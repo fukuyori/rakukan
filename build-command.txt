@@ -1,0 +1,6 @@
+| コマンド | engine | tsf/tray | インストール | 管理者 |
+|---|---|---|---|---|
+| `cargo make install` | ビルド | ビルド | ○ | 必要 |
+| `cargo make build-engine` | ビルド | — | — | 不要 |
+| `cargo make reinstall` | スキップ | ビルド | ○ | 必要 |
+| `cargo make build-tsf` | スキップ | ビルド | — | 不要 |

@@ -1,0 +1,18 @@
+[package]
+name = "rakukan-engine-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rakukan エンジン CLI（Phase 1 動作確認ツール）"
+
+[[bin]]
+name = "rakukan-cli"
+path = "src/main.rs"
+
+[dependencies]
+rakukan-engine = { path = "../rakukan-engine" }
+anyhow         = { workspace = true }
+clap           = { workspace = true }
+tracing        = { workspace = true }
+tracing-subscriber = { workspace = true }

@@ -1,0 +1,57 @@
+[workspace]
+members = ["crates/*"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+authors = ["rakukan Contributors"]
+license = "MIT"
+repository = "https://github.com/yourname/rakukan"
+
+# ワークスペース全体で共有する依存バージョン
+# 各クレートは workspace = true で参照する
+[workspace.dependencies]
+# 非同期ランタイム
+tokio = { version = "1", features = ["full"] }
+
+# エラーハンドリング
+anyhow = "1"
+thiserror = "1"
+
+# ログ
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# シリアライズ
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# ユーティリティ
+which    = "6"          # バイナリ存在確認（nvidia-smi / nvcc / vulkaninfo）
+tempfile = "3"          # テスト用一時ファイル
+memmap2  = "0.9"        # rakukan.dict の mmap 読み取り
+
+[profile.dev]
+# llama.cpp はデバッグビルドが極端に遅いため opt-level を上げる
+opt-level = 1
+
+[profile.dev.package."*"]
+# 依存クレート（llama.cppを含む）は常にリリース最適化
+opt-level = 3
+
+[profile.release]
+# IME DLL 向け最適化
+lto = true          # リンク時最適化（DLL サイズ削減＋速度向上）
+codegen-units = 1   # 単一コードユニット（LTO との相性）
+panic = "abort"     # IME で unwinding は不要、DLL サイズ削減
+opt-level = 3
+
+[profile.release.package."*"]
+opt-level = 3

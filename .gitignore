@@ -1,0 +1,65 @@
+# Rust ビルド成果物
+/target/
+**/target/
+
+# cargo-make
+/.cargo-make/
+
+# Windows IME インストール成果物
+*.dll
+*.exe
+!crates/**/build.rs
+
+# ログ
+*.log
+rakukan_install.log
+
+# エディタ・OS
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# LLM モデルファイル（大容量・再ダウンロード可能）
+*.gguf
+*.bin
+
+# 辞書バイナリ（インストール時に自動生成）
+rakukan.dict
+*.dict
+
+# ユーザー設定・学習データ（個人情報を含む可能性）
+user_dict.toml
+
+# バックエンド検出キャッシュ
+backend.json
+
+# GPU 判定スタンプ
+ninja_generator.stamp
+
+# cmake キャッシュ
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+
+# CUDA ビルド中間ファイル
+*.ptx
+*.cubin
+*.fatbin
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.sdf
+*.opensdf
+
+# HuggingFace キャッシュ（再ダウンロード可能）
+.cache/
+
+# 配布物・ZIPアーカイブ
+*.zip
+dist/

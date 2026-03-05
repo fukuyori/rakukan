@@ -1,0 +1,42 @@
+[package]
+name = "rakukan-engine"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rakukan 変換エンジン（karukan-engine 統合済み）"
+
+[lib]
+# rlib: rakukan-engine-cli 等が静的リンクで使う
+# cdylib: 実行時バックエンド選択用の standalone DLL
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+anyhow         = { workspace = true }
+thiserror      = { workspace = true }
+tracing        = { workspace = true }
+serde          = { workspace = true }
+serde_json     = { workspace = true }
+which          = { workspace = true }
+
+# 旧 karukan-engine の依存をそのまま引き継ぐ
+llama-cpp-2           = "0.1"
+yada                  = "0.5"
+hf-hub                = "0.4"
+unicode-normalization  = "0.1"
+memmap2               = "0.9"
+tokenizers            = "0.21"
+toml.workspace        = true
+tracing-subscriber    = { workspace = true }
+
+# 辞書統合
+rakukan-dict   = { path = "../rakukan-dict" }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+# GPU バックエンド（llama-cpp-2 の feature を通じて有効化）
+# install.ps1 が backend.json を読んで自動選択する
+cuda   = ["llama-cpp-2/cuda"]
+vulkan = ["llama-cpp-2/vulkan"]

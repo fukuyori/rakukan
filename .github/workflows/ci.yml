@@ -1,0 +1,64 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_LOG: warn
+
+jobs:
+  # ── Phase 0〜2: エンジン・gRPC のビルド＆テスト ──
+  build-and-test:
+    name: Build & Test (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive  # karukan-core の llama.cpp を取得
+
+      - name: Rust ツールチェーン設定
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # llama.cpp のビルドキャッシュ（最重要）
+      # llama.cpp の C++ コンパイルは数分かかるため必須
+      - name: キャッシュ（cargo + llama.cpp ビルド成果物）
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-
+
+      - name: ビルド確認（cargo check）
+        run: cargo check --workspace
+
+      - name: テスト実行
+        run: cargo test --workspace
+        env:
+          # llama.cpp のビルドで MSVC のパス長制限に当たることがある
+          # TrackFileAccess を無効化することで回避
+          TrackFileAccess: "false"
+
+      - name: Clippy（静的解析）
+        run: cargo clippy --workspace -- -D warnings
+
+  # ── フォーマットチェック（Linux で高速に実行）──
+  fmt:
+    name: Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check

@@ -1,0 +1,66 @@
+# Makefile.toml - rakukan build tasks
+# cargo make <task>
+#
+# 主要タスク:
+#   install         フルビルド（engine + tsf/tray）& インストール  ★管理者必要
+#   build-engine    engine DLL のみビルド（cpu/vulkan/cuda）        管理者不要
+#   reinstall       engine 以外ビルド（tsf/tray）& インストール     ★管理者必要
+#
+# その他:
+#   uninstall       登録解除                                        ★管理者必要
+#   check           型チェック（高速）
+#   test            エンジン単体テスト
+
+[config]
+default_to_workspace = false
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 主要3タスク
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tasks.install]
+description = "ビルド（tsf/tray のみ）& インストール ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine"]
+
+[tasks.install-full]
+description = "フルビルド（engine + tsf/tray）& インストール ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
+
+[tasks.build-engine]
+description = "engine DLL のみビルド（cpu/vulkan/cuda）管理者不要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release"]
+
+[tasks.reinstall]
+description = "engine 以外ビルド（tsf/tray）& インストール ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine"]
+
+[tasks.build-tsf]
+description = "engine 以外ビルドのみ（tsf/tray）インストールなし 管理者不要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine", "-BuildOnly"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# その他
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tasks.uninstall]
+description = "登録解除 ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\uninstall.ps1"]
+
+[tasks.check]
+description = "型チェックのみ（高速）"
+command = "cargo"
+args = ["check", "-p", "rakukan-tsf"]
+
+[tasks.test]
+description = "エンジン単体テスト"
+command = "cargo"
+args = ["test", "-p", "rakukan-engine", "--", "--nocapture"]
+
+[tasks.default]
+alias = "install"

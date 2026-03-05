@@ -1,0 +1,16 @@
+[package]
+name = "rakukan-engine-abi"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rakukan エンジン DLL の動的ロードラッパー"
+
+[dependencies]
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
+serde    = { workspace = true }
+serde_json = { workspace = true }
+
+# DLL 動的ロード
+libloading = "0.8"

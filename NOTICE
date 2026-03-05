@@ -1,0 +1,46 @@
+rakukan
+Copyright (c) 2024-2026 rakukan Contributors
+
+This product includes software and data developed by third parties.
+
+================================================================================
+Mozc Open Source Dictionary
+================================================================================
+Copyright (c) 2010-2024, Google Inc.
+
+This product includes dictionary data from the Mozc project.
+The dictionary data is downloaded at install time from:
+  https://github.com/google/mozc/tree/master/src/data/dictionary_oss
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+================================================================================
+karukan
+================================================================================
+Copyright (c) Hitoshi Togasaki
+
+The conversion engine used in rakukan is based on karukan.
+Source: https://github.com/togatoga/karukan
+
+Licensed under the MIT License.
+
+================================================================================
+azooKey-Windows
+================================================================================
+Copyright (c) fkunn1326
+
+The TSF (Text Services Framework) layer of rakukan references the
+implementation of azooKey-Windows.
+Source: https://github.com/fkunn1326/azooKey-Windows
+
+Licensed under the MIT License.

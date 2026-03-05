@@ -1,0 +1,3 @@
+// Windows リソーススクリプト
+// IDI_ICON1 (1) として rakukan.ico を埋め込む
+1 ICON "rakukan.ico"

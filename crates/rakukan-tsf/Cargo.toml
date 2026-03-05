@@ -1,0 +1,42 @@
+[package]
+name = "rakukan-tsf"
+version.workspace = true
+edition.workspace = true
+description = "rakukan TSF (Text Services Framework) DLL"
+
+[lib]
+crate-type = ["cdylib"]
+name = "rakukan_tsf"
+
+[dependencies]
+rakukan-engine-abi = { path = "../rakukan-engine-abi" }
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+windows-core = "0.58.0"
+
+[dependencies.windows]
+version = "0.58.0"
+features = [
+    "implement",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_System_Com",
+    "Win32_Security",
+    "Win32_System_Registry",
+    "Win32_System_SystemServices",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_TextServices",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+]
+
+[build-dependencies]
+# リソース埋め込み（アイコン等、将来用）
+embed-resource = "2"

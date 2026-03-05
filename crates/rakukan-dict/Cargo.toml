@@ -1,0 +1,20 @@
+[package]
+name    = "rakukan-dict"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+description = "辞書パーサー・ユーザー辞書管理（mozc binary + SKK + user）"
+
+[dependencies]
+anyhow       = { workspace = true }
+thiserror    = { workspace = true }
+tracing      = { workspace = true }
+serde        = { workspace = true }
+toml         = "0.8"
+encoding_rs  = "0.8"   # EUC-JP完全デコード（SKK-JISYO.L 対応）
+memmap2      = { workspace = true }   # rakukan.dict の mmap 読み取り
+
+[dev-dependencies]
+tempfile  = { workspace = true }

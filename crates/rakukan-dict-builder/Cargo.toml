@@ -1,0 +1,17 @@
+[package]
+name        = "rakukan-dict-builder"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "mozc TSV → rakukan.dict バイナリ変換ツール"
+
+[[bin]]
+name = "rakukan-dict-builder"
+path = "src/main.rs"
+
+[dependencies]
+anyhow  = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+clap    = { workspace = true }

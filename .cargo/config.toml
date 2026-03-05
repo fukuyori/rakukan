@@ -1,0 +1,15 @@
+# .cargo/config.toml
+# Windows MSVC ビルド設定
+
+[target.x86_64-pc-windows-msvc]
+# Rust コードの CRT を動的リンク (/MD) に統一
+rustflags = ["-C", "target-feature=-crt-static"]
+
+[env]
+# cc クレート経由でビルドされる C/C++ コード (esaxx-rs 等) を /MD に強制する
+# 背景: esaxx-rs は cc クレートで C++ をコンパイルするが、
+#        MSVC では cc クレートのデフォルトが /MT (静的CRT) であるため
+#        llama-cpp-sys-2 の /MD (動的CRT) と衝突する → LNK2038
+# /MD を末尾に追加することで /MT を上書きする（MSVC は後勝ち）
+CFLAGS   = "/MD"
+CXXFLAGS = "/MD"
