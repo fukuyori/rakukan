@@ -58,6 +58,8 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 .try_init();
         }
         tracing::info!("rakukan TSF DLL loaded");
+        let _ = crate::engine::config::config_save_default();
+        crate::engine::config::init_config_manager();
         let _ = crate::engine::keymap::keymap_save_default();
         crate::engine::state::start_reload_watcher();
     }

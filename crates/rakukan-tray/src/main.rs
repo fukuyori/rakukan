@@ -1,5 +1,4 @@
 #![windows_subsystem = "windows"]
-#![allow(unsafe_op_in_unsafe_fn)]
 
 use anyhow::Result;
 use std::{mem::size_of, ptr::null_mut, sync::atomic::{AtomicBool, Ordering}, thread};
@@ -118,7 +117,7 @@ fn decode(v: u32) -> (bool, Mode) {
     (open, m)
 }
 
-unsafe fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
+fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndMessaging::HICON> {
     // 32x32 ARGB DIB
     let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
@@ -133,9 +132,9 @@ unsafe fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndM
         ..Default::default()
     };
     let mut bits: *mut core::ffi::c_void = null_mut();
-    let hdc = CreateCompatibleDC(HDC(null_mut()));
-    let hbmp: HBITMAP = CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)?;
-    let old = SelectObject(hdc, hbmp);
+    let hdc = unsafe { CreateCompatibleDC(HDC(null_mut())) };
+    let hbmp: HBITMAP = unsafe { CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)? };
+    let old = unsafe { SelectObject(hdc, hbmp) };
 
     // Fill background (opaque) so the glyph remains visible on any taskbar theme.
     // BGRA order.
@@ -144,60 +143,76 @@ unsafe fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndM
         let p = bits as *mut u8;
         // light mode: near-white background, dark mode: near-black background
         let (br, bg, bb) = if light { (240u8, 240u8, 240u8) } else { (24u8, 24u8, 24u8) };
-        for i in 0..(32 * 32) {
-            *p.add(i * 4)     = bb;  // B
-            *p.add(i * 4 + 1) = bg;  // G
-            *p.add(i * 4 + 2) = br;  // R
-            *p.add(i * 4 + 3) = 255; // A
+        unsafe {
+            for i in 0..(32 * 32) {
+                *p.add(i * 4)     = bb;  // B
+                *p.add(i * 4 + 1) = bg;  // G
+                *p.add(i * 4 + 2) = br;  // R
+                *p.add(i * 4 + 3) = 255; // A
+            }
         }
     }
 
     // Font
     let face = to_wide_z("Yu Gothic UI");
     // Bigger, bolder font for better readability.
-    let hfont: HFONT = CreateFontW(
-        -28,
-        0,
-        0,
-        0,
-        800,
-        0,
-        0,
-        0,
-        1,
-        0,
-        0,
-        0,
-        0,
-        PCWSTR(face.as_ptr()),
-    );
-    let old_font = SelectObject(hdc, hfont);
-    SetBkMode(hdc, TRANSPARENT);
+    let hfont: HFONT = unsafe {
+        CreateFontW(
+            -28,
+            0,
+            0,
+            0,
+            800,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
+            PCWSTR(face.as_ptr()),
+        )
+    };
+    let old_font = unsafe { SelectObject(hdc, hfont) };
+    unsafe { SetBkMode(hdc, TRANSPARENT) };
 
     // Foreground
     let light = is_light_mode();
-    if light {
-        SetTextColor(hdc, rgb(0, 0, 0));
-    } else {
-        SetTextColor(hdc, rgb(255, 255, 255));
+    unsafe {
+        if light {
+            SetTextColor(hdc, rgb(0, 0, 0));
+        } else {
+            SetTextColor(hdc, rgb(255, 255, 255));
+        }
     }
     let mut rc2 = windows::Win32::Foundation::RECT { left: 0, top: 0, right: 32, bottom: 32 };
     let mut wbuf = to_wide_z(text);
     wbuf.pop(); // remove NUL for DrawTextW slice
-    let _ = DrawTextW(hdc, &mut wbuf, &mut rc2, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    let _ = unsafe { DrawTextW(hdc, &mut wbuf, &mut rc2, DT_CENTER | DT_VCENTER | DT_SINGLELINE) };
 
     // GDI does not guarantee alpha channel writes; force opaque alpha for all pixels.
     if !bits.is_null() {
         let p = bits as *mut u8;
-        for i in 0..(32 * 32) {
-            *p.add(i * 4 + 3) = 255;
+        unsafe {
+            for i in 0..(32 * 32) {
+                *p.add(i * 4 + 3) = 255;
+            }
         }
     }
 
     // Create 1bpp mask (all opaque)
     // windows 0.58 returns HBITMAP directly here (not Result).
     let mask_bits = [0u8; 128];
-    let mask: HBITMAP = windows::Win32::Graphics::Gdi::CreateBitmap(32, 32, 1, 1, Some(mask_bits.as_ptr() as *const core::ffi::c_void));
+    let mask: HBITMAP = unsafe {
+        windows::Win32::Graphics::Gdi::CreateBitmap(
+            32,
+            32,
+            1,
+            1,
+            Some(mask_bits.as_ptr() as *const core::ffi::c_void),
+        )
+    };
     let ii = ICONINFO {
         fIcon: true.into(),
         xHotspot: 0,
@@ -205,15 +220,15 @@ unsafe fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndM
         hbmMask: mask,
         hbmColor: hbmp,
     };
-    let hicon = CreateIconIndirect(&ii)?;
+    let hicon = unsafe { CreateIconIndirect(&ii)? };
 
     // Cleanup GDI objects
-    let _ = SelectObject(hdc, old_font);
-    let _ = DeleteObject(hfont);
-    let _ = SelectObject(hdc, old);
-    let _ = DeleteDC(hdc);
-    let _ = DeleteObject(mask);
-    let _ = DeleteObject(hbmp);
+    let _ = unsafe { SelectObject(hdc, old_font) };
+    let _ = unsafe { DeleteObject(hfont) };
+    let _ = unsafe { SelectObject(hdc, old) };
+    let _ = unsafe { DeleteDC(hdc) };
+    let _ = unsafe { DeleteObject(mask) };
+    let _ = unsafe { DeleteObject(hbmp) };
 
     Ok(hicon)
 }
@@ -238,35 +253,36 @@ unsafe impl Send for Shared {}
 unsafe impl Sync for Shared {}
 
 impl Shared {
-    unsafe fn open_or_create() -> Result<Self> {
+    fn open_or_create() -> Result<Self> {
         let map_name = to_wide_z(MAP_NAME);
         let evt_name = to_wide_z(EVT_NAME);
 
         // Try open first
-        let map = OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(map_name.as_ptr()))
+        let map = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(map_name.as_ptr())) }
             .or_else(|_| {
                 // create if not exists (so tray can run before IME activates)
-                CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, 4, PCWSTR(map_name.as_ptr()))
+                unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, 4, PCWSTR(map_name.as_ptr())) }
             })?;
 
-        let view = MapViewOfFile(map, FILE_MAP_READ, 0, 0, 4);
+        let view = unsafe { MapViewOfFile(map, FILE_MAP_READ, 0, 0, 4) };
         if view.Value.is_null() {
-            let _ = CloseHandle(map);
+            let _ = unsafe { CloseHandle(map) };
             anyhow::bail!("MapViewOfFile failed");
         }
 
-		let evt = OpenEventW(
-			SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE_ACCESS | EVENT_MODIFY_STATE.0),
-			false,
-			PCWSTR(evt_name.as_ptr()),
-		)
-            .or_else(|_| CreateEventW(None, false, false, PCWSTR(evt_name.as_ptr())))?;
+		let evt = unsafe {
+			OpenEventW(
+				SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE_ACCESS | EVENT_MODIFY_STATE.0),
+				false,
+				PCWSTR(evt_name.as_ptr()),
+			)
+		}.or_else(|_| unsafe { CreateEventW(None, false, false, PCWSTR(evt_name.as_ptr())) })?;
 
         Ok(Self { map, evt, view })
     }
 
-    unsafe fn read(&self) -> u32 {
-        (self.view.Value as *const u32).read_volatile()
+    fn read(&self) -> u32 {
+        unsafe { (self.view.Value as *const u32).read_volatile() }
     }
 }
 
@@ -284,7 +300,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 2 => Mode::Alnum,
                 _ => Mode::Hiragana,
             };
-            LAST_UPDATE_MS.store(GetTickCount64(), Ordering::Release);
+            LAST_UPDATE_MS.store(unsafe { GetTickCount64() }, Ordering::Release);
             if !ICON_SHOWN.load(Ordering::Acquire) {
                 let _ = add_notify_icon(hwnd, open, mode);
                 ICON_SHOWN.store(true, Ordering::Release);
@@ -293,7 +309,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             LRESULT(0)
         }
         WM_TIMER => {
-            let now = GetTickCount64();
+            let now = unsafe { GetTickCount64() };
             let last = LAST_UPDATE_MS.load(Ordering::Acquire);
             // If no update for a while, hide the indicator (IME likely inactive).
             if last != 0 && now.saturating_sub(last) > 2500 {
@@ -322,21 +338,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
                 unsafe { PostQuitMessage(0); }
                 return LRESULT(0);
             }
-            DefWindowProcW(hwnd, msg, w, l)
+            unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
         WM_DESTROY => {
             RUNNING.store(false, Ordering::Release);
-            PostQuitMessage(0);
+            unsafe { PostQuitMessage(0); }
             LRESULT(0)
         }
-        _ => DefWindowProcW(hwnd, msg, w, l),
+        _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
     }
 }
 
 /// TSF DLL に「エンジン再起動」を要求する。
 /// 名前付きイベント `Local\rakukan.engine.reload` を SetEvent する。
 fn signal_engine_reload() {
-    let name: Vec<u16> = format!("{RELOAD_EVT_NAME}\0").encode_utf16().collect();
+    let name = to_wide_z(RELOAD_EVT_NAME);
     unsafe {
         use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
         match OpenEventW(EVENT_MODIFY_STATE, false, windows::core::PCWSTR(name.as_ptr())) {
@@ -351,21 +367,21 @@ fn signal_engine_reload() {
     }
 }
 
-unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
+fn show_context_menu(hwnd: HWND) -> Result<()> {
     use windows::Win32::UI::WindowsAndMessaging::{
         MENU_ITEM_FLAGS, MF_SEPARATOR,
     };
-    let hmenu = CreatePopupMenu()?;
+    let hmenu = unsafe { CreatePopupMenu()? };
     let txt_reload = to_wide_z("エンジン再起動");
-    let _ = AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_RELOAD, PCWSTR(txt_reload.as_ptr()));
-    let _ = AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null());
+    let _ = unsafe { AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_RELOAD, PCWSTR(txt_reload.as_ptr())) };
+    let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };
     let txt_exit = to_wide_z("終了");
-    let _ = AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_EXIT, PCWSTR(txt_exit.as_ptr()));
+    let _ = unsafe { AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_EXIT, PCWSTR(txt_exit.as_ptr())) };
     let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
-    let _ = GetCursorPos(&mut pt);
+    let _ = unsafe { GetCursorPos(&mut pt) };
     // TrackPopupMenu を正しく閉じるために必要
-    let _ = SetForegroundWindow(hwnd);
-    let _ = TrackPopupMenu(
+    let _ = unsafe { SetForegroundWindow(hwnd) };
+    let _ = unsafe { TrackPopupMenu(
         hmenu,
         TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
         pt.x,
@@ -373,11 +389,11 @@ unsafe fn show_context_menu(hwnd: HWND) -> Result<()> {
         0,
         hwnd,
         None,
-    );
+    ) };
     Ok(())
 }
 
-unsafe fn update_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
+fn update_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
     let text = if !open { "A" } else {
         match mode {
             Mode::Hiragana => "あ",
@@ -402,13 +418,13 @@ unsafe fn update_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
     for (i, c) in tip_w.iter().take(nid.szTip.len() - 1).enumerate() {
         nid.szTip[i] = *c;
     }
-    let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+    let _ = unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
 
-    let _ = DestroyIcon(hicon);
+    let _ = unsafe { DestroyIcon(hicon) };
     Ok(())
 }
 
-unsafe fn add_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
+fn add_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
     // NIM_ADD でアイコンを必ず設定しないと、環境によってはトレイに表示されない。
     let text = if !open { "A" } else {
         match mode {
@@ -432,24 +448,24 @@ unsafe fn add_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
     for (i, c) in tip_w.iter().take(nid.szTip.len() - 1).enumerate() {
         nid.szTip[i] = *c;
     }
-    let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    let _ = unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
 
     // Use the latest NOTIFYICON behavior (improves reliability on Windows 11).
     let mut ver = nid;
     ver.Anonymous.uVersion = NOTIFYICON_VERSION_4;
-    let _ = Shell_NotifyIconW(NIM_SETVERSION, &ver);
+    let _ = unsafe { Shell_NotifyIconW(NIM_SETVERSION, &ver) };
 
-    let _ = DestroyIcon(hicon);
+    let _ = unsafe { DestroyIcon(hicon) };
     Ok(())
 }
 
-unsafe fn delete_notify_icon(hwnd: HWND) -> Result<()> {
+fn delete_notify_icon(hwnd: HWND) -> Result<()> {
     let mut nid = NOTIFYICONDATAW::default();
     nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
     nid.hWnd = hwnd;
     nid.uFlags = NIF_GUID;
     nid.guidItem = TRAY_GUID;
-    let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
+    let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
     Ok(())
 }
 

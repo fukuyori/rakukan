@@ -1,35 +1,43 @@
 # rakukan 設定ファイル
-# 変更後は cargo make install で再インストールが必要です
-# （gpu_backend は再ビルドが必要なため）
+# 入力モード変更時に再読込されます。
+# gpu_backend など再ビルドが必要な項目は cargo make install を再実行してください。
 
-# ─── GPU バックエンド設定 ──────────────────────────────────────────────────────
-#
-# 使用する GPU バックエンドを指定します。
-# コメントアウト（#）されている場合は detect-gpu.ps1 の自動検出が使われます。
-#
-# 選択肢:
-#   "cuda"   - NVIDIA GPU を CUDA で使用（最速・CUDA Toolkit 必要）
-#   "vulkan" - Vulkan 対応 GPU を使用（NVIDIA/AMD/Intel 共通・追加不要）
-#   "cpu"    - GPU を使わず CPU のみ（低速・フォールバック）
-#
-# 例: NVIDIA と AMD が両方ある場合
-#   NVIDIA で CUDA を使いたい場合: gpu_backend = "cuda"
-#   AMD で Vulkan を使いたい場合:  gpu_backend = "vulkan"
-#
-# 変更後は cargo make install を再実行してください（コンパイルが必要）。
+[general]
+log_level = "info"
+
+[keyboard]
+layout = "us"
+enable_jis_keys = false
+reload_on_mode_switch = true
+
+[input]
+default_mode = "hiragana"
+remember_last_kana_mode = true
+
+[candidate]
+page_size = 9
+use_number_selection = true
+show_numbers = true
+
+[conversion]
+engine = "karukan"
+commit_raw_with_enter = true
+cancel_behavior = "ms_ime"
+
+[live_conversion]
+enabled = false
+debounce_ms = 80
+use_llm = false
+prefer_dictionary_first = true
+
+[diagnostics]
+dump_active_config = true
+warn_on_unknown_key = true
+
+# 旧形式との互換用
+# num_candidates = 9
+
+# 再ビルド系オプション
 # gpu_backend = "cuda"
-
-# ─── GPU インデックス ──────────────────────────────────────────────────────────
-#
-# 同じ種類の GPU が複数ある場合、どの GPU を使うかをインデックスで指定します。
-# 0 = 最初の GPU（デフォルト）
-# GPU 名は nvidia-smi (CUDA) または vulkaninfo (Vulkan) で確認できます。
-#
-# 例: RTX 4090 = 0, RTX 3060 = 1 のとき
 # main_gpu = 0
-
-# ─── 候補ウィンドウ ────────────────────────────────────────────────────────────
-#
-# 変換候補ウィンドウに表示する最大候補数（1–9）
-# 数字キー 1–9 で直接選択できます
-num_candidates = 9
+# model_variant = "small"

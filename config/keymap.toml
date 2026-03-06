@@ -1,132 +1,25 @@
 # rakukan キーバインド設定
-# IME をオフ→オンにすると反映されます
-#
-# action の種類:
-#   [プリエディット]
-#     convert           -- 変換開始 (Space, 変換キー)
-#     commit_raw        -- ひらがなのまま確定 (Enter)
-#     backspace         -- 1文字削除
-#     cancel            -- 変換取り消し / プリエディット破棄 (Escape)
-#     cancel_all        -- プリエディット全破棄 (Ctrl+Backspace)
-#     hiragana          -- ひらがな変換 (F6)
-#     katakana          -- カタカナ変換 (F7)
-#     half_katakana     -- 半角カタカナ変換 (F8)
-#     full_latin        -- 全角英数変換 (F9)
-#     half_latin        -- 半角英数変換 (F10)
-#     cycle_kana        -- ひらがな→カタカナ→半角カタカナ 循環 (無変換)
-#     full_width_space  -- 全角スペース入力 (Shift+Space)
-#   [候補ウィンドウ]
-#     candidate_next      -- 次の候補 (Tab, ↓)
-#     candidate_prev      -- 前の候補 (Shift+Tab, ↑)
-#     candidate_page_down -- 次ページ (PageDown)
-#     candidate_page_up   -- 前ページ (PageUp)
-#   [IME オン/オフ]
-#     ime_toggle        -- オン↔オフ切り替え (全角/半角)
-#     ime_off           -- IME をオフ (英数パススルー)
-#     ime_on            -- IME をオン (ひらがなモードへ)
-#   [入力モード切り替え]
-#     mode_hiragana     -- ひらがなモードへ
-#     mode_katakana     -- カタカナモードへ (全角)
-#     mode_alphanumeric -- 英数モードへ
-#
-# キー名:
-#   通常キー : Enter, Space, Escape, Backspace, Tab, Delete
-#   矢印キー : Left, Up, Right, Down
-#   ファンクション: F1 - F12
-#   ページ   : PageUp, PageDown, Home, End
-#   日本語キー (日本語キーボードのみ):
-#     Zenkaku      -- 全角/半角
-#     Henkan       -- 変換
-#     Muhenkan     -- 無変換
-#     Hiragana_key -- ひらがな
-#     Katakana     -- カタカナ
-#     Eisuu        -- 英数
-#     Caps         -- Caps Lock
-#   修飾キー : Ctrl+, Shift+, Alt+（組み合わせ可）
-#   例: "Ctrl+Space", "Shift+Tab", "Alt+Caps"
+# 入力モード変更時に再読込されます
 
-[[bindings]]
-key    = "Space"
-action = "convert"
+preset = "ms-ime-us"
+inherit_preset = true
 
-[[bindings]]
-key    = "Enter"
-action = "commit_raw"
+# 追加・上書きしたいバインドだけを書いてください。
+# 例:
+# [[bindings]]
+# key = "Ctrl+;"
+# action = "ime_toggle"
 
 [[bindings]]
 key    = "Henkan"
 action = "convert"
 
 [[bindings]]
-key    = "Escape"
-action = "cancel"
-
-[[bindings]]
-key    = "Ctrl+Backspace"
-action = "cancel_all"
-
-[[bindings]]
-key    = "Backspace"
-action = "backspace"
-
-[[bindings]]
-key    = "F6"
-action = "hiragana"
-
-[[bindings]]
-key    = "F7"
-action = "katakana"
-
-[[bindings]]
-key    = "F8"
-action = "half_katakana"
-
-[[bindings]]
-key    = "F9"
-action = "full_latin"
-
-[[bindings]]
-key    = "F10"
-action = "half_latin"
-
-[[bindings]]
 key    = "Muhenkan"
 action = "cycle_kana"
 
 [[bindings]]
-key    = "Shift+Space"
-action = "full_width_space"
-
-[[bindings]]
-key    = "Tab"
-action = "candidate_next"
-
-[[bindings]]
-key    = "Down"
-action = "candidate_next"
-
-[[bindings]]
-key    = "Shift+Tab"
-action = "candidate_prev"
-
-[[bindings]]
-key    = "Up"
-action = "candidate_prev"
-
-[[bindings]]
-key    = "PageDown"
-action = "candidate_page_down"
-
-[[bindings]]
-key    = "PageUp"
-action = "candidate_page_up"
-
-[[bindings]]
 key    = "Zenkaku"
-action = "ime_toggle"
-
-[[bindings]]
-key    = "Ctrl+Space"
 action = "ime_toggle"
 
 [[bindings]]
@@ -134,25 +27,9 @@ key    = "Hiragana_key"
 action = "mode_hiragana"
 
 [[bindings]]
-key    = "Ctrl+Caps"
-action = "mode_hiragana"
-
-[[bindings]]
 key    = "Katakana"
-action = "mode_katakana"
-
-[[bindings]]
-key    = "Alt+Caps"
 action = "mode_katakana"
 
 [[bindings]]
 key    = "Eisuu"
 action = "mode_alphanumeric"
-
-[[bindings]]
-key    = "Left"
-action = "cursor_left"
-
-[[bindings]]
-key    = "Right"
-action = "cursor_right"

@@ -210,36 +210,12 @@ fn create_engine() -> anyhow::Result<DynEngine> {
 
 /// %APPDATA%\rakukan\config.toml を読んで EngineConfig JSON を生成する。
 fn build_engine_config_json() -> String {
-    let mut num_candidates: usize = 9;
-    let mut main_gpu:       i32   = 0;
+    let cfg = super::config::current_config();
+    let num_candidates = cfg.effective_num_candidates();
+    let main_gpu = cfg.main_gpu;
     let n_gpu_layers: u32 = u32::MAX;  // DLL 側（cpu DLL は 0 に上書き）
-    let mut model_variant: Option<String> = None;
+    let model_variant = cfg.model_variant.clone();
 
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let path = std::path::PathBuf::from(appdata).join("rakukan").join("config.toml");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('#') { continue; }
-                if let Some(rest) = line.strip_prefix("num_candidates") {
-                    let v = rest.trim().trim_start_matches('=').trim()
-                        .split('#').next().unwrap_or("").trim();
-                    if let Ok(n) = v.parse::<usize>() { num_candidates = n.clamp(1, 9); }
-                }
-                if let Some(rest) = line.strip_prefix("main_gpu") {
-                    let v = rest.trim().trim_start_matches('=').trim()
-                        .split('#').next().unwrap_or("").trim();
-                    if let Ok(n) = v.parse::<i32>() { main_gpu = n; }
-                }
-                if let Some(rest) = line.strip_prefix("model_variant") {
-                    let v = rest.trim().trim_start_matches('=').trim()
-                        .split('#').next().unwrap_or("").trim()
-                        .trim_matches('"');
-                    if !v.is_empty() { model_variant = Some(v.to_string()); }
-                }
-            }
-        }
-    }
     tracing::info!("engine config: num_candidates={num_candidates} main_gpu={main_gpu} model_variant={model_variant:?}");
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
@@ -251,21 +227,7 @@ fn build_engine_config_json() -> String {
 
 /// config.toml から num_candidates を読む（ホットパスで使う軽量版）
 pub fn get_num_candidates() -> usize {
-    if let Ok(appdata) = std::env::var("APPDATA") {
-        let path = std::path::PathBuf::from(appdata).join("rakukan").join("config.toml");
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            for line in text.lines() {
-                let line = line.trim();
-                if line.starts_with('#') { continue; }
-                if let Some(rest) = line.strip_prefix("num_candidates") {
-                    let v = rest.trim().trim_start_matches('=').trim()
-                        .split('#').next().unwrap_or("").trim();
-                    if let Ok(n) = v.parse::<usize>() { return n.clamp(1, 9); }
-                }
-            }
-        }
-    }
-    9  // default
+    super::config::effective_num_candidates()
 }
 
 impl std::ops::Deref for EngineWrapper {
@@ -350,6 +312,304 @@ pub fn composition_clone() -> anyhow::Result<Option<ITfComposition>> {
     Ok(g.0.clone())
 }
 
+// ─── SessionState ────────────────────────────────────────────────────────────
+// Phase 2: TSF 層の論理状態を 1 か所に寄せるための新状態。
+// 既存の SelectionState は互換のため残し、当面は相互同期で段階移行する。
+
+#[derive(Debug, Clone, Default)]
+pub enum SessionState {
+    #[default]
+    Idle,
+    Preedit {
+        text: String,
+    },
+    Waiting {
+        text: String,
+        pos_x: i32,
+        pos_y: i32,
+    },
+    Selecting {
+        original_preedit: String,
+        candidates: Vec<String>,
+        selected: usize,
+        page_size: usize,
+        llm_pending: bool,
+        pos_x: i32,
+        pos_y: i32,
+    },
+}
+
+pub static SESSION_STATE: LazyLock<Mutex<SessionState>> =
+    LazyLock::new(|| Mutex::new(SessionState::Idle));
+
+pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+
+pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
+    SESSION_STATE
+        .lock()
+        .map_err(|_| anyhow::anyhow!("session_state poisoned"))
+}
+
+#[inline]
+pub fn session_is_selecting_fast() -> bool {
+    SESSION_SELECTING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+impl SessionState {
+    pub fn set_idle(&mut self) {
+        *self = SessionState::Idle;
+        SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn set_preedit(&mut self, text: String) {
+        *self = SessionState::Preedit { text };
+        SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn set_waiting(&mut self, text: String, pos_x: i32, pos_y: i32) {
+        *self = SessionState::Waiting { text, pos_x, pos_y };
+        SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn activate_selecting(
+        &mut self,
+        candidates: Vec<String>,
+        original_preedit: String,
+        pos_x: i32,
+        pos_y: i32,
+        llm_pending: bool,
+    ) {
+        *self = SessionState::Selecting {
+            original_preedit,
+            candidates,
+            selected: 0,
+            page_size: 9,
+            llm_pending,
+            pos_x,
+            pos_y,
+        };
+        SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn is_selecting(&self) -> bool {
+        matches!(self, SessionState::Selecting { .. })
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        matches!(self, SessionState::Waiting { .. })
+    }
+
+    pub fn preedit_text(&self) -> Option<&str> {
+        match self {
+            SessionState::Preedit { text } => Some(text.as_str()),
+            SessionState::Waiting { text, .. } => Some(text.as_str()),
+            SessionState::Selecting { original_preedit, .. } => Some(original_preedit.as_str()),
+            SessionState::Idle => None,
+        }
+    }
+
+    pub fn waiting_info(&self) -> Option<(&str, i32, i32)> {
+        match self {
+            SessionState::Waiting { text, pos_x, pos_y } => Some((text.as_str(), *pos_x, *pos_y)),
+            _ => None,
+        }
+    }
+
+    pub fn current_candidate(&self) -> Option<&str> {
+        match self {
+            SessionState::Selecting { candidates, selected, .. } => {
+                candidates.get(*selected).map(|s| s.as_str())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn original_preedit(&self) -> Option<&str> {
+        match self {
+            SessionState::Selecting { original_preedit, .. } => Some(original_preedit.as_str()),
+            SessionState::Preedit { text } => Some(text.as_str()),
+            SessionState::Waiting { text, .. } => Some(text.as_str()),
+            SessionState::Idle => None,
+        }
+    }
+
+    pub fn current_page(&self) -> usize {
+        match self {
+            SessionState::Selecting { selected, page_size, .. } => selected / page_size,
+            _ => 0,
+        }
+    }
+
+    pub fn total_pages(&self) -> usize {
+        match self {
+            SessionState::Selecting { candidates, page_size, .. } => {
+                if candidates.is_empty() { 0 } else { (candidates.len() + page_size - 1) / page_size }
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn page_candidates(&self) -> &[String] {
+        match self {
+            SessionState::Selecting { candidates, selected, page_size, .. } => {
+                if candidates.is_empty() {
+                    return &[];
+                }
+                let start = (selected / page_size) * page_size;
+                let end = (start + page_size).min(candidates.len());
+                &candidates[start..end]
+            }
+            _ => &[],
+        }
+    }
+
+    pub fn page_selected(&self) -> usize {
+        match self {
+            SessionState::Selecting { selected, page_size, .. } => selected % page_size,
+            _ => 0,
+        }
+    }
+
+    pub fn page_info(&self) -> String {
+        let total = self.total_pages();
+        if total <= 1 {
+            String::new()
+        } else {
+            format!("{}/{}", self.current_page() + 1, total)
+        }
+    }
+
+    pub fn next_with_page_wrap(&mut self) {
+        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
+            if candidates.is_empty() { return; }
+            let next_idx = (*selected + 1) % candidates.len();
+            let cur_page = *selected / *page_size;
+            let next_page = next_idx / *page_size;
+            *selected = if next_page != cur_page {
+                next_page * *page_size
+            } else {
+                next_idx
+            };
+        }
+    }
+
+    pub fn prev(&mut self) {
+        if let SessionState::Selecting { candidates, selected, .. } = self {
+            if candidates.is_empty() { return; }
+            *selected = if *selected == 0 { candidates.len() - 1 } else { *selected - 1 };
+        }
+    }
+
+    pub fn next_page(&mut self) {
+        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
+            if candidates.is_empty() { return; }
+            let total_pages = (candidates.len() + *page_size - 1) / *page_size;
+            let cur = *selected / *page_size;
+            let next = (cur + 1) % total_pages;
+            *selected = next * *page_size;
+        }
+    }
+
+    pub fn prev_page(&mut self) {
+        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
+            if candidates.is_empty() { return; }
+            let total_pages = (candidates.len() + *page_size - 1) / *page_size;
+            let cur = *selected / *page_size;
+            let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
+            *selected = prev * *page_size;
+        }
+    }
+
+    pub fn select_nth_in_page(&mut self, n: usize) -> bool {
+        if n < 1 { return false; }
+        match self {
+            SessionState::Selecting { candidates, selected, page_size, .. } => {
+                let idx = (*selected / *page_size) * *page_size + (n - 1);
+                if idx < candidates.len() {
+                    *selected = idx;
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+}
+
+pub fn session_sync_from_selection(sel: &SelectionState) {
+    if let Ok(mut sess) = SESSION_STATE.lock() {
+        if sel.is_active() {
+            *sess = SessionState::Selecting {
+                original_preedit: sel.original_preedit.clone(),
+                candidates: sel.candidates.clone(),
+                selected: sel.selected,
+                page_size: sel.page_size,
+                llm_pending: sel.llm_pending,
+                pos_x: sel.pos_x,
+                pos_y: sel.pos_y,
+            };
+            SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
+        } else if let Some(wait) = sel.llm_wait_preedit.clone() {
+            *sess = SessionState::Waiting { text: wait, pos_x: sel.pos_x, pos_y: sel.pos_y };
+            SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+        } else {
+            *sess = SessionState::Idle;
+            SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+}
+
+pub fn selection_sync_from_session(sess: &SessionState) {
+    if let Ok(mut sel) = SELECTION_STATE.lock() {
+        // SelectionState 側の内容を直接更新し、逆同期は行わない。
+        sel.candidates.clear();
+        sel.selected = 0;
+        sel.original_preedit.clear();
+        sel.llm_wait_preedit = None;
+        sel.llm_pending = false;
+        sel.pos_x = 0;
+        sel.pos_y = 0;
+        sel.page_size = 9;
+
+        match sess {
+            SessionState::Idle => {
+                SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            }
+            SessionState::Preedit { text } => {
+                sel.original_preedit = text.clone();
+                SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            }
+            SessionState::Waiting { text, pos_x, pos_y } => {
+                sel.llm_wait_preedit = Some(text.clone());
+                sel.pos_x = *pos_x;
+                sel.pos_y = *pos_y;
+                SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+            }
+            SessionState::Selecting {
+                original_preedit,
+                candidates,
+                selected,
+                page_size,
+                llm_pending,
+                pos_x,
+                pos_y,
+            } => {
+                sel.candidates = candidates.clone();
+                sel.selected = *selected;
+                sel.original_preedit = original_preedit.clone();
+                sel.page_size = *page_size;
+                sel.llm_pending = *llm_pending;
+                sel.pos_x = *pos_x;
+                sel.pos_y = *pos_y;
+                SELECTION_ACTIVE.store(!sel.candidates.is_empty(), std::sync::atomic::Ordering::Release);
+            }
+        }
+    }
+}
+
 // ─── SelectionState ──────────────────────────────────────────────────────────
 // Convert後の候補選択モードを管理する。
 // ホットパスから try_lock のみ使うこと。
@@ -381,24 +641,6 @@ impl SelectionState {
         !self.candidates.is_empty()
     }
 
-    pub fn activate(
-        candidates: Vec<String>,
-        original_preedit: String,
-        pos_x: i32,
-        pos_y: i32,
-    ) -> Self {
-        SELECTION_ACTIVE.store(true, std::sync::atomic::Ordering::Release);
-        Self {
-            candidates,
-            selected: 0,
-            original_preedit,
-            pos_x,
-            pos_y,
-            page_size: 9,
-            llm_pending: false,
-            llm_wait_preedit: None,
-        }
-    }
 
     pub fn clear(&mut self) {
         self.candidates.clear();
@@ -406,11 +648,9 @@ impl SelectionState {
         self.original_preedit.clear();
         self.llm_wait_preedit = None;
         SELECTION_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        session_sync_from_selection(self);
     }
 
-    pub fn current_candidate(&self) -> Option<&str> {
-        self.candidates.get(self.selected).map(|s| s.as_str())
-    }
 
     // ─── ページング ───────────────────────────────────────────────────────────
 
@@ -431,54 +671,6 @@ impl SelectionState {
         let start = self.current_page() * self.page_size;
         let end   = (start + self.page_size).min(self.candidates.len());
         &self.candidates[start..end]
-    }
-
-    /// 現在ページ内での選択インデックス（0-origin、候補ウィンドウ描画用）
-    pub fn page_selected(&self) -> usize {
-        self.selected % self.page_size
-    }
-
-    /// Space キー用: 1候補ずつ進む。
-    /// ページ末尾（= 次が次ページ先頭）のときは次ページ先頭へジャンプする。
-    /// 全候補の末尾では先頭ページへ折り返す。
-    pub fn next_with_page_wrap(&mut self) {
-        if self.candidates.is_empty() { return; }
-        let next_idx = (self.selected + 1) % self.candidates.len();
-        // 次のインデックスが別ページに属すか（= 現在がページ末尾）
-        let cur_page  = self.selected / self.page_size;
-        let next_page = next_idx / self.page_size;
-        if next_page != cur_page {
-            // ページをまたぐ → 次ページ先頭へ
-            self.selected = next_page * self.page_size;
-        } else {
-            self.selected = next_idx;
-        }
-    }
-
-    /// ページ内の前候補へ（ページ先頭で前ページへ折り返す）
-    pub fn prev(&mut self) {
-        if !self.candidates.is_empty() {
-            if self.selected == 0 {
-                self.selected = self.candidates.len() - 1;
-            } else {
-                self.selected -= 1;
-            }
-        }
-    }
-
-    /// 次ページの先頭へ（最終ページなら先頭ページへ折り返す）
-    pub fn next_page(&mut self) {
-        if self.candidates.is_empty() { return; }
-        let next = (self.current_page() + 1) % self.total_pages();
-        self.selected = next * self.page_size;
-    }
-
-    /// 前ページの先頭へ（先頭ページなら最終ページへ折り返す）
-    pub fn prev_page(&mut self) {
-        if self.candidates.is_empty() { return; }
-        let cur = self.current_page();
-        let prev = if cur == 0 { self.total_pages() - 1 } else { cur - 1 };
-        self.selected = prev * self.page_size;
     }
 
     /// 現在ページ内で 1-indexed の選択（1〜page_size）
@@ -527,19 +719,6 @@ pub fn selection_try_get() -> anyhow::Result<MutexGuard<'static, SelectionState>
         .map_err(|_| anyhow::anyhow!("selection_state busy"))
 }
 
-/// 安全側の取得: 必要な場面（確定/次入力など）ではブロックしてでも取得する。
-/// try_lock 失敗で「確定が落ちる（文字が消える）」のを防ぐ。
-pub fn selection_get() -> anyhow::Result<MutexGuard<'static, SelectionState>> {
-    SELECTION_STATE
-        .lock()
-        .map_err(|_| anyhow::anyhow!("selection_state poisoned"))
-}
-
-/// ロックなし高速チェック: 候補選択モード中かどうかを確認する（ホットパス用）
-#[inline]
-pub fn selection_is_active_fast() -> bool {
-    SELECTION_ACTIVE.load(std::sync::atomic::Ordering::Acquire)
-}
 
 // ─── CARET_RECT ──────────────────────────────────────────────────────────────
 // GetTextExt で取得したキャレット矩形をEditSession→handlerに渡す橋渡し用。

@@ -112,6 +112,17 @@ fn name_to_vk(name: &str) -> Option<u16> {
         "enter" | "return"    => 0x0D,
         "escape" | "esc"      => 0x1B,
         "space"               => 0x20,
+        "backquote" | "grave" => 0xC0,
+        "semicolon"           => 0xBA,
+        "equal"               => 0xBB,
+        "comma"               => 0xBC,
+        "minus"               => 0xBD,
+        "period"              => 0xBE,
+        "slash"               => 0xBF,
+        "leftbracket"         => 0xDB,
+        "backslash"           => 0xDC,
+        "rightbracket"        => 0xDD,
+        "quote"               => 0xDE,
         "pageup"   | "pgup"   => 0x21,
         "pagedown" | "pgdn"   => 0x22,
         "end"                 => 0x23,
@@ -142,7 +153,21 @@ fn name_to_vk(name: &str) -> Option<u16> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeymapConfig {
     #[serde(default)]
+    pub preset: Option<KeymapPreset>,
+    #[serde(default = "default_inherit_preset")]
+    pub inherit_preset: bool,
+    #[serde(default)]
     pub bindings: Vec<KeyBinding>,
+}
+
+fn default_inherit_preset() -> bool { true }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum KeymapPreset {
+    MsImeUs,
+    MsImeJis,
+    Custom,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -153,47 +178,11 @@ pub struct KeyBinding {
 
 impl Default for KeymapConfig {
     fn default() -> Self {
-        // MS-IME 準拠のデフォルト
-        let bindings = vec![
-            // 確定・変換
-            bind("Space",       KeyAction::Convert),
-            bind("Enter",       KeyAction::CommitRaw),
-            bind("Henkan",      KeyAction::Convert),
-            // キャンセル
-            bind("Escape",      KeyAction::Cancel),
-            bind("Ctrl+Backspace", KeyAction::CancelAll),
-            // 削除
-            bind("Backspace",   KeyAction::Backspace),
-            // 文字種変換
-            bind("F6",          KeyAction::Hiragana),
-            bind("F7",          KeyAction::Katakana),
-            bind("F8",          KeyAction::HalfKatakana),
-            bind("F9",          KeyAction::FullLatin),
-            bind("F10",         KeyAction::HalfLatin),
-            bind("Muhenkan",    KeyAction::CycleKana),
-            // 全角スペース
-            bind("Shift+Space", KeyAction::FullWidthSpace),
-            // 候補操作
-            bind("Tab",         KeyAction::CandidatePageDown),
-            bind("Down",        KeyAction::CandidateNext),
-            bind("Shift+Tab",   KeyAction::CandidatePageUp),
-            bind("Up",          KeyAction::CandidatePrev),
-            bind("PageDown",    KeyAction::CandidatePageDown),
-            bind("PageUp",      KeyAction::CandidatePageUp),
-            // IME オン/オフ
-            bind("Zenkaku",          KeyAction::ImeToggle),
-            bind("Ctrl+Space",       KeyAction::ImeToggle),
-            // 入力モード切り替え（IME オン中）
-            bind("Hiragana_key",     KeyAction::ModeHiragana),   // ひらがなキー
-            bind("Ctrl+Caps",        KeyAction::ModeHiragana),   // Ctrl+Caps Lock
-            bind("Katakana",         KeyAction::ModeKatakana),   // カタカナキー
-            bind("Alt+Caps",         KeyAction::ModeKatakana),   // Alt+Caps Lock
-            bind("Eisuu",            KeyAction::ModeAlphanumeric), // 英数キー
-            // カーソル移動
-            bind("Left",        KeyAction::CursorLeft),
-            bind("Right",       KeyAction::CursorRight),
-        ];
-        Self { bindings }
+        Self {
+            preset: Some(KeymapPreset::MsImeJis),
+            inherit_preset: true,
+            bindings: Vec::new(),
+        }
     }
 }
 
@@ -260,7 +249,7 @@ impl Keymap {
 
         // ② 数字キー（修飾なし）→ 候補選択モード中のみ候補番号選択
         //    選択モード外では ToUnicode に落として通常文字として入力する
-        if !ctrl && !alt && super::state::selection_is_active_fast() {
+        if !ctrl && !alt && super::state::session_is_selecting_fast() {
             let n = match vk {
                 0x31..=0x39 => Some(vk - 0x30), // 1–9
                 0x61..=0x69 => Some(vk - 0x60), // テンキー 1–9
@@ -307,7 +296,15 @@ impl Keymap {
 
 impl Default for Keymap {
     fn default() -> Self {
-        Self::build(KeymapConfig::default())
+        let preset = match super::config::keyboard_layout() {
+            super::config::KeyboardLayout::Us => KeymapPreset::MsImeUs,
+            super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => KeymapPreset::MsImeJis,
+        };
+        Self::build(resolve_keymap_config(KeymapConfig {
+            preset: Some(preset),
+            inherit_preset: true,
+            bindings: Vec::new(),
+        }))
     }
 }
 
@@ -493,5 +490,82 @@ fn config_path() -> Result<std::path::PathBuf> {
 fn load_from_file() -> Result<Keymap> {
     let text = std::fs::read_to_string(config_path()?)?;
     let cfg: KeymapConfig = toml::from_str(&text)?;
-    Ok(Keymap::build(cfg))
+    Ok(Keymap::build(resolve_keymap_config(cfg)))
+}
+
+fn resolve_keymap_config(mut cfg: KeymapConfig) -> KeymapConfig {
+    let layout_preset = match super::config::keyboard_layout() {
+        super::config::KeyboardLayout::Us => KeymapPreset::MsImeUs,
+        super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => KeymapPreset::MsImeJis,
+    };
+    let preset = cfg.preset.unwrap_or(layout_preset);
+    if !cfg.inherit_preset || matches!(preset, KeymapPreset::Custom) {
+        return cfg;
+    }
+
+    let mut bindings = preset_bindings(preset);
+    bindings.extend(cfg.bindings);
+    cfg.bindings = bindings;
+    cfg
+}
+
+fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
+    match preset {
+        KeymapPreset::MsImeUs => vec![
+            bind("Ctrl+Space", KeyAction::ImeToggle),
+            bind("Ctrl+J", KeyAction::ModeHiragana),
+            bind("Ctrl+K", KeyAction::ModeKatakana),
+            bind("Ctrl+L", KeyAction::ModeAlphanumeric),
+            bind("Space", KeyAction::Convert),
+            bind("Enter", KeyAction::CommitRaw),
+            bind("Escape", KeyAction::Cancel),
+            bind("Ctrl+Backspace", KeyAction::CancelAll),
+            bind("Backspace", KeyAction::Backspace),
+            bind("F6", KeyAction::Hiragana),
+            bind("F7", KeyAction::Katakana),
+            bind("F8", KeyAction::HalfKatakana),
+            bind("F9", KeyAction::FullLatin),
+            bind("F10", KeyAction::HalfLatin),
+            bind("Shift+Space", KeyAction::FullWidthSpace),
+            bind("Down", KeyAction::CandidateNext),
+            bind("Up", KeyAction::CandidatePrev),
+            bind("Tab", KeyAction::CandidatePageDown),
+            bind("Shift+Tab", KeyAction::CandidatePageUp),
+            bind("PageDown", KeyAction::CandidatePageDown),
+            bind("PageUp", KeyAction::CandidatePageUp),
+            bind("Left", KeyAction::CursorLeft),
+            bind("Right", KeyAction::CursorRight),
+        ],
+        KeymapPreset::MsImeJis => vec![
+            bind("Space", KeyAction::Convert),
+            bind("Enter", KeyAction::CommitRaw),
+            bind("Henkan", KeyAction::Convert),
+            bind("Escape", KeyAction::Cancel),
+            bind("Ctrl+Backspace", KeyAction::CancelAll),
+            bind("Backspace", KeyAction::Backspace),
+            bind("F6", KeyAction::Hiragana),
+            bind("F7", KeyAction::Katakana),
+            bind("F8", KeyAction::HalfKatakana),
+            bind("F9", KeyAction::FullLatin),
+            bind("F10", KeyAction::HalfLatin),
+            bind("Muhenkan", KeyAction::CycleKana),
+            bind("Shift+Space", KeyAction::FullWidthSpace),
+            bind("Down", KeyAction::CandidateNext),
+            bind("Up", KeyAction::CandidatePrev),
+            bind("Tab", KeyAction::CandidatePageDown),
+            bind("Shift+Tab", KeyAction::CandidatePageUp),
+            bind("PageDown", KeyAction::CandidatePageDown),
+            bind("PageUp", KeyAction::CandidatePageUp),
+            bind("Zenkaku", KeyAction::ImeToggle),
+            bind("Ctrl+Space", KeyAction::ImeToggle),
+            bind("Hiragana_key", KeyAction::ModeHiragana),
+            bind("Ctrl+Caps", KeyAction::ModeHiragana),
+            bind("Katakana", KeyAction::ModeKatakana),
+            bind("Alt+Caps", KeyAction::ModeKatakana),
+            bind("Eisuu", KeyAction::ModeAlphanumeric),
+            bind("Left", KeyAction::CursorLeft),
+            bind("Right", KeyAction::CursorRight),
+        ],
+        KeymapPreset::Custom => Vec::new(),
+    }
 }

@@ -1,0 +1,64 @@
+﻿**********************
+Windows PowerShell transcript start
+Start time: 20260306171729
+Username: GALLERIA25\n_fuk
+RunAs User: GALLERIA25\n_fuk
+Configuration Name: 
+Machine: GALLERIA25 (Microsoft Windows NT 10.0.26200.0)
+Host Application: powershell -ExecutionPolicy Bypass -File scripts\install.ps1 -Profile release -SkipEngine -BuildOnly
+Process ID: 26372
+PSVersion: 5.1.26100.7920
+PSEdition: Desktop
+PSCompatibleVersions: 1.0, 2.0, 3.0, 4.0, 5.0, 5.1.26100.7920
+BuildVersion: 10.0.26100.7920
+CLRVersion: 4.0.30319.42000
+WSManStackVersion: 3.0
+PSRemotingProtocolVersion: 2.3
+SerializationVersion: 1.1.0.1
+**********************
+Log: D:\home\source\rust\rakukan\rakukan_install.log
+[0/4] Using saved backend: cuda
+[0/4] Cargo GPU features: --features=rakukan-engine/cuda
+[0.5/6] GPU backend unchanged (cuda): skipping cache wipe (incremental build)
+[1/6] Skipping engine DLL build (-SkipEngine)
+   Compiling rakukan-engine-abi v0.1.0 (D:\home\source\rust\rakukan\crates\rakukan-engine-abi)
+   Compiling rakukan-tsf v0.1.0 (D:\home\source\rust\rakukan\crates\rakukan-tsf)
+warning: unused import: `selection_get`
+  --> crates\rakukan-tsf\src\tsf\factory.rs:46:32
+   |
+46 |             selection_try_get, selection_get,
+   |                                ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: associated items `activate` and `current_candidate` are never used
+   --> crates\rakukan-tsf\src\engine\state.rs:644:12
+    |
+639 | impl SelectionState {
+    | ------------------- associated items in this implementation
+...
+644 |     pub fn activate(
+    |            ^^^^^^^^
+...
+674 |     pub fn current_candidate(&self) -> Option<&str> {
+    |            ^^^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `selection_get` is never used
+   --> crates\rakukan-tsf\src\engine\state.rs:747:8
+    |
+747 | pub fn selection_get() -> anyhow::Result<MutexGuard<'static, SelectionState>> {
+    |        ^^^^^^^^^^^^^
+
+warning: `rakukan-tsf` (lib) generated 3 warnings (run `cargo fix --lib -p rakukan-tsf` to apply 1 suggestion)
+    Finished `release` profile [optimized] target(s) in 15.13s
+   Compiling rakukan-tray v0.1.0 (D:\home\source\rust\rakukan\crates\rakukan-tray)
+    Finished `release` profile [optimized] target(s) in 1.49s
+   Compiling rakukan-dict-builder v0.1.0 (D:\home\source\rust\rakukan\crates\rakukan-dict-builder)
+    Finished `release` profile [optimized] target(s) in 9.99s
+[build-only] Build complete. Skipping install (-BuildOnly).
+**********************
+Windows PowerShell transcript end
+End time: 20260306171756
+**********************

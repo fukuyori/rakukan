@@ -1,4 +1,4 @@
-# rakukan
+# rakukan v0.2.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -12,8 +12,31 @@ Windows 向け日本語 IME。
 [karukan](https://github.com/togatoga/karukan)（Hitoshi Togasaki 氏）の LLM ベース変換エンジンを中核とし、
 [azooKey-Windows](https://github.com/fkunn1326/azooKey-Windows)（fkunn1326 氏）の TSF 層実装を参考に構築した IME です。
 
----
+## v0.2.0 の位置づけ
 
+v0.2.0 は、Phase 1 の設定・キーマップ整理を完了し、Phase 2 の状態機械導入を開始した **開発スナップショット版** です。
+この時点では `SessionState` を中心に TSF 層の状態整理を進めており、候補操作・変換開始・確定・取消の主要経路は新しい状態層へ段階移行しています。
+一方で、`SelectionState` はまだ互換レイヤとして一部に残っており、Phase 2 は継続中です。
+
+### この版で入っている主な内容
+
+- `config.toml` / `keymap.toml` の構造化と再読込
+- US / JIS 配列を意識したキーマップ基盤
+- システムトレイ常駐と入力モード表示
+- Rust 2024 警告の整理
+- `SessionState` 導入による TSF 状態管理の段階移行
+- Phase 2 に向けた候補選択・待機状態の整理
+
+### 同梱ドキュメント
+
+- `CHANGELOG.md` — リリース履歴
+- `PHASE1_SUMMARY.md` — Phase 1 の要点
+- `PHASE2_PREP.md` — Phase 2 着手前の整理
+- `PHASE2_STATUS.md` — v0.2.0 時点の Phase 2 状況
+- `WARNING_FIXES.md` — 直近の warning 修正内容
+- `THIRD_PARTY_LICENSES.md` — サードパーティライセンス
+
+---
 ## クレジット・謝辞
 
 ### 変換エンジン

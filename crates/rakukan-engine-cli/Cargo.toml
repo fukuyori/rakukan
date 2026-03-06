@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
-description = "rakukan エンジン CLI（Phase 1 動作確認ツール）"
+description = "rakukan エンジン CLI（v0.2.0 動作確認ツール）"
 
 [[bin]]
 name = "rakukan-cli"

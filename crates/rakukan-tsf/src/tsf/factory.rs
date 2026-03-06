@@ -43,7 +43,10 @@ use crate::{
         state::{
             composition_clone, composition_set, composition_take,
             engine_try_get_or_create, engine_get_or_create, engine_get,
-            selection_try_get, selection_get, caret_rect_get, caret_rect_set,
+            selection_try_get,
+            session_get, session_is_selecting_fast,
+            session_sync_from_selection, selection_sync_from_session,
+            caret_rect_get, caret_rect_set,
             doc_mode_on_focus_change, doc_mode_remove,
         },
         user_action::UserAction,
@@ -329,7 +332,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
 
         // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
         // AtomicBool でロックなし高速チェック
-        let is_selecting = crate::engine::state::selection_is_active_fast();
+        let is_selecting = session_is_selecting_fast();
 
         Ok(if key_should_eat(&action, has_preedit || is_selecting) { TRUE } else { FALSE })
     }
@@ -448,6 +451,17 @@ impl TextServiceFactory_Impl {
         tray_ipc::publish(open, mode);
     }
 
+    fn maybe_reload_runtime_config(&self) {
+        let config_changed = crate::engine::config::maybe_reload_on_mode_switch();
+        let new_keymap = crate::engine::keymap::Keymap::load();
+        if let Ok(mut inner) = self.inner.try_borrow_mut() {
+            inner.keymap = new_keymap;
+        }
+        if config_changed {
+            tracing::info!("runtime config reloaded on input mode switch");
+        }
+    }
+
     fn handle_action(
         &self, action: UserAction,
         ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
@@ -460,7 +474,7 @@ impl TextServiceFactory_Impl {
         };
 
         // LLM候補待機中に完了した場合、候補ウィンドウを自動更新
-        if crate::engine::state::selection_is_active_fast() {
+        if session_is_selecting_fast() {
             const DICT_LIMIT_POLL: usize = 50;
             if let Ok(mut sel) = selection_try_get() {
                 if sel.llm_pending && engine.bg_status() == "done" {
@@ -472,6 +486,7 @@ impl TextServiceFactory_Impl {
                             sel.candidates  = merged;
                             sel.selected    = 0;
                             sel.llm_pending = false;
+                            session_sync_from_selection(&sel);
                             let page_cands = sel.page_candidates().to_vec();
                             let page_info  = sel.page_info();
                             let pos = caret_rect_get();
@@ -491,22 +506,18 @@ impl TextServiceFactory_Impl {
         // 辞書0件でLLM完了待機中（選択モード外）→ BG完了したら選択モードへ遷移
         {
             const DICT_LIMIT_WAIT: usize = 50;
-            if let Ok(mut sel) = selection_try_get() {
-                if let Some(ref wait_preedit) = sel.llm_wait_preedit.clone() {
+            if let Ok(mut sess) = session_get() {
+                if let Some((wait_preedit, pos_x, pos_y)) = sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y)) {
                     if engine.bg_status() == "done" {
-                        if let Some(llm_cands) = engine.bg_take_candidates(wait_preedit) {
+                        if let Some(llm_cands) = engine.bg_take_candidates(&wait_preedit) {
                             let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_WAIT);
-                            if !merged.is_empty() && !(merged.len() == 1 && merged[0] == *wait_preedit) {
+                            if !merged.is_empty() && !(merged.len() == 1 && merged[0] == wait_preedit) {
                                 let first = merged.first().cloned().unwrap_or_default();
-                                let pos_x = sel.pos_x;
-                                let pos_y = sel.pos_y;
-                                let original = wait_preedit.clone();
-                                *sel = crate::engine::state::SelectionState::activate(
-                                    merged, original, pos_x, pos_y,
-                                );
-                                let page_cands = sel.page_candidates().to_vec();
-                                let page_info  = sel.page_info();
-                                drop(sel);
+                                sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
+                                selection_sync_from_session(&sess);
+                                let page_cands = sess.page_candidates().to_vec();
+                                let page_info  = sess.page_info();
+                                drop(sess);
                                 drop(guard);
                                 candidate_window::show_with_status(&page_cands, 0, &page_info, pos_x, pos_y, None);
                                 update_composition(ctx, tid, sink, first)?;
@@ -514,8 +525,9 @@ impl TextServiceFactory_Impl {
                             }
                         }
                         // BG 完了したが候補なし → 待機解除してウィンドウを閉じる
-                        sel.llm_wait_preedit = None;
-                        drop(sel);
+                        sess.set_preedit(wait_preedit);
+                        selection_sync_from_session(&sess);
+                        drop(sess);
                         candidate_window::hide();
                     }
                 }
@@ -528,22 +540,27 @@ impl TextServiceFactory_Impl {
                 let _t = diag::span("Input");
 
                 // LLM待機中（辞書0件で Space 待ち）に新文字が来たら待機を解除する
-                if let Ok(mut sel) = selection_try_get() {
-                    if sel.llm_wait_preedit.take().is_some() {
+                if let Ok(mut sess) = session_get() {
+                    if sess.is_waiting() {
+                        let pre = sess.preedit_text().unwrap_or("").to_string();
+                        sess.set_preedit(pre);
+                        selection_sync_from_session(&sess);
                         candidate_window::hide();
                     }
                 }
 
                 // 選択モード中に新たなキーが来たら選択モードを解除してコミット
                 // AtomicBool で先にロックなしチェックしてから Mutex を取得
-                if crate::engine::state::selection_is_active_fast() {
-                    let mut sel = selection_get()?;
-                    if sel.is_active() {
-                        let committed_text = sel.current_candidate()
-                            .unwrap_or(&sel.original_preedit)
+                if session_is_selecting_fast() {
+                    let mut sess = session_get()?;
+                    if sess.is_selecting() {
+                        let committed_text = sess.current_candidate()
+                            .or_else(|| sess.original_preedit())
+                            .unwrap_or("")
                             .to_string();
-                        sel.clear();
-                        drop(sel);
+                        sess.set_idle();
+                        selection_sync_from_session(&sess);
+                        drop(sess);
                         candidate_window::hide();
                         // エンジン内部状態を確定（UIへの確定挿入は後段の commit_then_start_composition が担当）
                         engine.commit(&committed_text);
@@ -633,16 +650,18 @@ impl TextServiceFactory_Impl {
 
                 // ── すでに選択モード中 → 1候補ずつ進む（ページ末で次ページへ）──
                 {
-                    let mut sel = selection_get()?;
-                    if sel.is_active() {
-                        sel.next_with_page_wrap();
-                        let page_cands = sel.page_candidates().to_vec();
-                        let page_sel   = sel.page_selected();
-                        let page_info  = sel.page_info();
-                        let cand_text  = sel.current_candidate()
-                            .unwrap_or(&sel.original_preedit)
+                    let mut sess = session_get()?;
+                    if sess.is_selecting() {
+                        sess.next_with_page_wrap();
+                        selection_sync_from_session(&sess);
+                        let page_cands = sess.page_candidates().to_vec();
+                        let page_sel   = sess.page_selected();
+                        let page_info  = sess.page_info();
+                        let cand_text  = sess.current_candidate()
+                            .or_else(|| sess.original_preedit())
+                            .unwrap_or("")
                             .to_string();
-                        drop(sel);
+                        drop(sess);
                         drop(guard);
                         candidate_window::update_selection(page_sel, &page_info);
                         candidate_window::show(&page_cands, page_sel, &page_info,
@@ -705,19 +724,19 @@ impl TextServiceFactory_Impl {
                                 // 辞書0件 + LLM未完了：選択モードに入らず待機。
                                 // 候補ウィンドウに「⏳ 変換中...」を表示してフィードバックを返す。
                                 let caret = caret_rect_get();
-                                if let Ok(mut sel) = selection_try_get() {
+                                if let Ok(mut sess) = session_get() {
                                     // すでに待機中なら Space 2回目 → ひらがなをコミット
-                                    if sel.llm_wait_preedit.is_some() {
-                                        sel.llm_wait_preedit = None;
-                                        drop(sel);
+                                    if sess.is_waiting() {
+                                        sess.set_preedit(preedit.clone());
+                                        selection_sync_from_session(&sess);
+                                        drop(sess);
                                         drop(guard);
                                         candidate_window::hide();
                                         engine_commit_hiragana(ctx, tid)?;
                                         return Ok(true);
                                     }
-                                    sel.llm_wait_preedit = Some(preedit.clone());
-                                    sel.pos_x = caret.left;
-                                    sel.pos_y = caret.bottom;
+                                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
+                                    selection_sync_from_session(&sess);
                                 }
                                 tracing::debug!("Convert: dict=0, BG running → waiting for LLM (preedit={preedit:?})");
                                 // preedit を仮候補として渡すことで候補ウィンドウを表示できる
@@ -746,12 +765,10 @@ impl TextServiceFactory_Impl {
                 let pos_x = caret.left;
                 let pos_y = caret.bottom;
                 let (page_cands, page_info) = {
-                    let mut sel = selection_get()?;
-                    *sel = crate::engine::state::SelectionState::activate(
-                        candidates.clone(), preedit.clone(), pos_x, pos_y,
-                    );
-                    sel.llm_pending = llm_pending;
-                    (sel.page_candidates().to_vec(), sel.page_info())
+                    let mut sess = session_get()?;
+                    sess.activate_selecting(candidates.clone(), preedit.clone(), pos_x, pos_y, llm_pending);
+                    selection_sync_from_session(&sess);
+                    (sess.page_candidates().to_vec(), sess.page_info())
                 };
                 drop(guard);
                 let status = if llm_pending { Some("⏳ 変換中...") } else { None };
@@ -764,14 +781,16 @@ impl TextServiceFactory_Impl {
             UserAction::CommitRaw => {
                 // 選択モード中 → 現在候補をコミット
                 {
-                    let mut sel = selection_get()?;
-                    if sel.is_active() {
-                        let text    = sel.current_candidate()
-                            .unwrap_or(&sel.original_preedit)
+                    let mut sess = session_get()?;
+                    if sess.is_selecting() {
+                        let text    = sess.current_candidate()
+                            .or_else(|| sess.original_preedit())
+                            .unwrap_or("")
                             .to_string();
-                        let reading = sel.original_preedit.clone();
-                        sel.clear();
-                        drop(sel);
+                        let reading = sess.original_preedit().unwrap_or("").to_string();
+                        sess.set_idle();
+                        selection_sync_from_session(&sess);
+                        drop(sess);
                         candidate_window::hide();
                         // ひらがな以外（プリエディットそのまま確定）は学習しない
                         if text != reading {
@@ -803,18 +822,22 @@ impl TextServiceFactory_Impl {
             UserAction::Backspace => {
                 // 選択モード中 → 選択モードを解除してプリエディット表示に戻す
                 {
-                    let mut sel = selection_get()?;
-                    if sel.is_active() {
-                        let original = sel.original_preedit.clone();
-                        sel.clear();
-                        drop(sel);
+                    let mut sess = session_get()?;
+                    if sess.is_selecting() {
+                        let original = sess.original_preedit().unwrap_or("").to_string();
+                        sess.set_preedit(original.clone());
+                        selection_sync_from_session(&sess);
+                        drop(sess);
                         candidate_window::hide();
                         drop(guard);
                         update_composition(ctx, tid, sink, original)?;
                         return Ok(true);
                     }
                     // LLM 待機中なら待機解除（文字が変わるので待ち直し）
-                    if sel.llm_wait_preedit.take().is_some() {
+                    if sess.is_waiting() {
+                        let pre = sess.preedit_text().unwrap_or("").to_string();
+                        sess.set_preedit(pre);
+                        selection_sync_from_session(&sess);
                         candidate_window::hide();
                     }
                 }
@@ -838,20 +861,24 @@ impl TextServiceFactory_Impl {
             UserAction::Cancel | UserAction::CancelAll => {
                 // 選択モード中 → 元プリエディットに戻す（キャンセル）
                 {
-                    let mut sel = selection_get()?;
-                    if sel.is_active() {
-                        let original = sel.original_preedit.clone();
-                        sel.clear();
-                        drop(sel);
+                    let mut sess = session_get()?;
+                    if sess.is_selecting() {
+                        let original = sess.original_preedit().unwrap_or("").to_string();
+                        sess.set_preedit(original.clone());
+                        selection_sync_from_session(&sess);
+                        drop(sess);
                         candidate_window::hide();
                         drop(guard);
                         update_composition(ctx, tid, sink, original)?;
                         return Ok(true);
                     }
                     // LLM 待機中なら待機解除（プリエディットはそのまま残す）
-                    if sel.llm_wait_preedit.take().is_some() {
+                    if sess.is_waiting() {
+                        let pre = sess.preedit_text().unwrap_or("").to_string();
+                        sess.set_preedit(pre);
+                        selection_sync_from_session(&sess);
                         candidate_window::hide();
-                        tracing::debug!("Cancel: llm_wait_preedit cleared");
+                        tracing::debug!("Cancel: waiting cleared");
                     }
                 }
                 if engine.preedit_is_empty() { return Ok(false); }
@@ -925,15 +952,16 @@ impl TextServiceFactory_Impl {
 
             // ─ 候補操作（Phase 4）────────────────────────────────────────────
             UserAction::CandidateNext => {
-                let mut sel = selection_get()?;
-                if !sel.is_active() { return Ok(!engine.preedit_is_empty()); }
-                sel.next_with_page_wrap();
-                let page_cands = sel.page_candidates().to_vec();
-                let page_sel   = sel.page_selected();
-                let page_info  = sel.page_info();
-                let text = sel.current_candidate()
-                    .unwrap_or(&sel.original_preedit).to_string();
-                drop(sel);
+                let mut sess = session_get()?;
+                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
+                sess.next_with_page_wrap();
+                selection_sync_from_session(&sess);
+                let page_cands = sess.page_candidates().to_vec();
+                let page_sel   = sess.page_selected();
+                let page_info  = sess.page_info();
+                let text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                drop(sess);
                 drop(guard);
                 candidate_window::update_selection(page_sel, &page_info);
                 candidate_window::show(&page_cands, page_sel, &page_info,
@@ -943,15 +971,16 @@ impl TextServiceFactory_Impl {
             }
 
             UserAction::CandidatePrev => {
-                let mut sel = selection_get()?;
-                if !sel.is_active() { return Ok(!engine.preedit_is_empty()); }
-                sel.prev();
-                let page_cands = sel.page_candidates().to_vec();
-                let page_sel   = sel.page_selected();
-                let page_info  = sel.page_info();
-                let text = sel.current_candidate()
-                    .unwrap_or(&sel.original_preedit).to_string();
-                drop(sel);
+                let mut sess = session_get()?;
+                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
+                sess.prev();
+                selection_sync_from_session(&sess);
+                let page_cands = sess.page_candidates().to_vec();
+                let page_sel   = sess.page_selected();
+                let page_info  = sess.page_info();
+                let text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                drop(sess);
                 drop(guard);
                 candidate_window::update_selection(page_sel, &page_info);
                 candidate_window::show(&page_cands, page_sel, &page_info,
@@ -961,15 +990,16 @@ impl TextServiceFactory_Impl {
             }
 
             UserAction::CandidatePageDown => {
-                let mut sel = selection_get()?;
-                if !sel.is_active() { return Ok(!engine.preedit_is_empty()); }
-                sel.next_page();
-                let page_cands = sel.page_candidates().to_vec();
-                let page_sel   = sel.page_selected();
-                let page_info  = sel.page_info();
-                let text = sel.current_candidate()
-                    .unwrap_or(&sel.original_preedit).to_string();
-                drop(sel);
+                let mut sess = session_get()?;
+                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
+                sess.next_page();
+                selection_sync_from_session(&sess);
+                let page_cands = sess.page_candidates().to_vec();
+                let page_sel   = sess.page_selected();
+                let page_info  = sess.page_info();
+                let text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                drop(sess);
                 drop(guard);
                 let caret = caret_rect_get();
                 candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
@@ -978,15 +1008,16 @@ impl TextServiceFactory_Impl {
             }
 
             UserAction::CandidatePageUp => {
-                let mut sel = selection_get()?;
-                if !sel.is_active() { return Ok(!engine.preedit_is_empty()); }
-                sel.prev_page();
-                let page_cands = sel.page_candidates().to_vec();
-                let page_sel   = sel.page_selected();
-                let page_info  = sel.page_info();
-                let text = sel.current_candidate()
-                    .unwrap_or(&sel.original_preedit).to_string();
-                drop(sel);
+                let mut sess = session_get()?;
+                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
+                sess.prev_page();
+                selection_sync_from_session(&sess);
+                let page_cands = sess.page_candidates().to_vec();
+                let page_sel   = sess.page_selected();
+                let page_info  = sess.page_info();
+                let text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                drop(sess);
                 drop(guard);
                 let caret = caret_rect_get();
                 candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
@@ -995,14 +1026,15 @@ impl TextServiceFactory_Impl {
             }
 
             UserAction::CandidateSelect(n) => {
-                let mut sel = selection_get()?;
-                if !sel.is_active() { return Ok(!engine.preedit_is_empty()); }
-                if !sel.select_nth_in_page(n as usize) { return Ok(true); }
-                let text    = sel.current_candidate()
-                    .unwrap_or(&sel.original_preedit).to_string();
-                let reading = sel.original_preedit.clone();
-                sel.clear();
-                drop(sel);
+                let mut sess = session_get()?;
+                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
+                if !sess.select_nth_in_page(n as usize) { return Ok(true); }
+                let text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                let reading = sess.original_preedit().unwrap_or("").to_string();
+                sess.set_idle();
+                selection_sync_from_session(&sess);
+                drop(sess);
                 candidate_window::hide();
                 if text != reading {
                     engine.learn(&reading, &text);
@@ -1050,6 +1082,7 @@ impl TextServiceFactory_Impl {
                 diag::event(DiagEvent::ModeChange { from, to });
                 self.notify_langbar_update();
                 self.notify_tray_update(tid);
+                self.maybe_reload_runtime_config();
                 Ok(true)
             }
 
@@ -1077,6 +1110,7 @@ impl TextServiceFactory_Impl {
                 }
                 self.notify_langbar_update();
                 self.notify_tray_update(tid);
+                self.maybe_reload_runtime_config();
                 Ok(true)
             }
 
@@ -1098,6 +1132,7 @@ impl TextServiceFactory_Impl {
                 }
                 self.notify_langbar_update();
                 self.notify_tray_update(tid);
+                self.maybe_reload_runtime_config();
                 Ok(true)
             }
 
@@ -1116,6 +1151,7 @@ impl TextServiceFactory_Impl {
                 }
                 self.notify_langbar_update();
                 self.notify_tray_update(tid);
+                self.maybe_reload_runtime_config();
                 Ok(true)
             }
 
@@ -1134,6 +1170,7 @@ impl TextServiceFactory_Impl {
                 }
                 self.notify_langbar_update();
                 self.notify_tray_update(tid);
+                self.maybe_reload_runtime_config();
                 Ok(true)
             }
 
@@ -1160,8 +1197,11 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
             engine.reset_preedit();
         }
         // 選択待機状態もクリア
-        if let Ok(mut sel) = selection_try_get() {
-            sel.llm_wait_preedit = None;
+        if let Ok(mut sess) = session_get() {
+            if sess.is_waiting() || sess.is_selecting() {
+                sess.set_idle();
+                selection_sync_from_session(&sess);
+            }
         }
         p
     };
