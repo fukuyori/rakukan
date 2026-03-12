@@ -3,7 +3,7 @@ members = ["crates/*"]
 resolver = "2"
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["rakukan Contributors"]
@@ -55,3 +55,10 @@ opt-level = 3
 
 [profile.release.package."*"]
 opt-level = 3
+
+# esaxx-rs の build.rs が .static_crt(true) を指定するため llama-cpp-sys-2 と
+# RuntimeLibrary が不一致になる（LNK2038）。
+# patches/esaxx-rs/build.rs で .static_crt(false) に変更したパッチ版を使う。
+# セットアップ: scripts/setup-esaxx-patch.ps1 を一度実行して esaxx.cpp をコピーする。
+[patch.crates-io]
+esaxx-rs = { path = "patches/esaxx-rs" }

@@ -1,11 +1,57 @@
 # Changelog
 
+## [0.3.1] - 2026-03-12
+
+### Fixed
+
+#### LLM変換タイミング問題（Phase 3a フォローアップ）
+
+- **Space 1 回で変換候補が表示されない問題を修正**
+  - `WM_TIMER` ベースの LLM 完了ポーリングを `candidate_window.rs` に実装
+  - `bg_start` 直後（`pending` 状態）に `wait_done_timeout` が即 `false` を返すレース条件を修正
+  - `worker_loop` で `pending → Running` 遷移時に `notify_all` を追加
+  - `wait_done_timeout` が `Idle && pending=Some` の場合も Condvar で待機するよう変更
+
+- **新しい文章を変換すると候補が表示されない問題を修正**（`conv_cache.rs`）
+  - 前の変換の converter が conv_cache に貸し出されたまま（`kanji_ready=false && bg=running`）の場合、前 bg の完了を待って `bg_reclaim` し新しいキーで `bg_start` するよう変更
+
+- **長い文章で変換が失敗する問題を修正**（`factory.rs`）
+  - `LLM_WAIT_MAX_MS` を固定 3 秒から文字数連動（基本 3 秒 + 1 文字 300ms、上限 15 秒）に変更
+  - `bg_take_candidates → None` 時に `bg_reclaim → bg_start → bg_wait_ms` でブロッキング再試行
+
+- **文節確定後に remainder が二重表示される問題を修正**（`factory.rs`）
+  - `commit_then_start_composition` で `EndComposition` 前に `SetText(commit_text)` を呼び、composition を確定テキストのみに縮めてから終了するよう変更
+  - `EndComposition` 後の新 composition 開始点を `get_cursor_range` から `ctx.GetEnd(ec)` に変更
+
+- **変換候補表示時に composition text が 1 番候補に変化しない問題を修正**（`factory.rs`）
+  - `bg_take_candidates` のキーを `hiragana_text()` 優先に統一（`preedit_display()` との不一致を解消）
+
+## [0.3.0] - 2026-03-11
+
+### Added
+- **Shift+左/右による変換範囲変更**（SplitPreedit）
+  - 変換中に Shift+左で変換対象を1文字縮小、Shift+右で1文字拡大
+  - target（実線）と remainder（点線）を視覚的に区別して表示
+  - Space で target のみを変換、Enter で確定、ESC/Backspace で全体を未変換に戻す
+- ビルド時刻を DLL に埋め込み、起動ログに出力（`build=YYYY-MM-DD HH:MM:SS UTC`）
+- インストール時にタイムスタンプ付き DLL（`rakukan_tsf_YYYYMMDD_HHmmss.dll`）を自動削除
+
+### Changed
+- `rakukan_tsf.dll` を固定名で上書きインストール（タイムスタンプ付きファイルが蓄積しない）
+- 診断用ログを `debug!` レベルに降格（通常ログには `info!` 以上のみ出力）
+- `esaxx-rs` パッチのセットアップスクリプトがスタブ `lib.rs` を正しく上書きするよう修正
+
+### Fixed
+- `esaxx-rs` パッチの `Cargo.toml` に `[lib]` セクションが欠落していたビルドエラーを修正
+- `build.rs` の `rerun-if-changed` 設定により `RAKUKAN_BUILD_TIME` が更新されなかった問題を修正
+- `update_composition_candidate_split` で `prop.Clear()` を呼んでから属性を再設定するよう修正
+- `on_segment_extend` の `target` の move エラーと未使用変数 `full` の警告を修正
+
 ## [0.2.0] - 2026-03-06
 
 ### Added
 - `SessionState` を導入し、TSF 層の論理状態を 1 か所へ寄せる土台を追加
 - `Waiting` 状態を追加し、LLM 待機中の状態表現を `SessionState` 側でも保持可能にした
-- Phase 2 の進捗メモとして `PHASE2_PREP.md` / `PHASE2_STATUS.md` を同梱
 
 ### Changed
 - `config.toml` / `keymap.toml` の構造化と再読込を整備
@@ -16,8 +62,3 @@
 ### Fixed
 - `rakukan-tray` の Rust 2024 `unsafe_op_in_unsafe_fn` warning を解消
 - Phase 2 移行途中に発生した未使用コード warning を整理
-- `-BuildOnly` 構成で warning なしのビルドが通る状態に調整
-
-### Notes
-- v0.2.0 は Phase 2 完了版ではなく、Phase 2 本体へ進むための整備版
-- `SelectionState` はまだ一部互換レイヤとして残る

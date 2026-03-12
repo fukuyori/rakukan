@@ -7,9 +7,18 @@
 //! HWND/CandData は `thread_local!` で管理し、Send/Sync を回避する。
 //!
 //! # ウィンドウ仕様
-//! - WS_POPUP | WS_BORDER、WS_EX_TOPMOST | WS_EX_NOACTIVATE
+//! - `WS_POPUP | WS_BORDER`、`WS_EX_TOPMOST | WS_EX_NOACTIVATE`
 //! - GDI で番号付きリスト描画（選択行はハイライト）
 //! - キャレット位置の直下に表示
+//!
+//! # LLM 完了ポーリング（`WM_TIMER` ベース）
+//! Waiting 状態（⏳ 変換中）に遷移した際に `start_waiting_timer()` を呼ぶことで、
+//! 80ms ごとに `bg_status == "done"` をポーリングする `WM_TIMER` を起動する。
+//! LLM 変換完了を検知したら候補ウィンドウを自動更新し、タイマーを停止する。
+//!
+//! TSF の `RequestEditSession` は TSF スレッドのキー入力コンテキスト外から呼べないため、
+//! タイマーコールバックでは候補ウィンドウの表示のみ行い、composition text の更新は
+//! 次のキー入力（Space 等）時の `waiting-poll` ブランチで行う。
 
 use std::cell::{Cell, RefCell};
 
@@ -26,8 +35,9 @@ use windows::{
         UI::WindowsAndMessaging::{
             CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, SetWindowPos,
             ShowWindow, HMENU, HWND_TOPMOST, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-            WM_ERASEBKGND, WM_PAINT, WNDCLASSW, WS_BORDER,
+            WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_BORDER,
             WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+            SetTimer, KillTimer,
         },
     },
 };
@@ -129,6 +139,13 @@ unsafe extern "system" fn wnd_proc(
         }
         // 背景消去を抑制（WM_PAINT で全描画するため）
         WM_ERASEBKGND => LRESULT(1),
+        // LLM完了ポーリングタイマー
+        WM_TIMER => {
+            if wparam.0 == WAITING_TIMER_ID {
+                crate::tsf::candidate_window::on_waiting_timer();
+            }
+            LRESULT(0)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }
@@ -321,3 +338,146 @@ pub fn destroy() {
 }
 
 
+// ─── LLM待機タイマー ──────────────────────────────────────────────────────────
+
+const WAITING_TIMER_ID: usize = 0x1234;
+const WAITING_POLL_MS:  u32   = 80; // 80ms ごとにポーリング
+
+/// Waiting状態に入った時に呼ぶ。LLM完了を80msごとに監視するタイマーを起動する。
+pub fn start_waiting_timer() {
+    let hwnd = get_hwnd();
+    if is_valid(hwnd) {
+        unsafe { SetTimer(hwnd, WAITING_TIMER_ID, WAITING_POLL_MS, None); }
+        tracing::debug!("waiting timer started");
+    }
+}
+
+/// Waiting状態を抜けた時に呼ぶ。タイマーを停止する。
+pub fn stop_waiting_timer() {
+    let hwnd = get_hwnd();
+    if is_valid(hwnd) {
+        unsafe { let _ = KillTimer(hwnd, WAITING_TIMER_ID); }
+        tracing::debug!("waiting timer stopped");
+    }
+}
+
+/// WM_TIMER コールバック（TSFスレッド上で呼ばれる）。
+/// bg_status == "done" になったら候補を取り出して表示する。
+pub fn on_waiting_timer() {
+    use crate::engine::state::{session_get, SessionState};
+    use crate::engine::state::engine_get;
+
+    // セッションが Waiting 状態かチェック
+    let wait_info = {
+        match session_get() {
+            Ok(sess) => {
+                if let SessionState::Waiting { text, pos_x, pos_y } = &*sess {
+                    Some((text.clone(), *pos_x, *pos_y))
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    };
+
+    let (wait_preedit, pos_x, pos_y) = match wait_info {
+        Some(v) => v,
+        None => {
+            // Waiting ではなくなっていたらタイマー停止
+            stop_waiting_timer();
+            return;
+        }
+    };
+
+    // engine の bg_status を確認
+    let bg_done = {
+        match engine_get() {
+            Ok(g) => g.as_ref().map(|e| e.bg_status() == "done").unwrap_or(false),
+            Err(_) => false,
+        }
+    };
+
+    if !bg_done {
+        return; // まだ実行中 → 次の WM_TIMER を待つ
+    }
+
+    // bg=done → 候補を取り出して表示
+    stop_waiting_timer();
+
+    const DICT_LIMIT: usize = 20;
+    let _llm_limit = crate::engine::state::get_num_candidates();
+
+    let result = (|| -> Option<(Vec<String>, String)> {
+        let mut guard = engine_get().ok()?;
+        let engine = guard.as_mut()?;
+
+        // bg_start は hiragana_buf をキーとして使う。
+        // wait_preedit は preedit_display()（pending_romaji 含む）なので不一致の場合がある。
+        // hiragana_text() でフォールバックして両方試す。
+        let hira_key = engine.hiragana_text();
+        let llm_cands = engine.bg_take_candidates(&wait_preedit)
+            .or_else(|| {
+                if hira_key != wait_preedit {
+                    tracing::debug!("on_waiting_timer: key mismatch, retry hira={:?}", hira_key);
+                    engine.bg_take_candidates(&hira_key)
+                } else {
+                    None
+                }
+            });
+
+        let llm_cands = match llm_cands {
+            Some(c) => c,
+            None => {
+                // キー不一致 → bg_reclaim して bg_start で正しいキーで再起動
+                tracing::warn!("on_waiting_timer: key mismatch preedit={:?} hira={:?}, reclaim+restart", wait_preedit, hira_key);
+                engine.bg_reclaim();
+                let llm_limit2 = crate::engine::state::get_num_candidates();
+                if engine.bg_start(llm_limit2) {
+                    tracing::info!("on_waiting_timer: bg_start restarted → re-arm timer");
+                    // タイマーを再起動して次のポーリングで取得
+                    start_waiting_timer();
+                } else {
+                    tracing::error!("on_waiting_timer: bg_start failed");
+                }
+                return None;
+            }
+        };
+
+        let merged = if llm_cands.is_empty() {
+            engine.merge_candidates(vec![], DICT_LIMIT)
+        } else {
+            engine.merge_candidates(llm_cands, DICT_LIMIT)
+        };
+        if merged.is_empty() {
+            return None;
+        }
+        let first = merged.first().cloned().unwrap_or_else(|| wait_preedit.clone());
+        Some((merged, first))
+    })();
+
+    let (merged, _first) = match result {
+        Some(v) => v,
+        None => {
+            tracing::warn!("on_waiting_timer: bg_take_candidates returned None or empty");
+            return;
+        }
+    };
+
+    // セッションを Selecting に遷移
+    let page_info_str;
+    let page_cands;
+    {
+        let mut sess = match session_get() { Ok(s) => s, Err(_) => return };
+        sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
+        page_cands = sess.page_candidates().to_vec();
+        page_info_str = sess.page_info().to_string();
+    }
+
+    show_with_status(&page_cands, 0, &page_info_str, pos_x, pos_y, None);
+
+    // composition text を更新するには TSF API が必要だが、ここは WndProc コンテキスト
+    // → composition 更新は次のキー入力時にポーリングが拾う（既存の poll ブランチ）
+    // ここでは候補ウィンドウだけ更新して、ユーザーに候補が来たことを見せる
+    tracing::info!("on_waiting_timer: showed {} cands for {:?}", page_cands.len(), wait_preedit);
+}

@@ -43,6 +43,10 @@ pub enum KeyAction {
     ModeAlphanumeric,  // 英数キー
     CursorLeft,
     CursorRight,
+    /// 文節縮小（Shift+Left）
+    SegmentShrink,
+    /// 文節拡大（Shift+Right）
+    SegmentExtend,
 }
 
 impl KeyAction {
@@ -73,6 +77,8 @@ impl KeyAction {
             Self::ModeAlphanumeric => UserAction::ModeAlphanumeric,
             Self::CursorLeft       => UserAction::CursorLeft,
             Self::CursorRight      => UserAction::CursorRight,
+            Self::SegmentShrink    => UserAction::SegmentShrink,
+            Self::SegmentExtend    => UserAction::SegmentExtend,
         }
     }
 }
@@ -272,6 +278,10 @@ impl Keymap {
             let c = buf[0];
             if c >= 0x20 && !(0x7F..=0x9F).contains(&c) {
                 if let Some(ch) = char::from_u32(c as u32) {
+                    // 句読点 → Punctuate アクション
+                    if matches!(ch, '、' | '。' | '，' | '．') {
+                        return Some(UserAction::Punctuate(ch));
+                    }
                     // Shift + かなモード → 全角英数字に変換
                     if shift && (0x21u16..=0x7Eu16).contains(&c) {
                         use super::input_mode::InputMode;
@@ -535,6 +545,8 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("PageUp", KeyAction::CandidatePageUp),
             bind("Left", KeyAction::CursorLeft),
             bind("Right", KeyAction::CursorRight),
+            bind("Shift+Left", KeyAction::SegmentShrink),
+            bind("Shift+Right", KeyAction::SegmentExtend),
         ],
         KeymapPreset::MsImeJis => vec![
             bind("Space", KeyAction::Convert),
@@ -565,6 +577,8 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("Eisuu", KeyAction::ModeAlphanumeric),
             bind("Left", KeyAction::CursorLeft),
             bind("Right", KeyAction::CursorRight),
+            bind("Shift+Left", KeyAction::SegmentShrink),
+            bind("Shift+Right", KeyAction::SegmentExtend),
         ],
         KeymapPreset::Custom => Vec::new(),
     }

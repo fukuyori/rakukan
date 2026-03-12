@@ -285,10 +285,21 @@ Stop-ProcSilent "ctfmon"
 Stop-ProcSilent "TextInputHost"
 Start-Sleep -Milliseconds 1200
 
-$ts  = Get-Date -Format "yyyyMMdd_HHmmss"
-$dst = Join-Path $installDir ("rakukan_tsf_{0}.dll" -f $ts)
+$dst = Join-Path $installDir "rakukan_tsf.dll"
 Copy-Item -LiteralPath $srcDll -Destination $dst -Force
 Write-Host "  -> $dst"
+
+# 古いタイムスタンプ付き DLL を削除（rakukan_tsf_YYYYMMDD_HHmmss.dll）
+Get-ChildItem -Path $installDir -Filter "rakukan_tsf_????????_??????.dll" -ErrorAction SilentlyContinue |
+    ForEach-Object {
+        try {
+            Invoke-Regsvr32UnregisterBestEffort $_.FullName
+            Remove-Item -LiteralPath $_.FullName -Force
+            Write-Host "  Removed old: $($_.Name)"
+        } catch {
+            Write-Host "  Could not remove: $($_.Name) (in use?)"
+        }
+    }
 
 # Copy engine DLLs (rakukan_engine_cpu.dll / _vulkan.dll / _cuda.dll)
 if ($engineDlls.Count -eq 0) {

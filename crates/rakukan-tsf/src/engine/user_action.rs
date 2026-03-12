@@ -55,6 +55,16 @@ pub enum UserAction {
     CursorLeft,
     CursorRight,
 
+    // ─── 文節伸縮（候補選択中）──────────────────────────────────────────
+    /// Shift+Left: 文節を1文字縮めて再変換
+    SegmentShrink,
+    /// Shift+Right: 縮めた文字を1文字戻して再変換（縮小履歴がなければ無視）
+    SegmentExtend,
+
+    // ─── 句読点入力 ──────────────────────────────────────────────────────
+    /// 「、」「。」等: プリエディットがあれば変換開始、なければ直接コミット
+    Punctuate(char),
+
     Tab,
     Unknown,
 }

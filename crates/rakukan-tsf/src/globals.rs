@@ -7,14 +7,17 @@ use anyhow::{Context, Result};
 use windows::{
     core::GUID,
     Win32::{
-        Foundation::{FALSE, HMODULE, MAX_PATH},
+        Foundation::{HMODULE, MAX_PATH},
         System::LibraryLoader::GetModuleFileNameW,
         UI::TextServices::{
-            TF_ATTR_TARGET_CONVERTED, TF_CT_NONE, TF_DA_COLOR, TF_DA_COLOR_0,
-            TF_DISPLAYATTRIBUTE, TF_LS_SOLID,
+            TF_ATTR_INPUT, TF_ATTR_TARGET_CONVERTED, TF_CT_NONE,
+            TF_DA_COLOR, TF_DA_COLOR_0, TF_DISPLAYATTRIBUTE,
+            TF_LS_DOT, TF_LS_SOLID,
         },
     },
 };
+
+
 
 #[allow(dead_code)]
 pub const CLSID_PREFIX: &str = "CLSID\\";
@@ -25,30 +28,36 @@ pub const SERVICE_NAME: &str = "Rakukan";
 // rakukan unique GUIDs
 pub const GUID_TEXT_SERVICE: GUID = GUID::from_u128(0xc0ddf8b0_1f1e_4c2d_a9e3_5f7b8d6e2a4c);
 pub const GUID_PROFILE:      GUID = GUID::from_u128(0xc0ddf8b1_1f1e_4c2d_a9e3_5f7b8d6e2a4c);
-#[allow(dead_code)]
+/// 選択中候補（変換確定待ち）のアンダーライン属性 GUID
 pub const GUID_DISPLAY_ATTRIBUTE: GUID = GUID::from_u128(0xc0ddf8b2_1f1e_4c2d_a9e3_5f7b8d6e2a4c);
+/// 未変換プリエディットのアンダーライン属性 GUID
+pub const GUID_DISPLAY_ATTRIBUTE_INPUT: GUID = GUID::from_u128(0xc0ddf8b3_1f1e_4c2d_a9e3_5f7b8d6e2a4c);
+
 
 #[allow(dead_code)]
 pub const TEXTSERVICE_LANGBARITEMSINK_COOKIE: u32 = 0x414D414B;
 
-#[allow(dead_code)]
-pub const DISPLAY_ATTRIBUTE: TF_DISPLAYATTRIBUTE = TF_DISPLAYATTRIBUTE {
-    crText: TF_DA_COLOR {
-        r#type: TF_CT_NONE,
-        Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 },
-    },
-    crBk: TF_DA_COLOR {
-        r#type: TF_CT_NONE,
-        Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 },
-    },
+/// 選択中候補（変換確定待ち）: 実線アンダーライン
+pub const DISPLAY_ATTRIBUTE_CONVERTED: TF_DISPLAYATTRIBUTE = TF_DISPLAYATTRIBUTE {
+    crText: TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
+    crBk:   TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
     lsStyle: TF_LS_SOLID,
-    fBoldLine: FALSE,
-    crLine: TF_DA_COLOR {
-        r#type: TF_CT_NONE,
-        Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 },
-    },
+    fBoldLine: windows::Win32::Foundation::TRUE,
+    crLine: TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
     bAttr: TF_ATTR_TARGET_CONVERTED,
 };
+
+/// 未変換プリエディット: 点線アンダーライン
+pub const DISPLAY_ATTRIBUTE_INPUT: TF_DISPLAYATTRIBUTE = TF_DISPLAYATTRIBUTE {
+    crText: TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
+    crBk:   TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
+    lsStyle: TF_LS_DOT,
+    fBoldLine: windows::Win32::Foundation::FALSE,
+    crLine: TF_DA_COLOR { r#type: TF_CT_NONE, Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 } },
+    bAttr: TF_ATTR_INPUT,
+};
+
+
 
 // ─── DLL instance ────────────────────────────────────────────────────────────
 

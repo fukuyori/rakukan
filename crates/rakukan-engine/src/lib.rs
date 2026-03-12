@@ -56,7 +56,7 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { model_variant: None, num_candidates: 9, n_threads: 0, n_gpu_layers: 0u32, main_gpu: 0 }
+        Self { model_variant: None, num_candidates: 5, n_threads: 0, n_gpu_layers: 0u32, main_gpu: 0 }
     }
 }
 
@@ -300,15 +300,19 @@ impl RakunEngine {
     /// is_kanji_ready() == true の場合にのみ converter をキャッシュに渡す。
     /// False: kanji 未準備 or ひらがなが空。
     pub fn bg_start(&mut self, n_cands: usize) -> bool {
+        // is_kanji_ready() チェックの前に Done 状態の converter を回収する。
+        // キー不一致で take_ready が None を返した場合、converter は Done に戻るが
+        // engine.kanji=None のまま → is_kanji_ready()=false → bg_start が永遠にスキップ
+        // されてしまう。回収を先に行うことでこの問題を解消する。
+        if let Some(old) = conv_cache::try_reclaim_done() {
+            tracing::trace!("bg_start: reclaimed converter from Done state");
+            self.kanji = Some(old);
+        }
+
         let hiragana  = self.hiragana_buf.clone();
         let committed = self.committed.clone();
         if hiragana.is_empty() { return false; }
         if !self.is_kanji_ready() { return false; }
-
-        // Done 状態の古い converter を先に engine に戻す
-        if let Some(old) = conv_cache::try_reclaim_done() {
-            self.kanji = Some(old);
-        }
 
         if let Some(conv) = self.kanji.take() {
             match conv_cache::start(hiragana, committed, conv, n_cands) {

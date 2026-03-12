@@ -96,7 +96,7 @@ impl LlamaCppModel {
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
-        Ok(Self { model, n_ctx: 256, external_tokenizer, n_threads: 0, n_gpu_layers, main_gpu })
+        Ok(Self { model, n_ctx: 128, external_tokenizer, n_threads: 0, n_gpu_layers, main_gpu })
     }
 
     /// Load a GGUF model with a pre-tokenizer type override.
@@ -134,7 +134,7 @@ impl LlamaCppModel {
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
 
-        Ok(Self { model, n_ctx: 256, external_tokenizer, n_threads: 0, n_gpu_layers: 0, main_gpu: 0 })
+        Ok(Self { model, n_ctx: 128, external_tokenizer, n_threads: 0, n_gpu_layers: 0, main_gpu: 0 })
     }
 
     /// Load a GGUF model with explicit context window size
@@ -325,12 +325,12 @@ impl LlamaCppModel {
         let input_len = input_tokens.len();
 
         // Step 1: Process input tokens for ALL sequences in one batch
-        // Add each token separately for each sequence (not coupled)
-        let mut batch = LlamaBatch::new(512, 1);
+        // batch_size already accounts for input_len * beam_size + 64
+        let mut batch = LlamaBatch::new(batch_size as usize, 1);
 
         for (i, token) in input_tokens.iter().enumerate() {
             for seq_id in 0..beam_size as i32 {
-                let is_last = i == input_len - 1 && seq_id == 0; // Only first seq needs logits
+                let is_last = i == input_len - 1 && seq_id == 0;
                 batch
                     .add(*token, i as i32, &[seq_id], is_last)
                     .map_err(|e| KanjiError::Inference(e.into()))?;
@@ -339,7 +339,7 @@ impl LlamaCppModel {
         ctx.decode(&mut batch)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
-        // Step 2: Get top-k initial tokens (from any seq, all have same logits at this point)
+        // Step 2: Get top-k initial tokens
         let logits = ctx.get_logits();
         let (top_tokens, top_log_probs) = self.get_top_k_tokens(logits, beam_size);
 
@@ -348,7 +348,6 @@ impl LlamaCppModel {
         let beam_scores: Vec<f32> = top_log_probs.clone();
         let mut beam_finished: Vec<bool> = vec![false; beam_size];
 
-        // Check if any initial tokens are EOS
         for (i, &token) in top_tokens.iter().enumerate() {
             if self.is_eos_token(token, eos_token_id, model_eos) {
                 beam_finished[i] = true;
@@ -375,14 +374,11 @@ impl LlamaCppModel {
             (0..beam_size).map(|_| LlamaSampler::greedy()).collect();
 
         for _step in 0..(max_new_tokens - 1) {
-            // Count active beams
             let active_count = beam_finished.iter().filter(|&&f| !f).count();
             if active_count == 0 {
                 break;
             }
 
-            // Sample next token for each active beam
-            // Track which beams added tokens to know their logit positions
             let mut active_beams: Vec<usize> = Vec::new();
             let mut new_tokens: Vec<LlamaToken> = Vec::new();
 
@@ -390,19 +386,15 @@ impl LlamaCppModel {
                 if *finished {
                     continue;
                 }
-                // Logit position corresponds to order in the batch (0, 1, 2, ...)
                 let logit_idx = active_beams.len() as i32;
                 let new_token = samplers[beam_idx].sample(&ctx, logit_idx);
                 active_beams.push(beam_idx);
                 new_tokens.push(new_token);
             }
 
-            // Process sampled tokens
             batch.clear();
             for (i, beam_idx) in active_beams.iter().enumerate() {
                 let new_token = new_tokens[i];
-
-                // Check for EOS
                 if self.is_eos_token(new_token, eos_token_id, model_eos) {
                     beam_finished[*beam_idx] = true;
                 } else {
@@ -414,7 +406,6 @@ impl LlamaCppModel {
                 }
             }
 
-            // Decode all active beams at once
             if batch.n_tokens() > 0 {
                 ctx.decode(&mut batch)
                     .map_err(|e| KanjiError::Inference(e.into()))?;
@@ -423,10 +414,8 @@ impl LlamaCppModel {
             }
         }
 
-        // Collect results
         let results: Vec<(Vec<LlamaToken>, f32)> =
             beam_tokens.into_iter().zip(beam_scores).collect();
-
         Ok(results)
     }
 
@@ -574,7 +563,7 @@ impl LlamaCppModel {
             .new_context(backend, ctx_params)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
-        let mut batch = LlamaBatch::new(512, 1);
+        let mut batch = LlamaBatch::new(tokens.len().max(64), 1);
         for (i, token) in tokens.iter().enumerate() {
             let is_last = i == tokens.len() - 1;
             batch
@@ -645,10 +634,8 @@ impl LlamaCppModel {
             .new_context(backend, ctx_params)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
-        let mut batch = LlamaBatch::new(512, 1);
+        let mut batch = LlamaBatch::new(input_tokens.len().max(64), 1);
         let mut generated = input_tokens.to_vec();
-
-        // Process input tokens
         for (i, token) in input_tokens.iter().enumerate() {
             let is_last = i == input_tokens.len() - 1;
             batch

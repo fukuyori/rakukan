@@ -74,6 +74,9 @@ struct EngineVTable {
 
     // 学習
     learn:                unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+
+    // 診断
+    last_error:           unsafe extern "C" fn() -> *mut c_char,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -124,6 +127,7 @@ impl EngineVTable {
             main_gpu:             load_sym!(lib, b"engine_main_gpu\0"),
             available_models_json: load_sym!(lib, b"engine_available_models_json\0"),
             learn:                 load_sym!(lib, b"engine_learn\0"),
+            last_error:            load_sym!(lib, b"engine_last_error\0"),
         })
     }
 }
@@ -384,6 +388,17 @@ impl DynEngine {
         let r = Self::to_cstring(reading);
         let s = Self::to_cstring(surface);
         unsafe { (self.vtable.learn)(self.handle, r.as_ptr(), s.as_ptr()); }
+    }
+
+    /// エンジン DLL 側の最後のエラー/ステータスメッセージを返す（診断用）
+    pub fn last_error(&self) -> String {
+        let ptr = unsafe { (self.vtable.last_error)() };
+        if ptr.is_null() { return String::new(); }
+        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { (self.vtable.free_string)(ptr) };
+        s
     }
 }
 

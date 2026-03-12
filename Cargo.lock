@@ -520,8 +520,6 @@ dependencies = [
 [[package]]
 name = "esaxx-rs"
 version = "0.1.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d817e038c30374a4bcb22f94d0a8a0e216958d4c3dcde369b1439fec4bdda6e6"
 dependencies = [
  "cc",
 ]
@@ -1535,7 +1533,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rakukan-dict"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "encoding_rs",
@@ -1549,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-dict-builder"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1559,7 +1557,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -1581,7 +1579,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-abi"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "libloading",
@@ -1592,7 +1590,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-cli"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1603,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tray"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "windows",
@@ -1611,7 +1609,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tsf"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "embed-resource",

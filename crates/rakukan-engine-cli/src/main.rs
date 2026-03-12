@@ -1,6 +1,6 @@
 //! rakukan エンジン CLI
 //!
-//! v0.2.0 時点の動作確認ツール。対話的にローマ字を入力して変換結果を確認できる。
+//! v0.3.0 時点の動作確認ツール。対話的にローマ字を入力して変換結果を確認できる。
 //!
 //! # 使い方
 //! ```
@@ -18,7 +18,7 @@ use std::io::{self, BufRead, Write};
 #[derive(Parser, Debug)]
 #[command(
     name = "rakukan-cli",
-    about = "rakukan 変換エンジン CLI（v0.2.0 動作確認）",
+    about = "rakukan 変換エンジン CLI（v0.3.0 動作確認）",
     long_about = None
 )]
 struct Args {
@@ -66,7 +66,7 @@ fn main() -> Result<()> {
         n_threads: args.threads,
     };
 
-    eprintln!("rakukan エンジン CLI  ─  v0.2.0");
+    eprintln!("rakukan エンジン CLI  ─  v0.3.0");
     eprintln!("モデルを初期化中...");
     eprintln!("（初回は HuggingFace からダウンロードします）");
 

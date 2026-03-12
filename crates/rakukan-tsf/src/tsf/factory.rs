@@ -1,10 +1,32 @@
 //! rakukan TextService COM オブジェクト
 //!
 //! # ホットパス原則
-//! OnKeyDown / OnTestKeyDown は **絶対にブロックしない**:
-//! - try_lock() のみ使用
-//! - TF_ES_SYNC を使わない（TF_ES_READWRITE のみ）
-//! - BG 変換結果を待たない（準備できていなければ「変換中」を表示して即リターン）
+//! `OnKeyDown` / `OnTestKeyDown` は原則ブロックしない:
+//! - `try_lock()` のみ使用
+//! - `TF_ES_SYNC` を使わない（`TF_ES_READWRITE` のみ）
+//!
+//! # Space キー（変換開始）の特例ブロッキング
+//! Space キーによる `on_convert[new]` は LLM 変換完了まで TSF スレッドをブロックする。
+//! これは `WM_TIMER` コールバックからは `RequestEditSession` を呼べないため
+//! composition text を更新できないという制約に由来する。
+//!
+//! タイムアウトは文字数に応じて動的に設定（基本 3 秒 + 1 文字 300ms、上限 15 秒）。
+//! タイムアウト時は `WM_TIMER` ポーリングにフォールバックし、候補ウィンドウのみ自動更新する。
+//!
+//! # on_convert[new] フロー
+//! ```text
+//! Space押下
+//!   │
+//!   ├─ bg=idle → bg_start → bg_wait_ms（ブロッキング）→ 候補取得 → 表示
+//!   │
+//!   ├─ bg=running（前変換の converter 貸し出し中）
+//!   │     → prev bg_wait_ms → bg_reclaim → bg_start → bg_wait_ms → 候補取得 → 表示
+//!   │
+//!   ├─ bg_take_candidates=None（キー不一致）
+//!   │     → bg_reclaim → bg_start → bg_wait_ms（再試行）→ 候補取得 → 表示
+//!   │
+//!   └─ bg_wait_ms タイムアウト → WM_TIMER ポーリングにフォールバック
+//! ```
 
 use std::cell::RefCell;
 
@@ -14,14 +36,19 @@ use windows::{
     Win32::{
         Foundation::{BOOL, E_FAIL, E_INVALIDARG, FALSE, LPARAM, POINT, RECT, TRUE, WPARAM},
         System::{
-            Com::{IClassFactory, IClassFactory_Impl},
+            Com::{IClassFactory, IClassFactory_Impl, CoCreateInstance, CLSCTX_INPROC_SERVER},
             Ole::CONNECT_E_CANNOTCONNECT,
         },
         UI::{
             Input::KeyboardAndMouse::GetKeyState,
             TextServices::{
+                CLSID_TF_CategoryMgr,
+                IEnumTfDisplayAttributeInfo,
+                ITfCategoryMgr,
                 ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl,
-                ITfContext, ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Impl,
+                ITfContext, ITfDisplayAttributeInfo, ITfDisplayAttributeProvider,
+                ITfDisplayAttributeProvider_Impl,
+                ITfDocumentMgr, ITfKeyEventSink, ITfKeyEventSink_Impl,
                 ITfKeystrokeMgr, ITfLangBarItem, ITfLangBarItem_Impl,
                 ITfLangBarItemButton, ITfLangBarItemButton_Impl,
                 ITfLangBarItemSink, ITfMenu,
@@ -29,7 +56,7 @@ use windows::{
                 ITfTextInputProcessor, ITfTextInputProcessor_Impl, ITfThreadMgr,
                 ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl,
                 TfLBIClick, TF_LANGBARITEMINFO,
-                TF_ES_READWRITE,
+                TF_ES_READWRITE, GUID_PROP_ATTRIBUTE,
             },
             WindowsAndMessaging::{GetForegroundWindow, HICON},
         },
@@ -43,17 +70,18 @@ use crate::{
         state::{
             composition_clone, composition_set, composition_take,
             engine_try_get_or_create, engine_get_or_create, engine_get,
-            selection_try_get,
             session_get, session_is_selecting_fast,
-            session_sync_from_selection, selection_sync_from_session,
             caret_rect_get, caret_rect_set,
+            SessionState,
             doc_mode_on_focus_change, doc_mode_remove,
         },
         user_action::UserAction,
         text_util,
     },
+    globals::{GUID_DISPLAY_ATTRIBUTE, GUID_DISPLAY_ATTRIBUTE_INPUT},
     tsf::{
         candidate_window,
+        display_attr,
         edit_session::EditSession,
         language_bar::{self, toggle_open_close, get_open_close, LANGBAR_SINK_COOKIE},
         tray_ipc,
@@ -91,7 +119,8 @@ unsafe impl Send for TextServiceState {}
 // ─── TextServiceFactory ───────────────────────────────────────────────────────
 
 #[implement(IClassFactory, ITfTextInputProcessor, ITfKeyEventSink, ITfCompositionSink,
-            ITfLangBarItemButton, ITfLangBarItem, ITfSource, ITfThreadMgrEventSink)]
+            ITfLangBarItemButton, ITfLangBarItem, ITfSource, ITfThreadMgrEventSink,
+            ITfDisplayAttributeProvider)]
 pub struct TextServiceFactory {
     pub inner: RefCell<TextServiceState>,
 }
@@ -222,6 +251,21 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
 
         diag::event(DiagEvent::Activate { tid });
         tracing::info!("rakukan Activate client_id={tid}");
+
+        // Display Attribute GUIDs を ITfCategoryMgr に登録して atom を取得
+        unsafe {
+            if let Ok(catmgr) = CoCreateInstance::<_, ITfCategoryMgr>(
+                &CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER,
+            ) {
+                let atom_input = catmgr.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE_INPUT)
+                    .unwrap_or(0);
+                let atom_conv  = catmgr.RegisterGUID(&GUID_DISPLAY_ATTRIBUTE)
+                    .unwrap_or(0);
+                display_attr::set_atoms(atom_input, atom_conv);
+                tracing::debug!("display attr atoms: input={atom_input} conv={atom_conv}");
+            }
+        }
+
         Ok(())
     }
 
@@ -249,7 +293,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         let _ = composition_set(None);
         if let Ok(mut g) = engine_get() { if let Some(e) = g.as_mut() { e.bg_reclaim(); } }
         candidate_window::destroy();
-        if let Ok(mut sel) = selection_try_get() { sel.clear(); }
+        if let Ok(mut sess) = session_get() { sess.set_idle(); }
         tracing::info!("rakukan Deactivate");
         Ok(())
     }
@@ -264,7 +308,7 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         let _ = composition_set(None);
         // 候補ウィンドウと選択状態をクリア
         candidate_window::hide();
-        if let Ok(mut sel) = selection_try_get() { sel.clear(); }
+        if let Ok(mut sess) = session_get() { sess.set_idle(); }
         // BG 変換の converter を先に回収してから（その後 reset_all で状態をクリア）
         // bg_reclaim は reset_all の前に呼ぶ
         // アプリが composition を強制終了した場合（例: メモ帳の最大 composition 長超過）、
@@ -347,6 +391,8 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         let _t = diag::span("OnKeyDown");
         let vk = wparam.0 as u16;
 
+        tracing::debug!("OnKeyDown vk={:#04x}", vk);
+
         // Ctrl+Shift+F12: 診断ダンプ
         if vk == 0x7B {
             let ctrl  = unsafe { GetKeyState(0x11) as u16 & 0x8000 != 0 };
@@ -362,6 +408,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         {
             Some(a) => a,
             None    => {
+                tracing::debug!("OnKeyDown vk={:#04x} → unmapped (try_borrow={:?})", vk, self.inner.try_borrow().is_ok());
                 diag::event(DiagEvent::KeyIgnored { vk, reason: "unmapped" });
                 return Ok(FALSE);
             }
@@ -431,10 +478,7 @@ impl TextServiceFactory_Impl {
         }
     }
 
-    /// トレイ常駐プロセスへ現在の入力モードを通知する。
-    /// UIスレッド（ホットパス）から呼ばれる可能性があるため、重い処理はしない。
     fn notify_tray_update(&self, tid: u32) {
-        // open は TSF コンパートメント（あれば）を優先
         let open = self.inner.try_borrow().ok()
             .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
             .unwrap_or_else(|| {
@@ -442,12 +486,10 @@ impl TextServiceFactory_Impl {
                     .map(|s| s.input_mode != crate::engine::input_mode::InputMode::Alphanumeric)
                     .unwrap_or(true)
             });
-
         let mode = crate::engine::state::ime_state_get().ok()
             .map(|s| s.input_mode)
             .unwrap_or_default();
-
-        let _ = tid; // 将来: client_id を含めた拡張用
+        let _ = tid;
         tray_ipc::publish(open, mode);
     }
 
@@ -466,724 +508,1333 @@ impl TextServiceFactory_Impl {
         &self, action: UserAction,
         ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
     ) -> Result<bool> {
-        // try_get: ブロックしない
         let mut guard = engine_try_get_or_create()?;
         let engine = match guard.as_mut() {
             Some(e) => e,
             None    => return Ok(false),
         };
 
+        // ── 診断: 全アクションの入口でセッション状態とBG状態をログ ──
+        {
+            let bg = engine.bg_status();
+            let state_name = if let Ok(s) = session_get() {
+                match &*s {
+                    SessionState::Idle                => "Idle".to_string(),
+                    SessionState::Preedit { text }    => format!("Preedit({:?})", text),
+                    SessionState::Waiting { text, .. } => format!("Waiting({:?})", text),
+                    SessionState::Selecting { original_preedit, llm_pending, candidates, .. }
+                        => format!("Selecting(op={:?} llm={} nc={})", original_preedit, llm_pending, candidates.len()),
+                    SessionState::SplitPreedit { target, remainder }
+                        => format!("Split({:?}+{:?})", target, remainder),
+                }
+            } else { "lock_err".to_string() };
+            tracing::info!("handle_action: {:?} state={} bg={} hira={:?}",
+                action_name(&action), state_name, bg, engine.hiragana_text());
+        }
+
         // LLM候補待機中に完了した場合、候補ウィンドウを自動更新
         if session_is_selecting_fast() {
-            const DICT_LIMIT_POLL: usize = 50;
-            if let Ok(mut sel) = selection_try_get() {
-                if sel.llm_pending && engine.bg_status() == "done" {
-                    let preedit_key = sel.original_preedit.clone();
-                    if let Some(llm_cands) = engine.bg_take_candidates(&preedit_key) {
-                        let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
-                        if !merged.is_empty() {
-                            let first = merged.first().cloned().unwrap_or_default();
-                            sel.candidates  = merged;
-                            sel.selected    = 0;
-                            sel.llm_pending = false;
-                            session_sync_from_selection(&sel);
-                            let page_cands = sel.page_candidates().to_vec();
-                            let page_info  = sel.page_info();
-                            let pos = caret_rect_get();
-                            drop(sel);
-                            drop(guard);
-                            candidate_window::show_with_status(&page_cands, 0, &page_info, pos.left, pos.bottom, None);
-                            update_composition(ctx, tid, sink, first)?;
-                            return Ok(true);
+            const DICT_LIMIT_POLL: usize = 20;
+            if let Ok(mut sess) = session_get() {
+                let poll_info = if let SessionState::Selecting { ref original_preedit, llm_pending, .. } = *sess {
+                    if llm_pending && engine.bg_status() == "done" { Some(original_preedit.clone()) } else { None }
+                } else { None };
+                if let Some(preedit_key) = poll_info {
+                    tracing::info!("poll: bg=done llm_pending=true key={:?}, calling bg_take_candidates", preedit_key);
+                    match engine.bg_take_candidates(&preedit_key) {
+                        Some(llm_cands) => {
+                            tracing::info!("poll: bg_take_candidates → Some({} cands)", llm_cands.len());
+                            let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
+                            if !merged.is_empty() {
+                                let first = merged.first().cloned().unwrap_or_default();
+                                if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess {
+                                    *candidates  = merged;
+                                    *selected    = 0;
+                                    *llm_pending = false;
+                                }
+                                let page_cands = sess.page_candidates().to_vec();
+                                let page_info  = sess.page_info();
+                                let remainder  = sess.selecting_remainder_clone();
+                                let pos = caret_rect_get();
+                                drop(sess);
+                                drop(guard);
+                                candidate_window::show_with_status(&page_cands, 0, &page_info, pos.left, pos.bottom, None);
+                                update_composition_candidate_split(ctx, tid, sink, first, remainder)?;
+                                return Ok(true);
+                            }
                         }
-                    } else {
-                        sel.llm_pending = false;
+                        None => {
+                            // take_ready がキー不一致で None を返した: Done 状態は保持されたまま
+                            // llm_pending はそのままにしておく（次のキー/Space で再試行できる）
+                            tracing::warn!("poll: bg_take_candidates → None (key mismatch or lock busy), bg={}", engine.bg_status());
+                        }
                     }
                 }
             }
         }
 
         // 辞書0件でLLM完了待機中（選択モード外）→ BG完了したら選択モードへ遷移
-        {
-            const DICT_LIMIT_WAIT: usize = 50;
+        // Cancel/CancelAll はこのポーリングをスキップして on_cancel に直接渡す
+        // （ポーリングで Waiting→Preedit 遷移すると on_cancel が fallthrough して全消去になる）
+        let is_cancel = matches!(action, UserAction::Cancel | UserAction::CancelAll);
+        if !is_cancel {
+            const DICT_LIMIT_WAIT: usize = 20;
             if let Ok(mut sess) = session_get() {
                 if let Some((wait_preedit, pos_x, pos_y)) = sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y)) {
-                    if engine.bg_status() == "done" {
-                        if let Some(llm_cands) = engine.bg_take_candidates(&wait_preedit) {
-                            let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_WAIT);
-                            if !merged.is_empty() && !(merged.len() == 1 && merged[0] == wait_preedit) {
-                                let first = merged.first().cloned().unwrap_or_default();
-                                sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
-                                selection_sync_from_session(&sess);
-                                let page_cands = sess.page_candidates().to_vec();
-                                let page_info  = sess.page_info();
-                                drop(sess);
-                                drop(guard);
-                                candidate_window::show_with_status(&page_cands, 0, &page_info, pos_x, pos_y, None);
-                                update_composition(ctx, tid, sink, first)?;
-                                return Ok(true);
+                    let bg_now = engine.bg_status();
+                    tracing::info!("waiting-poll: wait_preedit={:?} bg={}", wait_preedit, bg_now);
+                    if bg_now == "done" {
+                        tracing::info!("waiting-poll: calling bg_take_candidates({:?})", wait_preedit);
+                        match engine.bg_take_candidates(&wait_preedit) {
+                            Some(llm_cands) => {
+                                tracing::info!("waiting-poll: got {} LLM cands", llm_cands.len());
+                                // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
+                                let merged = if llm_cands.is_empty() {
+                                    engine.merge_candidates(vec![], DICT_LIMIT_WAIT)
+                                } else {
+                                    engine.merge_candidates(llm_cands, DICT_LIMIT_WAIT)
+                                };
+                                tracing::info!("waiting-poll: merged={} cands", merged.len());
+                                // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
+                                if !merged.is_empty() {
+                                    let first = merged.first().cloned().unwrap_or_default();
+                                    sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
+                                    let page_cands = sess.page_candidates().to_vec();
+                                    let page_info  = sess.page_info();
+                                    drop(sess);
+                                    drop(guard);
+                                    candidate_window::stop_waiting_timer();
+                                    candidate_window::show_with_status(&page_cands, 0, &page_info, pos_x, pos_y, None);
+                                    update_composition(ctx, tid, sink, first)?;
+                                    return Ok(true);
+                                }
+                            }
+                              None => {
+                                // キー不一致 or ロック競合 → Done 状態は保持されたまま
+                                // Waiting 状態を維持して次のキー/Space で再試行
+                                tracing::warn!("waiting-poll: bg_take_candidates → None (key mismatch?), bg={}", engine.bg_status());
                             }
                         }
-                        // BG 完了したが候補なし → 待機解除してウィンドウを閉じる
-                        sess.set_preedit(wait_preedit);
-                        selection_sync_from_session(&sess);
-                        drop(sess);
-                        candidate_window::hide();
+                        // merged が空（LLM候補なし）だった場合のみ preedit に戻す
+                        // None だった場合は Waiting を維持（→ Cancel や次のSpace で対処）
                     }
                 }
             }
-        }
+        } // if !is_cancel
 
         match action {
-            // ─ 文字入力 ──────────────────────────────────────────────────────
-            UserAction::Input(c) => {
-                let _t = diag::span("Input");
+            UserAction::Input(c)                       => self.on_input(c, ctx, tid, sink, guard),
+            UserAction::FullWidthSpace                 => self.on_full_width_space(ctx, tid, guard),
+            UserAction::Convert                        => self.on_convert(ctx, tid, sink, guard),
+            UserAction::CommitRaw                      => self.on_commit_raw(ctx, tid, guard),
+            UserAction::Backspace                      => self.on_backspace(ctx, tid, sink, guard),
+            UserAction::Cancel | UserAction::CancelAll => self.on_cancel(ctx, tid, sink, guard),
+            UserAction::Hiragana                       => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_hiragana),
+            UserAction::Katakana                       => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_katakana),
+            UserAction::HalfKatakana                   => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_half_katakana),
+            UserAction::FullLatin                      => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_full_latin),
+            UserAction::HalfLatin                      => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_half_latin),
+            UserAction::CycleKana                      => self.on_cycle_kana(ctx, tid, guard),
+            UserAction::CandidateNext                  => self.on_candidate_move(ctx, tid, sink, guard, CandidateDir::Next),
+            UserAction::CandidatePrev                  => self.on_candidate_move(ctx, tid, sink, guard, CandidateDir::Prev),
+            UserAction::CandidatePageDown              => self.on_candidate_page(ctx, tid, sink, guard, CandidateDir::Next),
+            UserAction::CandidatePageUp                => self.on_candidate_page(ctx, tid, sink, guard, CandidateDir::Prev),
+            UserAction::CandidateSelect(n)             => self.on_candidate_select(n, ctx, tid, guard),
+            UserAction::CursorLeft | UserAction::CursorRight => {
+                let e = guard.as_ref().map(|e| !e.preedit_is_empty()).unwrap_or(false);
+                Ok(e)
+            },
+            UserAction::Punctuate(c)                   => self.on_punctuate(c, ctx, tid, sink, guard),
+            UserAction::SegmentShrink                  => self.on_segment_shrink(ctx, tid, sink, guard),
+            UserAction::SegmentExtend                  => self.on_segment_extend(ctx, tid, sink, guard),
+            UserAction::ImeToggle                      => { drop(guard); self.on_ime_toggle(ctx, tid) },
+            UserAction::ImeOff | UserAction::ModeAlphanumeric => { drop(guard); self.on_ime_off(ctx, tid) },
+            UserAction::ImeOn                          => { drop(guard); self.on_ime_on(ctx, tid) },
+            UserAction::ModeHiragana                   => self.on_mode_hiragana(ctx, tid, guard),
+            UserAction::ModeKatakana                   => self.on_mode_katakana(ctx, tid, guard),
+            _                                          => Ok(false),
+        }
+    }
+}
 
-                // LLM待機中（辞書0件で Space 待ち）に新文字が来たら待機を解除する
-                if let Ok(mut sess) = session_get() {
-                    if sess.is_waiting() {
-                        let pre = sess.preedit_text().unwrap_or("").to_string();
-                        sess.set_preedit(pre);
-                        selection_sync_from_session(&sess);
-                        candidate_window::hide();
-                    }
-                }
+// ─── CandidateDir ─────────────────────────────────────────────────────────────
 
-                // 選択モード中に新たなキーが来たら選択モードを解除してコミット
-                // AtomicBool で先にロックなしチェックしてから Mutex を取得
-                if session_is_selecting_fast() {
-                    let mut sess = session_get()?;
-                    if sess.is_selecting() {
-                        let committed_text = sess.current_candidate()
-                            .or_else(|| sess.original_preedit())
-                            .unwrap_or("")
-                            .to_string();
-                        sess.set_idle();
-                        selection_sync_from_session(&sess);
-                        drop(sess);
-                        candidate_window::hide();
-                        // エンジン内部状態を確定（UIへの確定挿入は後段の commit_then_start_composition が担当）
-                        engine.commit(&committed_text);
-                        engine.reset_preedit();
-                        // ここで TSF へ確定挿入を行うと、後段の commit_then_start_composition と二重確定になり
-                        // 「漢字漢字」のように重複する。
-                        // したがって TSF 側の確定挿入は commit_then_start_composition に一本化する。
-                        drop(guard);
+enum CandidateDir { Next, Prev }
 
-                        // guard を再取得して次の文字を処理（新しい composition は composition_set 側で作られる）
-                        // guard2はこのスコープでのみ保持し、重い処理の前に必ずロックを解放する
-                        let (preedit, _hiragana, _committed2, _n_cands2) = {
-                            let mut guard2 = engine_try_get_or_create()?;
-                            let engine2 = match guard2.as_mut() {
-                                Some(e) => e,
-                                None => return Ok(true),
-                            };
+// ─── アクション実装（impl TextServiceFactory_Impl）────────────────────────────
 
-                            engine2.push_char(c);
-                            let preedit    = engine2.preedit_display();
-                            let _hiragana  = engine2.hiragana_text();
-                            let committed2 = engine2.committed_text();
-                            let n_cands2   = crate::engine::state::get_num_candidates();
+impl TextServiceFactory_Impl {
+    fn on_input(
+        &self, c: char,
+        ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(true) };
+        let _t = diag::span("Input");
 
-                            diag::event(DiagEvent::InputChar { ch: c, preedit_after: preedit.clone() });
+        if let Ok(mut sess) = session_get() {
+            if sess.is_waiting() {
+                let pre = sess.preedit_text().unwrap_or("").to_string();
+                sess.set_preedit(pre);
+                candidate_window::hide();
+            }
+        }
 
-                            engine2.bg_start(n_cands2);
-                            (preedit, _hiragana, committed2, n_cands2)
-                        };
-                        // Bug1修正: end + start を1セッションにまとめる
-                        commit_then_start_composition(ctx, tid, sink, committed_text, preedit)?;
-                        return Ok(true);
-                    }
-                }
-                // SELECTION_ACTIVE=true だったが is_active()=false の場合はここに来る
-                // （競合状態: すでに別スレッドが解除済み → そのまま続行）
+        if session_is_selecting_fast() {
+            let mut sess = session_get()?;
+            if sess.is_selecting() {
+                let committed_text = sess.current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                engine.commit(&committed_text);
+                engine.reset_preedit();
+                drop(guard);
 
-                // ポーリング: 辞書・モデルのバックグラウンドロード完了を反映
-                engine.poll_dict_ready();
-                engine.poll_model_ready();
-
-                engine.push_char(c);
-                let preedit   = engine.preedit_display();
-                let hiragana  = engine.hiragana_text();
-                let _committed = engine.committed_text();
-                let n_cands   = crate::engine::state::get_num_candidates();
+                let mut guard2 = engine_try_get_or_create()?;
+                let engine2 = match guard2.as_mut() { Some(e) => e, None => return Ok(true) };
+                engine2.push_char(c);
+                let preedit  = engine2.preedit_display();
+                let n_cands2 = crate::engine::state::get_num_candidates();
                 diag::event(DiagEvent::InputChar { ch: c, preedit_after: preedit.clone() });
-                tracing::trace!("Input: hiragana={:?} bg={}", hiragana, engine.bg_status());
+                engine2.bg_start(n_cands2);
+                drop(guard2);
+                commit_then_start_composition(ctx, tid, sink, committed_text, preedit)?;
+                return Ok(true);
+            }
+        }
+        // SESSION_SELECTING=true だったが is_selecting()=false の場合はここに来る
 
-                // ── BG 変換投機起動 ──────────────────────────────────────
-                if !hiragana.is_empty() {
-                    engine.bg_start(n_cands);
-                    drop(guard);
-                    tracing::trace!("BG: 起動試行 {:?}", hiragana);
-                    update_composition(ctx, tid, sink, preedit)?;
+        engine.poll_dict_ready();
+        engine.poll_model_ready();
+        engine.push_char(c);
+        let preedit  = engine.preedit_display();
+        let hiragana = engine.hiragana_text();
+        let n_cands  = crate::engine::state::get_num_candidates();
+        diag::event(DiagEvent::InputChar { ch: c, preedit_after: preedit.clone() });
+        tracing::trace!("Input: hiragana={:?} bg={}", hiragana, engine.bg_status());
+
+        if !hiragana.is_empty() {
+            engine.bg_start(n_cands);
+            drop(guard);
+            update_composition(ctx, tid, sink, preedit)?;
+            return Ok(true);
+        }
+        drop(guard);
+        update_composition(ctx, tid, sink, preedit)?;
+        Ok(true)
+    }
+
+    fn on_full_width_space(
+        &self, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let preedit = engine.preedit_display();
+        if !preedit.is_empty() {
+            engine.commit(&preedit.clone());
+            engine.reset_preedit();
+            drop(guard);
+            end_composition(ctx.clone(), tid, preedit)?;
+        } else {
+            drop(guard);
+        }
+        commit_text(ctx, tid, "　".into())?;
+        Ok(true)
+    }
+
+    fn on_convert(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let _t = diag::span("Convert");
+        update_caret_rect(ctx.clone(), tid);
+        engine.flush_pending_n();
+        let preedit_empty = engine.preedit_is_empty();
+        if let Ok(sess) = session_get() {
+            tracing::debug!("on_convert: preedit_empty={} is_split={} is_selecting={} state={:?}",
+                preedit_empty, sess.is_split_preedit(), sess.is_selecting(), &*sess);
+        }
+        if preedit_empty { return Ok(false); }
+
+        // ── SplitPreedit 中: target のみを変換対象にして候補表示 ──
+        {
+            let sess = session_get()?;
+            if sess.is_split_preedit() {
+                let target    = sess.split_target().unwrap_or("").to_string();
+                let remainder = sess.split_remainder().unwrap_or("").to_string();
+                drop(sess);
+                return convert_split_target(ctx, tid, sink, guard, target, remainder);
+            }
+        }
+
+        let preedit = engine.preedit_display();
+
+        // すでに選択モード中 → 1候補ずつ進む
+        {
+            let mut sess = session_get()?;
+            if sess.is_selecting() {
+                // llm_pending=true の場合はLLM完了を確認して候補を更新
+                let llm_pending = matches!(*sess, SessionState::Selecting { llm_pending: true, .. });
+                if llm_pending {
+                    let original_preedit = if let SessionState::Selecting { ref original_preedit, .. } = *sess {
+                        original_preedit.clone()
+                    } else { String::new() };
+                    drop(sess);
+
+                    // 非ブロッキングでLLM完了を確認（最大500ms待機）
+                    const WAIT_MS: u64 = 500;
+                    let bg_before = engine.bg_status();
+                    tracing::info!("on_convert[llm_pending]: key={:?} bg={} → wait_ms({})", original_preedit, bg_before, WAIT_MS);
+                    if engine.bg_status() == "running" {
+                        engine.bg_wait_ms(WAIT_MS);
+                    }
+                    engine.poll_model_ready();
+
+                    let bg_done = engine.bg_status() == "done";
+                    tracing::info!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
+                    const DICT_LIMIT: usize = 20;
+
+                    if bg_done {
+                        // LLM完了 → 候補をマージして表示
+                        // hiragana_text() でキャッシュの実際のキーを確認してから呼ぶ
+                        let hira_key = engine.hiragana_text();
+                        tracing::info!("on_convert[llm_pending]: calling bg_take_candidates op={:?}({}) hira={:?}({})",
+                            original_preedit, original_preedit.len(), hira_key, hira_key.len());
+                        // op と hira が一致する方をキーとして使う（バイト数も確認）
+                        let take_key = if hira_key == original_preedit {
+                            original_preedit.clone()
+                        } else {
+                            tracing::warn!("on_convert[llm_pending]: op/hira differ, using hira={:?}", hira_key);
+                            hira_key
+                        };
+                        match engine.bg_take_candidates(&take_key) {
+                            Some(llm_cands) => {
+                                tracing::info!("on_convert[llm_pending]: bg_take_candidates → Some({} cands)", llm_cands.len());
+                                let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                tracing::info!("on_convert[llm_pending]: merged={} cands", merged.len());
+                                if !merged.is_empty() {
+                                    if let Ok(mut sess2) = session_get() {
+                                        if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess2 {
+                                            *candidates  = merged;
+                                            *selected    = 0;
+                                            *llm_pending = false;
+                                        }
+                                        let page_cands = sess2.page_candidates().to_vec();
+                                        let page_info  = sess2.page_info();
+                                        let cand_text  = sess2.current_candidate()
+                                            .or_else(|| sess2.original_preedit())
+                                            .unwrap_or("").to_string();
+                                        let remainder  = sess2.selecting_remainder_clone();
+                                        let pos = caret_rect_get();
+                                        drop(sess2);
+                                        drop(guard);
+                                        candidate_window::show(&page_cands, 0, &page_info, pos.left, pos.bottom);
+                                        update_composition_candidate_split(ctx, tid, sink, cand_text, remainder)?;
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                            None => {
+                                // bg_reclaim で converter を強制回収 → 即 bg_start で再変換起動
+                                // (bg_reclaim だけして bg_start しないと converter が engine に戻ったまま
+                                //  次の変換が永遠に起動されない)
+                                let bg_now = engine.bg_status();
+                                tracing::warn!(
+                                    "on_convert[llm_pending]: take_key={:?}({}) returned None, bg={}. reclaim+restart.",
+                                    take_key, take_key.len(), bg_now
+                                );
+                                engine.bg_reclaim();
+                                // bg_start で正しいキーで即再変換 → その場で待機 → 1回のSpace押しで候補取得
+                                let llm_limit2 = crate::engine::state::get_num_candidates();
+                                if engine.bg_start(llm_limit2) {
+                                    tracing::info!("on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline", take_key);
+                                    // ここで最大 1500ms 待つ（ユーザーは1回のSpaceで候補を得られる）
+                                    const RESTART_WAIT_MS: u64 = 1500;
+                                    engine.bg_wait_ms(RESTART_WAIT_MS);
+                                    tracing::info!("on_convert[llm_pending]: inline wait done, bg={}", engine.bg_status());
+                                } else {
+                                    tracing::error!("on_convert[llm_pending]: bg_start also failed (kanji_ready={})", engine.is_kanji_ready());
+                                }
+                                if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
+                                    tracing::info!("on_convert[llm_pending]: reclaim+retry → Some({} cands)", llm_cands.len());
+                                    let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                    if !merged.is_empty() {
+                                        if let Ok(mut sess2) = session_get() {
+                                            if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess2 {
+                                                *candidates  = merged;
+                                                *selected    = 0;
+                                                *llm_pending = false;
+                                            }
+                                            let page_cands = sess2.page_candidates().to_vec();
+                                            let page_info  = sess2.page_info();
+                                            let cand_text  = sess2.current_candidate()
+                                                .or_else(|| sess2.original_preedit())
+                                                .unwrap_or("").to_string();
+                                            let remainder  = sess2.selecting_remainder_clone();
+                                            let pos = caret_rect_get();
+                                            drop(sess2);
+                                            drop(guard);
+                                            candidate_window::show(&page_cands, 0, &page_info, pos.left, pos.bottom);
+                                            update_composition_candidate_split(ctx, tid, sink, cand_text, remainder)?;
+                                            return Ok(true);
+                                        }
+                                    }
+                                } else {
+                                    tracing::error!("on_convert[llm_pending]: retry also failed, bg={}", engine.bg_status());
+                                }
+                            }
+                        }
+                    } else {
+                        // まだ変換中 → 現在の候補ウィンドウをそのまま維持
+                        if let Ok(sess2) = session_get() {
+                            let page_cands = sess2.page_candidates().to_vec();
+                            let page_info  = sess2.page_info();
+                            let pos = caret_rect_get();
+                            drop(sess2);
+                            drop(guard);
+                            candidate_window::show_with_status(
+                                &page_cands, 0, &page_info, pos.left, pos.bottom,
+                                Some("⏳ 変換中...")
+                            );
+                            return Ok(true);
+                        }
+                    }
                     return Ok(true);
                 }
 
-                drop(guard);
-                update_composition(ctx, tid, sink, preedit)?;
-                Ok(true)
-            }
-
-            UserAction::FullWidthSpace => {
-                let preedit = engine.preedit_display();
-                if !preedit.is_empty() {
-                    engine.commit(&preedit.clone());
-                    engine.reset_preedit();
-                    drop(guard);
-                    end_composition(ctx.clone(), tid, preedit)?;
-                } else {
-                    drop(guard);
-                }
-                commit_text(ctx, tid, "　".into())?;
-                Ok(true)
-            }
-
-            // ─ 変換 ── ブロックしない ─────────────────────────────────────────
-            UserAction::Convert => {
-                let _t = diag::span("Convert");
-                // 候補ウィンドウ配置のためカーソル矩形を取得（Convert時のみ）
-                update_caret_rect(ctx.clone(), tid);
-                // 末尾 "n" -> "ん" に確定してから変換
-                engine.flush_pending_n();
-                if engine.preedit_is_empty() { return Ok(false); }
-                let preedit     = engine.preedit_display();
-
-                // ── すでに選択モード中 → 1候補ずつ進む（ページ末で次ページへ）──
-                {
-                    let mut sess = session_get()?;
-                    if sess.is_selecting() {
-                        sess.next_with_page_wrap();
-                        selection_sync_from_session(&sess);
-                        let page_cands = sess.page_candidates().to_vec();
-                        let page_sel   = sess.page_selected();
-                        let page_info  = sess.page_info();
-                        let cand_text  = sess.current_candidate()
-                            .or_else(|| sess.original_preedit())
-                            .unwrap_or("")
-                            .to_string();
-                        drop(sess);
-                        drop(guard);
-                        candidate_window::update_selection(page_sel, &page_info);
-                        candidate_window::show(&page_cands, page_sel, &page_info,
-                            caret_rect_get().left, caret_rect_get().bottom);
-                        update_composition(ctx, tid, sink, cand_text)?;
-                        return Ok(true);
-                    }
-                }
-
-                // ── 新規変換: BG変換結果を取得または同期変換 ──
-                // LLM に要求する候補数は設定値（デフォルト9）に固定する。
-                // 辞書は高速（μs）なので別途 50 件まで引いてマージする。
-                let llm_limit   = crate::engine::state::get_num_candidates(); // 9
-                const DICT_LIMIT: usize = 50;
-                let kanji_ready = engine.is_kanji_ready();
-                // BG 変換が idle なら起動する
-                if kanji_ready && engine.bg_status() == "idle" {
-                    engine.bg_start(llm_limit);
-                }
-
-                // ── BG 待機（案A）──
-                // BG がまだ running の場合、最大 400ms ブロック待機する。
-                // GPU 環境では大抵この範囲で完了し、Space 1回で候補が出る。
-                // CPU 環境でタイムアウトしても⏳フォールバックに流れる。
-                const BG_WAIT_MS: u64 = 400;
-                if kanji_ready && matches!(engine.bg_status(), "running" | "idle") {
-                    let completed = engine.bg_wait_ms(BG_WAIT_MS);
-                    tracing::debug!("Convert: bg_wait_ms({BG_WAIT_MS}) → completed={completed}");
-                }
-
-                tracing::debug!("Convert preedit={preedit:?} kanji_ready={kanji_ready} bg={}", engine.bg_status());
-
-                // BG変換完了ステータスを取得
-                let bg_status  = engine.bg_status();
-                // モデルロード中、または BG 変換実行中は「変換中...」を表示
-                let bg_running = !kanji_ready  // モデルまだロード中
-                    || bg_status == "running"
-                    || bg_status == "idle";    // 400ms 待機後もタイムアウトした場合
-
-                let (candidates, llm_pending): (Vec<String>, bool) =
-                    match engine.bg_take_candidates(&preedit) {
-                    Some(llm_cands) if !llm_cands.is_empty() => {
-                        let merged = engine.merge_candidates(llm_cands.clone(), DICT_LIMIT);
-                        if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
-                            (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
-                        } else {
-                            (merged, false)
-                        }
-                    }
-                    _ => {
-                        if kanji_ready && !bg_running {
-                            (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
-                        } else {
-                            // 辞書候補を即時表示し、LLM完了時に自動更新
-                            let dict_cands = engine.merge_candidates(vec![], DICT_LIMIT);
-                            let dict_empty = dict_cands.is_empty()
-                                || (dict_cands.len() == 1 && dict_cands[0] == preedit);
-
-                            if dict_empty && bg_running {
-                                // 辞書0件 + LLM未完了：選択モードに入らず待機。
-                                // 候補ウィンドウに「⏳ 変換中...」を表示してフィードバックを返す。
-                                let caret = caret_rect_get();
-                                if let Ok(mut sess) = session_get() {
-                                    // すでに待機中なら Space 2回目 → ひらがなをコミット
-                                    if sess.is_waiting() {
-                                        sess.set_preedit(preedit.clone());
-                                        selection_sync_from_session(&sess);
-                                        drop(sess);
-                                        drop(guard);
-                                        candidate_window::hide();
-                                        engine_commit_hiragana(ctx, tid)?;
-                                        return Ok(true);
-                                    }
-                                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
-                                    selection_sync_from_session(&sess);
-                                }
-                                tracing::debug!("Convert: dict=0, BG running → waiting for LLM (preedit={preedit:?})");
-                                // preedit を仮候補として渡すことで候補ウィンドウを表示できる
-                                let dummy = vec![preedit.clone()];
-                                drop(guard);
-                                candidate_window::show_with_status(&dummy, 0, "", caret.left, caret.bottom, Some("⏳ 変換中..."));
-                                return Ok(true);
-                            }
-
-                            if dict_empty {
-                                (vec![preedit.clone()], bg_running)
-                            } else {
-                                (dict_cands, bg_running)
-                            }
-                        }
-                    }
-                };
-
-                let first = candidates.first().cloned().unwrap_or_else(|| preedit.clone());
-                diag::event(DiagEvent::Convert {
-                    preedit: preedit.clone(), kanji_ready: true, result: first.clone(),
-                });
-
-                // 選択モード開始
-                let caret = caret_rect_get();
-                let pos_x = caret.left;
-                let pos_y = caret.bottom;
-                let (page_cands, page_info) = {
-                    let mut sess = session_get()?;
-                    sess.activate_selecting(candidates.clone(), preedit.clone(), pos_x, pos_y, llm_pending);
-                    selection_sync_from_session(&sess);
-                    (sess.page_candidates().to_vec(), sess.page_info())
-                };
-                drop(guard);
-                let status = if llm_pending { Some("⏳ 変換中...") } else { None };
-                candidate_window::show_with_status(&page_cands, 0, &page_info, pos_x, pos_y, status);
-                update_composition(ctx, tid, sink, first)?;
-                Ok(true)
-            }
-
-            // ─ Enter ─────────────────────────────────────────────────────────
-            UserAction::CommitRaw => {
-                // 選択モード中 → 現在候補をコミット
-                {
-                    let mut sess = session_get()?;
-                    if sess.is_selecting() {
-                        let text    = sess.current_candidate()
-                            .or_else(|| sess.original_preedit())
-                            .unwrap_or("")
-                            .to_string();
-                        let reading = sess.original_preedit().unwrap_or("").to_string();
-                        sess.set_idle();
-                        selection_sync_from_session(&sess);
-                        drop(sess);
-                        candidate_window::hide();
-                        // ひらがな以外（プリエディットそのまま確定）は学習しない
-                        if text != reading {
-                            engine.learn(&reading, &text);
-                        }
-                        engine.commit(&text);
-                        engine.reset_preedit();
-                        drop(guard);
-                        diag::event(DiagEvent::CommitRaw { preedit: text.clone() });
-                        end_composition(ctx, tid, text)?;
-                        return Ok(true);
-                    }
-                }
-                // 通常モード → プリエディットをそのままコミット
-                // 末尾 "n" -> "ん" に確定してからコミット
-                engine.flush_pending_n();
-                let preedit = engine.preedit_display();
-                if preedit.is_empty() { return Ok(false); }
-                diag::event(DiagEvent::CommitRaw { preedit: preedit.clone() });
-                engine.bg_reclaim();
-                engine.commit(&preedit.clone());
-                engine.reset_preedit();
-                drop(guard);
-                end_composition(ctx, tid, preedit)?;
-                Ok(true)
-            }
-
-            // ─ Backspace ─────────────────────────────────────────────────────
-            UserAction::Backspace => {
-                // 選択モード中 → 選択モードを解除してプリエディット表示に戻す
-                {
-                    let mut sess = session_get()?;
-                    if sess.is_selecting() {
-                        let original = sess.original_preedit().unwrap_or("").to_string();
-                        sess.set_preedit(original.clone());
-                        selection_sync_from_session(&sess);
-                        drop(sess);
-                        candidate_window::hide();
-                        drop(guard);
-                        update_composition(ctx, tid, sink, original)?;
-                        return Ok(true);
-                    }
-                    // LLM 待機中なら待機解除（文字が変わるので待ち直し）
-                    if sess.is_waiting() {
-                        let pre = sess.preedit_text().unwrap_or("").to_string();
-                        sess.set_preedit(pre);
-                        selection_sync_from_session(&sess);
-                        candidate_window::hide();
-                    }
-                }
-                let consumed = engine.backspace();
-                if consumed {
-                    // Backspace で hiragana が変わった → BG キャッシュを無効化
-                    engine.bg_reclaim();
-                    let preedit = engine.preedit_display();
-                    diag::event(DiagEvent::Backspace { preedit_after: preedit.clone() });
-                    drop(guard);
-                    if preedit.is_empty() {
-                        end_composition(ctx, tid, String::new())?;
-                    } else {
-                        update_composition(ctx, tid, sink, preedit)?;
-                    }
-                }
-                Ok(consumed)
-            }
-
-            // ─ Escape / Ctrl+Backspace ───────────────────────────────────────
-            UserAction::Cancel | UserAction::CancelAll => {
-                // 選択モード中 → 元プリエディットに戻す（キャンセル）
-                {
-                    let mut sess = session_get()?;
-                    if sess.is_selecting() {
-                        let original = sess.original_preedit().unwrap_or("").to_string();
-                        sess.set_preedit(original.clone());
-                        selection_sync_from_session(&sess);
-                        drop(sess);
-                        candidate_window::hide();
-                        drop(guard);
-                        update_composition(ctx, tid, sink, original)?;
-                        return Ok(true);
-                    }
-                    // LLM 待機中なら待機解除（プリエディットはそのまま残す）
-                    if sess.is_waiting() {
-                        let pre = sess.preedit_text().unwrap_or("").to_string();
-                        sess.set_preedit(pre);
-                        selection_sync_from_session(&sess);
-                        candidate_window::hide();
-                        tracing::debug!("Cancel: waiting cleared");
-                    }
-                }
-                if engine.preedit_is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                engine.reset_all();
-                drop(guard);
-                end_composition(ctx, tid, String::new())?;
-                Ok(true)
-            }
-
-            // ─ 文字種変換 ────────────────────────────────────────────────────
-            UserAction::Hiragana => {
-                engine.flush_pending_n();
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                // ひらがなに戻す（カタカナ→ひらがな変換を含む）
-                let t = text_util::to_hiragana(&p);
-                engine.force_preedit(t.clone());
-                drop(guard);
-                update_composition(ctx, tid, sink, t)?; Ok(true)
-            }
-            UserAction::Katakana => {
-                engine.flush_pending_n();
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                let t = text_util::to_katakana(&p);
-                engine.force_preedit(t.clone());
-                drop(guard);
-                update_composition(ctx, tid, sink, t)?; Ok(true)
-            }
-            UserAction::HalfKatakana => {
-                engine.flush_pending_n();
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                let t = text_util::to_half_katakana(&p);
-                engine.force_preedit(t.clone());
-                drop(guard);
-                update_composition(ctx, tid, sink, t)?; Ok(true)
-            }
-            UserAction::FullLatin => {
-                engine.flush_pending_n();
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                let t = text_util::to_full_latin(&p);
-                engine.force_preedit(t.clone());
-                drop(guard);
-                update_composition(ctx, tid, sink, t)?; Ok(true)
-            }
-            UserAction::HalfLatin => {
-                engine.flush_pending_n();
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                let t = text_util::to_half_latin(&p);
-                engine.force_preedit(t.clone());
-                drop(guard);
-                update_composition(ctx, tid, sink, t)?; Ok(true)
-            }
-            UserAction::CycleKana => {
-                let p = engine.preedit_display();
-                if p.is_empty() { return Ok(false); }
-                engine.bg_reclaim();
-                let t = text_util::to_katakana(&p);
-                engine.commit(&t); engine.reset_preedit(); drop(guard);
-                end_composition(ctx, tid, t)?; Ok(true)
-            }
-
-            // ─ 候補操作（Phase 4）────────────────────────────────────────────
-            UserAction::CandidateNext => {
-                let mut sess = session_get()?;
-                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
                 sess.next_with_page_wrap();
-                selection_sync_from_session(&sess);
                 let page_cands = sess.page_candidates().to_vec();
                 let page_sel   = sess.page_selected();
                 let page_info  = sess.page_info();
-                let text = sess.current_candidate()
-                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                let cand_text  = sess.current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string();
+                let remainder  = sess.selecting_remainder_clone();
                 drop(sess);
                 drop(guard);
                 candidate_window::update_selection(page_sel, &page_info);
                 candidate_window::show(&page_cands, page_sel, &page_info,
                     caret_rect_get().left, caret_rect_get().bottom);
-                update_composition(ctx, tid, sink, text)?;
-                Ok(true)
+                update_composition_candidate_split(ctx, tid, sink, cand_text, remainder)?;
+                return Ok(true);
             }
+        }
 
-            UserAction::CandidatePrev => {
-                let mut sess = session_get()?;
-                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
-                sess.prev();
-                selection_sync_from_session(&sess);
-                let page_cands = sess.page_candidates().to_vec();
-                let page_sel   = sess.page_selected();
-                let page_info  = sess.page_info();
-                let text = sess.current_candidate()
-                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
-                drop(sess);
+        // 新規変換
+        let llm_limit   = crate::engine::state::get_num_candidates();
+        const DICT_LIMIT: usize = 20;
+        engine.poll_dict_ready();
+        engine.poll_model_ready();
+        // Done 状態の converter を先に回収する。
+        // bg_take_candidates がキー不一致で None を返した場合、converter は Done に残ったまま
+        // engine.kanji=None になる。is_kanji_ready() チェックより前に reclaim しないと
+        // bg_start が永遠にスキップされ Waiting から抜け出せなくなる。
+        engine.bg_reclaim();
+        let kanji_ready = engine.is_kanji_ready();
+        tracing::info!("on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
+            preedit, engine.hiragana_text(), kanji_ready, engine.bg_status());
+        if kanji_ready && engine.bg_status() == "idle" {
+            tracing::info!("on_convert: model ready → bg_start");
+            engine.bg_start(llm_limit);
+        }
+        if !kanji_ready {
+            let err = engine.last_error();
+            tracing::info!("on_convert: kanji not ready, engine status={:?}", err);
+        }
+
+        let bg_status  = engine.bg_status();
+        let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
+        tracing::info!("on_convert[new]: bg_running={} bg={}", bg_running, bg_status);
+
+        // LLM が実行中なら完了まで最大 LLM_WAIT_MAX_MS 待機して候補を取得する。
+        // TSF スレッドで待つため UI がブロックするが、完了後に composition text まで
+        // 一気に更新できる（WM_TIMER 経由では composition text を更新できないため）。
+        // 文字数に応じてタイムアウトを伸ばす（長文は推論に時間がかかる）。
+        // 基本 3 秒 + 1 文字あたり 300ms、上限 15 秒。
+        let char_count = preedit.chars().count() as u64;
+        let LLM_WAIT_MAX_MS: u64 = (3000 + char_count * 300).min(15_000);
+        tracing::info!("on_convert[new]: LLM_WAIT_MAX_MS={LLM_WAIT_MAX_MS}ms (chars={char_count})");
+        if bg_running && kanji_ready {
+            let caret = caret_rect_get();
+            // まず ⏳ を即表示してユーザーに変換中であることを伝える
+            if let Ok(mut sess) = session_get() {
+                if !sess.is_waiting() {
+                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
+                }
+            }
+            let dummy = vec![preedit.clone()];
+            // drop guard の前に ⏳ 表示（RequestEditSession 前）
+            candidate_window::show_with_status(&dummy, 0, "", caret.left, caret.bottom, Some("⏳ 変換中..."));
+            // LLM完了を待機
+            let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+            tracing::info!("on_convert[new]: bg_wait({LLM_WAIT_MAX_MS}ms) completed={completed}");
+            if !completed {
+                // タイムアウト → WM_TIMER に任せて return
                 drop(guard);
-                candidate_window::update_selection(page_sel, &page_info);
-                candidate_window::show(&page_cands, page_sel, &page_info,
-                    caret_rect_get().left, caret_rect_get().bottom);
-                update_composition(ctx, tid, sink, text)?;
-                Ok(true)
+                candidate_window::start_waiting_timer();
+                return Ok(true);
             }
-
-            UserAction::CandidatePageDown => {
-                let mut sess = session_get()?;
-                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
-                sess.next_page();
-                selection_sync_from_session(&sess);
-                let page_cands = sess.page_candidates().to_vec();
-                let page_sel   = sess.page_selected();
-                let page_info  = sess.page_info();
-                let text = sess.current_candidate()
-                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
-                drop(sess);
+        } else if bg_running {
+            // kanji_ready=false だが bg=running の場合：
+            // 前の変換の converter がまだ conv_cache に貸し出されている。
+            // 完了を待って reclaim し、新しいキーで bg_start を再試行する。
+            let caret = caret_rect_get();
+            if let Ok(mut sess) = session_get() {
+                if !sess.is_waiting() {
+                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
+                }
+            }
+            let dummy = vec![preedit.clone()];
+            candidate_window::show_with_status(&dummy, 0, "", caret.left, caret.bottom, Some("⏳ 変換中..."));
+            tracing::info!("on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish");
+            let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+            tracing::info!("on_convert[new]: prev bg wait completed={completed}");
+            // 前の bg が完了したら converter を回収して新しいキーで再起動
+            engine.bg_reclaim();
+            let kanji_ready2 = engine.is_kanji_ready();
+            tracing::info!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
+            if kanji_ready2 {
+                engine.bg_start(llm_limit);
+                let completed2 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+                tracing::info!("on_convert[new]: new bg wait completed={completed2}");
+                // kanji_ready を更新して後続の候補取得処理へ続行
+            } else {
+                // モデル自体が未ロード → タイマーに任せる
                 drop(guard);
-                let caret = caret_rect_get();
-                candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
-                update_composition(ctx, tid, sink, text)?;
-                Ok(true)
+                candidate_window::start_waiting_timer();
+                return Ok(true);
             }
+        }
 
-            UserAction::CandidatePageUp => {
-                let mut sess = session_get()?;
-                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
-                sess.prev_page();
-                selection_sync_from_session(&sess);
-                let page_cands = sess.page_candidates().to_vec();
-                let page_sel   = sess.page_selected();
-                let page_info  = sess.page_info();
-                let text = sess.current_candidate()
-                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
-                drop(sess);
-                drop(guard);
-                let caret = caret_rect_get();
-                candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
-                update_composition(ctx, tid, sink, text)?;
-                Ok(true)
+        // bg 完了（または idle/stopped）→ 候補を取得して表示
+        // bg_start のキーは hiragana_buf。preedit は preedit_display()（pending_romaji含む）で
+        // 不一致になる場合があるため、hiragana_text() を優先キーとして使う。
+        let bg_status2 = engine.bg_status();
+        let hiragana_key2 = engine.hiragana_text().to_string();
+        // kanji_ready は最新の状態に更新（前 bg の reclaim 後に変化している場合がある）
+        let kanji_ready_now = engine.is_kanji_ready();
+        tracing::info!("on_convert[new]: post-wait hiragana_key={:?} bg={} kanji_ready={}", hiragana_key2, bg_status2, kanji_ready_now);
+        // キー不一致で None が返ると Done が復元されるので、両方試した後に reclaim しておく
+        let bg_cands = engine.bg_take_candidates(&hiragana_key2)
+            .or_else(|| {
+                if preedit != hiragana_key2 {
+                    tracing::debug!("Convert: hira key miss, retry preedit={:?}", preedit);
+                    engine.bg_take_candidates(&preedit)
+                } else { None }
+            });
+        // いずれも None だった場合 → bg_reclaim + bg_start でブロッキング再試行
+        let bg_cands = if bg_cands.is_none() && kanji_ready_now {
+            tracing::warn!("Convert: bg_take_candidates None (hira={:?} preedit={:?}) → reclaim+restart", hiragana_key2, preedit);
+            engine.bg_reclaim();
+            if engine.is_kanji_ready() {
+                engine.bg_start(llm_limit);
+                let completed3 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+                tracing::info!("Convert: retry bg_wait completed={completed3}");
+                let hira3 = engine.hiragana_text().to_string();
+                engine.bg_take_candidates(&hira3)
+                    .or_else(|| {
+                        if preedit != hira3 { engine.bg_take_candidates(&preedit) } else { None }
+                    })
+                    .inspect(|c| tracing::info!("Convert: retry got {} cands", c.len()))
+            } else {
+                engine.bg_reclaim();
+                None
             }
+        } else {
+            bg_cands
+        };
+        // それでも None なら reclaim だけしておく
+        if bg_cands.is_none() {
+            engine.bg_reclaim();
+        }
 
-            UserAction::CandidateSelect(n) => {
-                let mut sess = session_get()?;
-                if !sess.is_selecting() { return Ok(!engine.preedit_is_empty()); }
-                if !sess.select_nth_in_page(n as usize) { return Ok(true); }
-                let text = sess.current_candidate()
-                    .or_else(|| sess.original_preedit()).unwrap_or("").to_string();
-                let reading = sess.original_preedit().unwrap_or("").to_string();
+        let (candidates, llm_pending): (Vec<String>, bool) = match bg_cands {
+            Some(llm_cands) if !llm_cands.is_empty() => {
+                let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
+                    if kanji_ready_now {
+                        (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
+                    } else {
+                        (vec![preedit.clone()], false)
+                    }
+                } else {
+                    (merged, false)
+                }
+            }
+            _ => {
+                if kanji_ready_now {
+                    let dict_cands = engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit);
+                    if dict_cands.is_empty() { (vec![preedit.clone()], false) } else { (dict_cands, false) }
+                } else {
+                    (vec![preedit.clone()], false)
+                }
+            }
+        };
+        // Waiting 状態を解除
+        if let Ok(mut sess) = session_get() {
+            if sess.is_waiting() { sess.set_preedit(preedit.clone()); }
+        }
+        candidate_window::stop_waiting_timer();
+        let _ = bg_status2; // suppress unused warning
+
+        let first = candidates.first().cloned().unwrap_or_else(|| preedit.clone());
+        diag::event(DiagEvent::Convert { preedit: preedit.clone(), kanji_ready: true, result: first.clone() });
+
+        let caret = caret_rect_get();
+        let (page_cands, page_info) = {
+            let mut sess = session_get()?;
+            sess.activate_selecting(candidates.clone(), preedit.clone(), caret.left, caret.bottom, llm_pending);
+            (sess.page_candidates().to_vec(), sess.page_info())
+        };
+        drop(guard);
+        let status = if llm_pending { Some("⏳ 変換中...") } else { None };
+        candidate_window::show_with_status(&page_cands, 0, &page_info, caret.left, caret.bottom, status);
+        tracing::info!("on_convert[new]: update_composition first={:?} comp_exists={}", first,
+            composition_clone().map(|g| g.is_some()).unwrap_or(false));
+        update_composition(ctx, tid, sink, first)?;
+        Ok(true)
+    }
+
+    fn on_commit_raw(
+        &self, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        {
+            let mut sess = session_get()?;
+            // ── SplitPreedit: target をそのまま確定、remainder を次のプリエディットへ ──
+            if sess.is_split_preedit() {
+                let target    = sess.split_target().unwrap_or("").to_string();
+                let remainder = sess.split_remainder().unwrap_or("").to_string();
+                if target.is_empty() { return Ok(false); }
                 sess.set_idle();
-                selection_sync_from_session(&sess);
                 drop(sess);
                 candidate_window::hide();
-                if text != reading {
-                    engine.learn(&reading, &text);
+                engine.commit(&target);
+                if remainder.is_empty() {
+                    engine.reset_preedit();
+                    drop(guard);
+                    end_composition(ctx, tid, target)?;
+                } else {
+                    engine.force_preedit(remainder.clone());
+                    drop(guard);
+                    commit_then_start_composition(ctx, tid, unsafe { self.cast()? }, target, remainder)?;
                 }
+                return Ok(true);
+            }
+            // ── Waiting（⏳変換中）: ひらがなのままコミット ──
+            if sess.is_waiting() {
+                let text = sess.preedit_text().unwrap_or("").to_string();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                engine.bg_reclaim();
                 engine.commit(&text);
                 engine.reset_preedit();
                 drop(guard);
-                diag::event(DiagEvent::Convert {
-                    preedit: text.clone(), kanji_ready: true, result: text.clone(),
-                });
+                tracing::info!("on_commit_raw[Waiting]: commit {:?}", text);
                 end_composition(ctx, tid, text)?;
-                Ok(true)
+                return Ok(true);
             }
-
-            UserAction::CursorLeft | UserAction::CursorRight => Ok(!engine.preedit_is_empty()),
-
-            // ─ IME トグル ────────────────────────────────────────────────────
-            // KEYBOARD_OPENCLOSE をモードに応じて更新する。
-            // Alphanumeric 時は 0、かな入力時は 1。ターミナル等はこの値を参照する。
-            UserAction::ImeToggle => {
-                let preedit = engine.preedit_display();
-                if !preedit.is_empty() {
-                    engine.bg_reclaim();
-                    engine.commit(&preedit.clone()); engine.reset_preedit();
+            // ── Selecting ──
+            if sess.is_selecting() {
+                let text      = sess.current_candidate().or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+                let reading   = sess.original_preedit().unwrap_or("").to_string();
+                let punct     = sess.take_punct_pending();
+                let remainder = sess.take_selecting_remainder();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                if text != reading { engine.learn(&reading, &text); }
+                let commit_text = if let Some(p) = punct { format!("{text}{p}") } else { text.clone() };
+                engine.commit(&commit_text);
+                if remainder.is_empty() {
+                    engine.reset_preedit();
                     drop(guard);
-                    end_composition(ctx, tid, preedit)?;
-                } else { drop(guard); }
-                let (from, to, now_open) = if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    use crate::engine::input_mode::InputMode;
-                    let was_alpha = st.input_mode == InputMode::Alphanumeric;
-                    let new_mode = if was_alpha { InputMode::Hiragana } else { InputMode::Alphanumeric };
-                    let from = format!("{:?}", st.input_mode);
-                    st.set_mode(new_mode);
-                    (from, if was_alpha { "Hiragana" } else { "Alphanumeric" }, was_alpha)
-                } else { ("unknown".into(), "unknown", true) };
-                // TSF コンパートメントも更新（ターミナル等が参照する）
-                if let Ok(inner) = self.inner.try_borrow() {
-                    if let Some(tm) = &inner.thread_mgr {
-                        if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, now_open) } {
-                            tracing::warn!("ImeToggle: set_open_close({}) failed: {e}", now_open);
-                            diag::event(DiagEvent::Error { site: "set_open_close/toggle", msg: e.to_string() });
-                        }
-                    }
-                }
-                diag::event(DiagEvent::ModeChange { from, to });
-                self.notify_langbar_update();
-                self.notify_tray_update(tid);
-                self.maybe_reload_runtime_config();
-                Ok(true)
-            }
-
-            UserAction::ImeOff | UserAction::ModeAlphanumeric => {
-                let preedit = engine.preedit_display();
-                if !preedit.is_empty() {
-                    engine.bg_reclaim();
-                    engine.commit(&preedit.clone()); engine.reset_preedit();
+                    diag::event(DiagEvent::CommitRaw { preedit: commit_text.clone() });
+                    end_composition(ctx, tid, commit_text)?;
+                } else {
+                    engine.force_preedit(remainder.clone());
                     drop(guard);
-                    end_composition(ctx, tid, preedit)?;
-                } else { drop(guard); }
-                if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    let from = format!("{:?}", st.input_mode);
-                    st.set_mode(crate::engine::input_mode::InputMode::Alphanumeric);
-                    diag::event(DiagEvent::ModeChange { from, to: "Alphanumeric" });
+                    diag::event(DiagEvent::CommitRaw { preedit: commit_text.clone() });
+                    commit_then_start_composition(ctx, tid, unsafe { self.cast()? }, commit_text, remainder)?;
                 }
-                // TSF コンパートメントを閉じる（ターミナル等が参照する）
-                if let Ok(inner) = self.inner.try_borrow() {
-                    if let Some(tm) = &inner.thread_mgr {
-                        if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, false) } {
-                            tracing::warn!("ImeOff: set_open_close(false) failed: {e}");
-                            diag::event(DiagEvent::Error { site: "set_open_close/off", msg: e.to_string() });
-                        }
-                    }
-                }
-                self.notify_langbar_update();
-                self.notify_tray_update(tid);
-                self.maybe_reload_runtime_config();
-                Ok(true)
+                return Ok(true);
             }
-
-            UserAction::ImeOn => {
-                drop(guard);
-                if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    let from = format!("{:?}", st.input_mode);
-                    st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
-                    diag::event(DiagEvent::ModeChange { from, to: "Hiragana" });
-                }
-                // TSF コンパートメントを開く
-                if let Ok(inner) = self.inner.try_borrow() {
-                    if let Some(tm) = &inner.thread_mgr {
-                        if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, true) } {
-                            tracing::warn!("ImeOn: set_open_close(true) failed: {e}");
-                            diag::event(DiagEvent::Error { site: "set_open_close/on", msg: e.to_string() });
-                        }
-                    }
-                }
-                self.notify_langbar_update();
-                self.notify_tray_update(tid);
-                self.maybe_reload_runtime_config();
-                Ok(true)
-            }
-
-            UserAction::ModeHiragana => {
-                let preedit = engine.preedit_display();
-                if !preedit.is_empty() {
-                    let t = preedit.clone();
-                    engine.bg_reclaim();
-                    engine.commit(&t); engine.reset_preedit(); drop(guard);
-                    end_composition(ctx, tid, t)?;
-                } else { drop(guard); }
-                if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    let from = format!("{:?}", st.input_mode);
-                    st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
-                    diag::event(DiagEvent::ModeChange { from, to: "Hiragana" });
-                }
-                self.notify_langbar_update();
-                self.notify_tray_update(tid);
-                self.maybe_reload_runtime_config();
-                Ok(true)
-            }
-
-            UserAction::ModeKatakana => {
-                let preedit = engine.preedit_display();
-                if !preedit.is_empty() {
-                    let t = text_util::to_katakana(&preedit);
-                    engine.bg_reclaim();
-                    engine.commit(&t); engine.reset_preedit(); drop(guard);
-                    end_composition(ctx, tid, t)?;
-                } else { drop(guard); }
-                if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    let from = format!("{:?}", st.input_mode);
-                    st.set_mode(crate::engine::input_mode::InputMode::Katakana);
-                    diag::event(DiagEvent::ModeChange { from, to: "Katakana" });
-                }
-                self.notify_langbar_update();
-                self.notify_tray_update(tid);
-                self.maybe_reload_runtime_config();
-                Ok(true)
-            }
-
-            _ => Ok(false),
         }
+        engine.flush_pending_n();
+        let preedit = engine.preedit_display();
+        if preedit.is_empty() { return Ok(false); }
+        diag::event(DiagEvent::CommitRaw { preedit: preedit.clone() });
+        engine.bg_reclaim();
+        engine.commit(&preedit.clone());
+        engine.reset_preedit();
+        drop(guard);
+        end_composition(ctx, tid, preedit)?;
+        Ok(true)
+    }
+
+    fn on_backspace(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        {
+            let mut sess = session_get()?;
+            // SplitPreedit → Backspace → 全体を未変換プリエディットに戻す
+            if sess.is_split_preedit() {
+                let full = format!("{}{}",
+                    sess.split_target().unwrap_or(""),
+                    sess.split_remainder().unwrap_or(""));
+                sess.set_preedit(full.clone());
+                drop(sess);
+                engine.force_preedit(full.clone());
+                drop(guard);
+                update_composition(ctx, tid, sink, full)?;
+                return Ok(true);
+            }
+            if sess.is_selecting() {
+                let original = sess.original_preedit().unwrap_or("").to_string();
+                sess.set_preedit(original.clone());
+                drop(sess);
+                candidate_window::hide();
+                drop(guard);
+                update_composition(ctx, tid, sink, original)?;
+                return Ok(true);
+            }
+            if sess.is_waiting() {
+                let pre = sess.preedit_text().unwrap_or("").to_string();
+                sess.set_preedit(pre);
+                candidate_window::hide();
+            }
+        }
+        let consumed = engine.backspace();
+        if consumed {
+            engine.bg_reclaim();
+            let preedit = engine.preedit_display();
+            diag::event(DiagEvent::Backspace { preedit_after: preedit.clone() });
+            drop(guard);
+            if preedit.is_empty() {
+                end_composition(ctx, tid, String::new())?;
+            } else {
+                update_composition(ctx, tid, sink, preedit)?;
+            }
+        }
+        Ok(consumed)
+    }
+
+    fn on_cancel(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        {
+            let mut sess = session_get()?;
+            // SplitPreedit → ESC → 全体を未変換プリエディットに戻す
+            if sess.is_split_preedit() {
+                let full = format!("{}{}",
+                    sess.split_target().unwrap_or(""),
+                    sess.split_remainder().unwrap_or(""));
+                tracing::info!("on_cancel[SplitPreedit]: restoring full={:?}", full);
+                sess.set_preedit(full.clone());
+                drop(sess);
+                candidate_window::hide();
+                // SplitPreedit 遷移時に force_preedit(target) で hiragana_buf が
+                // target のみになっている → full で復元しないと remainder が失われる
+                engine.force_preedit(full.clone());
+                drop(guard);
+                update_composition(ctx, tid, sink, full)?;
+                return Ok(true);
+            }
+            if sess.is_selecting() {
+                // 変換中 → ESC → 未変換状態へ戻す（2回目のESCでプリエディット全消去）
+                // 文節分割後の変換の場合は remainder も復元して full に戻す
+                let original  = sess.original_preedit().unwrap_or("").to_string();
+                let remainder = sess.selecting_remainder_clone();
+                let full = if remainder.is_empty() {
+                    original.clone()
+                } else {
+                    format!("{}{}", original, remainder)
+                };
+                tracing::info!("on_cancel[Selecting]: original={:?} remainder={:?} → full={:?}", original, remainder, full);
+                sess.set_preedit(full.clone());
+                drop(sess);
+                candidate_window::hide();
+                engine.bg_reclaim();
+                // engine の hiragana_buf を full に復元（force_preedit(target) で縮んでいるため）
+                engine.force_preedit(full.clone());
+                drop(guard);
+                update_composition(ctx, tid, sink, full)?;
+                return Ok(true);
+            }
+            if sess.is_waiting() {
+                let pre = sess.preedit_text().unwrap_or("").to_string();
+                let bg = engine.bg_status();
+                tracing::info!("on_cancel[Waiting]: pre={:?} bg={}", pre, bg);
+                if pre.is_empty() {
+                    // text が空の場合は Idle にしてプリエディットをクリア
+                    tracing::warn!("on_cancel[Waiting]: pre is empty → end_composition");
+                    sess.set_idle();
+                    drop(sess);
+                    engine.bg_reclaim();
+                    engine.reset_all();
+                    drop(guard);
+                    end_composition(ctx, tid, String::new())?;
+                    return Ok(true);
+                }
+                sess.set_preedit(pre.clone());
+                candidate_window::hide();
+                candidate_window::stop_waiting_timer();
+                // BG変換（Done状態）は保持 → 次のSpace押下で候補取得可能
+                drop(sess);
+                drop(guard);
+                update_composition(ctx, tid, sink, pre)?;
+                return Ok(true);
+            }
+        }
+        // 未変換状態 → ESC → プリエディット全消去
+        {
+            let bg = engine.bg_status();
+            let hira = engine.hiragana_text().to_string();
+            tracing::info!("on_cancel[fallthrough]: preedit_empty={} bg={} hira={:?}", engine.preedit_is_empty(), bg, hira);
+        }
+        if engine.preedit_is_empty() { return Ok(false); }
+        engine.bg_reclaim();
+        engine.reset_all();
+        drop(guard);
+        end_composition(ctx, tid, String::new())?;
+        Ok(true)
+    }
+
+    fn on_kana_convert(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+        convert_fn: fn(&str) -> String,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        engine.flush_pending_n();
+        let p = engine.preedit_display();
+        if p.is_empty() { return Ok(false); }
+        engine.bg_reclaim();
+        let t = convert_fn(&p);
+        engine.force_preedit(t.clone());
+        drop(guard);
+        update_composition(ctx, tid, sink, t)?;
+        Ok(true)
+    }
+
+    fn on_cycle_kana(
+        &self, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let p = engine.preedit_display();
+        if p.is_empty() { return Ok(false); }
+        engine.bg_reclaim();
+        let t = text_util::to_katakana(&p);
+        engine.commit(&t); engine.reset_preedit(); drop(guard);
+        end_composition(ctx, tid, t)?;
+        Ok(true)
+    }
+
+    fn on_candidate_move(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        guard: crate::engine::state::EngineGuard,
+        dir: CandidateDir,
+    ) -> Result<bool> {
+        let has_pre = guard.as_ref().map(|e| !e.preedit_is_empty()).unwrap_or(false);
+        drop(guard);
+        let mut sess = session_get()?;
+        if !sess.is_selecting() { return Ok(has_pre); }
+        match dir { CandidateDir::Next => sess.next_with_page_wrap(), CandidateDir::Prev => sess.prev() }
+        let page_cands = sess.page_candidates().to_vec();
+        let page_sel   = sess.page_selected();
+        let page_info  = sess.page_info();
+        let text = sess.current_candidate().or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+        let remainder  = sess.selecting_remainder_clone();
+        drop(sess);
+        candidate_window::update_selection(page_sel, &page_info);
+        candidate_window::show(&page_cands, page_sel, &page_info, caret_rect_get().left, caret_rect_get().bottom);
+        update_composition_candidate_split(ctx, tid, sink, text, remainder)?;
+        Ok(true)
+    }
+
+    fn on_candidate_page(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        guard: crate::engine::state::EngineGuard,
+        dir: CandidateDir,
+    ) -> Result<bool> {
+        let has_pre = guard.as_ref().map(|e| !e.preedit_is_empty()).unwrap_or(false);
+        drop(guard);
+        let mut sess = session_get()?;
+        if !sess.is_selecting() { return Ok(has_pre); }
+        match dir { CandidateDir::Next => sess.next_page(), CandidateDir::Prev => sess.prev_page() }
+        let page_cands = sess.page_candidates().to_vec();
+        let page_sel   = sess.page_selected();
+        let page_info  = sess.page_info();
+        let text = sess.current_candidate().or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+        let remainder  = sess.selecting_remainder_clone();
+        drop(sess);
+        let caret = caret_rect_get();
+        candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
+        update_composition_candidate_split(ctx, tid, sink, text, remainder)?;
+        Ok(true)
+    }
+
+    fn on_candidate_select(
+        &self, n: u8, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let has_pre = !engine.preedit_is_empty();
+        let mut sess = session_get()?;
+        if !sess.is_selecting() { return Ok(has_pre); }
+        if !sess.select_nth_in_page(n as usize) { return Ok(true); }
+        let text      = sess.current_candidate().or_else(|| sess.original_preedit()).unwrap_or("").to_string();
+        let reading   = sess.original_preedit().unwrap_or("").to_string();
+        let punct     = sess.take_punct_pending();
+        let remainder = sess.take_selecting_remainder();
+        sess.set_idle();
+        drop(sess);
+        candidate_window::hide();
+        if text != reading { engine.learn(&reading, &text); }
+        let commit_text = if let Some(p) = punct { format!("{text}{p}") } else { text.clone() };
+        engine.commit(&commit_text);
+        diag::event(DiagEvent::Convert { preedit: text.clone(), kanji_ready: true, result: commit_text.clone() });
+        if remainder.is_empty() {
+            engine.reset_preedit();
+            drop(guard);
+            end_composition(ctx, tid, commit_text)?;
+        } else {
+            engine.force_preedit(remainder.clone());
+            drop(guard);
+            commit_then_start_composition(ctx, tid, unsafe { self.cast()? }, commit_text, remainder)?;
+        }
+        Ok(true)
+    }
+
+    fn on_ime_toggle(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
+        {
+            let mut guard = engine_try_get_or_create()?;
+            if let Some(engine) = guard.as_mut() {
+                let preedit = engine.preedit_display();
+                if !preedit.is_empty() {
+                    engine.bg_reclaim();
+                    engine.commit(&preedit.clone()); engine.reset_preedit();
+                    drop(guard);
+                    end_composition(ctx.clone(), tid, preedit)?;
+                }
+            }
+        }
+        let (from, to, now_open) = if let Ok(mut st) = crate::engine::state::ime_state_get() {
+            use crate::engine::input_mode::InputMode;
+            let was_alpha = st.input_mode == InputMode::Alphanumeric;
+            let new_mode  = if was_alpha { InputMode::Hiragana } else { InputMode::Alphanumeric };
+            let from      = format!("{:?}", st.input_mode);
+            st.set_mode(new_mode);
+            (from, if was_alpha { "Hiragana" } else { "Alphanumeric" }, was_alpha)
+        } else { ("unknown".into(), "unknown", true) };
+        if let Ok(inner) = self.inner.try_borrow() {
+            if let Some(tm) = &inner.thread_mgr {
+                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, now_open) } {
+                    tracing::warn!("ImeToggle: set_open_close({}) failed: {e}", now_open);
+                    diag::event(DiagEvent::Error { site: "set_open_close/toggle", msg: e.to_string() });
+                }
+            }
+        }
+        diag::event(DiagEvent::ModeChange { from, to });
+        self.notify_langbar_update();
+        self.notify_tray_update(tid);
+        self.maybe_reload_runtime_config();
+        Ok(true)
+    }
+
+    fn on_ime_off(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
+        {
+            let mut guard = engine_try_get_or_create()?;
+            if let Some(engine) = guard.as_mut() {
+                let preedit = engine.preedit_display();
+                if !preedit.is_empty() {
+                    engine.bg_reclaim();
+                    engine.commit(&preedit.clone()); engine.reset_preedit();
+                    drop(guard);
+                    end_composition(ctx, tid, preedit)?;
+                }
+            }
+        }
+        if let Ok(mut st) = crate::engine::state::ime_state_get() {
+            let from = format!("{:?}", st.input_mode);
+            st.set_mode(crate::engine::input_mode::InputMode::Alphanumeric);
+            diag::event(DiagEvent::ModeChange { from, to: "Alphanumeric" });
+        }
+        if let Ok(inner) = self.inner.try_borrow() {
+            if let Some(tm) = &inner.thread_mgr {
+                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, false) } {
+                    tracing::warn!("ImeOff: set_open_close(false) failed: {e}");
+                    diag::event(DiagEvent::Error { site: "set_open_close/off", msg: e.to_string() });
+                }
+            }
+        }
+        self.notify_langbar_update();
+        self.notify_tray_update(tid);
+        self.maybe_reload_runtime_config();
+        Ok(true)
+    }
+
+    fn on_ime_on(&self, _ctx: ITfContext, tid: u32) -> Result<bool> {
+        if let Ok(mut st) = crate::engine::state::ime_state_get() {
+            let from = format!("{:?}", st.input_mode);
+            st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
+            diag::event(DiagEvent::ModeChange { from, to: "Hiragana" });
+        }
+        if let Ok(inner) = self.inner.try_borrow() {
+            if let Some(tm) = &inner.thread_mgr {
+                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, true) } {
+                    tracing::warn!("ImeOn: set_open_close(true) failed: {e}");
+                    diag::event(DiagEvent::Error { site: "set_open_close/on", msg: e.to_string() });
+                }
+            }
+        }
+        self.notify_langbar_update();
+        self.notify_tray_update(tid);
+        self.maybe_reload_runtime_config();
+        Ok(true)
+    }
+
+    fn on_mode_hiragana(
+        &self, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        if let Some(engine) = guard.as_mut() {
+            let preedit = engine.preedit_display();
+            if !preedit.is_empty() {
+                let t = preedit.clone();
+                engine.bg_reclaim();
+                engine.commit(&t); engine.reset_preedit(); drop(guard);
+                end_composition(ctx, tid, t)?;
+            } else { drop(guard); }
+        }
+        if let Ok(mut st) = crate::engine::state::ime_state_get() {
+            let from = format!("{:?}", st.input_mode);
+            st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
+            diag::event(DiagEvent::ModeChange { from, to: "Hiragana" });
+        }
+        self.notify_langbar_update();
+        self.notify_tray_update(tid);
+        self.maybe_reload_runtime_config();
+        Ok(true)
+    }
+
+    fn on_mode_katakana(
+        &self, ctx: ITfContext, tid: u32,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        if let Some(engine) = guard.as_mut() {
+            let preedit = engine.preedit_display();
+            if !preedit.is_empty() {
+                let t = text_util::to_katakana(&preedit);
+                engine.bg_reclaim();
+                engine.commit(&t); engine.reset_preedit(); drop(guard);
+                end_composition(ctx, tid, t)?;
+            } else { drop(guard); }
+        }
+        if let Ok(mut st) = crate::engine::state::ime_state_get() {
+            let from = format!("{:?}", st.input_mode);
+            st.set_mode(crate::engine::input_mode::InputMode::Katakana);
+            diag::event(DiagEvent::ModeChange { from, to: "Katakana" });
+        }
+        self.notify_langbar_update();
+        self.notify_tray_update(tid);
+        self.maybe_reload_runtime_config();
+        Ok(true)
+    }
+
+    /// 句読点入力:
+    ///   - プリエディットがあれば変換ウィンドウを表示し punct_pending にセット
+    ///   - プリエディットが空なら直接コミット
+    fn on_punctuate(
+        &self, c: char,
+        ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+
+        // プリエディットが空 → 直接コミット
+        if engine.preedit_is_empty() {
+            drop(guard);
+            commit_text(ctx, tid, c.to_string())?;
+            return Ok(true);
+        }
+
+        // 候補選択中に句読点 → 現在の punct_pending を上書きしてウィンドウを更新
+        {
+            let mut sess = session_get()?;
+            if sess.is_selecting() {
+                sess.set_punct_pending(c);
+                // 候補ウィンドウのステータスラインに句読点が付くことを示す
+                let page_cands = sess.page_candidates().to_vec();
+                let page_sel   = sess.page_selected();
+                let page_info  = sess.page_info();
+                let (pos_x, pos_y) = sess.selecting_pos().unwrap_or_default();
+                drop(sess);
+                drop(guard);
+                candidate_window::show_with_status(
+                    &page_cands, page_sel, &page_info, pos_x, pos_y,
+                    Some(&format!("確定後「{c}」を入力")),
+                );
+                return Ok(true);
+            }
+        }
+
+        // 未変換プリエディットあり → Convert と同じフローで変換ウィンドウを開く
+        // punct_pending は activate_selecting 後にセットする
+        engine.flush_pending_n();
+        let preedit = engine.preedit_display();
+        update_caret_rect(ctx.clone(), tid);
+
+        let llm_limit   = crate::engine::state::get_num_candidates();
+        const DICT_LIMIT: usize = 20;
+        engine.poll_dict_ready();
+        engine.poll_model_ready();
+        let kanji_ready = engine.is_kanji_ready();
+        if kanji_ready && engine.bg_status() == "idle" {
+            engine.bg_start(llm_limit);
+        }
+        const BG_WAIT_MS: u64 = 400;
+        if kanji_ready && matches!(engine.bg_status(), "running" | "idle") {
+            engine.bg_wait_ms(BG_WAIT_MS);
+        }
+
+        let bg_status  = engine.bg_status();
+        let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
+
+        let (candidates, llm_pending): (Vec<String>, bool) =
+            match engine.bg_take_candidates(&preedit) {
+            Some(llm_cands) if !llm_cands.is_empty() => {
+                let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
+                    (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
+                } else {
+                    (merged, false)
+                }
+            }
+            _ => {
+                if kanji_ready && !bg_running {
+                    (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
+                } else {
+                    let dict_cands = engine.merge_candidates(vec![], DICT_LIMIT);
+                    let dict_empty = dict_cands.is_empty()
+                        || (dict_cands.len() == 1 && dict_cands[0] == preedit);
+                    if dict_empty { (vec![preedit.clone()], bg_running) } else { (dict_cands, bg_running) }
+                }
+            }
+        };
+
+        let first = candidates.first().cloned().unwrap_or_else(|| preedit.clone());
+        let caret = caret_rect_get();
+        {
+            let mut sess = session_get()?;
+            sess.activate_selecting(candidates, preedit.clone(), caret.left, caret.bottom, llm_pending);
+            sess.set_punct_pending(c);
+            let page_cands = sess.page_candidates().to_vec();
+            let page_info  = sess.page_info();
+            drop(sess);
+            drop(guard);
+            let status_owned = format!("確定後「{c}」を入力");
+            candidate_window::show_with_status(&page_cands, 0, &page_info, caret.left, caret.bottom, Some(&status_owned));
+        }
+        update_composition(ctx, tid, sink, first)?;
+        Ok(true)
+    }
+
+    /// Shift+Left: 変換対象を1文字縮める（表示のみ・変換しない）
+    fn on_segment_shrink(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let mut sess = session_get()?;
+
+        tracing::debug!("on_segment_shrink: state={:?}", &*sess);
+
+        // Selecting → SplitPreedit
+        if sess.is_selecting() {
+            let original        = sess.original_preedit().unwrap_or("").to_string();
+            let outer_remainder = sess.selecting_remainder_clone();
+            let last_start = original.char_indices().next_back().map(|(i, _)| i);
+            tracing::debug!("  Selecting: original={:?} outer_rem={:?} last_start={:?}", original, outer_remainder, last_start);
+            let (target, new_rem) = match last_start {
+                Some(i) if i > 0 => (original[..i].to_string(), original[i..].to_string()),
+                _ => return Ok(true),
+            };
+            let remainder = format!("{new_rem}{outer_remainder}");
+            let full      = format!("{target}{remainder}");
+            tracing::debug!("  → SplitPreedit: target={:?} remainder={:?} full={:?}", target, remainder, full);
+            sess.set_split_preedit(target.clone(), remainder.clone());
+            drop(sess);
+            candidate_window::hide();
+            engine.bg_reclaim();
+            drop(guard);
+            // target を太実線、remainder を点線で表示して境界を視覚化
+            update_composition_candidate_split(ctx, tid, sink, target, remainder)?;
+            // update_composition 後に state が保持されているか確認
+            if let Ok(s) = crate::engine::state::session_get() {
+                tracing::debug!("  after update_composition: state={:?}", &*s);
+            }
+            return Ok(true);
+        }
+
+        // SplitPreedit → 境界を1文字縮める
+        if sess.is_split_preedit() {
+            let before_target = sess.split_target().unwrap_or("").to_string();
+            let shrank = sess.split_shrink();
+            tracing::debug!("  SplitPreedit: before_target={:?} shrank={}", before_target, shrank);
+            if !shrank { return Ok(true); }
+            let target    = sess.split_target().unwrap_or("").to_string();
+            let remainder = sess.split_remainder().unwrap_or("").to_string();
+            tracing::debug!("  → new target={:?} remainder={:?}", target, remainder);
+            drop(sess);
+            drop(guard);
+            // target を太実線、remainder を点線で表示して境界を視覚化
+            update_composition_candidate_split(ctx, tid, sink, target, remainder)?;
+            return Ok(true);
+        }
+
+        tracing::debug!("  → no matching state, eat={}", !engine.preedit_is_empty());
+        Ok(!engine.preedit_is_empty())
+    }
+
+    /// Shift+Right: 変換対象を1文字広げる（表示のみ・変換しない）
+    fn on_segment_extend(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        let mut sess = session_get()?;
+
+        if sess.is_split_preedit() {
+            if !sess.split_extend() {
+                // remainder 空 = 右端 → 全体を Preedit に戻す
+                let full = sess.split_target().unwrap_or("").to_string();
+                sess.set_preedit(full.clone());
+                drop(sess);
+                drop(guard);
+                update_composition(ctx, tid, sink, full)?;
+                return Ok(true);
+            }
+            let target    = sess.split_target().unwrap_or("").to_string();
+            let remainder = sess.split_remainder().unwrap_or("").to_string();
+            if remainder.is_empty() {
+                sess.set_preedit(target.clone());
+            }
+            drop(sess);
+            drop(guard);
+            update_composition_candidate_split(ctx, tid, sink, target, remainder)?;
+            return Ok(true);
+        }
+
+        Ok(!engine.preedit_is_empty())
     }
 }
 
 // ─── 変換ヘルパー ─────────────────────────────────────────────────────────────
 
+/// target 文字列を変換して `Selecting` 状態へ遷移する。
+///
+/// `on_segment_shrink` / `on_segment_extend` の共通処理。
+/// 境界変更直後に候補を再取得し、候補ウィンドウを表示する。
+///
+/// # 引数
+/// - `target`    : 変換対象（ひらがな）
+/// - `remainder` : 変換しない残り部分。確定後に次のプリエディットになる。
+///                 空文字列の場合は全体変換（remainder なし）として扱う。
+fn convert_split_target(
+    ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+    mut guard: crate::engine::state::EngineGuard,
+    target: String,
+    remainder: String,
+) -> Result<bool> {
+    let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+    if target.is_empty() { return Ok(false); }
+
+    tracing::debug!("convert_split_target: target={:?} remainder={:?}", target, remainder);
+
+    engine.bg_reclaim();
+    engine.force_preedit(target.clone());
+
+    let llm_limit = crate::engine::state::get_num_candidates();
+    const DICT_LIMIT: usize = 20;
+    const SPLIT_WAIT_MS: u64 = 1500;
+    let kanji_ready = engine.is_kanji_ready();
+
+    // kanji_ready な場合は同期変換を先に実行してから bg_start する。
+    // bg_start は self.kanji を move するため、後から convert_sync を呼べなくなる。
+    // 先に同期変換で辞書候補を取得しておき、LLM完了後にマージする戦略を取る。
+    let sync_cands: Vec<String> = if kanji_ready {
+        engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &target)
+    } else {
+        vec![target.clone()]
+    };
+
+    // bg_start → 最大 SPLIT_WAIT_MS 待機
+    let bg_cands = if kanji_ready {
+        engine.bg_start(llm_limit);
+        let completed = engine.bg_wait_ms(SPLIT_WAIT_MS);
+        tracing::info!("convert_split_target: bg_wait({SPLIT_WAIT_MS}ms) completed={completed}");
+        if completed {
+            engine.bg_take_candidates(&target)
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    let candidates = match bg_cands {
+        Some(llm_cands) if !llm_cands.is_empty() => {
+            let m = engine.merge_candidates(llm_cands, DICT_LIMIT);
+            if m.is_empty() { sync_cands } else { m }
+        }
+        _ => {
+            tracing::info!("convert_split_target: LLM not ready, using sync_cands ({} cands)", sync_cands.len());
+            sync_cands
+        }
+    };
+    tracing::debug!("convert_split_target: candidates={:?}", &candidates[..candidates.len().min(3)]);
+    let first = candidates.first().cloned().unwrap_or_else(|| target.clone());
+    let caret = caret_rect_get();
+    let (page_cands, page_info, remainder_for_display) = {
+        let mut sess = session_get()?;
+        sess.activate_selecting_with_remainder(
+            candidates,
+            target.clone(),
+            caret.left,
+            caret.bottom,
+            false,
+            remainder.clone(),
+        );
+        (sess.page_candidates().to_vec(), sess.page_info(), remainder)
+    };
+    drop(guard);
+    candidate_window::show_with_status(
+        &page_cands, 0, &page_info, caret.left, caret.bottom, None,
+    );
+    // remainder が残っている場合は「候補 + 未変換残り」を1つの composition で表示する。
+    // こうしないと remainder 部分が画面から消えてしまう。
+    update_composition_candidate_split(ctx, tid, sink, first, remainder_for_display)?;
+    Ok(true)
+}
+
 /// 複数候補を返す版（候補ウィンドウ用）
 /// プリエディット（ひらがな）をそのまま確定してコンポジションを終了する。
 /// 辞書0件 + LLM 待機中に Space を2回押したときの逃げ道として使用する。
+#[allow(dead_code)]
 fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
     let preedit = {
         let mut guard = engine_get_or_create()
@@ -1200,7 +1851,6 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
         if let Ok(mut sess) = session_get() {
             if sess.is_waiting() || sess.is_selecting() {
                 sess.set_idle();
-                selection_sync_from_session(&sess);
             }
         }
         p
@@ -1240,6 +1890,11 @@ fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
         | UserAction::CandidateNext | UserAction::CandidatePrev
         | UserAction::CandidatePageDown | UserAction::CandidatePageUp
         | UserAction::CursorLeft | UserAction::CursorRight => has_preedit,
+        // Shift+Left/Right: composition がアクティブな間は必ず消費する。
+        // 透過させるとアプリが composition テキストを直接編集してしまう。
+        // has_preedit=false（composition なし）のときだけ透過。
+        UserAction::SegmentShrink | UserAction::SegmentExtend => has_preedit,
+        UserAction::Punctuate(_) => true,
         UserAction::CandidateSelect(_) => has_preedit,
         _ => false,
     }
@@ -1268,6 +1923,9 @@ fn action_name(a: &UserAction) -> &'static str {
         UserAction::CandidateSelect(_) => "CandidateSelect",
         UserAction::CursorLeft         => "CursorLeft",
         UserAction::CursorRight        => "CursorRight",
+        UserAction::Punctuate(_)       => "Punctuate",
+        UserAction::SegmentShrink      => "SegmentShrink",
+        UserAction::SegmentExtend      => "SegmentExtend",
         UserAction::ImeToggle          => "ImeToggle",
         UserAction::ImeOn              => "ImeOn",
         UserAction::ImeOff             => "ImeOff",
@@ -1318,7 +1976,7 @@ fn update_composition(
         };
 
         let preedit_w: Vec<u16> = preedit.encode_utf16().collect();
-        tracing::trace!("SetText(update): {:?}", preedit);
+        tracing::debug!("update_composition[EditSession]: preedit={:?} existing={}", preedit, existing.is_some());
 
         let range = if let Some(comp) = &existing {
             comp.GetRange()
@@ -1339,6 +1997,16 @@ fn update_composition(
 
         range.SetText(ec, 0, &preedit_w)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+
+        // アンダーライン属性をセット
+        // SESSION_SELECTING アトミックで高速判定（クロージャ内なので Mutex は取れない）
+        // SplitPreedit は SESSION_SELECTING=true だが atom_input を使う。
+        // is_selecting() を正確に判定するには Mutex が必要だが、ここは EditSession
+        // クロージャ内（TSF のロック下）なので SESSION_STATE.lock() はデッドロックの
+        // リスクがある。安全のため atom_input で統一し、Selecting 時は on_candidate_move
+        // 等の呼び出し元が update_composition_candidate_split を使うことで区別する。
+        let atom = display_attr::atom_input();
+        set_display_attr_prop(&ctx, ec, &range, atom);
 
         // プリエディット中もカーソルを末尾に置く（アプリのキャレット表示を正しくする）
         if let Ok(cursor) = range.Clone() {
@@ -1381,12 +2049,16 @@ fn commit_then_start_composition(
         };
 
         // ── Step1: 既存 composition を確定テキストで終了 ──
-        // まれに composition ハンドルが失われる（アプリ/TSFの競合）ことがある。
-        // その場合でも確定テキストが消えないよう、カーソル位置へ直接コミットする。
+        // 文節分割後に候補表示している場合、composition のテキストは
+        // "確定部分 + remainder" の全体になっている。
+        // EndComposition だけだとその全体が確定されてしまうため、
+        // 先に SetText で commit_text だけに縮めてから EndComposition する。
         let commit_w: Vec<u16> = commit_text.encode_utf16().collect();
         if let Some(comp) = comp {
-            // composition 内のテキストは候補表示で最新化されている前提。
-            // ここで SetText すると、アプリによっては確定が二重化することがあるため EndComposition のみにする。
+            // composition テキストを commit_text だけに縮める
+            if let Ok(range) = comp.GetRange() {
+                let _ = range.SetText(ec, 0, &commit_w);
+            }
             comp.EndComposition(ec)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))?;
         } else if !commit_text.is_empty() {
@@ -1401,8 +2073,10 @@ fn commit_then_start_composition(
         }
 
         // ── Step2: 同セッション内で新 composition 開始 ──
-        let insert_point = get_cursor_range(&ctx, ec)
-            .unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+        // EndComposition 後は確定テキストの直後（= ドキュメント末尾方向）から挿入する。
+        // get_cursor_range は composition 開始位置を返すことがあるため使わず
+        // ctx.GetEnd(ec) で確実に末尾を取得する。
+        let insert_point = ctx.GetEnd(ec).unwrap();
         let cc: ITfContextComposition = ctx.cast()
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}")))?;
         let new_comp = cc.StartComposition(ec, &insert_point, &sink)
@@ -1414,6 +2088,9 @@ fn commit_then_start_composition(
         let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
         new_range.SetText(ec, 0, &preedit_w)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText new: {e}")))?;
+
+        // 新 composition にもアンダーライン属性をセット
+        set_display_attr_prop(&ctx, ec, &new_range, display_attr::atom_input());
 
         // カーソルを末尾に
         if let Ok(cursor) = new_range.Clone() {
@@ -1432,6 +2109,114 @@ fn commit_then_start_composition(
     unsafe {
         let _ = ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE)
             .map_err(|e| anyhow::anyhow!("RequestEditSession commit_then_start: {e}"));
+    }
+    Ok(())
+}
+
+/// GUID_PROP_ATTRIBUTE プロパティを range にセットしてアンダーラインを要求する
+///
+/// atom が 0（未登録）の場合は何もしない。
+/// アプリが属性を無視する場合もあるが、メモ帳・Word 等の標準アプリでは表示される。
+unsafe fn set_display_attr_prop(
+    ctx: &ITfContext,
+    ec: u32,
+    range: &windows::Win32::UI::TextServices::ITfRange,
+    atom: u32,
+) {
+    if atom == 0 { return; }
+    let Ok(prop) = ctx.GetProperty(&GUID_PROP_ATTRIBUTE) else { return; };
+    // 既存の属性を先にクリアして TSF に変更を通知させる
+    let _ = prop.Clear(ec, range);
+    // windows_core::VARIANT で VT_I4 (atom) を設定
+    let var = windows_core::VARIANT::from(atom as i32);
+    let _ = prop.SetValue(ec, range, &var);
+}
+
+/// 変換候補（`converted`）と未変換残り（`remainder`）を1つの composition に表示する。
+///
+/// `converted` + `remainder` を結合して composition にセットし、属性は
+/// converted 部分を atom_converted（太実線）、remainder 部分を atom_input（点線）で付与する。
+/// TSF の `ShiftEnd`/`ShiftStart` は実装によって挙動が異なるため使用しない。
+/// `GetProperty → EnumerateRanges` ではなく 1 property に 2 値を書く安全な方法として
+/// 先に全体を atom_converted で塗り、その後 remainder 部分のみ atom_input で上書きする。
+///
+/// `remainder` が空の場合は通常の `update_composition` と同じ動作になる。
+fn update_composition_candidate_split(
+    ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+    converted: String, remainder: String,
+) -> Result<()> {
+    if remainder.is_empty() {
+        return update_composition(ctx, tid, sink, converted);
+    }
+
+    let existing = composition_clone()?;
+    let ctx_req  = ctx.clone();
+    let full = format!("{converted}{remainder}");
+    // remainder の UTF-16 長（ShiftStart に使う）
+    let rem_utf16: i32 = remainder.encode_utf16().count() as i32;
+
+    let session = EditSession::new(move |ec| unsafe {
+        use windows::Win32::UI::TextServices::{
+            ITfContextComposition, TfActiveSelEnd, TF_SELECTION, TF_SELECTIONSTYLE, TF_ANCHOR_END,
+        };
+
+        let full_w: Vec<u16> = full.encode_utf16().collect();
+
+        // ── Step1: テキストをセット ──
+        let range = if let Some(comp) = &existing {
+            comp.GetRange()
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
+        } else {
+            let insert_point = get_cursor_range(&ctx, ec)
+                .unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+            let cc: ITfContextComposition = ctx.cast()
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("cast: {e}")))?;
+            let new_comp = cc.StartComposition(ec, &insert_point, &sink)
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("StartComposition: {e}")))?;
+            let r = new_comp.GetRange()
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))?;
+            let _ = composition_set(Some(new_comp));
+            r
+        };
+
+        range.SetText(ec, 0, &full_w)
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+
+        // ── Step2: 属性セット ──
+        // 全体を atom_converted（太実線）で塗る
+        set_display_attr_prop(&ctx, ec, &range, display_attr::atom_converted());
+
+        // remainder 部分（末尾 rem_utf16 文字）を atom_input（点線）で上書き
+        if rem_utf16 > 0 {
+            if let Ok(rem_range) = range.Clone() {
+                let mut actual = 0i32;
+                // 末尾 rem_utf16 文字の範囲を選ぶ: start を後ろから rem_utf16 文字分 forward
+                // = end を先頭にしてから rem_utf16 文字分縮める
+                // 安全な方法: start anchor を end 側に合わせてから負方向に移動
+                let _ = rem_range.Collapse(ec, TF_ANCHOR_END);
+                let _ = rem_range.ShiftStart(ec, -rem_utf16, &mut actual,
+                    std::ptr::null::<windows::Win32::UI::TextServices::TF_HALTCOND>());
+                set_display_attr_prop(&ctx, ec, &rem_range, display_attr::atom_input());
+            }
+        }
+
+        // ── Step3: カーソルを末尾に ──
+        if let Ok(cursor) = range.Clone() {
+            let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+            let sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(cursor)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            };
+            let _ = ctx.SetSelection(ec, &[sel]);
+        }
+        Ok(())
+    });
+    unsafe {
+        let _ = ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE)
+            .map_err(|e| anyhow::anyhow!("RequestEditSession candidate_split: {e}"));
     }
     Ok(())
 }
@@ -1725,4 +2510,23 @@ impl ITfSource_Impl for TextServiceFactory_Impl {
 pub struct ClassFactory;
 impl ClassFactory {
     pub fn create() -> IClassFactory { TextServiceFactory::new().into() }
+}
+
+// ─── ITfDisplayAttributeProvider ─────────────────────────────────────────────
+
+impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
+    fn EnumDisplayAttributeInfo(&self) -> windows::core::Result<IEnumTfDisplayAttributeInfo> {
+        let items = display_attr::make_all();
+        Ok(display_attr::EnumDisplayAttrInfo::new(items))
+    }
+
+    fn GetDisplayAttributeInfo(
+        &self,
+        guid: *const GUID,
+    ) -> windows::core::Result<ITfDisplayAttributeInfo> {
+        if guid.is_null() {
+            return Err(windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG));
+        }
+        display_attr::get_by_guid(unsafe { &*guid })
+    }
 }

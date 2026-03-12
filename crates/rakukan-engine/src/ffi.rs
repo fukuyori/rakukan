@@ -132,13 +132,18 @@ pub extern "C" fn engine_bg_start(handle: *mut c_void, n_cands: u32) -> bool {
     engine.bg_start(n_cands as usize)
 }
 
-/// BG 変換状態を返す: "idle" / "running" / "done" / "locked"
-/// 戻り値は static str なので解放不要。
+/// BG 変換状態を返す: "idle" / "running" / "done"
+/// 戻り値は null 終端の static バイト列なので解放不要。
+/// NOTE: Rust の &str は null 非終端なので s.as_ptr() を直接返してはいけない。
+///       CStr::from_ptr() が "done" の後のメモリをゴミとして読み続けるため。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_bg_status(handle: *mut c_void) -> *const c_char {
     let _engine = unsafe { &*(handle as *const RakunEngine) };
-    let s = crate::conv_cache::status();
-    s.as_ptr() as *const c_char  // static lifetime - 解放不要
+    match crate::conv_cache::status() {
+        "running" => b"running\0".as_ptr() as *const c_char,
+        "done"    => b"done\0".as_ptr()    as *const c_char,
+        _         => b"idle\0".as_ptr()    as *const c_char,
+    }
 }
 
 /// key が一致する BG 変換結果を取得する。
@@ -256,20 +261,19 @@ pub extern "C" fn engine_merge_candidates(
 pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if engine.is_kanji_ready() { return; }
+    set_last_error(String::new());  // clear
     let config = engine.get_config().clone();
     std::thread::spawn(move || {
+        set_last_error("model loading...".to_string());
         match RakunEngine::build_converter(&config) {
             Ok(converter) => {
-                // エンジンが既に破棄されている可能性があるため、グローバル経由で注入できない。
-                // 呼び出し元 (rakukan-tsf) が engine_is_kanji_ready をポーリングして
-                // engine_inject_converter を呼ぶパターンを取る。
-                // ここでは conv_cache 経由で保管しておく。
-                tracing::info!("model load complete");
-                // 仮置き: converter を持ったままスレッドが終わる
-                // → engine_poll_model_ready / engine_inject_converter で回収
+                set_last_error("model load complete".to_string());
                 let _ = PENDING_CONVERTER.lock().map(|mut g| *g = Some(converter));
             }
-            Err(e) => tracing::warn!("model load failed: {e}"),
+            Err(e) => {
+                let msg = format!("model load failed: {e}");
+                set_last_error(msg);
+            }
         }
     });
 }
@@ -396,4 +400,20 @@ pub extern "C" fn engine_learn(handle: *mut c_void, reading: *const c_char, surf
     let surface = unsafe { from_cstr(surface) }.to_string();
     if reading.is_empty() || surface.is_empty() { return; }
     engine.learn(&reading, &surface);
+}
+
+// ─── 最後のエラーメッセージ（診断用）────────────────────────────────────────
+
+static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+
+fn set_last_error(msg: String) {
+    if let Ok(mut g) = LAST_ERROR.lock() { *g = msg; }
+}
+
+/// 最後に発生したエラーメッセージを返す（TSF 側ログ用）
+/// 呼び出し側が engine_free_string で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_last_error() -> *mut c_char {
+    let msg = LAST_ERROR.lock().map(|g| g.clone()).unwrap_or_default();
+    unsafe { to_cstr(msg) }
 }

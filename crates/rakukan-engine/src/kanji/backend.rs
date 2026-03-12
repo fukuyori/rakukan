@@ -18,7 +18,7 @@ pub struct ConversionConfig {
 
 impl Default for ConversionConfig {
     fn default() -> Self {
-        Self { max_new_tokens: 50 }
+        Self { max_new_tokens: 15 }
     }
 }
 
