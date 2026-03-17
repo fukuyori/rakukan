@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.3.2] - 2026-03-17
+
+### Fixed
+
+#### CUDA 対応・UIフリーズ修正
+
+- **Activate 時の UIスレッドブロックを解消**（`state.rs` / `factory.rs`）
+  - エンジン DLL ロード（CUDA 初期化で最大6秒かかる処理）を `Activate` から切り出し、
+    バックグラウンドスレッド（`engine_start_bg_init`）で非同期に実行するよう変更
+  - `OnKeyDown` の `Activate` スパンが 7ms 以下に短縮（修正前: 最大 5.7 秒）
+  - アプリ切り替え時にメモ帳・エディタ等が「応答なし」になる問題を解消
+
+- **`rakukan_engine_cuda.dll` のロード失敗を修正**
+  - `llama-cpp-sys-2` を 0.1.137 → 0.1.138 に更新
+    （0.1.137 が要求していた `nvcudart_hybrid64.dll` は CUDA 13.x Toolkit に非同梱）
+  - CUDA 13.2 環境でのフルビルドにより `cublas64_13.dll` リンクの DLL を生成
+  - 不足 CUDA DLL（`nvcudart_hybrid64.dll` / `cublas64_13.dll` / `cublasLt64_13.dll` /
+    `cudart64_13.dll`）を `C:\\Windows\\System32` に手動配置することで解消
+
+### Changed
+
+- **`config.toml` の `gpu_backend` 説明を拡充**（`config/config.toml` / `config.rs`）
+  - `cuda` / `vulkan` / `cpu` の各オプションと対応 GPU を明記
+  - コメントアウトされた3行を並べて切り替えやすく整理
+
+- **Inno Setup の `config.toml` 配置先を修正**（`rakukan_installer.iss`）
+  - `{app}`（`%LOCALAPPDATA%\\rakukan`）から `%APPDATA%\\rakukan`（Roaming）に変更
+  - rakukan が実際に読む場所と一致させた
+  - `GetRoamingConfigDir()` 関数を追加（UAC 昇格時も正しいユーザーパスを取得）
+
+### Notes
+
+- CUDA 動作には CUDA 13.x Toolkit のインストールと、以下の DLL を
+  `C:\\Windows\\System32` へ手動コピーする作業が必要（初回のみ）:
+  - `nvcudart_hybrid64.dll`（`cudart64_13.dll` のコピー）
+  - `cublas64_13.dll`
+  - `cublasLt64_13.dll`
+  - `cudart64_13.dll`
+- これらのコピーは将来のバージョンでインストーラーに組み込む予定
+
 ## [0.3.1] - 2026-03-12
 
 ### Fixed

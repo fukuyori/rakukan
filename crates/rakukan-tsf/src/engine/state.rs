@@ -6,7 +6,7 @@
 //! - 非ホットパス（Activate, BG スレッド): `lock()` を使用可。
 
 use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicU8, Ordering as AO};
+use std::sync::atomic::{AtomicU8, AtomicBool, Ordering as AO};
 use windows::core::GUID;
 use super::input_mode::InputMode;
 use rakukan_engine_abi::{DynEngine, install_dir};
@@ -50,6 +50,73 @@ unsafe impl Sync for EngineWrapper {}
 pub static RAKUKAN_ENGINE: LazyLock<Mutex<EngineWrapper>> =
     LazyLock::new(|| Mutex::new(EngineWrapper(None)));
 
+/// バックグラウンドエンジン初期化が既に起動済みかどうかのフラグ。
+/// Activate ごとに重複スポーンしないために使う。
+static ENGINE_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// エンジン DLL のロードをバックグラウンドスレッドで開始する。
+///
+/// Activate（UIスレッド）からの呼び出し専用。
+/// DLL ロードは重いため（CUDA 初期化で数秒かかることがある）UIスレッドをブロックしない。
+/// 既に起動済みの場合は何もしない（二重スポーン防止）。
+/// ロード完了後、辞書・モデルのバックグラウンドロードを開始し、
+/// `LANGBAR_UPDATE_PENDING` をセットして言語バー表示を更新する。
+pub fn engine_start_bg_init() {
+    // すでに起動済みなら何もしない（エンジンが既に存在する場合も不要）
+    if ENGINE_INIT_STARTED.swap(true, AO::AcqRel) {
+        // 既存エンジンで辞書・モデルがまだ未ロードなら起動する
+        if let Ok(mut g) = RAKUKAN_ENGINE.try_lock() {
+            if let Some(eng) = g.0.as_mut() {
+                if !eng.is_dict_ready()  { eng.start_load_dict(); }
+                if !eng.is_kanji_ready() { eng.start_load_model(); }
+            }
+        }
+        tracing::debug!("engine_start_bg_init: already started, skipping DLL load");
+        return;
+    }
+    tracing::info!("engine_start_bg_init: spawning background engine init thread");
+    std::thread::Builder::new()
+        .name("rakukan-engine-init".into())
+        .spawn(|| {
+            tracing::info!("engine-init: starting DLL load");
+            let load_result = {
+                match RAKUKAN_ENGINE.lock() {
+                    Ok(mut g) => {
+                        if g.0.is_some() {
+                            tracing::info!("engine-init: engine already present, skipping");
+                            return;
+                        }
+                        match create_engine() {
+                            Ok(e) => { g.0 = Some(e); Ok(()) }
+                            Err(e) => Err(e),
+                        }
+                    }
+                    Err(_) => Err(anyhow::anyhow!("engine mutex poisoned")),
+                }
+            };
+            match load_result {
+                Ok(()) => {
+                    // 辞書・モデルのバックグラウンドロードを起動
+                    if let Ok(mut g) = RAKUKAN_ENGINE.lock() {
+                        if let Some(eng) = g.0.as_mut() {
+                            if !eng.is_dict_ready()  { eng.start_load_dict(); }
+                            if !eng.is_kanji_ready() { eng.start_load_model(); }
+                        }
+                    }
+                    tracing::info!("engine-init: engine created successfully");
+                    // 言語バーのアイコン・ツールチップを更新するよう通知
+                    langbar_update_set();
+                }
+                Err(e) => {
+                    tracing::error!("engine-init: DLL load failed: {e}");
+                    // 次回 Activate で再試行できるようフラグをリセット
+                    ENGINE_INIT_STARTED.store(false, AO::Release);
+                }
+            }
+        })
+        .ok();
+}
+
 /// ホットパス用: ブロックしない。取れなければ Err を返す。
 #[inline]
 pub fn engine_try_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
@@ -68,7 +135,10 @@ pub fn engine_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
     }
 }
 
-/// エンジンを作成して返す（未初期化の場合のみ作成する）
+/// エンジンを作成して返す（未初期化の場合のみ作成する）。
+/// 現在は engine_start_bg_init() が初期化を担当するため直接呼ばれないが、
+/// engine_reload() 等の内部用途・将来の拡張のために残す。
+#[allow(dead_code)]
 pub fn engine_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
     {
         let mut g = engine_get()?;
@@ -88,30 +158,9 @@ pub fn engine_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrappe
     engine_get()
 }
 
-/// ホットパス用 engine_get_or_create: ブロックしない
+/// ホットパス用: エンジンを取得するだけ（DLL ロードしない）。
+/// DLL ロードは engine_start_bg_init() が担当する。
 pub fn engine_try_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
-    {
-        let g = engine_try_get()?;
-        if g.0.is_none() {
-            if let Ok(mut g2) = RAKUKAN_ENGINE.lock() {
-                if g2.0.is_none() {
-                    match create_engine() {
-                        Ok(e) => {
-                            g2.0 = Some(e);
-                            drop(g2);
-                            if let Ok(mut g3) = RAKUKAN_ENGINE.lock() {
-                                if let Some(eng) = g3.0.as_mut() {
-                                    if !eng.is_dict_ready()  { eng.start_load_dict(); }
-                                    if !eng.is_kanji_ready() { eng.start_load_model(); }
-                                }
-                            }
-                        }
-                        Err(e) => tracing::error!("engine create failed: {e}"),
-                    }
-                }
-            }
-        }
-    }
     engine_try_get()
 }
 
@@ -134,6 +183,8 @@ pub fn engine_force_recreate() {
 /// エンジンを破棄した後、バックグラウンドで再生成を試みる。
 pub fn engine_reload() {
     engine_force_recreate();
+    // 次回 Activate で engine_start_bg_init が再度スポーンできるようフラグをリセット
+    ENGINE_INIT_STARTED.store(false, AO::Release);
     // バックグラウンドで再生成（UIスレッドをブロックしない）
     std::thread::spawn(|| {
         match RAKUKAN_ENGINE.lock() {
@@ -714,7 +765,7 @@ pub fn caret_rect_get() -> RECT {
 // 言語バー表示を更新するためのフラグ。
 // STA スレッドが次回キー入力時にこれを確認して OnUpdate を呼ぶ。
 
-use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+use std::sync::atomic::Ordering as AtomicOrdering;
 
 pub static LANGBAR_UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
 

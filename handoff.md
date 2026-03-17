@@ -1,7 +1,7 @@
-# rakukan handoff — 2026-03-12
+# rakukan handoff — 2026-03-17
 
 ## 現在のバージョン
-v0.3.1（`VERSION` / `CHANGELOG.md` 更新済み）
+v0.3.2（`VERSION` / `CHANGELOG.md` / `Cargo.toml` 更新済み）
 
 ## プロジェクト構成
 
@@ -12,7 +12,10 @@ v0.3.1（`VERSION` / `CHANGELOG.md` 更新済み）
 | `crates/rakukan-engine-abi/src/lib.rs` | エンジン DLL FFI インターフェース |
 | `crates/rakukan-tsf/src/tsf/factory.rs` | TSF メインロジック（キーハンドリング・変換フロー） |
 | `crates/rakukan-tsf/src/tsf/candidate_window.rs` | 候補ウィンドウ（GDI描画 + WM_TIMERポーリング） |
-| `crates/rakukan-tsf/src/engine/state.rs` | SessionState 定義 |
+| `crates/rakukan-tsf/src/engine/state.rs` | SessionState 定義・エンジン初期化 |
+| `crates/rakukan-tsf/src/engine/config.rs` | config.toml 読み込み・デフォルト生成 |
+| `config/config.toml` | サンプル設定ファイル |
+| `rakukan_installer.iss` | Inno Setup インストーラースクリプト |
 
 ## ビルドコマンド
 
@@ -28,76 +31,59 @@ cargo make reinstall
 > **注意**: エンジン DLL の変更を `reinstall` だけで反映しようとすると
 > IME がランゲージバーで選択不能になる。FFI/vtable 変更は必ず `build-engine` から。
 
-## 今セッションで修正したバグ（v0.3.1）
+## v0.3.2 で修正・変更した内容
 
-### [FIX] bg_start 直後のレース条件（conv_cache.rs）
-**症状**: 長い文章や新しい文章を変換すると LLM 変換が失敗し辞書候補のみ表示  
-**原因**: `bg_start()` は `pending` に積んで即リターンするため呼び出し直後は
-`State::Idle && pending=Some`。`wait_done_timeout` はこの状態を「変換未起動」と
-誤判定して即 `false` を返していた。  
+### [FIX] Activate 時の UIスレッドブロック（state.rs / factory.rs）
+**症状**: アプリ切り替え時にメモ帳等が「応答なし」になる（最大 5.7 秒フリーズ）
+**原因**: `Activate`（UIスレッド）内で `engine_get_or_create()` → CUDA DLL ロードを同期実行
 **修正**:
-- `wait_done_timeout`: `Idle && pending=Some` でも Condvar で待機
-- `worker_loop`: `pending → Running` 遷移時に `notify_all` を追加
+- `engine_start_bg_init()` を追加（DLL ロードを別スレッドで非同期実行）
+- `ENGINE_INIT_STARTED: AtomicBool` で二重スポーン防止
+- `Activate` 内を `engine_start_bg_init()` 1行に置き換え
+- `engine_try_get_or_create()` から同期 DLL ロードを除去
 
-### [FIX] 前変換の converter 貸し出し中に新変換を開始した場合（factory.rs）
-**症状**: 連続して異なる文章を変換すると 1 回目が失敗  
-**原因**: 前の変換の converter が conv_cache に貸し出されたまま → `kanji_ready=false`
-→ `bg_start` がスキップ → タイマーに任せるが前変換のキーで mismatch  
-**修正**: `kanji_ready=false && bg=running` の場合、前 bg の完了を待って
-`bg_reclaim` し新しいキーで `bg_start` → `bg_wait_ms`
-
-### [FIX] bg_take_candidates キー不一致後の再試行（factory.rs）
-**症状**: 変換結果が 1 候補（辞書のみ）になる  
-**原因**: `bg_take_candidates` が `preedit_display()` をキーとして使うが
-`bg_start` のキーは `hiragana_buf` → 不一致で None  
-**修正**: `hiragana_text()` を優先キーとして使用。不一致の場合は
-`bg_reclaim → bg_start → bg_wait_ms` でブロッキング再試行
-
-### [FIX] 文節確定後 remainder が二重表示（factory.rs）
-**症状**: 「ほんじつは」を確定すると「本日はいいてんきです」の後に「いいてんきです」が追加表示  
-**原因**: `commit_then_start_composition` の `EndComposition` が
-composition 全体（確定部 + remainder）をコミットした後に
-新 composition で remainder を再追加していた  
+### [FIX] rakukan_engine_cuda.dll のロード失敗
+**症状**: CUDA モードで `DLL load failed: rakukan_engine_cuda.dll`
+**原因**:
+1. `llama-cpp-sys-2 0.1.137` が `nvcudart_hybrid64.dll` を要求するが CUDA 13.x Toolkit に非同梱
+2. `cublas64_13.dll` 等が System32 になく、DLL ロード時に見つからない
 **修正**:
-- `EndComposition` 前に `SetText(commit_text)` で composition を確定テキストのみに縮小
-- `EndComposition` 後の挿入点を `ctx.GetEnd(ec)` に変更（`get_cursor_range` が先頭を返す問題を回避）
+- `llama-cpp-sys-2` を 0.1.138 に更新（`cargo update`）
+- `C:\rb`（ビルドキャッシュ）を削除してフルビルド（31分）
+- 以下の DLL を `C:\Windows\System32` に手動コピー（管理者権限）:
+  - `nvcudart_hybrid64.dll`（`cudart64_13.dll` のコピー）
+  - `cublas64_13.dll`
+  - `cublasLt64_13.dll`
+  - `cudart64_13.dll`
 
-### [FIX] LLM_WAIT_MAX_MS タイムアウト（factory.rs）
-**症状**: 長い文章（10 文字以上）で変換が失敗  
-**原因**: 固定 3000ms が LLM 推論時間を下回る場合があった  
-**修正**: `基本 3 秒 + 1 文字 × 300ms、上限 15 秒` で動的に設定
+### [CHANGED] config.toml の gpu_backend 説明拡充
+- `cuda` / `vulkan` / `cpu` の説明と対応 GPU を明記
+- `config/config.toml` と `config.rs` の `default_config_text()` 両方を更新
 
-## 現在の on_convert フロー（完成版）
+### [CHANGED] Inno Setup の config.toml 配置先修正
+- `{app}`（LocalAppData）→ `%APPDATA%\rakukan`（Roaming）に修正
+- `GetRoamingConfigDir()` 関数を追加
 
-```
-Space押下
-  │
-  ├─ [bg=idle, kanji_ready=true]
-  │     bg_start → bg_wait_ms(動的) → 完了
-  │         └─ bg_take_candidates(hira_key)
-  │               Some → merge → activate_selecting → 表示
-  │               None → bg_reclaim → bg_start → bg_wait_ms → retry
-  │
-  ├─ [bg=running, kanji_ready=false]  ← 前変換の conv 貸し出し中
-  │     prev bg_wait_ms → bg_reclaim → bg_start → bg_wait_ms(動的)
-  │         └─ 同上
-  │
-  └─ bg_wait_ms タイムアウト
-        WM_TIMER(80ms ポーリング) にフォールバック
-        → 候補ウィンドウのみ自動更新（composition は次のキー入力で更新）
-```
+## CUDA 動作環境（実機確認済み）
 
-## 次に取り組む候補
+| 項目 | 内容 |
+|------|------|
+| GPU | NVIDIA GeForce RTX 5070 |
+| CUDA Toolkit | 13.2 |
+| ドライバー | 591.86 |
+| llama-cpp-sys-2 | 0.1.138 |
+| 変換速度 | 127〜444ms（CPUとほぼ同等、モデルが小さいため） |
 
-- [ ] ライブ変換（ライブ変換）: 入力中にリアルタイムで変換候補を更新
-  - MS-IME / Google IME にない Windows 独自機能になり得る差別化ポイント
-  - 実装コスト大（キー入力のたびに bg_start → WM_TIMER 更新が必要）
-- [ ] SplitPreedit の複数文節連続変換（「本日は」確定後に「いいてんき」を自動変換開始）
-- [ ] WM_TIMER フォールバック時の composition text 更新（現状は次のキー入力まで遅延）
+## 残課題
+
+- [ ] CUDA DLL（`cublas64_13.dll` 等）の System32 コピーをインストーラーに組み込む
+- [ ] ライブ変換（Phase 4）
+- [ ] SplitPreedit の複数文節連続変換
+- [ ] WM_TIMER フォールバック時の composition text 更新
 
 ## ログ収集コマンド
 
 ```powershell
 Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 80 |
-  Select-String "on_convert|bg_wait|completed|MISMATCH|kanji_ready|waiting|update_comp"
+  Select-String "on_convert|bg_wait|completed|engine-init|engine created|DLL load|SLOW"
 ```

@@ -38,6 +38,7 @@ $llamaGlob      = Join-Path $BuildDir "$profileDir\build\llama-cpp-sys-2-*"
 $ninjaStamp     = Join-Path $BuildDir "ninja_generator.stamp"
 
 $env:CARGO_TARGET_DIR = $BuildDir
+$null = New-Item -ItemType Directory -Force -Path $BuildDir
 
 # --- Cargo build helper ---
 function Invoke-CargoBuild {
@@ -124,6 +125,7 @@ if ($needNinja) {
             Write-Host "    Removing: $($_.FullName)"
             Remove-Item $_.FullName -Recurse -Force
         }
+        $null = New-Item -ItemType Directory -Force -Path (Split-Path $ninjaStamp)
         $stampVal | Set-Content $ninjaStamp -NoNewline
     } else {
         Write-Host "  Generator unchanged (Ninja); skipping cache wipe"
@@ -134,6 +136,21 @@ if ($nvcc) {
     $env:CUDACXX   = "nvcc"
     $env:CUDAFLAGS = "--allow-unsupported-compiler"
     Write-Host "[engine] CUDA: CUDACXX=nvcc CUDAFLAGS=--allow-unsupported-compiler"
+    # cudart.lib / cublas.lib のリンクに必要な CUDA lib パスを LIB に追加
+    $cudaLibPath = $null
+    if ($env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\lib\x64")) {
+        $cudaLibPath = "$env:CUDA_PATH\lib\x64"
+    } elseif (Test-Path "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA") {
+        $cudaLibPath = Get-ChildItem "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA" -Directory |
+                       Sort-Object Name -Descending | Select-Object -First 1 |
+                       ForEach-Object { "$($_.FullName)\lib\x64" }
+    }
+    if ($cudaLibPath -and (Test-Path $cudaLibPath)) {
+        $env:LIB = "$cudaLibPath;$env:LIB"
+        Write-Host "[engine] CUDA lib path added to LIB: $cudaLibPath"
+    } else {
+        Write-Warning "[engine] CUDA lib path not found; cudart.lib / cublas.lib may be missing"
+    }
 }
 
 # --- CPU DLL ---

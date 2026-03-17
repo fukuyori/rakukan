@@ -69,7 +69,7 @@ use crate::{
         keymap::Keymap,
         state::{
             composition_clone, composition_set, composition_take,
-            engine_try_get_or_create, engine_get_or_create, engine_get,
+            engine_try_get_or_create, engine_get,
             session_get, session_is_selecting_fast,
             caret_rect_get, caret_rect_set,
             SessionState,
@@ -167,23 +167,12 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             inner.keymap     = Keymap::load();
         }
 
-        // エンジン事前初期化（漢字モデルはバックグラウンドで）
-        // エンジン DLL のロードに失敗しても Activate() 自体は成功させる。
-        // 失敗すると Windows TSF が TIP を壊れているとマークし選択不可になるため。
-        // エンジンなしでも辞書ロード済み or 後ロードで動作継続できる。
-        {
-            match engine_get_or_create() {
-                Ok(mut guard) => {
-                    if let Some(engine) = guard.as_mut() {
-                        if !engine.is_kanji_ready() { engine.start_load_model(); }
-                        if !engine.is_dict_ready()  { engine.start_load_dict(); }
-                    }
-                }
-                Err(e) => {
-                    tracing::error!("Activate: engine init failed (continuing without engine): {e}");
-                }
-            }
-        }
+        // エンジン非同期初期化
+        // DLL ロードは重い（CUDA 初期化で数秒かかる）ため、バックグラウンドスレッドで行う。
+        // UIスレッドをブロックしないことでアプリのハングを防ぐ。
+        // エンジン準備完了後に langbar_update_take() が true になり、
+        // 次回 OnKeyDown で言語バーが更新される。
+        crate::engine::state::engine_start_bg_init();
 
         // KeyEventSink 登録
         unsafe {
@@ -316,7 +305,7 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         // 不要になるため、converter の回収有無に関わらず必ず reset_all() を呼ぶ。
         // ※ 以前は conv が Some の場合に return していたため hiragana_buf が残り、
         //    次のキー入力で古いひらがなが末尾に追加される「途中切れ」バグがあった。
-        if let Ok(mut g) = engine_get_or_create() {
+        if let Ok(mut g) = engine_get() {
             if let Some(e) = g.as_mut() {
                 e.bg_reclaim();
                 e.reset_all();
@@ -1837,7 +1826,7 @@ fn convert_split_target(
 #[allow(dead_code)]
 fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
     let preedit = {
-        let mut guard = engine_get_or_create()
+        let mut guard = engine_get()
             .map_err(|e| anyhow::anyhow!("engine_commit_hiragana: engine unavailable: {e}"))?;
         let engine = guard.as_mut()
             .ok_or_else(|| anyhow::anyhow!("engine_commit_hiragana: engine is None"))?;

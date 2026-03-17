@@ -374,9 +374,20 @@ warn_on_unknown_key = true
 # 旧形式との互換用。
 # num_candidates = 9
 
-# GPU バックエンドやモデル切替は再インストール/再ビルド前提です。
+# ── GPU バックエンド ────────────────────────────────────────────────────────
+# 変更後は cargo make build-engine && cargo make reinstall が必要です。
+# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
+# "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
+# "cpu"    : CPU のみ（GPU なし、VMware 等）
+# コメントを外して gpu_backend の行を有効にしてください。
 # gpu_backend = "cuda"
+# gpu_backend = "vulkan"
+# gpu_backend = "cpu"
+
+# 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
 # main_gpu = 0
+
+# LLM モデルサイズ（"small" / "xsmall"）
 # model_variant = "small"
 "#
 }
