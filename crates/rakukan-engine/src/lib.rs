@@ -32,6 +32,58 @@ use kanji::{registry, Backend as KarukanBackend};
 use thiserror::Error;
 use tracing::{debug, info};
 
+// ── コンテキストトリミング ────────────────────────────────────────────────────
+
+/// テキストから末尾 `n` 文の開始バイト位置を返す。
+///
+/// fast-bunkai の BasicRule / LinebreakAnnotator 相当の純 Rust 実装。
+/// 文境界は `。！？!?.．\n` の直後とみなす。
+/// 文境界が `n` 個未満の場合はテキスト全体の先頭（0）を返す。
+fn last_n_sentences_start(text: &str, n: usize) -> usize {
+    let chars: Vec<(usize, char)> = text.char_indices().collect();
+    let len = chars.len();
+    let mut boundaries: Vec<usize> = Vec::new();
+    let mut i = 0;
+    while i < len {
+        let ch = chars[i].1;
+        if matches!(ch, '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '!' | '?' | '.' | '\u{FF0E}' | '\n') {
+            // 句読点・空白が連続する場合はまとめてスキップ
+            let mut j = i + 1;
+            while j < len && matches!(chars[j].1,
+                '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '!' | '?' | '.' | '\u{FF0E}'
+                | ' ' | '\u{3000}' | '\n') {
+                j += 1;
+            }
+            if j < len {
+                boundaries.push(chars[j].0);
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    // 末尾から n 個目の境界を返す。境界が足りなければ先頭。
+    if boundaries.len() >= n {
+        boundaries[boundaries.len() - n]
+    } else {
+        0
+    }
+}
+
+/// 直前の文字種から判定したコンテキスト幅。
+/// ASCII 記号の全角・半角変換に使用する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextWidth {
+    /// ひらがな・全角カタカナ（長音符 → ー、記号 → 全角）
+    Kana,
+    /// 半角カタカナ（長音符 → ｰ、記号 → 半角）
+    HankakuKana,
+    /// 全角英数・全角記号（記号 → 全角）
+    Full,
+    /// 半角英数・半角記号・空（記号 → 半角）
+    Half,
+}
+
 #[derive(Debug, Error)]
 pub enum EngineError {
     #[error("エンジン初期化失敗: {0}")]
@@ -136,6 +188,22 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
+        // ASCII 記号のコンテキスト判定
+        // ローマ字ルールに登録されていない ASCII 記号（U+0021–U+007E のうち英数字以外）を
+        // 直前の文字種に応じて全角・半角・長音符に変換する。
+        // 未確定ローマ字がある場合は英数字コンテキストとして半角のまま渡す。
+        let is_ascii_symbol = (c as u32) < 0x80
+            && !c.is_ascii_alphanumeric()
+            && c != ' ';
+        if is_ascii_symbol && self.pending_romaji_buf.is_empty() {
+            if let Some(out) = Self::symbol_for_context(&self.hiragana_buf, c) {
+                self.hiragana_buf.push(out);
+                debug!("symbol context {:?} → {:?}", c, out);
+                return self.current_preedit();
+            }
+            // None の場合はローマ字ルールに任せる（句読点変換等）
+        }
+
         self.pending_romaji_buf.push(c);
         match self.romaji.push(c) {
             ConversionEvent::Converted(hiragana) => {
@@ -150,6 +218,93 @@ impl RakunEngine {
             }
         }
         self.current_preedit()
+    }
+
+    /// ASCII 記号のコンテキスト変換。
+    ///
+    /// 直前の文字種を見て、入力された ASCII 記号を適切な文字に変換する。
+    /// `None` を返した場合はローマ字ルールに委ねる（`/`→`・` 等）。
+    ///
+    /// | 直前の文字種               | `-`        | その他 ASCII 記号      |
+    /// |--------------------------|------------|----------------------|
+    /// | ひらがな・全角カタカナ      | `ー`（長音）| 全角記号              |
+    /// | 半角カタカナ               | `ｰ`（長音）| 半角のまま（None）     |
+    /// | 全角英数・全角記号          | `－`       | 全角記号              |
+    /// | 半角英数・半角記号・空      | `-`        | None（ローマ字ルール） |
+    pub(crate) fn symbol_for_context(s: &str, c: char) -> Option<char> {
+        // 直前の文字種を判定
+        let prev = s.chars().last();
+        let width = Self::context_width(prev);
+
+        if c == '-' {
+            // '-' は長音符・ハイフン・全角ハイフンの三択
+            return Some(match width {
+                ContextWidth::Kana     => 'ー',  // 全角長音符
+                ContextWidth::HankakuKana => 'ｰ',  // 半角長音符
+                ContextWidth::Full     => '－',  // 全角ハイフン
+                ContextWidth::Half     => '-',   // 半角ハイフン
+            });
+        }
+
+        // '-' 以外の ASCII 記号
+        // ¥（U+00A5）は全角コンテキストで ￥（U+FFE5）に変換
+        if c == '¥' {
+            return match width {
+                ContextWidth::Kana | ContextWidth::Full => Some('￥'),
+                _ => None,
+            };
+        }
+
+        match width {
+            ContextWidth::Kana | ContextWidth::Full => {
+                // 全角コンテキスト → 全角記号に変換
+                let n = c as u32;
+                if (0x21..=0x7E).contains(&n) {
+                    // U+FF01–U+FF5E への変換
+                    Some(char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c))
+                } else {
+                    None
+                }
+            }
+            ContextWidth::HankakuKana | ContextWidth::Half => {
+                // 半角コンテキスト → ローマ字ルールに任せる
+                None
+            }
+        }
+    }
+
+    /// 直前の文字からコンテキスト幅を判定する。
+    fn context_width(prev: Option<char>) -> ContextWidth {
+        match prev {
+            None => ContextWidth::Half,
+            Some(c) => {
+                let n = c as u32;
+                // ひらがな・全角カタカナ・全角長音符
+                if (0x3041..=0x3096).contains(&n)
+                    || (0x30A1..=0x30F6).contains(&n)
+                    || c == 'ー'
+                {
+                    return ContextWidth::Kana;
+                }
+                // 半角カタカナ・半角長音符
+                if (0xFF65..=0xFF9F).contains(&n) || c == 'ｰ' {
+                    return ContextWidth::HankakuKana;
+                }
+                // 全角ASCII範囲（全角英数記号）U+FF01–U+FF5E
+                if (0xFF01..=0xFF5E).contains(&n) {
+                    return ContextWidth::Full;
+                }
+                // 全角括弧・記号（CJK記号）
+                if matches!(c,
+                    '）'|'］'|'】'|'〕'|'〉'|'》'|'」'|'〟'|
+                    '（'|'「'|'【'|'〔'|'〈'|'《'|'『'|'』'|'〝'|
+                    '、'|'。'|'・'|'…'|'—'|'～'
+                ) {
+                    return ContextWidth::Full;
+                }
+                ContextWidth::Half
+            }
+        }
     }
 
     /// 末尾の未確定 "n" を「ん」として確定する（Convert / CommitRaw 前に呼ぶ）
@@ -169,6 +324,13 @@ impl RakunEngine {
         self.hiragana_buf = text;
         self.pending_romaji_buf.clear();
         self.romaji = RomajiConverter::new();
+    }
+
+    /// ローマ字変換を経由せず hiragana_buf に直接1文字追加する。
+    /// テンキー記号など、かなルールに登録されている文字をそのまま入力する場合に使用する。
+    pub fn push_raw(&mut self, c: char) {
+        // 未確定ローマ字（pending_romaji_buf）がある場合はそのまま残す
+        self.hiragana_buf.push(c);
     }
 
     pub fn backspace(&mut self) -> bool {
@@ -211,14 +373,22 @@ impl RakunEngine {
         debug!("確定: {:?}", text);
         self.committed.push_str(text);
         if self.committed.chars().count() > 200 {
-            let start = self
-                .committed
-                .char_indices()
-                .rev()
-                .nth(199)
-                .map(|(i, _)| i)
-                .unwrap_or(0);
-            self.committed = self.committed[start..].to_string();
+            // 文境界でトリミング: 直近 2 文を残す。
+            // 200 文字単純切りより自然な文脈を LLM に渡せる。
+            let start = last_n_sentences_start(&self.committed, 2);
+            if start > 0 {
+                self.committed = self.committed[start..].to_string();
+            } else {
+                // 文境界が見つからない場合は従来通り直近 200 文字
+                let fallback = self
+                    .committed
+                    .char_indices()
+                    .rev()
+                    .nth(199)
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+                self.committed = self.committed[fallback..].to_string();
+            }
         }
         self.hiragana_buf.clear();
         self.romaji = RomajiConverter::new();
@@ -236,7 +406,7 @@ impl RakunEngine {
         }
     }
 
-    pub fn preedit_is_empty(&self) -> bool { self.hiragana_buf.is_empty() }
+    pub fn preedit_is_empty(&self) -> bool { self.hiragana_buf.is_empty() && self.pending_romaji_buf.is_empty() }
     pub fn get_config(&self) -> &EngineConfig { &self.config }
     pub fn committed_text(&self) -> &str { &self.committed }
     pub fn is_kanji_ready(&self) -> bool { self.kanji.is_some() }
@@ -380,4 +550,136 @@ pub struct ModelInfo {
     pub id: String,
     pub display_name: String,
     pub is_default: bool,
+}
+
+#[cfg(test)]
+mod context_trim_tests {
+    use super::last_n_sentences_start;
+
+    #[test]
+    fn empty_text() {
+        assert_eq!(last_n_sentences_start("", 2), 0);
+    }
+
+    #[test]
+    fn no_boundary() {
+        let text = "文境界のないテキスト";
+        assert_eq!(last_n_sentences_start(text, 2), 0);
+    }
+
+    #[test]
+    fn single_boundary_want_two() {
+        let text = "最初の文。二番目の文";
+        // 境界が1個しかない → 先頭を返す
+        assert_eq!(last_n_sentences_start(text, 2), 0);
+    }
+
+    #[test]
+    fn two_boundaries_want_two() {
+        let text = "最初の文。二番目の文。三番目の文";
+        // 境界が2個 [「二番目」先頭, 「三番目」先頭]、n=2 → 先頭から2個目の境界 = 「二番目」先頭
+        let start = last_n_sentences_start(text, 2);
+        assert_eq!(&text[start..], "二番目の文。三番目の文");
+    }
+
+    #[test]
+    fn multiple_punctuation() {
+        let text = "A！？B。C";
+        // 境界2個 [「B」先頭, 「C」先頭]、n=2 → 「B」先頭
+        let start = last_n_sentences_start(text, 2);
+        assert_eq!(&text[start..], "B。C");
+    }
+
+    #[test]
+    fn linebreak_as_boundary() {
+        let text = "一行目\n二行目\n三行目";
+        // 境界2個 [「二行目」先頭, 「三行目」先頭]、n=2 → 「二行目」先頭
+        let start = last_n_sentences_start(text, 2);
+        assert_eq!(&text[start..], "二行目\n三行目");
+    }
+
+    #[test]
+    fn want_one_sentence() {
+        let text = "文A。文B。文C";
+        // n=1 → 最後の境界 = 「文C」先頭
+        let start = last_n_sentences_start(text, 1);
+        assert_eq!(&text[start..], "文C");
+    }
+}
+
+#[cfg(test)]
+mod minus_context_tests {
+    use super::RakunEngine;
+
+    fn sym(s: &str, c: char) -> Option<char> {
+        RakunEngine::symbol_for_context(s, c)
+    }
+
+    // ─── '-' のテスト ────────────────────────────────────────────────────
+    #[test]
+    fn minus_after_hiragana() {
+        assert_eq!(sym("あ", '-'), Some('ー'));
+        assert_eq!(sym("かいぎ", '-'), Some('ー'));
+    }
+
+    #[test]
+    fn minus_after_zenkaku_katakana() {
+        assert_eq!(sym("ア", '-'), Some('ー'));
+        assert_eq!(sym("ラー", '-'), Some('ー'));
+    }
+
+    #[test]
+    fn minus_after_hankaku_katakana() {
+        assert_eq!(sym("ｶｲｷﾞ", '-'), Some('ｰ'));
+    }
+
+    #[test]
+    fn minus_after_zenkaku_latin() {
+        assert_eq!(sym("ＭＳ", '-'), Some('－'));
+        assert_eq!(sym("１２３", '-'), Some('－'));
+    }
+
+    #[test]
+    fn minus_after_ascii() {
+        assert_eq!(sym("MS", '-'), Some('-'));
+        assert_eq!(sym("090", '-'), Some('-'));
+    }
+
+    #[test]
+    fn minus_repeat() {
+        assert_eq!(sym("-", '-'), Some('-'));    // --- → ---
+        assert_eq!(sym("－", '-'), Some('－'));  // 全角連続
+    }
+
+    #[test]
+    fn minus_at_start() {
+        assert_eq!(sym("", '-'), Some('-'));
+    }
+
+    // ─── その他記号のテスト ───────────────────────────────────────────────
+    #[test]
+    fn symbol_after_hiragana() {
+        assert_eq!(sym("あ", '='), Some('＝'));
+        assert_eq!(sym("あ", '@'), Some('＠'));
+        assert_eq!(sym("あ", '('), Some('（'));
+    }
+
+    #[test]
+    fn symbol_after_zenkaku() {
+        assert_eq!(sym("ＭＳ", '='), Some('＝'));
+        assert_eq!(sym("ａｂｃ", '('), Some('（'));
+    }
+
+    #[test]
+    fn symbol_after_ascii() {
+        // 半角コンテキスト → ローマ字ルールに任せる（None）
+        assert_eq!(sym("MS", '='), None);
+        assert_eq!(sym("MS", '/'), None);
+    }
+
+    #[test]
+    fn symbol_at_start() {
+        assert_eq!(sym("", '='), None);
+        assert_eq!(sym("", '/'), None);
+    }
 }

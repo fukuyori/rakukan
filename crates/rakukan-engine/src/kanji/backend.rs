@@ -158,8 +158,8 @@ impl KanaKanjiConverter {
                 candidates.push(clean);
             }
         } else {
-            // Multiple candidates: use beam search
-            let results = self.model.generate_beam_search(
+            // Multiple candidates: use batched depth-1 beam search (shared KV cache, faster on GPU)
+            let results = self.model.generate_beam_search_d1_greedy(
                 &tokens,
                 self.config.max_new_tokens,
                 eos,

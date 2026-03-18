@@ -64,6 +64,16 @@ pub extern "C" fn engine_free_string(s: *mut c_char) {
 
 // ─── 文字入力 ──────────────────────────────────────────────────────────────────
 
+/// ローマ字変換を経由せず hiragana_buf に直接1文字追加する。
+/// テンキー記号など、かなルールに登録されている文字をそのまま入力する場合に使用する。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_push_raw(handle: *mut c_void, codepoint: u32) {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    if let Some(c) = char::from_u32(codepoint) {
+        engine.push_raw(c);
+    }
+}
+
 /// 1 文字を入力する（Unicode コードポイント）。
 /// 戻り値: 0 = 通常, 1 = BG 変換を新たに起動した
 #[unsafe(no_mangle)]

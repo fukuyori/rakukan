@@ -303,15 +303,23 @@ impl LlamaCppModel {
     ) -> Result<Vec<(Vec<LlamaToken>, f32)>> {
         let backend = get_backend()?;
 
-        // Set n_batch and n_ubatch large enough to avoid batch splitting
-        // which causes "coupled sequences" error
+        // d1_greedy では候補数が多くても品質向上は限定的で、
+        // beam_size が大きいほど n_batch が膨らみ n_ctx を超えてクラッシュする。
+        // 実用上 5 候補あれば十分なため上限を設ける。
+        let beam_size = beam_size.min(5);
+
+        // n_batch / n_ubatch は input_len * beam_size + 生成余裕分 が必要。
+        // ただし llama.cpp は n_batch > n_ctx を許容しないため、
+        // n_ctx を max(self.n_ctx, batch_size) に動的に拡張する。
         let batch_size = input_tokens
             .len()
             .saturating_mul(beam_size)
-            .saturating_add(64)
+            .saturating_add(max_new_tokens.saturating_add(16))
             .min(u32::MAX as usize) as u32;
+        let n_ctx_needed = batch_size.max(self.n_ctx);
         let ctx_params = self
             .context_params()
+            .with_n_ctx(Some(NonZeroU32::new(n_ctx_needed).expect("n_ctx must be non-zero")))
             .with_n_seq_max(beam_size.try_into().unwrap_or(32))
             .with_n_batch(batch_size)
             .with_n_ubatch(batch_size);

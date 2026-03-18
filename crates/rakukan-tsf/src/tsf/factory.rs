@@ -613,6 +613,7 @@ impl TextServiceFactory_Impl {
 
         match action {
             UserAction::Input(c)                       => self.on_input(c, ctx, tid, sink, guard),
+            UserAction::InputRaw(c)                    => self.on_input_raw(c, ctx, tid, sink, guard),
             UserAction::FullWidthSpace                 => self.on_full_width_space(ctx, tid, guard),
             UserAction::Convert                        => self.on_convert(ctx, tid, sink, guard),
             UserAction::CommitRaw                      => self.on_commit_raw(ctx, tid, guard),
@@ -712,6 +713,23 @@ impl TextServiceFactory_Impl {
             update_composition(ctx, tid, sink, preedit)?;
             return Ok(true);
         }
+        drop(guard);
+        update_composition(ctx, tid, sink, preedit)?;
+        Ok(true)
+    }
+
+    /// ローマ字変換を経由せず hiragana_buf に直接書き込む入力処理。
+    /// テンキー記号（/ * - + .）など、かなルールに登録されている文字を
+    /// そのまま入力する場合に使用する。
+    fn on_input_raw(
+        &self, c: char, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        engine.push_raw(c);
+        let preedit = engine.preedit_display();
+        let n_cands = crate::engine::state::get_num_candidates();
+        engine.bg_start(n_cands);
         drop(guard);
         update_composition(ctx, tid, sink, preedit)?;
         Ok(true)
@@ -1869,7 +1887,7 @@ fn engine_convert_sync_multi(
 #[inline]
 fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
     match action {
-        UserAction::Input(_) | UserAction::FullWidthSpace => true,
+        UserAction::Input(_) | UserAction::InputRaw(_) | UserAction::FullWidthSpace => true,
         UserAction::Backspace => has_preedit,
         UserAction::ImeToggle | UserAction::ImeOff | UserAction::ImeOn
         | UserAction::ModeHiragana | UserAction::ModeKatakana | UserAction::ModeAlphanumeric => true,
@@ -1893,6 +1911,7 @@ fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
 fn action_name(a: &UserAction) -> &'static str {
     match a {
         UserAction::Input(_)           => "Input",
+        UserAction::InputRaw(_)        => "InputRaw",
         UserAction::FullWidthSpace     => "FullWidthSpace",
         UserAction::Convert            => "Convert",
         UserAction::CommitRaw          => "CommitRaw",

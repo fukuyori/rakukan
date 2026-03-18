@@ -266,6 +266,23 @@ impl Keymap {
             }
         }
 
+        // ② テンキー記号 → ローマ字変換を経由せず直接入力（InputRaw）
+        // ToUnicode を通すと JIS かなルールで ・ ー 。等に変換されてしまうため先に処理する
+        // 実測 (/*-+. の順に入力): 0x6f=/ 0x6a=* 0x6d=- 0x6b=+ 0x6e=.
+        if !ctrl && !alt {
+            let ch = match vk {
+                0x6F => Some('/'),  // テンキー /
+                0x6A => Some('*'),  // テンキー *
+                0x6D => Some('-'),  // テンキー -
+                0x6B => Some('+'),  // テンキー +
+                0x6E => Some('.'),  // テンキー .
+                _ => None,
+            };
+            if let Some(ch) = ch {
+                return Some(UserAction::InputRaw(ch));
+            }
+        }
+
         // ③ ToUnicode で文字変換（ローマ字入力）
         let key_state = {
             let mut state = [0u8; 256];

@@ -246,25 +246,25 @@ mod tests {
 
     #[test]
     fn test_env_override_cuda() {
-        std::env::set_var("RAKUKAN_BACKEND", "cuda");
+        unsafe { std::env::set_var("RAKUKAN_BACKEND", "cuda"); }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cuda);
-        std::env::remove_var("RAKUKAN_BACKEND");
+        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
     }
 
     #[test]
     fn test_env_override_cpu() {
-        std::env::set_var("RAKUKAN_BACKEND", "cpu");
+        unsafe { std::env::set_var("RAKUKAN_BACKEND", "cpu"); }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        std::env::remove_var("RAKUKAN_BACKEND");
+        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
     }
 
     #[test]
     fn test_env_override_unknown_falls_back_to_cpu() {
-        std::env::set_var("RAKUKAN_BACKEND", "unknown_backend");
+        unsafe { std::env::set_var("RAKUKAN_BACKEND", "unknown_backend"); }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        std::env::remove_var("RAKUKAN_BACKEND");
+        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
     }
 }

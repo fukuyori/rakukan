@@ -1,89 +1,85 @@
-# rakukan handoff — 2026-03-17
+# rakukan handoff — 2026-03-18
 
 ## 現在のバージョン
-v0.3.2（`VERSION` / `CHANGELOG.md` / `Cargo.toml` 更新済み）
+v0.3.3（`Cargo.toml` / `rakukan_installer.iss` / `README.md` / `CHANGELOG.md` 更新済み）
 
 ## プロジェクト構成
 
 | パス | 役割 |
 |------|------|
+| `crates/rakukan-engine/src/lib.rs` | エンジン本体（`push_char` / `push_raw` / コンテキスト判定） |
 | `crates/rakukan-engine/src/conv_cache.rs` | BG変換キャッシュ（状態機械＋Condvar） |
-| `crates/rakukan-engine/src/lib.rs` | エンジン本体（`bg_start` / `bg_reclaim` / `merge_candidates`） |
-| `crates/rakukan-engine-abi/src/lib.rs` | エンジン DLL FFI インターフェース |
-| `crates/rakukan-tsf/src/tsf/factory.rs` | TSF メインロジック（キーハンドリング・変換フロー） |
+| `crates/rakukan-engine/src/kanji/backend.rs` | LLM変換バックエンド（d1_greedy_batch） |
+| `crates/rakukan-engine/src/kanji/llamacpp.rs` | llama.cpp推論（n_ctx動的拡張） |
+| `crates/rakukan-engine/src/ffi.rs` | エンジン DLL FFI（push_raw追加） |
+| `crates/rakukan-engine-abi/src/lib.rs` | エンジン DLL ABI（push_raw追加） |
+| `crates/rakukan-tsf/src/tsf/factory.rs` | TSF メインロジック（InputRaw対応） |
 | `crates/rakukan-tsf/src/tsf/candidate_window.rs` | 候補ウィンドウ（GDI描画 + WM_TIMERポーリング） |
 | `crates/rakukan-tsf/src/engine/state.rs` | SessionState 定義・エンジン初期化 |
 | `crates/rakukan-tsf/src/engine/config.rs` | config.toml 読み込み・デフォルト生成 |
-| `config/config.toml` | サンプル設定ファイル |
-| `rakukan_installer.iss` | Inno Setup インストーラースクリプト |
+| `crates/rakukan-tsf/src/engine/keymap.rs` | キーマップ（テンキー早期処理・InputRaw） |
+| `crates/rakukan-tsf/src/engine/user_action.rs` | UserAction定義（InputRaw追加） |
+| `crates/rakukan-tsf/src/engine/text_util.rs` | 文字種変換（F6/F7/F8完全実装） |
 
 ## ビルドコマンド
 
 ```powershell
-# conv_cache.rs / lib.rs 変更時（エンジン DLL 再ビルドが必要）
+# ABI変更を含む場合（ffi.rs / abi/lib.rs / llamacpp.rs / backend.rs）
 cargo make build-engine
 cargo make reinstall
 
-# factory.rs / candidate_window.rs / state.rs のみ変更時
+# TSF側のみ変更の場合（factory.rs / keymap.rs / text_util.rs 等）
 cargo make reinstall
 ```
 
 > **注意**: エンジン DLL の変更を `reinstall` だけで反映しようとすると
-> IME がランゲージバーで選択不能になる。FFI/vtable 変更は必ず `build-engine` から。
+> IME がランゲージバーで選択不能になる。
 
-## v0.3.2 で修正・変更した内容
+## v0.3.3 で修正・変更した内容
 
-### [FIX] Activate 時の UIスレッドブロック（state.rs / factory.rs）
-**症状**: アプリ切り替え時にメモ帳等が「応答なし」になる（最大 5.7 秒フリーズ）
-**原因**: `Activate`（UIスレッド）内で `engine_get_or_create()` → CUDA DLL ロードを同期実行
-**修正**:
-- `engine_start_bg_init()` を追加（DLL ロードを別スレッドで非同期実行）
-- `ENGINE_INIT_STARTED: AtomicBool` で二重スポーン防止
-- `Activate` 内を `engine_start_bg_init()` 1行に置き換え
-- `engine_try_get_or_create()` から同期 DLL ロードを除去
+### [FIX] バックスペース素通り（子音単体入力中）
+`preedit_is_empty()` が `hiragana_buf` のみ確認し `pending_romaji_buf` を無視していた。
 
-### [FIX] rakukan_engine_cuda.dll のロード失敗
-**症状**: CUDA モードで `DLL load failed: rakukan_engine_cuda.dll`
-**原因**:
-1. `llama-cpp-sys-2 0.1.137` が `nvcudart_hybrid64.dll` を要求するが CUDA 13.x Toolkit に非同梱
-2. `cublas64_13.dll` 等が System32 になく、DLL ロード時に見つからない
-**修正**:
-- `llama-cpp-sys-2` を 0.1.138 に更新（`cargo update`）
-- `C:\rb`（ビルドキャッシュ）を削除してフルビルド（31分）
-- 以下の DLL を `C:\Windows\System32` に手動コピー（管理者権限）:
-  - `nvcudart_hybrid64.dll`（`cudart64_13.dll` のコピー）
-  - `cublas64_13.dll`
-  - `cublasLt64_13.dll`
-  - `cudart64_13.dll`
+### [FIX] 複数候補生成時のクラッシュ
+`d1_greedy_batch` の `n_batch > n_ctx` により llama.cpp の `GGML_ASSERT` が `abort()`。
+`n_ctx` を動的拡張し `beam_size` を最大5にキャップして解消。
 
-### [CHANGED] config.toml の gpu_backend 説明拡充
-- `cuda` / `vulkan` / `cpu` の説明と対応 GPU を明記
-- `config/config.toml` と `config.rs` の `default_config_text()` 両方を更新
+### [FIX] テンキー記号がかな変換される問題
+`UserAction::InputRaw` と `push_raw()` を新設してローマ字変換を完全バイパス。
 
-### [CHANGED] Inno Setup の config.toml 配置先修正
-- `{app}`（LocalAppData）→ `%APPDATA%\rakukan`（Roaming）に修正
-- `GetRoamingConfigDir()` 関数を追加
+### [CHANGED] 変換速度改善
+`generate_beam_search` → `generate_beam_search_d1_greedy_batch`（KVキャッシュ共有）
 
-## CUDA 動作環境（実機確認済み）
+### [CHANGED] F8 半角カタカナ変換を完全実装
+ひらがな・全角カタカナ → 半角カタカナ（濁音/半濁音は結合文字2文字）
+全角英数記号も半角に変換。
 
-| 項目 | 内容 |
-|------|------|
-| GPU | NVIDIA GeForce RTX 5070 |
-| CUDA Toolkit | 13.2 |
-| ドライバー | 591.86 |
-| llama-cpp-sys-2 | 0.1.138 |
-| 変換速度 | 127〜444ms（CPUとほぼ同等、モデルが小さいため） |
+### [CHANGED] F6/F7 に全角変換を追加
+半角英数記号 → 全角、半角カタカナ → 全角カタカナ/ひらがな対応。
+
+### [CHANGED] `-` のコンテキスト判定
+直前文字種に応じて `ー` / `ｰ` / `－` / `-` を自動選択。
+
+### [CHANGED] ASCII 記号のコンテキスト判定
+全角コンテキスト直後の `=`, `@`, `(`, `¥` 等を全角記号に自動変換。
+
+### [CHANGED] コンテキストトリミング改善
+`commit()` の200文字トリミングを文境界（`。！？`等）で行うよう改善。
 
 ## 残課題
 
+- [ ] F9/F10 のローマ字バッファ実装（`romaji_input_log` の導入）
+  - `Vec<String>` でひらがな1文字単位にまとめて蓄積
+  - バックスペース時は `pop()` で対応
+  - F9: `romaji_input_log` を結合して全角化
+  - F10: `romaji_input_log` を結合して半角化
 - [ ] CUDA DLL（`cublas64_13.dll` 等）の System32 コピーをインストーラーに組み込む
 - [ ] ライブ変換（Phase 4）
 - [ ] SplitPreedit の複数文節連続変換
-- [ ] WM_TIMER フォールバック時の composition text 更新
 
 ## ログ収集コマンド
 
 ```powershell
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 80 |
-  Select-String "on_convert|bg_wait|completed|engine-init|engine created|DLL load|SLOW"
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 50 |
+  Select-String "on_convert|bg_wait|completed|engine-init|engine created|DLL load|SLOW|Input|Backspace"
 ```
