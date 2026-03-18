@@ -296,8 +296,14 @@ impl Keymap {
             if c >= 0x20 && !(0x7F..=0x9F).contains(&c) {
                 if let Some(ch) = char::from_u32(c as u32) {
                     // 句読点 → Punctuate アクション
-                    if matches!(ch, '、' | '。' | '，' | '．') {
+                    // 注: '，' '．' はコンテキスト判定のため Input として push_char に委ねる
+                    if matches!(ch, '、' | '。') {
                         return Some(UserAction::Punctuate(ch));
+                    }
+                    // '，' '．' は push_char のコンテキスト判定で '、' '。' '，' '．' ',' '.' に変換
+                    if matches!(ch, '，' | '．') {
+                        let ascii = if ch == '，' { ',' } else { '.' };
+                        return Some(UserAction::Input(ascii));
                     }
                     // Shift + かなモード → 全角英数字に変換
                     if shift && (0x21u16..=0x7Eu16).contains(&c) {

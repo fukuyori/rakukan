@@ -158,12 +158,16 @@ impl KanaKanjiConverter {
                 candidates.push(clean);
             }
         } else {
-            // Multiple candidates: use batched depth-1 beam search (shared KV cache, faster on GPU)
-            let results = self.model.generate_beam_search_d1_greedy(
+            // Multiple candidates: use true beam search for better candidate quality
+            // d1_greedy is faster but generates candidates unrelated to the reading.
+            // Cap beam_size at 3 to balance quality and speed — true beam search
+            // runs eval_sequence() per beam per step so cost grows quickly.
+            let beam_size = num_candidates.min(3);
+            let results = self.model.generate_beam_search(
                 &tokens,
                 self.config.max_new_tokens,
                 eos,
-                num_candidates,
+                beam_size,
             )?;
 
             for (output_tokens, _score) in results {

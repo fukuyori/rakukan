@@ -225,28 +225,42 @@ impl RakunEngine {
     /// 直前の文字種を見て、入力された ASCII 記号を適切な文字に変換する。
     /// `None` を返した場合はローマ字ルールに委ねる（`/`→`・` 等）。
     ///
-    /// | 直前の文字種               | `-`        | その他 ASCII 記号      |
-    /// |--------------------------|------------|----------------------|
-    /// | ひらがな・全角カタカナ      | `ー`（長音）| 全角記号              |
-    /// | 半角カタカナ               | `ｰ`（長音）| 半角のまま（None）     |
-    /// | 全角英数・全角記号          | `－`       | 全角記号              |
-    /// | 半角英数・半角記号・空      | `-`        | None（ローマ字ルール） |
+    /// | 直前の文字種               | `-`        | `,`   | `.`   | その他 ASCII 記号 |
+    /// |--------------------------|------------|-------|-------|-----------------|
+    /// | ひらがな・全角カタカナ      | `ー`（長音）| `、`  | `。`  | 全角記号          |
+    /// | 半角カタカナ               | `ｰ`（長音）| `、`  | `。`  | 半角のまま（None）|
+    /// | 全角英数・全角記号          | `－`       | `，`  | `．`  | 全角記号          |
+    /// | 全角句読点（、。，．）      | `－`       | `、`  | `。`  | 全角記号          |
+    /// | 半角英数・半角記号・空      | `-`        | `,`   | `.`   | None（ローマ字）  |
     pub(crate) fn symbol_for_context(s: &str, c: char) -> Option<char> {
-        // 直前の文字種を判定
         let prev = s.chars().last();
         let width = Self::context_width(prev);
 
         if c == '-' {
-            // '-' は長音符・ハイフン・全角ハイフンの三択
             return Some(match width {
-                ContextWidth::Kana     => 'ー',  // 全角長音符
-                ContextWidth::HankakuKana => 'ｰ',  // 半角長音符
-                ContextWidth::Full     => '－',  // 全角ハイフン
-                ContextWidth::Half     => '-',   // 半角ハイフン
+                ContextWidth::Kana        => 'ー',
+                ContextWidth::HankakuKana => 'ｰ',
+                ContextWidth::Full        => '－',
+                ContextWidth::Half        => '-',
             });
         }
 
-        // '-' 以外の ASCII 記号
+        if c == ',' {
+            return Some(match width {
+                ContextWidth::Kana | ContextWidth::HankakuKana => '、',
+                ContextWidth::Full  => '，',
+                ContextWidth::Half  => ',',
+            });
+        }
+
+        if c == '.' {
+            return Some(match width {
+                ContextWidth::Kana | ContextWidth::HankakuKana => '。',
+                ContextWidth::Full  => '．',
+                ContextWidth::Half  => '.',
+            });
+        }
+
         // ¥（U+00A5）は全角コンテキストで ￥（U+FFE5）に変換
         if c == '¥' {
             return match width {
@@ -257,17 +271,14 @@ impl RakunEngine {
 
         match width {
             ContextWidth::Kana | ContextWidth::Full => {
-                // 全角コンテキスト → 全角記号に変換
                 let n = c as u32;
                 if (0x21..=0x7E).contains(&n) {
-                    // U+FF01–U+FF5E への変換
                     Some(char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c))
                 } else {
                     None
                 }
             }
             ContextWidth::HankakuKana | ContextWidth::Half => {
-                // 半角コンテキスト → ローマ字ルールに任せる
                 None
             }
         }
@@ -283,6 +294,7 @@ impl RakunEngine {
                 if (0x3041..=0x3096).contains(&n)
                     || (0x30A1..=0x30F6).contains(&n)
                     || c == 'ー'
+                    || matches!(c, '、' | '。')  // 和文句読点の直後はかなコンテキスト
                 {
                     return ContextWidth::Kana;
                 }
@@ -298,7 +310,7 @@ impl RakunEngine {
                 if matches!(c,
                     '）'|'］'|'】'|'〕'|'〉'|'》'|'」'|'〟'|
                     '（'|'「'|'【'|'〔'|'〈'|'《'|'『'|'』'|'〝'|
-                    '、'|'。'|'・'|'…'|'—'|'～'
+                    '・'|'…'|'—'|'～'
                 ) {
                     return ContextWidth::Full;
                 }
@@ -681,5 +693,56 @@ mod minus_context_tests {
     fn symbol_at_start() {
         assert_eq!(sym("", '='), None);
         assert_eq!(sym("", '/'), None);
+    }
+
+    // ─── ',' のテスト ────────────────────────────────────────────────────
+    #[test]
+    fn comma_after_hiragana() {
+        assert_eq!(sym("あ", ','), Some('、'));
+        assert_eq!(sym("かいぎ", ','), Some('、'));
+    }
+
+    #[test]
+    fn comma_after_katakana() {
+        assert_eq!(sym("ア", ','), Some('、'));
+        assert_eq!(sym("ｶｲｷﾞ", ','), Some('、')); // 半角カタカナも読点
+    }
+
+    #[test]
+    fn comma_after_zenkaku() {
+        assert_eq!(sym("ＡＢＣ", ','), Some('，'));
+        assert_eq!(sym("１２３", ','), Some('，'));
+    }
+
+    #[test]
+    fn comma_after_kuten() {
+        assert_eq!(sym("あ。", ','), Some('、')); // 句点の直後も読点
+        assert_eq!(sym("あ、", ','), Some('、')); // 読点の直後も読点
+    }
+
+    #[test]
+    fn comma_after_ascii() {
+        assert_eq!(sym("abc", ','), Some(','));
+        assert_eq!(sym("123", ','), Some(','));
+        assert_eq!(sym("", ','), Some(','));
+    }
+
+    // ─── '.' のテスト ────────────────────────────────────────────────────
+    #[test]
+    fn period_after_hiragana() {
+        assert_eq!(sym("あ", '.'), Some('。'));
+    }
+
+    #[test]
+    fn period_after_zenkaku() {
+        assert_eq!(sym("ＡＢＣ", '.'), Some('．'));
+        assert_eq!(sym("１２３", '.'), Some('．'));
+    }
+
+    #[test]
+    fn period_after_ascii() {
+        assert_eq!(sym("abc", '.'), Some('.'));
+        assert_eq!(sym("3", '.'), Some('.')); // 小数点 3.14
+        assert_eq!(sym("", '.'), Some('.'));
     }
 }

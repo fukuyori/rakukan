@@ -19,7 +19,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.3.4"
+#define MyAppVersion   "0.3.3"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 
@@ -96,7 +96,7 @@ Source: "dist\rakukan_engine_vulkan.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; ----- 辞書 -----
-Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
+Source: "dist\rakukan.dict"; DestDir: "{code:GetRoamingConfigDir}\dict"; Flags: ignoreversion
 
 ; ----- デフォルト設定ファイル (既存は上書きしない) -----
 ; config.toml は %APPDATA%\rakukan\ に配置する（rakukan が読む場所）

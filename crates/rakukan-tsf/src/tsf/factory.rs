@@ -2062,10 +2062,19 @@ fn commit_then_start_composition(
         // EndComposition だけだとその全体が確定されてしまうため、
         // 先に SetText で commit_text だけに縮めてから EndComposition する。
         let commit_w: Vec<u16> = commit_text.encode_utf16().collect();
+        // EndComposition 後の挿入位置: composition range の末尾（確定テキストの直後）を保存する。
+        // EndComposition 後は GetSelection が composition 開始位置を返すことがあるため
+        // EndComposition 前に range の末尾を取得しておく。
+        let mut insert_after_commit: Option<windows::Win32::UI::TextServices::ITfRange> = None;
         if let Some(comp) = comp {
             // composition テキストを commit_text だけに縮める
             if let Ok(range) = comp.GetRange() {
                 let _ = range.SetText(ec, 0, &commit_w);
+                // 確定テキストの末尾位置を保存
+                if let Ok(end_range) = range.Clone() {
+                    let _ = end_range.Collapse(ec, TF_ANCHOR_END);
+                    insert_after_commit = Some(end_range);
+                }
             }
             comp.EndComposition(ec)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))?;
@@ -2074,6 +2083,10 @@ fn commit_then_start_composition(
                 .unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
             insert_point.SetText(ec, 0, &commit_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}")))?;
+            if let Ok(end_range) = insert_point.Clone() {
+                let _ = end_range.Collapse(ec, TF_ANCHOR_END);
+                insert_after_commit = Some(end_range);
+            }
         }
 
         if next_preedit.is_empty() {
@@ -2081,10 +2094,11 @@ fn commit_then_start_composition(
         }
 
         // ── Step2: 同セッション内で新 composition 開始 ──
-        // EndComposition 後は確定テキストの直後（= ドキュメント末尾方向）から挿入する。
-        // get_cursor_range は composition 開始位置を返すことがあるため使わず
-        // ctx.GetEnd(ec) で確実に末尾を取得する。
-        let insert_point = ctx.GetEnd(ec).unwrap();
+        // EndComposition 前に保存した確定テキスト末尾位置から新 composition を開始する。
+        // EndComposition 後の GetSelection はカーソルが composition 開始位置を示すことがあり
+        // 使用できない。ctx.GetEnd(ec) はドキュメント末尾を返すため文章途中の編集で問題になる。
+        let insert_point = insert_after_commit
+            .unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
         let cc: ITfContextComposition = ctx.cast()
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}")))?;
         let new_comp = cc.StartComposition(ec, &insert_point, &sink)

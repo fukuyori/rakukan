@@ -396,7 +396,7 @@ Start-Process ctfmon | Out-Null
 Write-Host "[5/6] Setting up dictionaries..."
 Write-Host ""
 
-$dictDir   = Join-Path $env:APPDATA "rakukan\dict"
+$dictDir   = Join-Path $env:LOCALAPPDATA "rakukan\dict"
 New-Item -ItemType Directory -Force -Path $dictDir | Out-Null
 $forceDict = $env:RAKUKAN_FORCE_DICT -eq "1"
 

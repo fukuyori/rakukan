@@ -1,5 +1,55 @@
 # Changelog
 
+## [0.3.4] - 2026-03-18
+
+### Fixed
+
+- **変換後に次の入力をするとカーソルが飛ぶ問題を修正**（`factory.rs`）
+  - 候補選択中に次の文字を打つと新しい composition が文末または文頭に開始されていた
+  - `EndComposition` 前に確定テキストの range 末尾位置を保存し、その位置から新 composition を開始するよう修正
+  - 従来は `ctx.GetEnd(ec)`（ドキュメント末尾）を使用していたため文章途中の編集でカーソルが末尾に飛んでいた
+
+- **候補品質の改善**（`backend.rs`）
+  - `generate_beam_search_d1_greedy`（深さ1ビームサーチ）に切り替えていたが、読みと無関係な候補が生成される問題があった
+  - 真のビームサーチ（`generate_beam_search`）に戻し、`beam_size` を最大3にキャップして速度と品質のバランスを改善
+
+- **辞書が参照できない問題を修正**（`rakukan-dict/src/lib.rs`）
+  - 辞書配置先を `%LOCALAPPDATA%\rakukan\dict\` に明確化（フォールバックを削除）
+  - `rakukan_installer.iss` / `install.ps1` / `download-skk.ps1` / `build-installer.ps1` の辞書パスを統一
+
+### Changed
+
+- **`-`（ハイフン）のコンテキスト判定を拡張**（`lib.rs`）
+  - `,` → `、`（ひらがな直後）/ `，`（全角文字直後）/ `,`（半角直後）
+  - `.` → `。`（ひらがな直後）/ `．`（全角文字直後）/ `.`（半角直後・小数点）
+  - `=`, `@`, `(`, `¥` 等の ASCII 記号も全角コンテキストで全角記号に変換
+
+- **`UserAction::InputRaw` を追加**（`user_action.rs`, `keymap.rs`, `factory.rs`, `lib.rs`, `ffi.rs`, `abi/lib.rs`）
+  - テンキー記号（`/ * - + .`）がかなルール経由で誤変換される問題を根本解決
+  - ローマ字変換を完全バイパスして `hiragana_buf` に直接書き込む経路を新設
+
+- **F8（半角カタカナ）変換を完全実装**（`text_util.rs`）
+  - ひらがな・全角カタカナ → 半角カタカナ（濁音・半濁音は結合文字2文字に展開）
+  - 全角英数記号も半角に変換
+
+- **F6/F7 に全角変換・半角カタカナ対応を追加**（`text_util.rs`）
+  - 半角英数記号 → 全角英数記号
+  - 半角カタカナ → 全角カタカナ/ひらがな（F8後にF7/F6でサイクル可能）
+
+- **コンテキストトリミング改善**（`lib.rs`）
+  - `commit()` の200文字トリミングを文境界（`。！？`等）で行うよう改善
+
+- **バックスペース素通り修正**（`lib.rs`）
+  - `preedit_is_empty()` が `pending_romaji_buf` を無視していた問題を修正
+
+- **`build-installer.ps1` のバージョンを 0.3.4 に更新**
+
+### Notes
+
+- 辞書ファイルの配置先は `%LOCALAPPDATA%\rakukan\dict\` に統一
+- `config.toml` / `keymap.toml` / `user_dict.toml` は `%APPDATA%\rakukan\` に配置
+
+
 ## [0.3.3] - 2026-03-18
 
 ### Fixed
