@@ -13,10 +13,7 @@
 
 param(
     [ValidateSet("debug","release")] [string]$Profile  = "release",
-    [string]$BuildDir = "C:\rb",
-    # -FullClean: delete entire build dir incl. llama/CUDA cache (slow; rarely needed)
-    # Default: clean only rakukan-engine rlib/cdylib, keep llama/CUDA cache (fast)
-    [switch]$FullClean
+    [string]$BuildDir = "C:\rb"
 )
 
 $ErrorActionPreference = "Stop"
@@ -42,34 +39,6 @@ $ninjaStamp     = Join-Path $BuildDir "ninja_generator.stamp"
 
 $env:CARGO_TARGET_DIR = $BuildDir
 $null = New-Item -ItemType Directory -Force -Path $BuildDir
-
-# --- Clean ---
-# -FullClean : remove entire C:\rb\release (incl. llama CUDA cache) -- slow
-# Default    : cargo clean -p rakukan-engine only (keep llama cache)  -- fast
-#
-# Normal engine ABI changes only need the fast (default) clean.
-# Use -FullClean only when upgrading llama-cpp-sys-2 or fixing broken cache.
-if ($FullClean) {
-    Write-Host "[engine] FullClean: removing $BuildDir\$profileDir ..."
-    Remove-Item (Join-Path $BuildDir $profileDir) -Recurse -Force -ErrorAction SilentlyContinue
-} else {
-    Write-Host "[engine] Incremental clean: cargo clean -p rakukan-engine (llama cache preserved)"
-    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    & cargo clean -p rakukan-engine 2>&1 | Out-Null
-    $ErrorActionPreference = $prev
-    # Remove rakukan-engine-abi cache dirs directly in both target locations.
-    # cargo clean -p is unreliable when CARGO_TARGET_DIR differs between build steps.
-    foreach ($root in @($BuildDir, "target")) {
-        Get-ChildItem $root -Recurse -Directory -Filter "rakukan_engine_abi-*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-        # Also remove the .d dependency file and .rlib if present
-        Get-ChildItem "$root" -Recurse -Filter "librakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-        Get-ChildItem "$root" -Recurse -Filter "rakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-    }
-    Write-Host "[engine] rakukan-engine-abi cache cleared"
-}
 
 # --- Cargo build helper ---
 function Invoke-CargoBuild {
@@ -167,7 +136,7 @@ if ($nvcc) {
     $env:CUDACXX   = "nvcc"
     $env:CUDAFLAGS = "--allow-unsupported-compiler"
     Write-Host "[engine] CUDA: CUDACXX=nvcc CUDAFLAGS=--allow-unsupported-compiler"
-    # Add CUDA lib path to LIB for cudart.lib / cublas.lib linking
+    # cudart.lib / cublas.lib のリンクに必要な CUDA lib パスを LIB に追加
     $cudaLibPath = $null
     if ($env:CUDA_PATH -and (Test-Path "$env:CUDA_PATH\lib\x64")) {
         $cudaLibPath = "$env:CUDA_PATH\lib\x64"
@@ -221,20 +190,14 @@ if ($nvcc) {
 $env:CMAKE_GENERATOR  = $null
 $env:CARGO_TARGET_DIR = $null
 
-# Clear rakukan-engine-abi compile cache (both target locations).
-if ($FullClean) {
-    Write-Host "[engine] Clearing rakukan-engine-abi cache..."
-    $prev2 = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    foreach ($root in @($BuildDir, "target")) {
-        Get-ChildItem $root -Recurse -Directory -Filter "rakukan_engine_abi-*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-        Get-ChildItem "$root" -Recurse -Filter "librakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-        Get-ChildItem "$root" -Recurse -Filter "rakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-    }
-    $ErrorActionPreference = $prev2
-}
+# rakukan-engine-abi のコンパイルキャッシュを削除する。
+# engine ABI 変更後に build-tsf (-SkipEngine) を実行すると古いキャッシュが使われ
+# "method not found" エラーになるため、engine ビルド後に必ずキャッシュをクリアする。
+# build-tsf は CARGO_TARGET_DIR を設定しない（デフォルト target/ を使う）ため、
+# ここでも CARGO_TARGET_DIR をリセットしてからクリアする。
+Write-Host "[engine] Clearing rakukan-engine-abi cache..."
+$env:CARGO_TARGET_DIR = $null
+& cargo clean -p rakukan-engine-abi 2>&1 | Out-Null
 
 if ($OwnTranscript) {
     Stop-Transcript | Out-Null

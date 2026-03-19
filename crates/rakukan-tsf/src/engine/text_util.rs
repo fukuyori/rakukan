@@ -1,8 +1,80 @@
+/// ASCII 記号 → 全角記号マッピング（F6/F7 用）
+///
+/// `,` `[` `]` `\` は和文対応の全角記号に変換。
+/// `.` は `。` ではなく `．`（全角ピリオド）に変換（F6/F7 は文字種変換であり句読点変換ではない）。
+/// `-` は `－`（全角ハイフン）に変換（長音符は文脈依存なので F6/F7 では扱わない）。
+/// その他の ASCII 印字可能文字は U+FF01–U+FF5E の全角対応文字に変換。
+pub(crate) fn ascii_to_fullwidth_symbol(c: char) -> char {
+    match c {
+        ',' => '、',
+        '.' => '。',
+        '[' => '「',
+        ']' => '」',
+        '\x5C' | '\u{A5}' => '\u{FFE5}',
+        '-' => '－',
+        _ => {
+            let n = c as u32;
+            if (0x21..=0x7E).contains(&n) {
+                char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
+            } else {
+                c
+            }
+        }
+    }
+}
+
+/// 全角記号 → ASCII 記号マッピング（F8/F10 用）
+pub(crate) fn fullwidth_symbol_to_ascii(c: char) -> char {
+    match c {
+        '、' => ',',
+        '。' => '.',
+        '「' => '[',
+        '」' => ']',
+        '\u{FFE5}' => '\x5C',
+        '－' => '-',
+        'ー' => '-',   // F10: 長音符 → 半角ハイフン
+        '，' => ',',
+        '．' => '.',
+        '［' => '[',
+        '］' => ']',
+        _ => {
+            let n = c as u32;
+            if (0xFF01..=0xFF5E).contains(&n) {
+                char::from_u32(n - 0xFF01 + 0x21).unwrap_or(c)
+            } else {
+                c
+            }
+        }
+    }
+}
+
+/// 全角記号 → 半角カタカナ対応記号マッピング（F8 用）
+pub(crate) fn fullwidth_symbol_to_hankaku(c: char) -> char {
+    match c {
+        '、' => '､',
+        '。' => '｡',
+        '「' => '｢',
+        '」' => '｣',
+        '\u{FFE5}' => '\x5C',
+        '－' => '-',
+        'ー' => 'ｰ',  // F8: 長音符 → 半角長音符
+        _ => {
+            let n = c as u32;
+            if (0xFF01..=0xFF5E).contains(&n) {
+                char::from_u32(n - 0xFF01 + 0x21).unwrap_or(c)
+            } else {
+                c
+            }
+        }
+    }
+}
+
 /// ひらがな → カタカナ変換（F7）
 ///
 /// - ひらがな → 全角カタカナ
 /// - 半角カタカナ → 全角カタカナ
 /// - 半角英数記号(ASCII) → 全角英数記号
+/// - 全角記号はそのまま（長音符 ー は維持）
 /// - その他はそのまま
 pub fn to_katakana(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
@@ -21,14 +93,14 @@ pub fn to_katakana(s: &str) -> String {
             let next = chars.get(i + 1).copied();
             if let Some(kata) = half_kata_to_full(c, next) {
                 result.push(kata.0);
-                i += 1 + kata.1 as usize; // 結合文字を消費したら+1
+                i += 1 + kata.1 as usize;
             } else {
                 result.push(c);
                 i += 1;
             }
         } else if (0x21..=0x7E).contains(&n) {
-            // 半角ASCII印字可能文字 → 全角
-            result.push(char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c));
+            // 半角ASCII印字可能文字 → 全角（記号マッピング適用）
+            result.push(ascii_to_fullwidth_symbol(c));
             i += 1;
         } else {
             result.push(c);
@@ -42,9 +114,9 @@ pub fn to_katakana(s: &str) -> String {
 ///
 /// - 全角カタカナ → ひらがな
 /// - 半角カタカナ → ひらがな
-/// - 半角英数記号(ASCII) → 全角英数記号
+/// - 半角英数記号(ASCII) → 全角記号マッピング適用
+/// - 全角英数 → ひらがなには変換しない（そのまま）
 /// - ひらがなはそのまま
-/// - その他はそのまま
 pub fn to_hiragana(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let chars: Vec<char> = s.chars().collect();
@@ -56,6 +128,10 @@ pub fn to_hiragana(s: &str) -> String {
         if (0x30A1..=0x30F6).contains(&n) {
             // 全角カタカナ → ひらがな
             result.push(char::from_u32(n - 0x60).unwrap_or(c));
+            i += 1;
+        } else if c == 'ー' {
+            // 全角長音符 → ひらがなに対応するものはないのでそのまま
+            result.push(c);
             i += 1;
         } else if (0xFF65..=0xFF9F).contains(&n) {
             // 半角カタカナ → 全角カタカナ → ひらがな
@@ -73,8 +149,8 @@ pub fn to_hiragana(s: &str) -> String {
                 i += 1;
             }
         } else if (0x21..=0x7E).contains(&n) {
-            // 半角ASCII印字可能文字 → 全角
-            result.push(char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c));
+            // 半角ASCII印字可能文字 → 全角記号マッピング適用
+            result.push(ascii_to_fullwidth_symbol(c));
             i += 1;
         } else {
             result.push(c);
@@ -133,33 +209,170 @@ fn half_kata_to_full(c: char, next: Option<char>) -> Option<(char, bool)> {
     Some(r)
 }
 
-/// 全角英数字変換（F9）
-pub fn to_full_latin(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let n = c as u32;
-            // ASCII 印字可能文字 U+0021–U+007E → 全角 U+FF01–U+FF5E
-            if (0x21..=0x7E).contains(&n) {
-                char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
-            } else {
-                c
-            }
-        })
-        .collect()
+/// 文字列を全角英数字にする（ひらがな等はそのまま）
+/// ローマ字ログに使用するため記号は全角記号マッピングを適用
+fn ascii_to_fullwidth(s: &str) -> String {
+    s.chars().map(|c| {
+        let n = c as u32;
+        if (0x21..=0x7E).contains(&n) {
+            ascii_to_fullwidth_symbol(c)
+        } else {
+            c
+        }
+    }).collect()
 }
 
-/// 半角英数字変換（F10）
-pub fn to_half_latin(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            let n = c as u32;
-            if (0xFF01..=0xFF5E).contains(&n) {
-                char::from_u32(n - 0xFF01 + 0x21).unwrap_or(c)
+/// 文字列を半角英数字にする
+fn fullwidth_to_ascii(s: &str) -> String {
+    s.chars().map(|c| {
+        fullwidth_symbol_to_ascii(c)
+    }).collect()
+}
+
+/// 全角文字列を大文字化
+fn fullwidth_to_upper(s: &str) -> String {
+    s.chars().map(|c| {
+        let n = c as u32;
+        // 全角小文字 ａ–ｚ (FF41–FF5A) → 全角大文字 Ａ–Ｚ (FF21–FF3A)
+        if (0xFF41..=0xFF5A).contains(&n) {
+            char::from_u32(n - 0x20).unwrap_or(c)
+        } else {
+            c
+        }
+    }).collect()
+}
+
+/// 全角文字列を先頭だけ大文字化（Ｔｅｓｕｔｏ 形式）
+fn fullwidth_to_title(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        None => String::new(),
+        Some(first) => {
+            let n = first as u32;
+            let upper_first = if (0xFF41..=0xFF5A).contains(&n) {
+                char::from_u32(n - 0x20).unwrap_or(first)
             } else {
-                c
+                first
+            };
+            let rest: String = chars.collect();
+            format!("{}{}", upper_first, fullwidth_to_lower(&rest))
+        }
+    }
+}
+
+fn fullwidth_to_lower(s: &str) -> String {
+    s.chars().map(|c| {
+        let n = c as u32;
+        // 全角大文字 Ａ–Ｚ (FF21–FF3A) → 全角小文字 ａ–ｚ (FF41–FF5A)
+        if (0xFF21..=0xFF3A).contains(&n) {
+            char::from_u32(n + 0x20).unwrap_or(c)
+        } else {
+            c
+        }
+    }).collect()
+}
+
+/// F9 サイクル状態
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LatinCycle {
+    /// 全角小文字（ｔｅｓｕｔｏ）
+    FullLower,
+    /// 全角大文字（ＴＥＳＵＴＯ）
+    FullUpper,
+    /// 全角先頭大文字（Ｔｅｓｕｔｏ）
+    FullTitle,
+    /// 半角小文字（tesuto）
+    HalfLower,
+    /// 半角大文字（TESUTO）
+    HalfUpper,
+    /// 半角先頭大文字（Tesuto）
+    HalfTitle,
+}
+
+impl LatinCycle {
+    /// 現在の文字列からサイクル状態を推定する
+    pub fn detect(s: &str) -> Self {
+        let is_half = s.chars().all(|c| (c as u32) < 0x80 || !(0xFF01..=0xFF5E).contains(&(c as u32)));
+        let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic()
+            || (0xFF21..=0xFF3A).contains(&(c as u32))
+            || (0xFF41..=0xFF5A).contains(&(c as u32)));
+        if !has_alpha { return Self::FullLower; }
+        if is_half {
+            let all_upper = s.chars().filter(|c| c.is_ascii_alphabetic()).all(|c| c.is_uppercase());
+            let all_lower = s.chars().filter(|c| c.is_ascii_alphabetic()).all(|c| c.is_lowercase());
+            if all_lower { Self::HalfLower }
+            else if all_upper { Self::HalfUpper }
+            else { Self::HalfTitle }
+        } else {
+            let all_upper = s.chars().filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32))).all(|c| (0xFF21..=0xFF3A).contains(&(c as u32)));
+            let all_lower = s.chars().filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32))).all(|c| (0xFF41..=0xFF5A).contains(&(c as u32)));
+            if all_lower { Self::FullLower }
+            else if all_upper { Self::FullUpper }
+            else { Self::FullTitle }
+        }
+    }
+
+    /// 次のサイクル状態（F9: 全角サイクル、F10: 半角サイクル）
+    pub fn next_full(self) -> Self {
+        match self {
+            Self::FullLower | Self::HalfLower | Self::HalfUpper | Self::HalfTitle => Self::FullUpper,
+            Self::FullUpper  => Self::FullTitle,
+            Self::FullTitle  => Self::FullLower,
+        }
+    }
+
+    pub fn next_half(self) -> Self {
+        match self {
+            Self::HalfLower | Self::FullLower | Self::FullUpper | Self::FullTitle => Self::HalfUpper,
+            Self::HalfUpper  => Self::HalfTitle,
+            Self::HalfTitle  => Self::HalfLower,
+        }
+    }
+
+    /// サイクル状態を文字列に適用する
+    pub fn apply(self, s: &str) -> String {
+        match self {
+            Self::FullLower => fullwidth_to_lower(&ascii_to_fullwidth(s)),
+            Self::FullUpper => fullwidth_to_upper(&ascii_to_fullwidth(s)),
+            Self::FullTitle => fullwidth_to_title(&ascii_to_fullwidth(s)),
+            Self::HalfLower => fullwidth_to_ascii(s).to_lowercase(),
+            Self::HalfUpper => fullwidth_to_ascii(s).to_uppercase(),
+            Self::HalfTitle => {
+                let half = fullwidth_to_ascii(s);
+                let mut chars = half.chars();
+                match chars.next() {
+                    None => String::new(),
+                    Some(first) => {
+                        format!("{}{}", first.to_uppercase(), chars.as_str().to_lowercase())
+                    }
+                }
             }
-        })
-        .collect()
+        }
+    }
+}
+
+/// F9: 全角英数サイクル変換（ローマ字ログから変換 or 現在の状態から次へ）
+pub fn to_full_latin(s: &str) -> String {
+    let cycle = LatinCycle::detect(s);
+    let next = cycle.next_full();
+    next.apply(s)
+}
+
+/// F10: 半角英数サイクル変換
+pub fn to_half_latin(s: &str) -> String {
+    let cycle = LatinCycle::detect(s);
+    let next = cycle.next_half();
+    next.apply(s)
+}
+
+/// F9/F10 初回変換: ローマ字ログを全角英数（小文字）に変換する
+pub fn romaji_to_fullwidth_latin(romaji: &str) -> String {
+    fullwidth_to_lower(&ascii_to_fullwidth(romaji))
+}
+
+/// F9/F10 初回変換: ローマ字ログを半角英数（小文字）に変換する
+pub fn romaji_to_halfwidth_latin(romaji: &str) -> String {
+    romaji.to_lowercase()
 }
 
 /// 半角カタカナ変換（F8）
@@ -221,13 +434,23 @@ pub fn to_half_katakana(s: &str) -> String {
     }
 
     // ひらがな → 全角カタカナ → 半角カタカナ の2段変換
-    // 全角英数記号(U+FF01–U+FF5E) → 半角ASCII も同時に処理
+    // 全角記号・長音符は fullwidth_symbol_to_hankaku で変換
     let mut result = String::with_capacity(s.len() * 2);
     for c in s.chars() {
         let n = c as u32;
-        // 全角英数記号 → 半角ASCII（ＭＳーＩＭＥ → MS-IME の英数部分）
+        // 全角数字 (FF10–FF19) → 半角数字
+        if (0xFF10..=0xFF19).contains(&n) {
+            result.push(char::from_u32(n - 0xFF10 + 0x30).unwrap_or(c));
+            continue;
+        }
+        // 全角英数記号 (FF01–FF5E) → 半角ASCII（記号は fullwidth_symbol_to_hankaku で処理）
         if (0xFF01..=0xFF5E).contains(&n) {
-            result.push(char::from_u32(n - 0xFF01 + 0x21).unwrap_or(c));
+            result.push(fullwidth_symbol_to_hankaku(c));
+            continue;
+        }
+        // 全角句読点・長音符・和文記号 → 半角カタカナ対応記号
+        if matches!(c, '、'|'。'|'「'|'」'|'\u{FFE5}'|'－'|'ー') {
+            result.push(fullwidth_symbol_to_hankaku(c));
             continue;
         }
         // ひらがな(U+3041–U+3096)は先に全角カタカナに変換
@@ -250,74 +473,114 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_to_katakana_hiragana() {
-        assert_eq!(to_katakana("あいう"), "アイウ");
+    fn katakana_from_hiragana() {
+        assert_eq!(to_katakana("\u{3042}\u{3044}\u{3046}"), "\u{30A2}\u{30A4}\u{30A6}");
     }
 
     #[test]
-    fn test_to_katakana_ascii_to_fullwidth() {
-        assert_eq!(to_katakana("abc123"), "ａｂｃ１２３");
+    fn katakana_symbols_fullwidth() {
+        assert_eq!(to_katakana(",.[\\x5C]"), "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}");
+        assert_eq!(to_katakana("abc123"), "\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}");
     }
 
     #[test]
-    fn test_to_katakana_half_kata_to_full() {
-        assert_eq!(to_katakana("ｶｲｷﾞ"), "カイギ");
+    fn katakana_from_half_kata() {
+        assert_eq!(to_katakana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"), "\u{30AB}\u{30A4}\u{30AE}");
     }
 
     #[test]
-    fn test_to_hiragana_katakana() {
-        assert_eq!(to_hiragana("アイウ"), "あいう");
+    fn hiragana_from_katakana() {
+        assert_eq!(to_hiragana("\u{30A2}\u{30A4}\u{30A6}"), "\u{3042}\u{3044}\u{3046}");
     }
 
     #[test]
-    fn test_to_hiragana_ascii_to_fullwidth() {
-        assert_eq!(to_hiragana("abc123"), "ａｂｃ１２３");
+    fn hiragana_symbols_fullwidth() {
+        assert_eq!(to_hiragana(",.[\\x5C]"), "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}");
     }
 
     #[test]
-    fn test_to_hiragana_half_kata() {
-        assert_eq!(to_hiragana("ｶｲｷﾞ"), "かいぎ");
+    fn hiragana_from_half_kata() {
+        assert_eq!(to_hiragana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"), "\u{304B}\u{3044}\u{304E}");
     }
 
     #[test]
-    fn test_to_full_latin() {
-        assert_eq!(to_full_latin("abc"), "ａｂｃ");
+    fn half_kata_from_hiragana() {
+        assert_eq!(to_half_katakana("\u{3042}\u{3044}\u{3046}"), "\u{FF71}\u{FF72}\u{FF73}");
     }
 
     #[test]
-    fn test_to_half_katakana_hiragana() {
-        assert_eq!(to_half_katakana("あいう"), "ｱｲｳ");
+    fn half_kata_dakuten() {
+        assert_eq!(
+            to_half_katakana("\u{304C}\u{304E}\u{3050}\u{3052}\u{3054}"),
+            "\u{FF76}\u{FF9E}\u{FF77}\u{FF9E}\u{FF78}\u{FF9E}\u{FF79}\u{FF9E}\u{FF7A}\u{FF9E}"
+        );
     }
 
     #[test]
-    fn test_to_half_katakana_dakuten() {
-        assert_eq!(to_half_katakana("がぎぐげご"), "ｶﾞｷﾞｸﾞｹﾞｺﾞ");
+    fn half_kata_handakuten() {
+        assert_eq!(
+            to_half_katakana("\u{3071}\u{3074}\u{3077}\u{307A}\u{307D}"),
+            "\u{FF8A}\u{FF9F}\u{FF8B}\u{FF9F}\u{FF8C}\u{FF9F}\u{FF8D}\u{FF9F}\u{FF8E}\u{FF9F}"
+        );
     }
 
     #[test]
-    fn test_to_half_katakana_handakuten() {
-        assert_eq!(to_half_katakana("ぱぴぷぺぽ"), "ﾊﾟﾋﾟﾌﾟﾍﾟﾎﾟ");
+    fn half_kata_small() {
+        assert_eq!(
+            to_half_katakana("\u{3041}\u{3063}\u{3083}\u{3085}\u{3087}"),
+            "\u{FF67}\u{FF6F}\u{FF6C}\u{FF6D}\u{FF6E}"
+        );
     }
 
     #[test]
-    fn test_to_half_katakana_small() {
-        assert_eq!(to_half_katakana("ぁっゃゅょ"), "ｧｯｬｭｮ");
+    fn half_kata_from_kata() {
+        assert_eq!(to_half_katakana("\u{30AB}\u{30A4}\u{30AE}"), "\u{FF76}\u{FF72}\u{FF77}\u{FF9E}");
     }
 
     #[test]
-    fn test_to_half_katakana_from_kata() {
-        assert_eq!(to_half_katakana("カイギ"), "ｶｲｷﾞ");
+    fn half_kata_choon() {
+        assert_eq!(
+            to_half_katakana("\u{30E9}\u{30FC}\u{30E1}\u{30F3}"),
+            "\u{FF97}\u{FF70}\u{FF92}\u{FF9D}"
+        );
     }
 
     #[test]
-    fn test_to_half_katakana_choon() {
-        assert_eq!(to_half_katakana("ラーメン"), "ﾗｰﾒﾝ");
+    fn half_kata_symbols() {
+        assert_eq!(to_half_katakana("\u{3001}\u{3002}\u{300C}\u{300D}"), "\u{FF64}\u{FF61}\u{FF62}\u{FF63}");
+        assert_eq!(to_half_katakana("\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}"), "abc123");
+        assert_eq!(to_half_katakana("\u{FFE5}"), "\x5C");
+        assert_eq!(to_half_katakana("\u{FF0D}"), "-");
     }
 
     #[test]
-    fn test_to_half_katakana_fullwidth_latin() {
-        // 全角英数記号も半角に変換される
-        assert_eq!(to_half_katakana("ＭＳーＩＭＥ"), "MSｰIME"); // ーは半角長音符ｰ(U+FF70)
-        assert_eq!(to_half_katakana("ａｂｃ１２３"), "abc123");
+    fn full_latin_cycle() {
+        let s = "tesuto";
+        let s1 = to_full_latin(s);   assert_eq!(s1, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
+        let s2 = to_full_latin(&s1); assert_eq!(s2, "\u{FF34}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
+        let s3 = to_full_latin(&s2); assert_eq!(s3, "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
+        let s4 = to_full_latin(&s3); assert_eq!(s4, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
+    }
+
+    #[test]
+    fn half_latin_cycle() {
+        let s = "tesuto";
+        let s1 = to_half_latin(s);   assert_eq!(s1, "TESUTO");
+        let s2 = to_half_latin(&s1); assert_eq!(s2, "Tesuto");
+        let s3 = to_half_latin(&s2); assert_eq!(s3, "tesuto");
+        let s4 = to_half_latin(&s3); assert_eq!(s4, "TESUTO");
+    }
+
+    #[test]
+    fn romaji_to_full() {
+        assert_eq!(romaji_to_fullwidth_latin("tesuto"),   "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
+        assert_eq!(romaji_to_fullwidth_latin("schedule"), "\u{FF53}\u{FF43}\u{FF48}\u{FF45}\u{FF44}\u{FF55}\u{FF4C}\u{FF45}");
+    }
+
+    #[test]
+    fn romaji_to_half() {
+        assert_eq!(romaji_to_halfwidth_latin("tesuto"), "tesuto");
+        assert_eq!(romaji_to_halfwidth_latin("SCHEDULE"), "schedule");
     }
 }
+

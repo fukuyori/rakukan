@@ -29,9 +29,14 @@ command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
 
 [tasks.build-engine]
-description = "engine DLL のみビルド（cpu/vulkan/cuda）管理者不要"
+description = "engine DLL のみビルド（高速: llamaキャッシュ維持、ABI変更対応済み）管理者不要"
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release"]
+
+[tasks.build-engine-full]
+description = "engine DLL フルクリーンビルド（llama CUDA キャッシュも削除、低速）管理者不要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release", "-FullClean"]
 
 [tasks.reinstall]
 description = "engine 以外ビルド（tsf/tray）& インストール ★管理者必要"

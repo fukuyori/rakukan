@@ -12,7 +12,7 @@
 # =============================================================================
 
 param(
-    [string]$Version = "0.3.2",
+    [string]$Version = "0.3.5",
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
     [string]$BuildDir = "C:\rb\release",
     [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"

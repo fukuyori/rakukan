@@ -622,8 +622,8 @@ impl TextServiceFactory_Impl {
             UserAction::Hiragana                       => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_hiragana),
             UserAction::Katakana                       => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_katakana),
             UserAction::HalfKatakana                   => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_half_katakana),
-            UserAction::FullLatin                      => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_full_latin),
-            UserAction::HalfLatin                      => self.on_kana_convert(ctx, tid, sink, guard, text_util::to_half_latin),
+            UserAction::FullLatin                      => self.on_latin_convert(ctx, tid, sink, guard, true),
+            UserAction::HalfLatin                      => self.on_latin_convert(ctx, tid, sink, guard, false),
             UserAction::CycleKana                      => self.on_cycle_kana(ctx, tid, guard),
             UserAction::CandidateNext                  => self.on_candidate_move(ctx, tid, sink, guard, CandidateDir::Next),
             UserAction::CandidatePrev                  => self.on_candidate_move(ctx, tid, sink, guard, CandidateDir::Prev),
@@ -1329,7 +1329,74 @@ impl TextServiceFactory_Impl {
         let p = engine.preedit_display();
         if p.is_empty() { return Ok(false); }
         engine.bg_reclaim();
-        let t = convert_fn(&p);
+
+        // F9/F10 で全角/半角ラテン文字に変換済みの場合、
+        // hiragana_buf はラテン文字のみになっている。
+        // romaji_input_log からひらがなを復元してから変換する。
+        let has_kana = p.chars().any(|c| {
+            let n = c as u32;
+            (0x3041..=0x3096).contains(&n)   // ひらがな
+            || (0x30A1..=0x30FC).contains(&n) // カタカナ
+            || (0xFF65..=0xFF9F).contains(&n) // 半角カタカナ
+        });
+        let source = if !has_kana {
+            // ラテン文字のみ → romaji_log からひらがなを復元
+            let hira = engine.hiragana_from_romaji_log();
+            if hira.is_empty() { p.clone() } else { hira }
+        } else {
+            p.clone()
+        };
+        let t = convert_fn(&source);
+        engine.force_preedit(t.clone());
+        drop(guard);
+        update_composition(ctx, tid, sink, t)?;
+        Ok(true)
+    }
+
+    /// F9（全角英数）/ F10（半角英数）変換。
+    ///
+    /// - 初回: romaji_input_log を使ってかな→ローマ字に変換し、全角/半角小文字にする
+    /// - 2回目以降: 現在の文字列のサイクル状態から次状態へ進む
+    ///   F9サイクル: 全角小→全角大→全角先頭大→全角小→…
+    ///   F10サイクル: 半角小→半角大→半角先頭大→半角小→…
+    /// - F6を押すとひらがな（romaji_log から force_preedit で元のかなに戻す）
+    fn on_latin_convert(
+        &self, ctx: ITfContext, tid: u32, sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+        full: bool, // true=F9全角, false=F10半角
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() { Some(e) => e, None => return Ok(false) };
+        engine.flush_pending_n();
+        let p = engine.preedit_display();
+        if p.is_empty() { return Ok(false); }
+        engine.bg_reclaim();
+
+        // ひらがな/カタカナを含む場合は初回変換（ローマ字ログをFFI経由で取得）
+        // 既にラテン文字のみの場合はサイクル継続
+        // プリエディットにひらがな/カタカナが含まれる場合は初回変換
+        // ラテン文字のみの場合はサイクル継続
+        let has_kana = p.chars().any(|c| {
+            let n = c as u32;
+            (0x3041..=0x3096).contains(&n)   // ひらがな
+            || (0x30A1..=0x30FC).contains(&n) // カタカナ
+            || (0xFF65..=0xFF9F).contains(&n) // 半角カタカナ
+        });
+        let t = if has_kana {
+            // かな → romaji_log_str でローマ字を復元して変換
+            let romaji = engine.romaji_log_str();
+            if full {
+                text_util::romaji_to_fullwidth_latin(&romaji)
+            } else {
+                text_util::romaji_to_halfwidth_latin(&romaji)
+            }
+        } else {
+            // すでにラテン文字 → サイクル
+            if full {
+                text_util::to_full_latin(&p)
+            } else {
+                text_util::to_half_latin(&p)
+            }
+        };
         engine.force_preedit(t.clone());
         drop(guard);
         update_composition(ctx, tid, sink, t)?;

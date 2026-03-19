@@ -124,6 +124,22 @@ pub extern "C" fn engine_hiragana_text(handle: *mut c_void) -> *mut c_char {
     unsafe { to_cstr(engine.hiragana_text().to_string()) }
 }
 
+/// ローマ字入力ログ（F9/F10 のカリフォルニア大学小学長文字変換用）
+/// 戻り値は `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_romaji_log_str(handle: *mut c_void) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    unsafe { to_cstr(engine.romaji_log_str()) }
+}
+
+/// romaji_input_log からひらがなを復元する（F6/F7/F8 でかなに戻す用）
+/// 戻り値は `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_hiragana_from_romaji_log(handle: *mut c_void) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    unsafe { to_cstr(engine.hiragana_from_romaji_log()) }
+}
+
 /// 確定済みテキスト（LLM コンテキスト用）
 /// 戻り値は `engine_free_string` で解放すること。
 #[unsafe(no_mangle)]

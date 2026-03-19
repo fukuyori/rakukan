@@ -37,6 +37,8 @@ struct EngineVTable {
     preedit_display:      unsafe extern "C" fn(*mut c_void) -> *mut c_char,
     preedit_is_empty:     unsafe extern "C" fn(*mut c_void) -> bool,
     hiragana_text:        unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    romaji_log_str:       unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    hiragana_from_romaji_log: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
     committed_text:       unsafe extern "C" fn(*mut c_void) -> *mut c_char,
 
     // BG 変換
@@ -105,6 +107,8 @@ impl EngineVTable {
             preedit_display:      load_sym!(lib, b"engine_preedit_display\0"),
             preedit_is_empty:     load_sym!(lib, b"engine_preedit_is_empty\0"),
             hiragana_text:        load_sym!(lib, b"engine_hiragana_text\0"),
+            romaji_log_str:       load_sym!(lib, b"engine_romaji_log_str\0"),
+            hiragana_from_romaji_log: load_sym!(lib, b"engine_hiragana_from_romaji_log\0"),
             committed_text:       load_sym!(lib, b"engine_committed_text\0"),
             bg_start:             load_sym!(lib, b"engine_bg_start\0"),
             bg_status:            load_sym!(lib, b"engine_bg_status\0"),
@@ -242,6 +246,20 @@ impl DynEngine {
     pub fn hiragana_text(&self) -> String {
         unsafe {
             let ptr = (self.vtable.hiragana_text)(self.handle);
+            self.take_cstr(ptr).unwrap_or_default()
+        }
+    }
+
+    pub fn romaji_log_str(&self) -> String {
+        unsafe {
+            let ptr = (self.vtable.romaji_log_str)(self.handle);
+            self.take_cstr(ptr).unwrap_or_default()
+        }
+    }
+
+    pub fn hiragana_from_romaji_log(&self) -> String {
+        unsafe {
+            let ptr = (self.vtable.hiragana_from_romaji_log)(self.handle);
             self.take_cstr(ptr).unwrap_or_default()
         }
     }

@@ -1,5 +1,60 @@
 # Changelog
 
+## [0.3.5] - 2026-03-20
+
+### Fixed
+
+- **F9/F10 が機能しない問題を修正**（`factory.rs`）
+  - `on_latin_convert` が `hiragana_text()`（変換済みかな）をローマ字として渡していた
+  - `romaji_log_str()` に変更し、正しいローマ字ログを使うよう修正
+
+- **F9 変換結果が文字数分重複する問題を修正**（`engine/lib.rs`）
+  - `romaji_input_log` の `Buffered` 記録で、確定済みエントリに後続の子音を誤追記していた
+  - 例: `らぢお` → F9 → `ｒｒａｄｄｉｏ`（正しくは `ｒａｄｉｏ`）
+  - `Buffered` 時はログに触らず、`Converted`/`PassThrough` 時にのみ `pending_romaji_buf` 全体を push するよう修正
+
+- **F9/F10 後に F6/F7/F8 でかなに戻せない問題を修正**（`factory.rs`, `engine/lib.rs`, `engine/ffi.rs`, `engine-abi/lib.rs`）
+  - F9/F10 で `force_preedit` するとひらがなが全角/半角ラテン文字に置き換わり、`to_hiragana`/`to_katakana` が処理できなかった
+  - `hiragana_from_romaji_log()` を新設し、`romaji_input_log` からひらがなを再構築して変換関数に渡すよう修正
+  - F9→F6 でひらがな、F9→F7 でカタカナ、F9→F8 で半角カタカナに戻せるようになった
+
+### Changed
+
+- **記号・数字の入力を常に全角に統一**（`lib.rs`）
+  - ASCII 記号をコンテキスト判定から固定マッピングに変更
+  - `,`→`、` `.`→`。` `[`→`「` `]`→`」` `\`→`￥`、その他ASCII記号→全角
+  - `-` のみ直前がかな→`ー`（長音符）、それ以外→`－`（全角ハイフン）を維持
+  - 数字 `0`–`9` を常に全角 `０`–`９` で入力（テンキー除く）
+
+- **F8/F9/F10 の記号・数字変換を整理**（`text_util.rs`）
+  - F8（半角カタカナ）: 全角句読点・長音符・英数を半角に変換
+  - F9（全角英数）: かな→ローマ字→全角英数、サイクル: 全角小→全角大→全角先頭大→全角小
+  - F10（半角英数）: かな→ローマ字→半角英数、サイクル: 半角小→半角大→半角先頭大→半角小
+  - F6 でひらがなに戻る（F9/F10 後も含む）
+
+- **`romaji_input_log` を追加**（`lib.rs`）
+  - F9/F10 のかな→ローマ字復元に使用
+  - `RomajiConverter::Converted` 単位で蓄積、バックスペース時にも整合維持
+
+- **ユーザー学習語のリアルタイム反映**（`store.rs`, `lib.rs`）
+  - `DictStoreInner.user` を `RwLock<HashMap>` に変更
+  - `DictStore::learn()` を追加してメモリ即時更新＋ファイル保存を一元化
+  - IME 再起動なしで学習内容が候補に反映される
+
+- **候補順序の変更**（`lib.rs`）
+  - `merge_candidates` の優先順位: ユーザー辞書 → LLM → mozc/skk
+
+### Build
+
+- **`build-engine` を高速化**（`build-engine.ps1`, `Makefile.toml`）
+  - llama-cpp-sys-2（CUDA/Vulkan）のビルドキャッシュを維持したまま rakukan-engine のみ再ビルド
+  - 通常の engine ABI 変更時は `cargo make build-engine`（約50秒）で完了
+  - フルキャッシュ削除が必要な場合のみ `cargo make build-engine-full` を使用
+
+- **`rakukan-engine-abi` キャッシュクリアの信頼性向上**（`build-engine.ps1`, `install.ps1`）
+  - `cargo clean` に頼らず `Remove-Item` で直接削除する方式に変更
+  - `CARGO_TARGET_DIR` が複数存在する環境（`C:\rb` と `target/`）で確実に動作
+
 ## [0.3.4] - 2026-03-18
 
 ### Fixed

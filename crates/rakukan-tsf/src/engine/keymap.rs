@@ -295,25 +295,8 @@ impl Keymap {
             let c = buf[0];
             if c >= 0x20 && !(0x7F..=0x9F).contains(&c) {
                 if let Some(ch) = char::from_u32(c as u32) {
-                    // 句読点 → Punctuate アクション
-                    // 注: '，' '．' はコンテキスト判定のため Input として push_char に委ねる
-                    if matches!(ch, '、' | '。') {
-                        return Some(UserAction::Punctuate(ch));
-                    }
-                    // '，' '．' は push_char のコンテキスト判定で '、' '。' '，' '．' ',' '.' に変換
-                    if matches!(ch, '，' | '．') {
-                        let ascii = if ch == '，' { ',' } else { '.' };
-                        return Some(UserAction::Input(ascii));
-                    }
-                    // Shift + かなモード → 全角英数字に変換
-                    if shift && (0x21u16..=0x7Eu16).contains(&c) {
-                        use super::input_mode::InputMode;
-                        let mode = super::state::input_mode_get_atomic();
-                        if matches!(mode, InputMode::Hiragana | InputMode::Katakana) {
-                            let fw = char::from_u32(c as u32 - 0x21 + 0xFF01).unwrap_or(ch);
-                            return Some(UserAction::Input(fw));
-                        }
-                    }
+                    // 全ての印字可能文字を Input として push_char に委ねる。
+                    // 数字・記号の全角変換は push_char 内の symbol_fixed / digit 処理で行う。
                     return Some(UserAction::Input(ch));
                 }
             }

@@ -204,6 +204,17 @@ if ($lastBackend -ne $gpuBackend) {
 # --- 1/6 Build engine DLLs (cpu / vulkan / cuda) ---
 if ($SkipEngine) {
     Write-Host "[1/6] Skipping engine DLL build (-SkipEngine)"
+    # Remove rakukan-engine-abi cache directly (cargo clean is unreliable with multiple target dirs).
+    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
+    foreach ($root in @($buildDir, "target")) {
+        Get-ChildItem $root -Recurse -Directory -Filter "rakukan_engine_abi-*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
+        Get-ChildItem "$root" -Recurse -Filter "librakukan_engine_abi*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+        Get-ChildItem "$root" -Recurse -Filter "rakukan_engine_abi*" -ErrorAction SilentlyContinue |
+            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
+    }
+    $ErrorActionPreference = $prev
 } else {
     Write-Host "[1/6] Building rakukan-engine DLLs..."
     & "$PSScriptRoot\build-engine.ps1" -Profile $Profile -BuildDir $buildDir
