@@ -79,7 +79,7 @@ impl MozcDict {
         // セクションオフセット計算
         let index_off        = HEADER_SIZE;
         let reading_heap_off = index_off + n_readings as usize * INDEX_ENTRY_SIZE;
-        let entries_off      = reading_heap_off + reading_heap_size(&mmap, n_readings, reading_heap_off)?;
+        let entries_off      = reading_heap_off + reading_heap_size(&mmap, n_readings, index_off)?;
         let surface_heap_off = entries_off + n_entries as usize * ENTRY_RECORD_SIZE;
 
         if surface_heap_off > mmap.len() {

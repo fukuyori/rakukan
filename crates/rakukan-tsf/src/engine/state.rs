@@ -99,7 +99,11 @@ pub fn engine_start_bg_init() {
                     // 辞書・モデルのバックグラウンドロードを起動
                     if let Ok(mut g) = RAKUKAN_ENGINE.lock() {
                         if let Some(eng) = g.0.as_mut() {
-                            if !eng.is_dict_ready()  { eng.start_load_dict(); }
+                            tracing::info!("engine-init: is_dict_ready={} is_kanji_ready={}", eng.is_dict_ready(), eng.is_kanji_ready());
+                            if !eng.is_dict_ready()  {
+                                tracing::info!("engine-init: calling start_load_dict");
+                                eng.start_load_dict();
+                            }
                             if !eng.is_kanji_ready() { eng.start_load_model(); }
                         }
                     }

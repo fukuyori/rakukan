@@ -1536,7 +1536,6 @@ name = "rakukan-dict"
 version = "0.3.5"
 dependencies = [
  "anyhow",
- "encoding_rs",
  "memmap2",
  "serde",
  "tempfile",

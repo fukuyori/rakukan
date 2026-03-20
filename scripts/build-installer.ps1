@@ -12,7 +12,7 @@
 # =============================================================================
 
 param(
-    [string]$Version = "0.3.5",
+    [string]$Version = "0.3.6",
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
     [string]$BuildDir = "C:\rb\release",
     [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"
@@ -53,10 +53,6 @@ if (Test-Path $icoSrc) {
 } else {
     Write-Warning "rakukan.ico が見つかりません ($icoSrc)"
 }
-
-# download-skk.ps1 (SKK辞書ダウンロードスクリプト)
-Copy-Item "$PSScriptRoot\download-skk.ps1" "$distDir\download-skk.ps1" -Force
-Write-Host "  -> download-skk.ps1"
 
 # register-tip.ps1 (キーボードリスト登録スクリプト)
 Copy-Item "$PSScriptRoot\register-tip.ps1" "$distDir\register-tip.ps1" -Force

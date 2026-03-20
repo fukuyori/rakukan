@@ -275,6 +275,15 @@ pub extern "C" fn engine_merge_candidates(
     let engine = unsafe { &*(handle as *const RakunEngine) };
     let s = unsafe { from_cstr(llm_json) };
     let llm_cands: Vec<String> = serde_json::from_str(s).unwrap_or_default();
+    // 辞書検索を直接デバッグ
+    let hiragana = engine.hiragana_text().to_string();
+    let dict_debug = if let Some(store) = engine.dict_store_ref() {
+        let d = store.lookup_dict(&hiragana, limit as usize);
+        format!("lookup_dict({:?})={:?}", hiragana, d)
+    } else {
+        "dict_store=None".to_string()
+    };
+    set_dict_status(dict_debug);
     let merged = engine.merge_candidates(llm_cands, limit as usize);
     let json = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into());
     unsafe { to_cstr(json) }
@@ -329,25 +338,41 @@ pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
 /// 辞書のロードをバックグラウンドで開始する。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_start_load_dict(handle: *mut c_void) {
+    static DICT_LOADING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
     let engine = unsafe { &*(handle as *const RakunEngine) };
     if engine.is_dict_ready() { return; }
 
+    // 多重 spawn 防止
+    if DICT_LOADING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+
+    // 前回セッションの残留データをクリア
+    let _ = PENDING_DICT.lock().map(|mut g| *g = None);
+
     // DictStore をロードしてエンジンに渡す（同様に poll パターン）
     std::thread::spawn(move || {
-        use crate::{DictStore, find_skk_jisyo, find_mozc_dict, user_dict_path};
-        let skk_paths = find_skk_jisyo();
-        let skk_refs: Vec<&std::path::Path> = skk_paths.iter().map(|p| p.as_path()).collect();
-        let mozc_path = find_mozc_dict();
-        let mozc_ref  = mozc_path.as_deref();
-        let user_path = user_dict_path();
-        let user_ref  = user_path.as_deref();
-        match DictStore::load(user_ref, mozc_ref, &skk_refs) {
-            Ok(store) => {
+        use crate::dict::loader::{load_dict, LoadResult};
+
+        set_dict_status(format!(
+            "starting: build={}",
+            option_env!("RAKUKAN_ENGINE_BUILD_TIME").unwrap_or("unknown")
+        ));
+
+        match load_dict() {
+            LoadResult::Ok(store) => {
+                let user_n = store.user_entry_count();
                 let _ = PENDING_DICT.lock().map(|mut g| *g = Some(store));
-                tracing::info!("dict load complete");
+                set_dict_status(format!("ok: mozc=true user_entries={}", user_n));
             }
-            Err(e) => tracing::warn!("dict load failed: {e}"),
+            LoadResult::Failed { step, reason } => {
+                set_dict_status(format!("failed at [{}]: {}", step, reason));
+                tracing::warn!("dict load failed at [{}]: {}", step, reason);
+            }
         }
+        DICT_LOADING.store(false, std::sync::atomic::Ordering::Release);
     });
 }
 
@@ -363,7 +388,7 @@ pub extern "C" fn engine_poll_dict_ready(handle: *mut c_void) -> bool {
     if let Ok(mut g) = PENDING_DICT.try_lock() {
         if let Some(store) = g.take() {
             engine.set_dict_store(store);
-            tracing::info!("dict store injected into engine");
+            set_dict_status("injected: mozc=true".to_string());
             return true;
         }
     }
@@ -431,9 +456,14 @@ pub extern "C" fn engine_learn(handle: *mut c_void, reading: *const c_char, surf
 // ─── 最後のエラーメッセージ（診断用）────────────────────────────────────────
 
 static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
+static DICT_STATUS: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new("not started".to_string()));
 
 fn set_last_error(msg: String) {
     if let Ok(mut g) = LAST_ERROR.lock() { *g = msg; }
+}
+
+fn set_dict_status(msg: String) {
+    if let Ok(mut g) = DICT_STATUS.lock() { *g = msg; }
 }
 
 /// 最後に発生したエラーメッセージを返す（TSF 側ログ用）
@@ -441,5 +471,12 @@ fn set_last_error(msg: String) {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_last_error() -> *mut c_char {
     let msg = LAST_ERROR.lock().map(|g| g.clone()).unwrap_or_default();
+    unsafe { to_cstr(msg) }
+}
+
+/// 辞書ロード状態を返す（TSF 側ログ用）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_dict_status() -> *mut c_char {
+    let msg = DICT_STATUS.lock().map(|g| g.clone()).unwrap_or_default();
     unsafe { to_cstr(msg) }
 }

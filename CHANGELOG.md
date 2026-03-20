@@ -1,5 +1,36 @@
 # Changelog
 
+## [0.3.6] - 2026-03-20
+
+### Fixed
+
+- **mozc 辞書がロードされない問題を修正**（`rakukan-dict/src/mozc_dict.rs`）
+  - `from_mmap` 内の `reading_heap_size()` に誤ったオフセット（`reading_heap_off`）を渡していた
+  - reading heap の UTF-8 バイト列をインデックスエントリとして解釈し `entries_off` が約 3.8GB に誤算
+  - 正しくは `index_off`（= 16）を渡すべきところを修正
+  - これにより `rakukan.dict`（45MB）が常に「ファイルサイズ不足」で失敗していた
+
+### Added
+
+- **辞書ロードを `dict/loader.rs` に分離**（`rakukan-engine/src/dict/loader.rs`）
+  - `load_dict()` が 4 ステップに分解: `resolve_paths` → `probe_mozc` → `open_mozc` → `load_store`
+  - 失敗時のログが `failed at [open_mozc]: ...` のようにステップ名付きになり原因が明確
+  - `ffi.rs` のスレッド内コードを整理
+
+- **エンジン DLL にビルド時刻を埋め込み**（`rakukan-engine/build.rs`）
+  - `RAKUKAN_ENGINE_BUILD_TIME` をビルド時に設定し `dict_status` 経由で `rakukan.log` に出力
+  - エンジン DLL のビルド時刻を TSF 側から確認可能になった
+
+- **辞書診断ツール `dict_check` を追加**（`rakukan-dict/src/bin/dict_check.rs`）
+  - `cargo run -p rakukan-dict --bin dict_check` で `rakukan.dict` の各セクションを検証
+  - ファイル存在・サイズ・マジック・バージョン・インデックス・オフセット計算・先頭読みを出力
+
+### Build
+
+- **`build-engine.ps1` に `rakukan-dict` クリーンを追加**（`scripts/build-engine.ps1`）
+  - インクリメンタルクリーン時に `cargo clean -p rakukan-dict` も実行
+  - `rakukan-dict` ソース変更がキャッシュに遮られてエンジン DLL に反映されない問題を防止
+
 ## [0.3.5] - 2026-03-20
 
 ### Fixed

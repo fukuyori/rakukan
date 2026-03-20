@@ -53,9 +53,10 @@ if ($FullClean) {
     Write-Host "[engine] FullClean: removing $BuildDir\$profileDir ..."
     Remove-Item (Join-Path $BuildDir $profileDir) -Recurse -Force -ErrorAction SilentlyContinue
 } else {
-    Write-Host "[engine] Incremental clean: cargo clean -p rakukan-engine (llama cache preserved)"
+    Write-Host "[engine] Incremental clean: cargo clean -p rakukan-engine rakukan-dict (llama cache preserved)"
     $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
     & cargo clean -p rakukan-engine 2>&1 | Out-Null
+    & cargo clean -p rakukan-dict   2>&1 | Out-Null
     $ErrorActionPreference = $prev
     # Remove rakukan-engine-abi cache dirs directly in both target locations.
     # cargo clean -p is unreliable when CARGO_TARGET_DIR differs between build steps.

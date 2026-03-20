@@ -1,4 +1,4 @@
-# rakukan v0.3.5
+# rakukan v0.3.6
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -15,7 +15,7 @@ Windows 向け日本語 IME。
 ## 主な機能
 
 - **LLM ベース変換**：jinen モデルによる自然な変換候補
-- **辞書変換**：Mozc オープンソース辞書（約 113 万エントリ）+ SKK-JISYO.L フォールバック
+- **辞書変換**：Mozc オープンソース辞書（約 113 万エントリ）+ Mozc 記号辞書（`symbol.tsv`）
 - **ユーザー辞書学習**：確定した変換を記憶し即時反映
 - **変換範囲変更**：Shift+左/右で変換対象を1文字単位で調整
 - **文字種変換**：F6（ひらがな）/ F7（カタカナ）/ F8（半角カタカナ）/ F9（全角英数）/ F10（半角英数）のサイクル変換、相互に戻すことも可能
@@ -50,10 +50,6 @@ https://github.com/google/mozc
 GitHub から自動ダウンロードし、rakukan 独自のバイナリ形式に変換して使用します。  
 ライセンス：Apache License 2.0
 
-**SKK-JISYO.L** — SKK 開発チーム  
-https://github.com/skk-dev/dict  
-インストール時に自動ダウンロードし、Mozc 辞書に候補がない場合のフォールバックとして使用します。  
-ライセンス：GNU General Public License v2
 
 ### 主要依存ライブラリ
 
@@ -65,7 +61,7 @@ https://github.com/skk-dev/dict
 | [memmap2](https://github.com/RazrFalcon/memmap2) | バイナリ辞書の mmap 読み取り | MIT / Apache 2.0 |
 | [windows-rs](https://github.com/microsoft/windows-rs) | Windows API バインディング | MIT / Apache 2.0 |
 | [tokenizers](https://github.com/huggingface/tokenizers) | トークナイザー | Apache 2.0 |
-| [encoding_rs](https://github.com/hsivonen/encoding_rs) | EUC-JP デコード（SKK-JISYO.L 対応） | MIT / Apache 2.0 |
+
 | [anyhow](https://github.com/dtolnay/anyhow) / [thiserror](https://github.com/dtolnay/thiserror) | エラーハンドリング | MIT / Apache 2.0 |
 | [tracing](https://github.com/tokio-rs/tracing) | 構造化ログ | MIT |
 
@@ -78,7 +74,6 @@ rakukan 本体のコードは **MIT ライセンス** で配布します。
 ただし、インストール時に取得する辞書ファイルには異なるライセンスが適用されます。
 
 - **Mozc 辞書**（`rakukan.dict`）：Apache License 2.0
-- **SKK-JISYO.L**：GNU General Public License v2
 
 これらの辞書ファイルを再配布する場合は、それぞれのライセンス条件に従ってください。  
 rakukan のインストーラーは辞書を GitHub から直接取得するため、rakukan のリポジトリ自体には辞書ファイルを含みません。
@@ -207,10 +202,12 @@ rakukan/
 │   └── setup-esaxx-patch.ps1   esaxx-rs パッチセットアップ
 └── crates/
     ├── rakukan-engine/          変換エンジン（karukan 統合）
+    │   └── src/dict/loader.rs   辞書ロード（4ステップ分離）
     ├── rakukan-engine-abi/      エンジン DLL FFI インターフェース
     ├── rakukan-tsf/             TSF IME DLL 本体
     ├── rakukan-tray/            システムトレイアプリ
-    ├── rakukan-dict/            辞書パーサー（Mozc / SKK / ユーザー辞書）
+    ├── rakukan-dict/            辞書パーサー（Mozc / ユーザー辞書）
+    │   └── src/bin/dict_check   辞書ファイル診断ツール
     └── rakukan-dict-builder/    Mozc TSV → バイナリ辞書変換ツール
 ```
 
@@ -299,4 +296,28 @@ $dll = "$env:LOCALAPPDATA\rakukan\rakukan_tsf.dll"
 regsvr32 /s /u $dll
 Copy-Item "C:\rb\release\rakukan_tsf.dll" $dll -Force
 regsvr32 /s $dll
+```
+
+### 辞書変換が機能しない（dict_status が retry / failed のまま）
+
+ログで状態を確認します：
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" |
+    Select-String "dict_status" | Select-Object -Last 3
+```
+
+辞書ファイルを直接診断するには：
+
+```powershell
+cargo run -p rakukan-dict --bin dict_check
+```
+
+`rakukan-dict` のビルドキャッシュが古い場合は以下で解決します：
+
+```powershell
+$env:CARGO_TARGET_DIR = "C:\rb"
+Remove-Item C:\rb\release\.fingerprint\rakukan-dict-* -Recurse -Force -ErrorAction SilentlyContinue
+cargo make build-engine
+cargo make reinstall
 ```

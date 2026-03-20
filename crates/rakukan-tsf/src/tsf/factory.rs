@@ -534,6 +534,7 @@ impl TextServiceFactory_Impl {
                         Some(llm_cands) => {
                             tracing::info!("poll: bg_take_candidates → Some({} cands)", llm_cands.len());
                             let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
+                            tracing::info!("poll: merge_candidates → {:?}", merged);
                             if !merged.is_empty() {
                                 let first = merged.first().cloned().unwrap_or_default();
                                 if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess {
@@ -698,7 +699,11 @@ impl TextServiceFactory_Impl {
         }
         // SESSION_SELECTING=true だったが is_selecting()=false の場合はここに来る
 
-        engine.poll_dict_ready();
+        let dict_injected = engine.poll_dict_ready();
+        if dict_injected { tracing::info!("on_input: dict store injected"); }
+        // 辞書状態の定期ログ（デバッグ用）
+        tracing::info!("on_input: is_dict_ready={} dict_status={:?}",
+            engine.is_dict_ready(), engine.dict_status());
         engine.poll_model_ready();
         engine.push_char(c);
         let preedit  = engine.preedit_display();
@@ -823,6 +828,7 @@ impl TextServiceFactory_Impl {
                             Some(llm_cands) => {
                                 tracing::info!("on_convert[llm_pending]: bg_take_candidates → Some({} cands)", llm_cands.len());
                                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                tracing::info!("merge_candidates → {:?}", merged);
                                 tracing::info!("on_convert[llm_pending]: merged={} cands", merged.len());
                                 if !merged.is_empty() {
                                     if let Ok(mut sess2) = session_get() {
@@ -870,6 +876,7 @@ impl TextServiceFactory_Impl {
                                 if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
                                     tracing::info!("on_convert[llm_pending]: reclaim+retry → Some({} cands)", llm_cands.len());
                                     let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                    tracing::info!("merge_candidates → {:?}", merged);
                                     if !merged.is_empty() {
                                         if let Ok(mut sess2) = session_get() {
                                             if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess2 {
@@ -1035,6 +1042,7 @@ impl TextServiceFactory_Impl {
                     engine.bg_take_candidates(&preedit)
                 } else { None }
             });
+        tracing::info!("on_convert[new]: bg_cands={:?}", bg_cands.as_ref().map(|c| c.len()));
         // いずれも None だった場合 → bg_reclaim + bg_start でブロッキング再試行
         let bg_cands = if bg_cands.is_none() && kanji_ready_now {
             tracing::warn!("Convert: bg_take_candidates None (hira={:?} preedit={:?}) → reclaim+restart", hiragana_key2, preedit);
@@ -1063,7 +1071,11 @@ impl TextServiceFactory_Impl {
 
         let (candidates, llm_pending): (Vec<String>, bool) = match bg_cands {
             Some(llm_cands) if !llm_cands.is_empty() => {
+                // bg_take_candidates 成功時に kanji が復元されているため再評価
+                let kanji_ready_now = engine.is_kanji_ready();
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                tracing::info!("merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
+                    kanji_ready_now, merged, engine.dict_status());
                 if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
                     if kanji_ready_now {
                         (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
@@ -1692,6 +1704,7 @@ impl TextServiceFactory_Impl {
             match engine.bg_take_candidates(&preedit) {
             Some(llm_cands) if !llm_cands.is_empty() => {
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                tracing::info!("merge_candidates → {:?}", merged);
                 if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
                     (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
                 } else {
@@ -1873,6 +1886,7 @@ fn convert_split_target(
     let candidates = match bg_cands {
         Some(llm_cands) if !llm_cands.is_empty() => {
             let m = engine.merge_candidates(llm_cands, DICT_LIMIT);
+            tracing::info!("merge_candidates → {:?}", m);
             if m.is_empty() { sync_cands } else { m }
         }
         _ => {
@@ -1946,6 +1960,7 @@ fn engine_convert_sync_multi(
 
     // 辞書候補とマージ（dict_limit 件まで）
     let merged = engine.merge_candidates(llm_cands, dict_limit);
+    tracing::info!("merge_candidates → {:?}", merged);
     if merged.is_empty() { vec![preedit.to_string()] } else { merged }
 }
 

@@ -1,7 +1,7 @@
 # rakukan handoff — 2026-03-20
 
 ## 現在のバージョン
-v0.3.5（`Cargo.toml` / `CHANGELOG.md` / `handoff.md` 更新済み）
+v0.3.6（`Cargo.toml` / `VERSION` / `CHANGELOG.md` / `handoff.md` 更新済み）
 
 ## ファイル配置
 
@@ -9,7 +9,7 @@ v0.3.5（`Cargo.toml` / `CHANGELOG.md` / `handoff.md` 更新済み）
 |---------|--------|
 | DLL・EXE | `%LOCALAPPDATA%\rakukan\` |
 | `rakukan.log` | `%LOCALAPPDATA%\rakukan\` |
-| `rakukan.dict` / `SKK-JISYO.L` | `%LOCALAPPDATA%\rakukan\dict\` |
+| `rakukan.dict` | `%LOCALAPPDATA%\rakukan\dict\` |
 | `config.toml` / `keymap.toml` | `%APPDATA%\rakukan\` |
 | `user_dict.toml` | `%APPDATA%\rakukan\` |
 | LLMモデル | `~\.cache\huggingface\...` |
@@ -29,49 +29,40 @@ cargo make build-engine-full
 cargo make reinstall
 ```
 
-> **注意**: `build-engine` は `C:\rb` と `target/` の両方の `rakukan-engine-abi`
-> キャッシュを削除してから DLL をビルドする。ABI 変更後は必ず `build-engine` から実行すること。
+> **注意**: `build-engine` は `rakukan-engine` と `rakukan-dict` の両方をクリーンしてから DLL をビルドする。
+> ABI 変更後は必ず `build-engine` → `reinstall` の順で実行すること。
 
-## v0.3.5 で修正・変更した内容
+## v0.3.6 で修正・変更した内容
 
-### [FIXED] F9/F10 が機能しない問題
-- `on_latin_convert` が `hiragana_text()`（かな文字列）をローマ字として使っていた
-- `romaji_log_str()` に変更して正しいローマ字ログを参照するよう修正
+### [FIXED] mozc 辞書がロードされない問題（`mozc_dict.rs`）
+- `from_mmap` 内の `reading_heap_size()` に `reading_heap_off` を渡していた（正しくは `index_off`）
+- reading heap の UTF-8 バイト列をインデックスとして解釈し `entries_off` が約 3.8GB に誤算
+- `rakukan.dict`（45MB）が常に「ファイルサイズ不足」で失敗していた
 
-### [FIXED] F9 変換結果が文字数分重複する問題
-- `romaji_input_log` の `Buffered` 記録で確定済みエントリに後続の子音を誤追記していた
-- 例: `らぢお` → F9 → `ｒｒａｄｄｉｏ`（正しくは `ｒａｄｉｏ`）
-- `Buffered` 時はログに触らず `Converted`/`PassThrough` 時にのみ push する方式に変更
+### [ADDED] 辞書ロードを `dict/loader.rs` に分離
+- `load_dict()` が 4 ステップに分解: `resolve_paths` → `probe_mozc` → `open_mozc` → `load_store`
+- 失敗時のログ: `failed at [open_mozc]: ...` のようにステップ名付きで原因が明確
 
-### [FIXED] F9/F10 後に F6/F7/F8 でかなに戻せない問題
-- F9/F10 後の `hiragana_buf` は全角/半角ラテン文字になっており `to_hiragana` 等が処理できなかった
-- `hiragana_from_romaji_log()` を新設（`engine/lib.rs`, `ffi.rs`, `engine-abi/lib.rs`）
-- `on_kana_convert` でかな以外のとき `hiragana_from_romaji_log()` で復元してから変換関数を適用
+### [ADDED] エンジン DLL にビルド時刻を埋め込み（`build.rs`）
+- `dict_status` 経由で `rakukan.log` にエンジン DLL のビルド時刻が出力される
+- ビルドが反映されているか確認するコマンド:
+  ```powershell
+  Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" |
+      Select-String "dict_status" | Select-Object -Last 3
+  # -> dict_status="starting: build=2026-03-20 ..."
+  ```
 
-### [CHANGED] 記号・数字の入力を常に全角に統一
-- `,`→`、` `.`→`。` `[`→`「` `]`→`」` `\`→`￥`、その他ASCII記号→全角
-- `-` のみ直前がかな→`ー`、それ以外→`－`
-- 数字 `0`–`9` を常に全角 `０`–`９`（テンキー除く）
+### [ADDED] 辞書診断ツール `dict_check`
+- `cargo run -p rakukan-dict --bin dict_check` で `rakukan.dict` を直接検証
 
-### [CHANGED] ユーザー学習語のリアルタイム反映
-`DictStore::learn()` を追加、IME 再起動なしで学習内容が候補に反映される
-
-### [CHANGED] 候補順序
-`merge_candidates` の優先順位: ユーザー辞書 → LLM → mozc/skk
-
-### [BUILD] build-engine の高速化
-- llama-cpp-sys-2 の CUDA/Vulkan キャッシュを維持したまま rakukan-engine のみ再ビルド
-- 通常は `cargo make build-engine`（約50秒）で完了
-- `cargo make build-engine-full` でフルキャッシュ削除ビルド
-
-### [BUILD] rakukan-engine-abi キャッシュクリアの信頼性向上
-- `cargo clean` から `Remove-Item` による直接削除方式に変更
-- `C:\rb` と `target/` の両方を確実に削除
+### [BUILD] `build-engine.ps1` に `rakukan-dict` クリーンを追加
+- インクリメンタルクリーン時に `cargo clean -p rakukan-dict` も実行
+- `rakukan-dict` ソース変更がキャッシュに遮られる問題を防止
 
 ## 残課題
 
 - [ ] Shift+アルファベット入力の改善（Shift+R → 英字モード自動移行）
-- [ ] `/` キーの挙動（ひらがな入力時→`・`、F9→`／`、F10→`/`）
+- [ ] `/` キーの挙動（ひらがな入力時→`・`、F9→`/`、F10→`/`）
 - [ ] ライブ変換（Phase 4a〜4c）
 - [ ] SplitPreedit の複数文節連続変換
 - [ ] 数字・かな混在入力（例: `400じ` → `400字`）
@@ -86,7 +77,8 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 50 |
 ## 重要な技術的制約
 
 - **TSF スレッド制約**: `RequestEditSession` は `WndProc` から呼べない（ライブ変換実装の最大障壁）
-- **engine DLL のログ**: `rakukan.log` には出力されない（engine DLL は独自 tracing subscriber）
+- **engine DLL のログ**: `tracing::info!` は `rakukan.log` に出ない。`set_dict_status` 経由でのみ TSF ログに届く
 - **TOML セクション順序**: トップレベルキーはセクションヘッダより前に書く必要がある
 - **install.ps1 / build-engine.ps1 エンコーディング**: ASCII のみ（日本語コメント不可）
 - **ABI 変更時のビルド順序**: 必ず `build-engine` → `reinstall` の順で実行
+- **Cargo キャッシュと ZIP 配布**: ZIP 展開ではタイムスタンプが変わらず Cargo が変更検知できない場合がある。`C:\rb\release\.fingerprint\rakukan-dict-*` を直接削除すれば解決

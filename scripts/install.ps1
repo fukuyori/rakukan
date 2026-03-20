@@ -1,4 +1,4 @@
-﻿# scripts\install.ps1 - rakukan installer (robust)
+# scripts\install.ps1 - rakukan installer (robust)
 # Run from an elevated (Administrator) PowerShell:
 #   cargo make install
 
@@ -469,13 +469,34 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
 
     if ($downloadedTsvs.Count -eq 0) {
         Write-Host "  [WARNING] No mozc TSV files downloaded. rakukan.dict will not be built."
-        Write-Host "  IME will fall back to SKK dictionary."
     } else {
-        Write-Host ("  Building rakukan.dict from " + $downloadedTsvs.Count + " TSV files...")
+        # Download symbol.tsv (Apache 2.0)
+        $symbolTsvPath = Join-Path $mozcTsvDir "symbol.tsv"
+        $symbolUrl     = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/symbol/symbol.tsv"
+        if ((-not (Test-Path -LiteralPath $symbolTsvPath)) -or $forceDict) {
+            try {
+                $tmpPath = $symbolTsvPath + ".tmp"
+                Invoke-WebRequest -Uri $symbolUrl -OutFile $tmpPath -UseBasicParsing -TimeoutSec 60
+                Move-Item -LiteralPath $tmpPath -Destination $symbolTsvPath -Force
+                Write-Host "    Downloaded: symbol.tsv"
+            } catch {
+                $tmpPath = $symbolTsvPath + ".tmp"
+                if (Test-Path -LiteralPath $tmpPath) {
+                    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
+                }
+                Write-Host ("    [WARNING] Failed to download symbol.tsv: " + $_)
+            }
+        }
+
+        Write-Host ("  Building rakukan.dict from " + $downloadedTsvs.Count + " TSV files + symbol.tsv...")
         $inputArgs = @()
         foreach ($f in $downloadedTsvs) {
             $inputArgs += "--input"
             $inputArgs += $f
+        }
+        if (Test-Path -LiteralPath $symbolTsvPath) {
+            $inputArgs += "--symbol"
+            $inputArgs += $symbolTsvPath
         }
         $inputArgs += "--output"
         $inputArgs += $mozcDictOut
@@ -494,36 +515,6 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
     }
 }
 
-# --- 5b: SKK-JISYO.L (GPL v2, fallback) ---
-Write-Host ""
-Write-Host "  [5b] SKK-JISYO.L (GPL v2, fallback)..."
-Write-Host "  Source: https://github.com/skk-dev/dict"
-
-$skkJisyoL = Join-Path $dictDir "SKK-JISYO.L"
-
-if ((Test-Path -LiteralPath $skkJisyoL) -and (-not $forceDict)) {
-    Write-Host "  -> SKK-JISYO.L already installed, skipping."
-} else {
-    Write-Host "  Downloading SKK-JISYO.L (~10 MB)..."
-    $skkUrl  = "https://raw.githubusercontent.com/skk-dev/dict/master/SKK-JISYO.L"
-    $tmpFile = $skkJisyoL + ".tmp"
-    try {
-        $ProgressPreference = "SilentlyContinue"
-        Invoke-WebRequest -Uri $skkUrl -OutFile $tmpFile -UseBasicParsing -TimeoutSec 120
-        Move-Item -LiteralPath $tmpFile -Destination $skkJisyoL -Force
-        $sizeBytes = (Get-Item $skkJisyoL).Length
-        $sizeMB    = [math]::Round($sizeBytes / 1048576, 1)
-        Write-Host ("  -> " + $skkJisyoL + " (" + $sizeMB + " MB)")
-    } catch {
-        if (Test-Path -LiteralPath $tmpFile) {
-            Remove-Item -LiteralPath $tmpFile -Force -ErrorAction SilentlyContinue
-        }
-        Write-Host ("[WARNING] Failed to download SKK-JISYO.L: " + $_)
-        Write-Host "  IME will work with LLM + rakukan.dict only."
-        Write-Host "  To download manually later:"
-        Write-Host ("    Invoke-WebRequest -Uri '" + $skkUrl + "' -OutFile '" + $skkJisyoL + "'")
-    }
-}
 
 # --- 5c: LLM model pre-download ---
 Write-Host ""

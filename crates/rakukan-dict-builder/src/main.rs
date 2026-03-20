@@ -52,22 +52,26 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(
     name = "rakukan-dict-builder",
-    about = "mozc TSV → rakukan.dict バイナリ変換ツール"
+    about = "mozc TSV → rakukan.dict binary converter"
 )]
 struct Args {
-    /// 入力 TSV ファイル（複数指定可）
+    /// Input TSV files (mozc dictionary format, multiple allowed)
     #[arg(short, long = "input", required = true)]
     inputs: Vec<PathBuf>,
 
-    /// 出力バイナリファイル
+    /// Input symbol TSV files (mozc symbol/symbol.tsv format, multiple allowed)
+    #[arg(long = "symbol")]
+    symbols: Vec<PathBuf>,
+
+    /// Output binary file
     #[arg(short, long)]
     output: PathBuf,
 
-    /// 1 読みあたりの最大候補数（デフォルト: 50）
+    /// Max candidates per reading (default: 50)
     #[arg(long, default_value = "50")]
     max_per_reading: usize,
 
-    /// cost 上限（これより大きいエントリを除外。デフォルト: 無制限）
+    /// Max cost threshold (default: no limit)
     #[arg(long, default_value = "65535")]
     max_cost: u16,
 }
@@ -150,6 +154,72 @@ struct ReadingGroup {
     reading: String,
     /// cost 昇順にソートされた (surface, cost) リスト
     tokens:  Vec<(String, u16)>,
+}
+
+/// symbol.tsv パーサー
+///
+/// フォーマット: POS TAB CHAR TAB Readings(space-sep) TAB description ...
+/// Readings フィールドのうちひらがなのみのトークンを読みとして採用する。
+/// cost は固定値（symbol は優先度を高めにする）。
+fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("symbol TSV read failed: {}", path.display()))?;
+
+    let mut entries = Vec::new();
+    let mut skipped = 0usize;
+
+    for (_lineno, line) in text.lines().enumerate() {
+        let line = line.trim();
+        // ヘッダ・コメント・空行スキップ
+        if line.is_empty() || line.starts_with('#') || line.starts_with("POS\t") {
+            continue;
+        }
+
+        let cols: Vec<&str> = line.splitn(4, '\t').collect();
+        if cols.len() < 3 {
+            skipped += 1;
+            continue;
+        }
+
+        let surface  = cols[1].trim().to_string();
+        let readings_raw = cols[2];
+
+        if surface.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        // readings フィールドはスペース区切りの複数トークン
+        // ひらがな（U+3041–U+309F）と長音符（U+30FC）のみで構成されるトークンを読みとして採用
+        let hira_readings: Vec<&str> = readings_raw.split(' ')
+            .filter(|t| !t.is_empty() && t.chars().all(|c| {
+                let n = c as u32;
+                (0x3041..=0x309F).contains(&n) || c == 'ー'
+            }))
+            .collect();
+
+        if hira_readings.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        // symbol エントリは cost=3000 固定（mozc 通常エントリの平均的な値）
+        let cost: u16 = 3000;
+
+        for reading in hira_readings {
+            entries.push(Entry {
+                reading: reading.to_string(),
+                surface: surface.clone(),
+                cost,
+            });
+        }
+    }
+
+    tracing::info!(
+        "{}: {} symbol entries, {} skipped",
+        path.display(), entries.len(), skipped
+    );
+    Ok(entries)
 }
 
 fn build_groups(entries: Vec<Entry>, max_per_reading: usize) -> Vec<ReadingGroup> {
@@ -301,6 +371,13 @@ fn main() -> Result<()> {
     for path in &args.inputs {
         let entries = parse_tsv(path, args.max_cost)
             .with_context(|| format!("TSV パース失敗: {}", path.display()))?;
+        all_entries.extend(entries);
+    }
+
+    // symbol.tsv を読み込んでマージ
+    for path in &args.symbols {
+        let entries = parse_symbol_tsv(path)
+            .with_context(|| format!("symbol TSV パース失敗: {}", path.display()))?;
         all_entries.extend(entries);
     }
 

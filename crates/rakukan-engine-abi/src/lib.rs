@@ -80,6 +80,7 @@ struct EngineVTable {
 
     // 診断
     last_error:           unsafe extern "C" fn() -> *mut c_char,
+    dict_status:          unsafe extern "C" fn() -> *mut c_char,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -134,6 +135,7 @@ impl EngineVTable {
             available_models_json: load_sym!(lib, b"engine_available_models_json\0"),
             learn:                 load_sym!(lib, b"engine_learn\0"),
             last_error:            load_sym!(lib, b"engine_last_error\0"),
+            dict_status:           load_sym!(lib, b"engine_dict_status\0"),
         })
     }
 }
@@ -417,6 +419,16 @@ impl DynEngine {
     /// エンジン DLL 側の最後のエラー/ステータスメッセージを返す（診断用）
     pub fn last_error(&self) -> String {
         let ptr = unsafe { (self.vtable.last_error)() };
+        if ptr.is_null() { return String::new(); }
+        let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { (self.vtable.free_string)(ptr) };
+        s
+    }
+
+    pub fn dict_status(&self) -> String {
+        let ptr = unsafe { (self.vtable.dict_status)() };
         if ptr.is_null() { return String::new(); }
         let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_string_lossy()

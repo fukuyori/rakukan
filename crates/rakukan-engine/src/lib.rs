@@ -21,12 +21,14 @@ pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter};
 // ── rakukan 独自モジュール ────────────────────────────────────────────────────
 pub mod backend;
 pub mod conv_cache;
+pub mod dict;
 pub mod ffi;
 pub use backend::{BackendSelection, GpuInfo, select_backend};
 // Backend は kanji::Backend と名前が被るため、rakukan の Backend は別名でエクスポート
 pub use backend::Backend as RakunBackend;
 
-pub use rakukan_dict::{DictStore, find_skk_jisyo, find_mozc_dict, user_dict_path};
+pub use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
+pub use rakukan_dict::mozc_dict::MozcDict;
 
 use kanji::{registry, Backend as KarukanBackend};
 use thiserror::Error;
@@ -406,8 +408,8 @@ impl RakunEngine {
     pub fn is_kanji_ready(&self) -> bool { self.kanji.is_some() }
 
     pub fn set_dict_store(&mut self, store: DictStore) {
-        info!("DictStore セット: SKK={} entries, user={} entries",
-            store.skk_entry_count(), store.user_entry_count());
+        info!("DictStore セット: user={} entries",
+            store.user_entry_count());
         self.dict_store = Some(store);
     }
 
@@ -422,13 +424,17 @@ impl RakunEngine {
     }
 
     pub fn is_dict_ready(&self) -> bool {
-        self.dict_store.as_ref().map(|d| d.is_skk_loaded()).unwrap_or(false)
+        self.dict_store.is_some()
+    }
+
+    pub fn dict_store_ref(&self) -> Option<&DictStore> {
+        self.dict_store.as_ref()
     }
 
     pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
         let hiragana = &self.hiragana_buf;
 
-        // 優先順位: ユーザー辞書 → LLM → mozc/skk
+        // 優先順位: ユーザー辞書 → LLM → mozc
         let user_cands: Vec<String> = self.dict_store
             .as_ref()
             .map(|d| d.lookup_user(hiragana))
@@ -439,21 +445,37 @@ impl RakunEngine {
             .map(|d| d.lookup_dict(hiragana, limit))
             .unwrap_or_default();
 
+        info!("merge_candidates: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
+            hiragana,
+            if self.dict_store.is_some() { "Some" } else { "None" },
+            dict_cands,
+            llm_candidates);
+
         let mut merged: Vec<String> = Vec::new();
 
         // 1. ユーザー辞書候補（最優先）
-        for c in user_cands {
+        for c in &user_cands {
             if merged.len() >= limit { break; }
-            if !merged.contains(&c) { merged.push(c); }
+            if !merged.contains(c) { merged.push(c.clone()); }
         }
 
-        // 2. LLM候補（文脈考慮）
+        // 辞書候補に確保するスロット数（limit の半分、最低3件）
+        let dict_slots = (limit / 2).max(3);
+        // LLM は残りのスロットを使用
+        let llm_limit = limit.saturating_sub(dict_slots).max(1);
+
+        // 2. LLM候補（文脈考慮、上限 llm_limit）
+        let mut llm_count = 0;
         for c in llm_candidates {
+            if llm_count >= llm_limit { break; }
             if merged.len() >= limit { break; }
-            if !merged.contains(&c) { merged.push(c); }
+            if !merged.contains(&c) {
+                merged.push(c);
+                llm_count += 1;
+            }
         }
 
-        // 3. mozc/skk候補（文脈なし辞書）
+        // 3. mozc候補（残りスロットを全て使用）
         for c in dict_cands {
             if merged.len() >= limit { break; }
             if !merged.contains(&c) { merged.push(c); }
