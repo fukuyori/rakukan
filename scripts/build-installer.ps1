@@ -72,7 +72,7 @@ foreach ($name in @("rakukan_engine_cpu.dll", "rakukan_engine_vulkan.dll", "raku
 }
 
 # 辞書
-$dict = Join-Path $env:APPDATA "rakukan\dict\rakukan.dict"
+$dict = Join-Path $env:LOCALAPPDATA "rakukan\dict\rakukan.dict"
 if (Test-Path $dict) {
     Copy-Item $dict "$distDir\rakukan.dict" -Force
     Write-Host "  -> rakukan.dict"
