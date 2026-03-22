@@ -80,6 +80,18 @@ if (Test-Path $dict) {
     Write-Warning "rakukan.dict が見つかりません ($dict)"
 }
 
+# ライセンス・帰属表示
+$repoRoot = "$PSScriptRoot\.."
+foreach ($f in @("NOTICE", "THIRD_PARTY_LICENSES.md")) {
+    $src = Join-Path $repoRoot $f
+    if (Test-Path $src) {
+        Copy-Item $src "$distDir\$f" -Force
+        Write-Host "  -> $f"
+    } else {
+        Write-Warning "$f が見つかりません"
+    }
+}
+
 # config.toml (デフォルト値が入ったもの)
 $configSrc = "$PSScriptRoot\..\config\config.toml"
 if (-not (Test-Path $configSrc)) {

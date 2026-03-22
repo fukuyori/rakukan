@@ -107,6 +107,10 @@ Source: "dist\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesu
 Source: "dist\register-tip.ps1";   DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\unregister-tip.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
+; ----- ライセンス・帰属表示 -----
+Source: "dist\NOTICE";                  DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
+
 [Run]
 ; ----- COM/TSF 登録 -----
 Filename: "{sys}\regsvr32.exe"; \

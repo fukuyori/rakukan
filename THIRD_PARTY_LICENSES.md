@@ -74,16 +74,12 @@ SOFTWARE.
 
 ## Dictionaries
 
-> The following dictionary files are **downloaded at install time** from their
-> respective repositories. They are **not** included in the rakukan source code
-> or binary distribution.
-
 ### Mozc Open Source Dictionary
 
 - **Author:** Google Inc.
 - **Source:** https://github.com/google/mozc
 - **Files:** `src/data/dictionary_oss/dictionary*.txt`, `reading_correction.tsv`
-- **Usage:** Downloaded at install time, converted to `rakukan.dict` binary format
+- **Usage:** Converted to `rakukan.dict` binary format and bundled in the installer
 - **License:** Apache License 2.0
 
 ```

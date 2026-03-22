@@ -8,8 +8,8 @@ Mozc Open Source Dictionary
 ================================================================================
 Copyright (c) 2010-2024, Google Inc.
 
-This product includes dictionary data from the Mozc project.
-The dictionary data is downloaded at install time from:
+This product includes dictionary data derived from the Mozc project.
+The dictionary data (rakukan.dict) is a binary format derived from:
   https://github.com/google/mozc/tree/master/src/data/dictionary_oss
 
 Licensed under the Apache License, Version 2.0 (the "License");
