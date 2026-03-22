@@ -74,6 +74,15 @@ pub extern "C" fn engine_push_raw(handle: *mut c_void, codepoint: u32) {
     }
 }
 
+/// Shift+アルファベット用: hiragana_buf に全角大文字、romaji_input_log に ASCII 大文字を記録する。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_push_fullwidth_alpha(handle: *mut c_void, codepoint: u32) {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    if let Some(c) = char::from_u32(codepoint) {
+        engine.push_fullwidth_alpha(c);
+    }
+}
+
 /// 1 文字を入力する（Unicode コードポイント）。
 /// 戻り値: 0 = 通常, 1 = BG 変換を新たに起動した
 #[unsafe(no_mangle)]

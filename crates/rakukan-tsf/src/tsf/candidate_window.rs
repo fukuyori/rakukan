@@ -25,10 +25,11 @@ use std::cell::{Cell, RefCell};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
             BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-            InvalidateRect, PAINTSTRUCT, SelectObject, SetBkMode,
+            GetMonitorInfoW, InvalidateRect, MONITORINFO, MonitorFromPoint,
+            MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SelectObject, SetBkMode,
             SetTextColor, TextOutW, BACKGROUND_MODE, HDC,
         },
         System::LibraryLoader::GetModuleHandleW,
@@ -51,6 +52,8 @@ const FONT_HEIGHT: i32 = 17;
 const WIN_WIDTH: i32 = 260;
 /// ページインジケーター行の高さ
 const PAGER_HEIGHT: i32 = 22;
+/// キャレット高さの推定値（画面端反転時に使用）
+const CARET_HEIGHT_ESTIMATE: i32 = 24;
 
 /// 選択行のハイライト色（濃い青）
 const COLOR_SEL_BG: COLORREF = COLORREF(0x00_B4_4E_20); // #204EB4 → BGR
@@ -275,11 +278,15 @@ pub fn show_with_status(page_candidates: &[String], page_selected: usize, page_i
 
     let n     = page_candidates.len();
     let win_h = window_height(n, has_pager, has_status);
+
+    // ─── 画面端検出：ウィンドウが画面外にはみ出す場合はキャレットの上側に反転 ───
+    let win_y = unsafe { calc_window_y(x, y, win_h) };
+
     let hwnd  = get_hwnd();
 
     if is_valid(hwnd) {
         unsafe {
-            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, y, WIN_WIDTH, win_h, SWP_NOACTIVATE);
+            let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, win_y, WIN_WIDTH, win_h, SWP_NOACTIVATE);
             let _ = InvalidateRect(hwnd, None, BOOL(0));
             let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         }
@@ -292,7 +299,7 @@ pub fn show_with_status(page_candidates: &[String], page_selected: usize, page_i
                 PCWSTR(CLASS_NAME_UTF16.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP | WS_BORDER,
-                x, y, WIN_WIDTH, win_h,
+                x, win_y, WIN_WIDTH, win_h,
                 HWND::default(), HMENU::default(), hmod, None,
             ) {
                 Ok(new_hwnd) if is_valid(new_hwnd) => {
@@ -304,6 +311,30 @@ pub fn show_with_status(page_candidates: &[String], page_selected: usize, page_i
             }
         }
     }
+}
+
+/// キャレット下端 `caret_bottom` から候補ウィンドウの表示 Y を計算する。
+///
+/// ウィンドウが作業領域（タスクバー除く）の下端を超える場合は
+/// キャレットの上側（`caret_bottom - CARET_HEIGHT_ESTIMATE - win_h`）に反転する。
+unsafe fn calc_window_y(x: i32, caret_bottom: i32, win_h: i32) -> i32 {
+    let pt = POINT { x, y: caret_bottom };
+    let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        let work_bottom = mi.rcWork.bottom;
+        if caret_bottom + win_h > work_bottom {
+            // 上側に反転：4ドット上
+            let flipped = caret_bottom - CARET_HEIGHT_ESTIMATE - win_h - 4;
+            tracing::debug!("候補ウィンドウ反転: bottom={} work_bottom={} → y={}", caret_bottom + win_h, work_bottom, flipped);
+            return flipped.max(mi.rcWork.top);
+        }
+    }
+    // 下側：1ドット下
+    caret_bottom + 1
 }
 
 /// 選択インデックスとページ情報だけ更新して再描画する（位置は変えない）。

@@ -1,6 +1,42 @@
 # Changelog
 
-## [0.3.6] - 2026-03-20
+## [0.3.7] - 2026-03-22
+
+### Fixed
+
+- **`/` キーで `・` が入力されない問題を修正**
+  - `symbol_fixed` が `/` を全角 `／` に変換していたため、ローマ字ルールの `/` → `・` が機能していなかった
+  - F9/F10 変換時の `/` も正しく動作するよう対応
+
+- **LLM 出力にふりがなが混入する問題に対処**（`rakukan-engine/src/kanji/backend.rs`）
+  - `clean_model_output` に `strip_furigana` を追加
+  - 「健診(けんしん)や」のように括弧内がひらがな・カタカナのみの場合に括弧ごと除去
+
+- **F9 変換で `、。` が `，．` に変換されない問題を修正**（`rakukan-tsf/src/engine/text_util.rs`）
+  - `ascii_to_fullwidth` が `ascii_to_fullwidth_symbol` 経由で和文句読点を返していた
+  - F9/F10（全角英数モード）では純粋な ASCII→全角対応（`，．`）を返すよう修正
+
+- **候補ウィンドウが画面下部で見えなくなる問題を修正**（`rakukan-tsf/src/tsf/candidate_window.rs`）
+  - `MonitorFromPoint` + `GetMonitorInfoW` で作業領域を取得し、はみ出す場合にキャレット上側へ反転表示
+  - 下表示時は 1px 下、上表示時は 4px 上にオフセット調整
+
+### Added
+
+- **Shift+A–Z で全角大文字を入力**（`rakukan-engine/src/lib.rs`、`ffi.rs`、`rakukan-engine-abi`）
+  - `push_fullwidth_alpha()` を追加: `hiragana_buf` に `Ａ`、`romaji_input_log` に ASCII `A` を記録
+  - F9/F10 によるサイクル変換（全角大文字→全角小文字→半角）に対応
+
+### Changed
+
+- **`symbol_fixed` 関数を削除**（`rakukan-engine/src/lib.rs`）
+  - `,./[]\-` の変換をローマ字トライルール（`rules.rs`）に統合
+  - それ以外の ASCII 記号（`@#$%` 等）は `push_char` 内でインライン全角変換
+  - `-` の文脈依存ロジック（かな後→`ー`、それ以外→`－`）を廃止し、常に `ー`
+
+- **インストーラーから SKK 辞書ダウンロード機能を削除**（`rakukan_installer.iss`）
+  - `[Tasks]` の `downloadskk`、`[Files]` の `download-skk.ps1`、`[Run]` の SKK ダウンロード処理を除去
+
+
 
 ### Fixed
 

@@ -183,32 +183,33 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
-        // ─── ASCII 数字・記号の全角変換 ───────────────────────────────────────
-        // 未確定ローマ字がない場合のみ実施（pending 中は英数字コンテキスト）。
-        // ローマ字ルールに登録されている文字（英字）は通常のローマ字変換に任せる。
+        // 数字 0–9 → 全角数字 ０–９（pending_romaji がない場合のみ）
+        if self.pending_romaji_buf.is_empty() && c.is_ascii_digit() {
+            let fw = char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c);
+            self.hiragana_buf.push(fw);
+            self.romaji_input_log.push(c.to_string());
+            debug!("digit {:?} → {:?}", c, fw);
+            return self.current_preedit();
+        }
+
+        // ASCII 記号の処理（pending_romaji がない場合のみ）
+        // ,./[]\- はトライのルール（、。・「」￥ー等）に委ねる。
+        // それ以外の印字可能 ASCII 記号（@#$%^&*()+=_:"~!? 等）は
+        // 全角に変換して即確定する（以前の symbol_fixed catch-all と同等）。
         if self.pending_romaji_buf.is_empty() {
-            // 数字 0–9 → 全角数字 ０–９
-            if c.is_ascii_digit() {
-                let fw = char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c);
+            let n = c as u32;
+            let is_ascii_printable = (0x21..=0x7E).contains(&n);
+            let is_trie_symbol = matches!(c, ',' | '.' | '/' | '[' | ']' | '\\' | '-');
+            if is_ascii_printable && !is_trie_symbol && !c.is_ascii_alphanumeric() {
+                let fw = char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c);
                 self.hiragana_buf.push(fw);
                 self.romaji_input_log.push(c.to_string());
-                debug!("digit {:?} → {:?}", c, fw);
+                debug!("symbol {:?} → {:?}", c, fw);
                 return self.current_preedit();
-            }
-            // ASCII 記号 → 固定マッピングまたは全角変換
-            let is_ascii_symbol = (c as u32) < 0x80 && !c.is_ascii_alphanumeric() && c != ' ';
-            if is_ascii_symbol {
-                let out = Self::symbol_fixed(c, &self.hiragana_buf);
-                if let Some(out) = out {
-                    self.hiragana_buf.push(out);
-                    self.romaji_input_log.push(c.to_string());
-                    debug!("symbol {:?} → {:?}", c, out);
-                    return self.current_preedit();
-                }
-                // None はローマ字ルールに任せる（`/`→`・` 等）
             }
         }
 
+        // ,./[]\- および英字 → ローマ字ルール（trie）に委ねる
         self.pending_romaji_buf.push(c);
         match self.romaji.push(c) {
             ConversionEvent::Converted(hiragana) => {
@@ -230,46 +231,6 @@ impl RakunEngine {
         }
         self.current_preedit()
     }
-
-    /// ASCII 記号の固定マッピング変換。
-    ///
-    /// コンテキスト判定を廃止し、以下のルールで固定変換する：
-    /// - `,` → `、`  `.` → `。`  `[` → `「`  `]` → `」`  `\` → `￥`
-    /// - `-` のみ直前文字種で `ー`（かな後）/ `－`（その他）に分岐
-    /// - その他 ASCII 印字可能記号 → 全角記号
-    /// - `None` を返すとローマ字ルールに委ねる
-    pub(crate) fn symbol_fixed(c: char, hiragana_buf: &str) -> Option<char> {
-        match c {
-            ',' => Some('、'),
-            '.' => Some('。'),
-            '[' => Some('「'),
-            ']' => Some('」'),
-            '\x5C' | '\u{A5}' => Some('\u{FFE5}'),
-            '-' => {
-                // 直前がひらがな・カタカナ → 長音符、それ以外 → 全角ハイフン
-                let prev = hiragana_buf.chars().last();
-                let is_kana = prev.map(|ch| {
-                    let n = ch as u32;
-                    (0x3041..=0x3096).contains(&n)   // ひらがな
-                    || (0x30A1..=0x30FC).contains(&n) // 全角カタカナ・長音符
-                    || (0xFF65..=0xFF9F).contains(&n) // 半角カタカナ
-                    || ch == 'ｰ'
-                }).unwrap_or(false);
-                Some(if is_kana { 'ー' } else { '－' })
-            }
-            _ => {
-                // その他 ASCII 印字可能文字 → 全角
-                let n = c as u32;
-                if (0x21..=0x7E).contains(&n) {
-                    Some(char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c))
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-
 
     /// 末尾の未確定 "n" を「ん」として確定する（Convert / CommitRaw 前に呼ぶ）
     pub fn flush_pending_n(&mut self) -> bool {
@@ -296,6 +257,18 @@ impl RakunEngine {
     /// テンキー記号など、かなルールに登録されている文字をそのまま入力する場合に使用する。
     pub fn push_raw(&mut self, c: char) {
         self.hiragana_buf.push(c);
+        self.romaji_input_log.push(c.to_string());
+    }
+
+    /// Shift+アルファベット用: hiragana_buf に全角大文字を、romaji_input_log に ASCII 大文字を記録する。
+    ///
+    /// F9/F10 のサイクル変換は romaji_input_log の ASCII 文字を元に動作するため、
+    /// log には元の ASCII 文字（'A'–'Z'）を保持する必要がある。
+    /// `c` には ASCII 大文字（'A'–'Z'）を渡すこと。
+    pub fn push_fullwidth_alpha(&mut self, c: char) {
+        debug_assert!(c.is_ascii_uppercase());
+        let fw = char::from_u32(c as u32 - 0x41 + 0xFF21).unwrap_or(c);
+        self.hiragana_buf.push(fw);
         self.romaji_input_log.push(c.to_string());
     }
 
@@ -642,65 +615,61 @@ mod context_trim_tests {
 }
 
 #[cfg(test)]
-mod symbol_fixed_tests {
+mod symbol_input_tests {
     use super::RakunEngine;
 
-    fn sym(buf: &str, c: char) -> Option<char> {
-        RakunEngine::symbol_fixed(c, buf)
+    fn push(buf_init: &str, c: char) -> String {
+        let mut e = RakunEngine::new(crate::EngineConfig::default());
+        // hiragana_buf に初期値をセット
+        e.force_preedit(buf_init.to_string());
+        e.push_char(c);
+        e.hiragana_text().to_string()
     }
 
     #[test]
-    fn comma_always_kuten() {
-        assert_eq!(sym("", ','), Some('\u{3001}'));
-        assert_eq!(sym("\u{3042}", ','), Some('\u{3001}'));
-        assert_eq!(sym("abc", ','), Some('\u{3001}'));
-        assert_eq!(sym("\u{FF21}\u{FF22}\u{FF23}", ','), Some('\u{3001}'));
+    fn comma_to_kuten() {
+        assert!(push("", ',').ends_with('、'));
+        assert!(push("あ", ',').ends_with('、'));
     }
 
     #[test]
-    fn period_always_maru() {
-        assert_eq!(sym("", '.'), Some('\u{3002}'));
-        assert_eq!(sym("\u{3042}", '.'), Some('\u{3002}'));
-        assert_eq!(sym("abc", '.'), Some('\u{3002}'));
+    fn period_to_maru() {
+        assert!(push("", '.').ends_with('。'));
+    }
+
+    #[test]
+    fn slash_to_nakaten() {
+        assert!(push("", '/').ends_with('・'));
     }
 
     #[test]
     fn bracket_open() {
-        assert_eq!(sym("", '['), Some('\u{300C}'));
-        assert_eq!(sym("\u{3042}", '['), Some('\u{300C}'));
+        assert!(push("", '[').ends_with('「'));
     }
 
     #[test]
     fn bracket_close() {
-        assert_eq!(sym("", ']'), Some('\u{300D}'));
+        assert!(push("", ']').ends_with('」'));
     }
 
     #[test]
     fn backslash_to_yen() {
-        assert_eq!(sym("", '\x5C'), Some('\u{FFE5}'));
-        assert_eq!(sym("\u{3042}", '\x5C'), Some('\u{FFE5}'));
+        assert!(push("", '\\').ends_with('￥'));
     }
 
     #[test]
-    fn minus_after_kana_is_choon() {
-        assert_eq!(sym("\u{3042}", '-'), Some('\u{30FC}'));
-        assert_eq!(sym("\u{30A2}", '-'), Some('\u{30FC}'));
-        assert_eq!(sym("\u{FF71}", '-'), Some('\u{30FC}'));
-    }
-
-    #[test]
-    fn minus_after_other_is_zenkaku_hyphen() {
-        assert_eq!(sym("", '-'), Some('\u{FF0D}'));
-        assert_eq!(sym("abc", '-'), Some('\u{FF0D}'));
-        assert_eq!(sym("\u{FF21}\u{FF22}\u{FF23}", '-'), Some('\u{FF0D}'));
+    fn minus_always_choon() {
+        // 文脈依存ロジック廃止 → 常に ー
+        assert!(push("", '-').ends_with('ー'));
+        assert!(push("あ", '-').ends_with('ー'));
+        assert!(push("abc", '-').ends_with('ー'));
     }
 
     #[test]
     fn other_symbols_fullwidth() {
-        assert_eq!(sym("", '='), Some('\u{FF1D}'));
-        assert_eq!(sym("", '@'), Some('\u{FF20}'));
-        assert_eq!(sym("", '('), Some('\u{FF08}'));
-        assert_eq!(sym("", ')'), Some('\u{FF09}'));
-        assert_eq!(sym("abc", '='), Some('\u{FF1D}'));
+        assert!(push("", '=').ends_with('＝'));
+        assert!(push("", '@').ends_with('＠'));
+        assert!(push("", '(').ends_with('（'));
+        assert!(push("", ')').ends_with('）'));
     }
 }

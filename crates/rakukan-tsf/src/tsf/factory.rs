@@ -687,7 +687,11 @@ impl TextServiceFactory_Impl {
 
                 let mut guard2 = engine_try_get_or_create()?;
                 let engine2 = match guard2.as_mut() { Some(e) => e, None => return Ok(true) };
-                engine2.push_char(c);
+                if c.is_ascii_uppercase() {
+                    engine2.push_fullwidth_alpha(c);
+                } else {
+                    engine2.push_char(c);
+                }
                 let preedit  = engine2.preedit_display();
                 let n_cands2 = crate::engine::state::get_num_candidates();
                 diag::event(DiagEvent::InputChar { ch: c, preedit_after: preedit.clone() });
@@ -705,7 +709,11 @@ impl TextServiceFactory_Impl {
         tracing::info!("on_input: is_dict_ready={} dict_status={:?}",
             engine.is_dict_ready(), engine.dict_status());
         engine.poll_model_ready();
-        engine.push_char(c);
+        if c.is_ascii_uppercase() {
+            engine.push_fullwidth_alpha(c);
+        } else {
+            engine.push_char(c);
+        }
         let preedit  = engine.preedit_display();
         let hiragana = engine.hiragana_text();
         let n_cands  = crate::engine::state::get_num_candidates();

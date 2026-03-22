@@ -30,6 +30,7 @@ struct EngineVTable {
     // 文字入力
     push_char:            unsafe extern "C" fn(*mut c_void, u32) -> u8,
     push_raw:             unsafe extern "C" fn(*mut c_void, u32),
+    push_fullwidth_alpha: unsafe extern "C" fn(*mut c_void, u32),
     backspace:            unsafe extern "C" fn(*mut c_void) -> bool,
     flush_n:              unsafe extern "C" fn(*mut c_void) -> bool,
 
@@ -103,6 +104,7 @@ impl EngineVTable {
             free_string:          load_sym!(lib, b"engine_free_string\0"),
             push_char:            load_sym!(lib, b"engine_push_char\0"),
             push_raw:             load_sym!(lib, b"engine_push_raw\0"),
+            push_fullwidth_alpha: load_sym!(lib, b"engine_push_fullwidth_alpha\0"),
             backspace:            load_sym!(lib, b"engine_backspace\0"),
             flush_n:              load_sym!(lib, b"engine_flush_n\0"),
             preedit_display:      load_sym!(lib, b"engine_preedit_display\0"),
@@ -222,6 +224,10 @@ impl DynEngine {
 
     pub fn push_raw(&mut self, c: char) {
         unsafe { (self.vtable.push_raw)(self.handle, c as u32); }
+    }
+
+    pub fn push_fullwidth_alpha(&mut self, c: char) {
+        unsafe { (self.vtable.push_fullwidth_alpha)(self.handle, c as u32); }
     }
 
     pub fn backspace(&mut self) -> bool {

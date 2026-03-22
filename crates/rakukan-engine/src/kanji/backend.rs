@@ -30,12 +30,58 @@ pub fn build_jinen_prompt(katakana: &str, context: &str) -> String {
     )
 }
 
-/// Clean model output by trimming whitespace.
+/// Clean model output by trimming whitespace and removing spurious furigana.
 ///
 /// Special tokens (BOS/EOS) are handled at the decode level via
 /// `skip_special_tokens` rather than string replacement.
+///
+/// # Furigana removal
+/// LLM が「健診(けんしん)や」のようにルビ形式で読みを付けることがある。
+/// 全角・半角括弧内がひらがな・カタカナのみで構成される場合は除去する。
+/// 意図的な括弧（(笑)、(注)、(英数字)）はカナ以外の文字を含むため保持される。
 pub fn clean_model_output(text: &str) -> String {
-    text.trim().to_string()
+    strip_furigana(text.trim())
+}
+
+/// 括弧内がひらがな・カタカナのみで構成される場合に括弧ごと除去する。
+fn strip_furigana(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut result = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        let close = match c {
+            '（' => Some('）'),
+            '(' => Some(')'),
+            _ => None,
+        };
+        if let Some(close_ch) = close {
+            // 閉じ括弧を探す（同一行内のみ、最大30文字先まで）
+            let lookahead = chars[i + 1..].iter().take(30);
+            let end_pos = lookahead.enumerate().find(|&(_, &x)| x == close_ch).map(|(j, _)| j);
+            if let Some(end) = end_pos {
+                let inner: String = chars[i + 1..i + 1 + end].iter().collect();
+                // 内容がひらがな・カタカナ（長音符含む）のみなら除去
+                let is_kana_only = !inner.is_empty() && inner.chars().all(is_kana_or_prolonged);
+                if is_kana_only {
+                    i = i + 1 + end + 1; // 括弧全体をスキップ
+                    continue;
+                }
+            }
+        }
+        result.push(c);
+        i += 1;
+    }
+    result
+}
+
+/// ひらがな・カタカナ・長音符・中点のいずれかか判定する。
+#[inline]
+fn is_kana_or_prolonged(c: char) -> bool {
+    let n = c as u32;
+    (0x3041..=0x3096).contains(&n)   // ひらがな（ぁ〜ゖ）
+    || (0x30A1..=0x30FC).contains(&n) // カタカナ（ァ〜ー、ー含む）
+    || c == 'ー' || c == '・' || c == 'ｰ'
 }
 
 /// Inference backend configuration (llama.cpp GGUF format with external tokenizer)

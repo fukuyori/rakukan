@@ -348,6 +348,8 @@ pub fn build_rules() -> TrieNode {
     trie.insert("?", "？");
     trie.insert("!", "！");
     trie.insert("~", "〜");
+    trie.insert("\\", "\u{FFE5}"); // \ → ￥
+    trie.insert("\u{00A5}", "\u{FFE5}"); // ¥（JISキー） → ￥
 
     // Brackets
     trie.insert("[", "「");

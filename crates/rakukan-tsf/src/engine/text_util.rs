@@ -211,11 +211,15 @@ fn half_kata_to_full(c: char, next: Option<char>) -> Option<(char, bool)> {
 
 /// 文字列を全角英数字にする（ひらがな等はそのまま）
 /// ローマ字ログに使用するため記号は全角記号マッピングを適用
+/// ASCII 文字列を全角英数記号に変換（F9/F10 用）。
+///
+/// `,` → `，`、`.` → `．` など、純粋な ASCII→全角対応（U+FF01–U+FF5E）を使う。
+/// `ascii_to_fullwidth_symbol`（F6/F7用の和文句読点変換）は経由しない。
 fn ascii_to_fullwidth(s: &str) -> String {
     s.chars().map(|c| {
         let n = c as u32;
         if (0x21..=0x7E).contains(&n) {
-            ascii_to_fullwidth_symbol(c)
+            char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
         } else {
             c
         }
