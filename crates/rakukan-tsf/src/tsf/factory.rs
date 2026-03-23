@@ -380,7 +380,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         let _t = diag::span("OnKeyDown");
         let vk = wparam.0 as u16;
 
-        tracing::debug!("OnKeyDown vk={:#04x}", vk);
+        tracing::trace!("OnKeyDown vk={:#04x}", vk);
 
         // Ctrl+Shift+F12: 診断ダンプ
         if vk == 0x7B {
@@ -517,7 +517,7 @@ impl TextServiceFactory_Impl {
                         => format!("Split({:?}+{:?})", target, remainder),
                 }
             } else { "lock_err".to_string() };
-            tracing::info!("handle_action: {:?} state={} bg={} hira={:?}",
+            tracing::debug!("handle_action: {:?} state={} bg={} hira={:?}",
                 action_name(&action), state_name, bg, engine.hiragana_text());
         }
 
@@ -529,12 +529,12 @@ impl TextServiceFactory_Impl {
                     if llm_pending && engine.bg_status() == "done" { Some(original_preedit.clone()) } else { None }
                 } else { None };
                 if let Some(preedit_key) = poll_info {
-                    tracing::info!("poll: bg=done llm_pending=true key={:?}, calling bg_take_candidates", preedit_key);
+                    tracing::debug!("poll: bg=done llm_pending=true key={:?}, calling bg_take_candidates", preedit_key);
                     match engine.bg_take_candidates(&preedit_key) {
                         Some(llm_cands) => {
-                            tracing::info!("poll: bg_take_candidates → Some({} cands)", llm_cands.len());
+                            tracing::debug!("poll: bg_take_candidates → Some({} cands)", llm_cands.len());
                             let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
-                            tracing::info!("poll: merge_candidates → {:?}", merged);
+                            tracing::debug!("poll: merge_candidates → {:?}", merged);
                             if !merged.is_empty() {
                                 let first = merged.first().cloned().unwrap_or_default();
                                 if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess {
@@ -572,19 +572,19 @@ impl TextServiceFactory_Impl {
             if let Ok(mut sess) = session_get() {
                 if let Some((wait_preedit, pos_x, pos_y)) = sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y)) {
                     let bg_now = engine.bg_status();
-                    tracing::info!("waiting-poll: wait_preedit={:?} bg={}", wait_preedit, bg_now);
+                    tracing::debug!("waiting-poll: wait_preedit={:?} bg={}", wait_preedit, bg_now);
                     if bg_now == "done" {
-                        tracing::info!("waiting-poll: calling bg_take_candidates({:?})", wait_preedit);
+                        tracing::debug!("waiting-poll: calling bg_take_candidates({:?})", wait_preedit);
                         match engine.bg_take_candidates(&wait_preedit) {
                             Some(llm_cands) => {
-                                tracing::info!("waiting-poll: got {} LLM cands", llm_cands.len());
+                                tracing::debug!("waiting-poll: got {} LLM cands", llm_cands.len());
                                 // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
                                 let merged = if llm_cands.is_empty() {
                                     engine.merge_candidates(vec![], DICT_LIMIT_WAIT)
                                 } else {
                                     engine.merge_candidates(llm_cands, DICT_LIMIT_WAIT)
                                 };
-                                tracing::info!("waiting-poll: merged={} cands", merged.len());
+                                tracing::debug!("waiting-poll: merged={} cands", merged.len());
                                 // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
                                 if !merged.is_empty() {
                                     let first = merged.first().cloned().unwrap_or_default();
@@ -706,7 +706,7 @@ impl TextServiceFactory_Impl {
         let dict_injected = engine.poll_dict_ready();
         if dict_injected { tracing::info!("on_input: dict store injected"); }
         // 辞書状態の定期ログ（デバッグ用）
-        tracing::info!("on_input: is_dict_ready={} dict_status={:?}",
+        tracing::debug!("on_input: is_dict_ready={} dict_status={:?}",
             engine.is_dict_ready(), engine.dict_status());
         engine.poll_model_ready();
         if c.is_ascii_uppercase() {
@@ -809,21 +809,21 @@ impl TextServiceFactory_Impl {
                     // 非ブロッキングでLLM完了を確認（最大500ms待機）
                     const WAIT_MS: u64 = 500;
                     let bg_before = engine.bg_status();
-                    tracing::info!("on_convert[llm_pending]: key={:?} bg={} → wait_ms({})", original_preedit, bg_before, WAIT_MS);
+                    tracing::debug!("on_convert[llm_pending]: key={:?} bg={} → wait_ms({})", original_preedit, bg_before, WAIT_MS);
                     if engine.bg_status() == "running" {
                         engine.bg_wait_ms(WAIT_MS);
                     }
                     engine.poll_model_ready();
 
                     let bg_done = engine.bg_status() == "done";
-                    tracing::info!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
+                    tracing::debug!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
                     const DICT_LIMIT: usize = 20;
 
                     if bg_done {
                         // LLM完了 → 候補をマージして表示
                         // hiragana_text() でキャッシュの実際のキーを確認してから呼ぶ
                         let hira_key = engine.hiragana_text();
-                        tracing::info!("on_convert[llm_pending]: calling bg_take_candidates op={:?}({}) hira={:?}({})",
+                        tracing::debug!("on_convert[llm_pending]: calling bg_take_candidates op={:?}({}) hira={:?}({})",
                             original_preedit, original_preedit.len(), hira_key, hira_key.len());
                         // op と hira が一致する方をキーとして使う（バイト数も確認）
                         let take_key = if hira_key == original_preedit {
@@ -834,10 +834,10 @@ impl TextServiceFactory_Impl {
                         };
                         match engine.bg_take_candidates(&take_key) {
                             Some(llm_cands) => {
-                                tracing::info!("on_convert[llm_pending]: bg_take_candidates → Some({} cands)", llm_cands.len());
+                                tracing::debug!("on_convert[llm_pending]: bg_take_candidates → Some({} cands)", llm_cands.len());
                                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
-                                tracing::info!("merge_candidates → {:?}", merged);
-                                tracing::info!("on_convert[llm_pending]: merged={} cands", merged.len());
+                                tracing::debug!("merge_candidates → {:?}", merged);
+                                tracing::debug!("on_convert[llm_pending]: merged={} cands", merged.len());
                                 if !merged.is_empty() {
                                     if let Ok(mut sess2) = session_get() {
                                         if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess2 {
@@ -873,18 +873,18 @@ impl TextServiceFactory_Impl {
                                 // bg_start で正しいキーで即再変換 → その場で待機 → 1回のSpace押しで候補取得
                                 let llm_limit2 = crate::engine::state::get_num_candidates();
                                 if engine.bg_start(llm_limit2) {
-                                    tracing::info!("on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline", take_key);
+                                    tracing::debug!("on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline", take_key);
                                     // ここで最大 1500ms 待つ（ユーザーは1回のSpaceで候補を得られる）
                                     const RESTART_WAIT_MS: u64 = 1500;
                                     engine.bg_wait_ms(RESTART_WAIT_MS);
-                                    tracing::info!("on_convert[llm_pending]: inline wait done, bg={}", engine.bg_status());
+                                    tracing::debug!("on_convert[llm_pending]: inline wait done, bg={}", engine.bg_status());
                                 } else {
                                     tracing::error!("on_convert[llm_pending]: bg_start also failed (kanji_ready={})", engine.is_kanji_ready());
                                 }
                                 if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
-                                    tracing::info!("on_convert[llm_pending]: reclaim+retry → Some({} cands)", llm_cands.len());
+                                    tracing::debug!("on_convert[llm_pending]: reclaim+retry → Some({} cands)", llm_cands.len());
                                     let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
-                                    tracing::info!("merge_candidates → {:?}", merged);
+                                    tracing::debug!("merge_candidates → {:?}", merged);
                                     if !merged.is_empty() {
                                         if let Ok(mut sess2) = session_get() {
                                             if let SessionState::Selecting { ref mut candidates, ref mut selected, ref mut llm_pending, .. } = *sess2 {
@@ -959,20 +959,20 @@ impl TextServiceFactory_Impl {
         // bg_start が永遠にスキップされ Waiting から抜け出せなくなる。
         engine.bg_reclaim();
         let kanji_ready = engine.is_kanji_ready();
-        tracing::info!("on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
+        tracing::debug!("on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
             preedit, engine.hiragana_text(), kanji_ready, engine.bg_status());
         if kanji_ready && engine.bg_status() == "idle" {
-            tracing::info!("on_convert: model ready → bg_start");
+            tracing::debug!("on_convert: model ready → bg_start");
             engine.bg_start(llm_limit);
         }
         if !kanji_ready {
             let err = engine.last_error();
-            tracing::info!("on_convert: kanji not ready, engine status={:?}", err);
+            tracing::warn!("on_convert: kanji not ready, engine status={:?}", err);
         }
 
         let bg_status  = engine.bg_status();
         let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
-        tracing::info!("on_convert[new]: bg_running={} bg={}", bg_running, bg_status);
+        tracing::debug!("on_convert[new]: bg_running={} bg={}", bg_running, bg_status);
 
         // LLM が実行中なら完了まで最大 LLM_WAIT_MAX_MS 待機して候補を取得する。
         // TSF スレッドで待つため UI がブロックするが、完了後に composition text まで
@@ -981,7 +981,7 @@ impl TextServiceFactory_Impl {
         // 基本 3 秒 + 1 文字あたり 300ms、上限 15 秒。
         let char_count = preedit.chars().count() as u64;
         let LLM_WAIT_MAX_MS: u64 = (3000 + char_count * 300).min(15_000);
-        tracing::info!("on_convert[new]: LLM_WAIT_MAX_MS={LLM_WAIT_MAX_MS}ms (chars={char_count})");
+        tracing::debug!("on_convert[new]: LLM_WAIT_MAX_MS={LLM_WAIT_MAX_MS}ms (chars={char_count})");
         if bg_running && kanji_ready {
             let caret = caret_rect_get();
             // まず ⏳ を即表示してユーザーに変換中であることを伝える
@@ -995,7 +995,7 @@ impl TextServiceFactory_Impl {
             candidate_window::show_with_status(&dummy, 0, "", caret.left, caret.bottom, Some("⏳ 変換中..."));
             // LLM完了を待機
             let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
-            tracing::info!("on_convert[new]: bg_wait({LLM_WAIT_MAX_MS}ms) completed={completed}");
+            tracing::debug!("on_convert[new]: bg_wait({LLM_WAIT_MAX_MS}ms) completed={completed}");
             if !completed {
                 // タイムアウト → WM_TIMER に任せて return
                 drop(guard);
@@ -1014,17 +1014,17 @@ impl TextServiceFactory_Impl {
             }
             let dummy = vec![preedit.clone()];
             candidate_window::show_with_status(&dummy, 0, "", caret.left, caret.bottom, Some("⏳ 変換中..."));
-            tracing::info!("on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish");
+            tracing::debug!("on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish");
             let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
-            tracing::info!("on_convert[new]: prev bg wait completed={completed}");
+            tracing::debug!("on_convert[new]: prev bg wait completed={completed}");
             // 前の bg が完了したら converter を回収して新しいキーで再起動
             engine.bg_reclaim();
             let kanji_ready2 = engine.is_kanji_ready();
-            tracing::info!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
+            tracing::debug!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
             if kanji_ready2 {
                 engine.bg_start(llm_limit);
                 let completed2 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
-                tracing::info!("on_convert[new]: new bg wait completed={completed2}");
+                tracing::debug!("on_convert[new]: new bg wait completed={completed2}");
                 // kanji_ready を更新して後続の候補取得処理へ続行
             } else {
                 // モデル自体が未ロード → タイマーに任せる
@@ -1041,7 +1041,7 @@ impl TextServiceFactory_Impl {
         let hiragana_key2 = engine.hiragana_text().to_string();
         // kanji_ready は最新の状態に更新（前 bg の reclaim 後に変化している場合がある）
         let kanji_ready_now = engine.is_kanji_ready();
-        tracing::info!("on_convert[new]: post-wait hiragana_key={:?} bg={} kanji_ready={}", hiragana_key2, bg_status2, kanji_ready_now);
+        tracing::debug!("on_convert[new]: post-wait hiragana_key={:?} bg={} kanji_ready={}", hiragana_key2, bg_status2, kanji_ready_now);
         // キー不一致で None が返ると Done が復元されるので、両方試した後に reclaim しておく
         let bg_cands = engine.bg_take_candidates(&hiragana_key2)
             .or_else(|| {
@@ -1050,7 +1050,7 @@ impl TextServiceFactory_Impl {
                     engine.bg_take_candidates(&preedit)
                 } else { None }
             });
-        tracing::info!("on_convert[new]: bg_cands={:?}", bg_cands.as_ref().map(|c| c.len()));
+        tracing::debug!("on_convert[new]: bg_cands={:?}", bg_cands.as_ref().map(|c| c.len()));
         // いずれも None だった場合 → bg_reclaim + bg_start でブロッキング再試行
         let bg_cands = if bg_cands.is_none() && kanji_ready_now {
             tracing::warn!("Convert: bg_take_candidates None (hira={:?} preedit={:?}) → reclaim+restart", hiragana_key2, preedit);
@@ -1058,13 +1058,13 @@ impl TextServiceFactory_Impl {
             if engine.is_kanji_ready() {
                 engine.bg_start(llm_limit);
                 let completed3 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
-                tracing::info!("Convert: retry bg_wait completed={completed3}");
+                tracing::debug!("Convert: retry bg_wait completed={completed3}");
                 let hira3 = engine.hiragana_text().to_string();
                 engine.bg_take_candidates(&hira3)
                     .or_else(|| {
                         if preedit != hira3 { engine.bg_take_candidates(&preedit) } else { None }
                     })
-                    .inspect(|c| tracing::info!("Convert: retry got {} cands", c.len()))
+                    .inspect(|c| tracing::debug!("Convert: retry got {} cands", c.len()))
             } else {
                 engine.bg_reclaim();
                 None
@@ -1082,7 +1082,7 @@ impl TextServiceFactory_Impl {
                 // bg_take_candidates 成功時に kanji が復元されているため再評価
                 let kanji_ready_now = engine.is_kanji_ready();
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
-                tracing::info!("merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
+                tracing::debug!("merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
                     kanji_ready_now, merged, engine.dict_status());
                 if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
                     if kanji_ready_now {
@@ -1122,7 +1122,7 @@ impl TextServiceFactory_Impl {
         drop(guard);
         let status = if llm_pending { Some("⏳ 変換中...") } else { None };
         candidate_window::show_with_status(&page_cands, 0, &page_info, caret.left, caret.bottom, status);
-        tracing::info!("on_convert[new]: update_composition first={:?} comp_exists={}", first,
+        tracing::debug!("on_convert[new]: update_composition first={:?} comp_exists={}", first,
             composition_clone().map(|g| g.is_some()).unwrap_or(false));
         update_composition(ctx, tid, sink, first)?;
         Ok(true)
@@ -1268,7 +1268,7 @@ impl TextServiceFactory_Impl {
                 let full = format!("{}{}",
                     sess.split_target().unwrap_or(""),
                     sess.split_remainder().unwrap_or(""));
-                tracing::info!("on_cancel[SplitPreedit]: restoring full={:?}", full);
+                tracing::debug!("on_cancel[SplitPreedit]: restoring full={:?}", full);
                 sess.set_preedit(full.clone());
                 drop(sess);
                 candidate_window::hide();
@@ -1289,7 +1289,7 @@ impl TextServiceFactory_Impl {
                 } else {
                     format!("{}{}", original, remainder)
                 };
-                tracing::info!("on_cancel[Selecting]: original={:?} remainder={:?} → full={:?}", original, remainder, full);
+                tracing::debug!("on_cancel[Selecting]: original={:?} remainder={:?} → full={:?}", original, remainder, full);
                 sess.set_preedit(full.clone());
                 drop(sess);
                 candidate_window::hide();
@@ -1303,7 +1303,7 @@ impl TextServiceFactory_Impl {
             if sess.is_waiting() {
                 let pre = sess.preedit_text().unwrap_or("").to_string();
                 let bg = engine.bg_status();
-                tracing::info!("on_cancel[Waiting]: pre={:?} bg={}", pre, bg);
+                tracing::debug!("on_cancel[Waiting]: pre={:?} bg={}", pre, bg);
                 if pre.is_empty() {
                     // text が空の場合は Idle にしてプリエディットをクリア
                     tracing::warn!("on_cancel[Waiting]: pre is empty → end_composition");
@@ -1329,7 +1329,7 @@ impl TextServiceFactory_Impl {
         {
             let bg = engine.bg_status();
             let hira = engine.hiragana_text().to_string();
-            tracing::info!("on_cancel[fallthrough]: preedit_empty={} bg={} hira={:?}", engine.preedit_is_empty(), bg, hira);
+            tracing::debug!("on_cancel[fallthrough]: preedit_empty={} bg={} hira={:?}", engine.preedit_is_empty(), bg, hira);
         }
         if engine.preedit_is_empty() { return Ok(false); }
         engine.bg_reclaim();
@@ -1712,7 +1712,7 @@ impl TextServiceFactory_Impl {
             match engine.bg_take_candidates(&preedit) {
             Some(llm_cands) if !llm_cands.is_empty() => {
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
-                tracing::info!("merge_candidates → {:?}", merged);
+                tracing::debug!("merge_candidates → {:?}", merged);
                 if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
                     (engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit), false)
                 } else {
@@ -1881,7 +1881,7 @@ fn convert_split_target(
     let bg_cands = if kanji_ready {
         engine.bg_start(llm_limit);
         let completed = engine.bg_wait_ms(SPLIT_WAIT_MS);
-        tracing::info!("convert_split_target: bg_wait({SPLIT_WAIT_MS}ms) completed={completed}");
+        tracing::debug!("convert_split_target: bg_wait({SPLIT_WAIT_MS}ms) completed={completed}");
         if completed {
             engine.bg_take_candidates(&target)
         } else {
@@ -1894,11 +1894,11 @@ fn convert_split_target(
     let candidates = match bg_cands {
         Some(llm_cands) if !llm_cands.is_empty() => {
             let m = engine.merge_candidates(llm_cands, DICT_LIMIT);
-            tracing::info!("merge_candidates → {:?}", m);
+            tracing::debug!("merge_candidates → {:?}", m);
             if m.is_empty() { sync_cands } else { m }
         }
         _ => {
-            tracing::info!("convert_split_target: LLM not ready, using sync_cands ({} cands)", sync_cands.len());
+            tracing::warn!("convert_split_target: LLM not ready, using sync_cands ({} cands)", sync_cands.len());
             sync_cands
         }
     };
@@ -1968,7 +1968,7 @@ fn engine_convert_sync_multi(
 
     // 辞書候補とマージ（dict_limit 件まで）
     let merged = engine.merge_candidates(llm_cands, dict_limit);
-    tracing::info!("merge_candidates → {:?}", merged);
+    tracing::debug!("merge_candidates → {:?}", merged);
     if merged.is_empty() { vec![preedit.to_string()] } else { merged }
 }
 

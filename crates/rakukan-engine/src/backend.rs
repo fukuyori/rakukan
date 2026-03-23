@@ -49,7 +49,7 @@ pub struct BackendSelection {
 /// 優先順位: CUDA > Vulkan > CPU
 /// 環境変数 `RAKUKAN_BACKEND` で強制上書きできる
 pub fn select_backend() -> BackendSelection {
-    tracing::info!("バックエンドを検出中...");
+    tracing::info!("backend::detect: start");
 
     // 環境変数による強制指定
     if let Ok(forced) = std::env::var("RAKUKAN_BACKEND") {
@@ -58,11 +58,11 @@ pub fn select_backend() -> BackendSelection {
             "vulkan" => Backend::Vulkan,
             "cpu"    => Backend::Cpu,
             other => {
-                tracing::warn!("不明な RAKUKAN_BACKEND: '{}'. CPU にフォールバック", other);
+                tracing::warn!("backend::detect: unknown RAKUKAN_BACKEND={:?}, fallback to cpu", other);
                 Backend::Cpu
             }
         };
-        tracing::info!("バックエンドを強制指定: {} (RAKUKAN_BACKEND)", backend);
+        tracing::info!("backend::detect: forced via RAKUKAN_BACKEND={}", backend);
         return BackendSelection {
             backend,
             reason: format!("環境変数 RAKUKAN_BACKEND='{}' で指定", forced),
@@ -72,7 +72,7 @@ pub fn select_backend() -> BackendSelection {
 
     // 保存済み設定の読み込み（PowerShell の detect-gpu.ps1 が生成）
     if let Some(saved) = load_saved_config() {
-        tracing::info!("保存済みバックエンド設定を使用: {}", saved.backend);
+        tracing::info!("backend::detect: using saved backend={}", saved.backend);
         return saved;
     }
 
@@ -126,7 +126,7 @@ fn detect_at_runtime() -> BackendSelection {
             };
         } else {
             // CUDA GPU はあるが Toolkit なし → Vulkan へ
-            tracing::warn!("Nvidia GPU を検出しましたが CUDA Toolkit がありません。Vulkan を試みます");
+            tracing::warn!("backend::detect: NVIDIA GPU found but CUDA Toolkit missing, trying Vulkan");
         }
     }
 
@@ -140,7 +140,7 @@ fn detect_at_runtime() -> BackendSelection {
     }
 
     // CPU フォールバック
-    tracing::warn!("GPU バックエンドが利用できません。CPU モードで起動します（低速）");
+    tracing::warn!("backend::detect: no GPU backend available, falling back to cpu (slow)");
     BackendSelection {
         backend: Backend::Cpu,
         reason: "Vulkan/CUDA が利用できないため CPU を使用（低速）".to_string(),

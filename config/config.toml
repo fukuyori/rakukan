@@ -1,28 +1,34 @@
 # rakukan 設定ファイル
 # 入力モード変更時に再読込されます。
-# gpu_backend など再ビルドが必要な項目は cargo make install を再実行してください。
 
 [general]
-log_level = "info"
+# ログレベル: error / warn / info / debug / trace
+# debug: 開発中の標準。キー入力ごとの状態変化が見える
+# info:  通常運用。初期化・確定・モード変更のみ
+# trace: 詳細調査時。ループ内・トークン単位まで出力される（低速）
+# 環境変数 RAKUKAN_LOG が設定されている場合はそちらが優先される
+log_level = "debug"
+
+# GPU バックエンド: "cuda" / "vulkan" / "cpu"
+# 未指定の場合は backend.json の保存値または自動検出を使用する
+# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
+# "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
+# "cpu"    : CPU のみ（GPU なし、VMware 等）
+# gpu_backend = "cuda"
+
+# 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
+# main_gpu = 0
+
+# LLM モデルサイズ（"small" / "xsmall"）
+# model_variant = "small"
 
 [keyboard]
-layout = "us"
-enable_jis_keys = false
+layout = "jis"
 reload_on_mode_switch = true
 
 [input]
-default_mode = "hiragana"
+default_mode = "alphanumeric"
 remember_last_kana_mode = true
-
-[candidate]
-page_size = 9
-use_number_selection = true
-show_numbers = true
-
-[conversion]
-engine = "karukan"
-commit_raw_with_enter = true
-cancel_behavior = "ms_ime"
 
 [live_conversion]
 enabled = false
@@ -36,19 +42,3 @@ warn_on_unknown_key = true
 
 # 旧形式との互換用
 # num_candidates = 9
-
-# ── GPU バックエンド ────────────────────────────────────────────────────────
-# 変更後は cargo make build-engine && cargo make reinstall が必要です。
-# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
-# "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
-# "cpu"    : CPU のみ（GPU なし、VMware 等）
-# コメントを外して gpu_backend の行を有効にしてください。
-# gpu_backend = "cuda"
-# gpu_backend = "vulkan"
-# gpu_backend = "cpu"
-
-# 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
-# main_gpu = 0
-
-# LLM モデルサイズ（"small" / "xsmall"）
-# model_variant = "small"

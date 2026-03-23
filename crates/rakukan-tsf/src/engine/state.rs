@@ -83,7 +83,7 @@ pub fn engine_start_bg_init() {
                 match RAKUKAN_ENGINE.lock() {
                     Ok(mut g) => {
                         if g.0.is_some() {
-                            tracing::info!("engine-init: engine already present, skipping");
+                            tracing::debug!("engine-init: engine already present, skipping");
                             return;
                         }
                         match create_engine() {
@@ -99,7 +99,7 @@ pub fn engine_start_bg_init() {
                     // 辞書・モデルのバックグラウンドロードを起動
                     if let Ok(mut g) = RAKUKAN_ENGINE.lock() {
                         if let Some(eng) = g.0.as_mut() {
-                            tracing::info!("engine-init: is_dict_ready={} is_kanji_ready={}", eng.is_dict_ready(), eng.is_kanji_ready());
+                            tracing::debug!("engine-init: is_dict_ready={} is_kanji_ready={}", eng.is_dict_ready(), eng.is_kanji_ready());
                             if !eng.is_dict_ready()  {
                                 tracing::info!("engine-init: calling start_load_dict");
                                 eng.start_load_dict();
@@ -173,7 +173,7 @@ pub fn engine_try_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWr
 pub fn engine_force_recreate() {
     match RAKUKAN_ENGINE.lock() {
         Ok(mut g) => {
-            tracing::info!("engine_force_recreate: dropping engine");
+            tracing::debug!("engine_force_recreate: dropping engine");
             g.0 = None;
         }
         Err(p) => {
@@ -266,7 +266,7 @@ pub fn start_reload_watcher() {
 /// バックエンド DLL をロードしてエンジンを生成する。
 fn create_engine() -> anyhow::Result<DynEngine> {
     let dir = install_dir().ok_or_else(|| anyhow::anyhow!("install_dir not found"))?;
-    tracing::info!("create_engine: install_dir={}", dir.display());
+    tracing::debug!("create_engine: install_dir={}", dir.display());
 
     // engine DLL の存在を事前確認してわかりやすいエラーを出す
     for backend in &["cpu", "vulkan", "cuda"] {
@@ -285,9 +285,9 @@ fn create_engine() -> anyhow::Result<DynEngine> {
 fn build_engine_config_json() -> String {
     let cfg = super::config::current_config();
     let num_candidates = cfg.effective_num_candidates();
-    let main_gpu = cfg.main_gpu;
+    let main_gpu = cfg.general.main_gpu;
     let n_gpu_layers: u32 = u32::MAX;  // DLL 側（cpu DLL は 0 に上書き）
-    let model_variant = cfg.model_variant.clone();
+    let model_variant = cfg.general.model_variant.clone();
 
     tracing::info!("engine config: num_candidates={num_candidates} main_gpu={main_gpu} model_variant={model_variant:?}");
     let mv_json = match &model_variant {
@@ -807,13 +807,25 @@ pub fn doc_mode_on_focus_change(
     next_dm_ptr: usize,
     next_hwnd:   usize,
 ) -> Option<InputMode> {
+    use super::config::{current_config, DefaultInputMode};
+
+    let cfg = current_config();
+    let remember = cfg.input.remember_last_kana_mode;
+
+    // config.input.default_mode → InputMode へ変換
+    let config_default = match cfg.input.default_mode {
+        DefaultInputMode::Alphanumeric => InputMode::Alphanumeric,
+        DefaultInputMode::Hiragana     => InputMode::Hiragana,
+    };
+
     let mut store = match DOC_MODE_STORE.try_lock() {
         Ok(g)  => g,
         Err(_) => return None,
     };
 
-    // 前のDocumentManagerのモードを保存（0 = DocumentManagerなし = スキップ）
-    if prev_dm_ptr != 0 {
+    // 前の DocumentManager のモードを保存
+    // remember_last_kana_mode=false の場合は保存しない（次回もデフォルトを返す）
+    if prev_dm_ptr != 0 && remember {
         store.insert(prev_dm_ptr, input_mode_get_atomic());
     }
 
@@ -821,19 +833,32 @@ pub fn doc_mode_on_focus_change(
         return None;
     }
 
-    let mode = if let Some(&saved) = store.get(&next_dm_ptr) {
-        // 既知のDocumentManager → 前回モードを復元
-        saved
-    } else {
-        // 初回フォーカス → デフォルトモードを決定
-        let default_mode = if is_terminal_hwnd(next_hwnd) {
-            tracing::debug!("doc_mode: terminal detected (hwnd={next_hwnd:#x}), default=Alphanumeric");
+    // 初回フォーカス時のデフォルトモードを決定
+    // ターミナルは config に関わらず常に Alphanumeric
+    let resolve_default = |hwnd: usize| -> InputMode {
+        if is_terminal_hwnd(hwnd) {
+            tracing::debug!("doc_mode: terminal detected (hwnd={hwnd:#x}), default=Alphanumeric");
             InputMode::Alphanumeric
         } else {
-            InputMode::Hiragana
-        };
-        store.insert(next_dm_ptr, default_mode);
-        default_mode
+            tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
+            config_default
+        }
+    };
+
+    let mode = if remember {
+        if let Some(&saved) = store.get(&next_dm_ptr) {
+            // 既知の DocumentManager → 前回モードを復元
+            tracing::debug!("doc_mode: restored mode={saved:?} for dm={next_dm_ptr:#x}");
+            saved
+        } else {
+            // 初回フォーカス → デフォルトモードを記録して返す
+            let m = resolve_default(next_hwnd);
+            store.insert(next_dm_ptr, m);
+            m
+        }
+    } else {
+        // remember=false: 毎回デフォルトモードを適用（保存・復元ともに行わない）
+        resolve_default(next_hwnd)
     };
 
     Some(mode)

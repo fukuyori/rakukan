@@ -37,24 +37,42 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
         let log_path = std::env::var("LOCALAPPDATA")
             .map(|p| format!("{}\\rakukan\\rakukan.log", p))
             .unwrap_or_default();
+
+        // config.toml の log_level を読む（ファイルが存在する場合）。
+        // subscriber 初期化は config より先に行う必要があるため、
+        // ここで直接ファイルを読み込む（init_config_manager より前）。
+        let config_log_level = {
+            let config_path = std::env::var("APPDATA").ok()
+                .map(|p| format!("{}\\rakukan\\config.toml", p));
+            config_path.and_then(|p| std::fs::read_to_string(p).ok())
+                .and_then(|s| {
+                    s.lines()
+                        .find(|l| l.trim_start().starts_with("log_level"))
+                        .and_then(|l| l.split('=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                })
+                .unwrap_or_else(|| "debug".to_string())
+        };
+
+        let make_filter = |scope: &str| {
+            tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
+                    format!("{}={}", scope, config_log_level)
+                ))
+        };
+
         if !log_path.is_empty() {
             if let Ok(f) = std::fs::OpenOptions::new()
                 .create(true).append(true).open(&log_path)
             {
                 let _ = tracing_subscriber::fmt()
-                    .with_env_filter(
-                        tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
-                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("rakukan_tsf=info")),
-                    )
+                    .with_env_filter(make_filter("rakukan_tsf"))
                     .with_writer(std::sync::Mutex::new(f))
                     .try_init();
             }
         } else {
             let _ = tracing_subscriber::fmt()
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("rakukan=info")),
-                )
+                .with_env_filter(make_filter("rakukan"))
                 .try_init();
         }
         tracing::info!("rakukan TSF DLL loaded  build={}", option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown"));

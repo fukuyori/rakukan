@@ -1,89 +1,132 @@
-# rakukan handoff — 2026-03-22
+# Rakukan 引き継ぎ資料 (v0.3.8)
 
-## 現在のバージョン
-v0.3.7（`Cargo.toml` / `VERSION` / `CHANGELOG.md` / `handoff.md` 更新済み）
+更新日: 2026-03-23
 
-## ファイル配置
+---
 
-| ファイル | 配置先 |
-|---------|--------|
-| DLL・EXE | `%LOCALAPPDATA%\rakukan\` |
-| `rakukan.log` | `%LOCALAPPDATA%\rakukan\` |
-| `rakukan.dict` | `%LOCALAPPDATA%\rakukan\dict\` |
-| `config.toml` / `keymap.toml` | `%APPDATA%\rakukan\` |
-| `user_dict.toml` | `%APPDATA%\rakukan\` |
-| LLMモデル | `~\.cache\huggingface\...` |
+## 現在の状態
 
-## ビルドコマンド
+**バージョン:** v0.3.8
+**ビルドパス:** `C:\Users\n_fuk\source\rust\rakukan`（または `D:\home\source\rust\rakukan`）
+**インストール先:** `%LOCALAPPDATA%\rakukan\`
+**ログ:** `%LOCALAPPDATA%\rakukan\rakukan.log`
+
+---
+
+## v0.3.8 で完了した変更
+
+### config.toml 整理（`config.rs`）
+- `[candidate]` / `[conversion]` セクションを削除（未実装のため）
+- `CandidateConfig` / `ConversionConfig` / `CancelBehavior` 構造体を削除
+- `effective_num_candidates()` を `num_candidates.unwrap_or(9).clamp(1, 9)` に単純化
+- `enable_jis_keys` フィールドを削除（`layout = "jis"` に統合）
+- キーボードレイアウトのデフォルトを `"jis"` に変更
+- `default_config_text()` を `config/config.toml` と完全同期
+
+### 入力モード初期化（`config.rs`, `state.rs`）
+- `DefaultInputMode::Katakana` を廃止（F7 変換は引き続き動作）
+- `default_mode = "alphanumeric"` が初回フォーカス時に有効になるよう実装
+- `remember_last_kana_mode = false` 時、毎回デフォルトモードを適用するよう実装
+- ターミナル（Windows Terminal / ConHost）は config に関わらず常に `Alphanumeric`
+
+### keymap バグ修正（`keymap.rs`）
+- `Ctrl+J/K/L` 等が parse できない問題を修正（`name_to_vk` に a-z フォールバックを追加）
+- 全角/半角キー（`Zenkaku`）の VK コードを `0xF3` → `0x19`（VK_KANJI）に修正
+
+---
+
+## 動作確認ポイント
 
 ```powershell
-# ABI変更を含む場合（engine DLL の変更）
+cargo make build-tsf
+cargo make reinstall
+```
+
+確認項目:
+1. `rakukan.log` に `debug` レベルのログが出ること
+2. 一般アプリ初回フォーカス時に Alphanumeric モードで起動すること
+3. 別ウィンドウに切り替えて戻ったとき前回モードが復元されること
+4. 全角/半角キーで IME オン/オフが切り替わること
+5. keymap ロード時に `cannot parse` ワーニングが出ないこと
+
+---
+
+## 既知バグ（未対応）
+
+### B-1: LLM 出力に読み仮名が混入
+- 症状: `健診(けんしん)や` のようにルビ形式の読みが付く
+- 対策候補: 出力後処理での strip、またはプロンプト側での抑制
+- 優先度: 中
+
+---
+
+## 次の実装候補
+
+### 優先度: 高（メイン機能）
+
+#### Phase 4a: LiveConv 基盤
+- `SessionState::LiveConv` バリアント追加
+- `bg_take_top1` API 実装
+- タイマー汎化・config フラグ追加
+
+#### Phase 4b: キーストローク統合
+- キーストローク毎の `bg_start`
+- `on_live_timer` を `WM_TIMER` 経由で実装
+- 重要制約: `RequestEditSession` は `WndProc` から呼べない → `PostMessage` で TSF スレッドに委譲
+
+#### Phase 4c: 仕上げ
+- デバウンス処理・ビジュアルポリッシュ・アプリ互換性テスト
+
+### 優先度: 中
+- 各モジュールへのログ追加（ライブ変換実装前の整備）
+- SplitPreedit 多文節チェーン改善
+- LLM 候補数増加（`num_candidates.min(3)` → `.min(5)`、レイテンシ要確認）
+- 数字・かな混在入力（`123abc` 混在ケース）
+
+---
+
+## アーキテクチャ早見表
+
+```
+rakukan-tsf          TSF レイヤー（Windows IME 登録・UI）
+rakukan-engine       変換エンジン（LLM + 辞書）
+rakukan-engine-abi   ABI ブリッジ（FFI 境界）
+rakukan-dict-builder 辞書ビルド
+```
+
+重要制約:
+- TSF スレッドからのみ `RequestEditSession` 呼び出し可（WndProc 不可）
+- エンジン DLL 変更時は `cargo make build-engine` 必須
+- `generate_beam_search_d1_greedy_batch` は `n_batch > n_ctx` で C レベル abort()
+- CUDA ランタイム DLL は System32 に配置必須
+
+---
+
+## ファイルパス早見表
+
+| 用途 | パス |
+|------|------|
+| ソース | `C:\Users\n_fuk\source\rust\rakukan` |
+| ビルド成果物 | `C:\rb\release` |
+| インストール先 | `%LOCALAPPDATA%\rakukan\` |
+| config.toml | `%APPDATA%\rakukan\config.toml` |
+| keymap.toml | `%APPDATA%\rakukan\keymap.toml` |
+| ログ | `%LOCALAPPDATA%\rakukan\rakukan.log` |
+| 辞書 | `%APPDATA%\rakukan\dict\rakukan.dict` |
+| LLM モデル | `snapshots/main/*.gguf` |
+
+---
+
+## クイックデバッグコマンド
+
+```powershell
+# ログ末尾確認
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 20
+
+# 再インストール（TSF のみ）
+cargo make reinstall
+
+# エンジン DLL 変更後
 cargo make build-engine
 cargo make reinstall
-
-# TSF側のみ変更の場合
-cargo make reinstall
-
-# llama-cpp-sys-2 のバージョン更新等、llama キャッシュごと全削除したい場合
-cargo make build-engine-full
-cargo make reinstall
 ```
-
-> **注意**: `build-engine` は `rakukan-engine` と `rakukan-dict` の両方をクリーンしてから DLL をビルドする。
-> ABI 変更後は必ず `build-engine` → `reinstall` の順で実行すること。
-
-## v0.3.7 で修正・変更した内容
-
-### [FIXED] `/` キーで `・` が入力されない問題
-- `symbol_fixed` が `/` を全角 `／` に変換していたためローマ字ルールが機能していなかった
-- F9/F10 変換時も `/` を正しく出力するよう対応
-
-### [FIXED] LLM 出力にふりがなが混入する問題
-- `clean_model_output` に `strip_furigana` を追加
-- 括弧内がひらがな・カタカナのみの場合に除去（例: 「健診(けんしん)や」→「健診や」）
-
-### [FIXED] F9 変換で `、。` が `，．` に変換されない問題
-- `ascii_to_fullwidth` が和文句読点を返していた
-- F9/F10（全角英数モード）では `，．` を返すよう修正
-
-### [FIXED] 候補ウィンドウが画面下部で見えなくなる問題
-- `MonitorFromPoint` + `GetMonitorInfoW` で作業領域を取得し、はみ出す場合にキャレット上側へ反転表示
-- 下表示時は +1px、上表示時は -4px のオフセット調整
-
-### [ADDED] Shift+A–Z で全角大文字を入力（F9/F10 サイクル対応）
-- `push_fullwidth_alpha()` を追加: `hiragana_buf` に `Ａ`、`romaji_input_log` に ASCII `A` を記録
-- F9（`ａ`→`Ａ`→…）/ F10（`A`→`a`→…）のサイクル変換に対応
-- ABI 変更あり（`engine_push_fullwidth_alpha` FFI 追加）
-
-### [CHANGED] `symbol_fixed` 関数を削除・トライに統合
-- `,./[]\-` の変換をローマ字トライルール（`rules.rs`）に統合
-- その他 ASCII 記号（`@#$%` 等）は `push_char` 内でインライン全角変換
-- `-` の文脈依存ロジック廃止。トライで常に `ー`
-- `¥`（JIS キー U+00A5）→ `￥` をトライに追加
-
-### [CHANGED] インストーラーから SKK 辞書ダウンロード機能を削除
-- `[Tasks]` / `[Files]` / `[Run]` の SKK 関連エントリを除去
-
-## 残課題
-
-- [ ] ライブ変換（Phase 4a〜4c）
-- [ ] SplitPreedit の複数文節連続変換
-- [ ] 数字・かな混在入力（例: `400じ` → `400字`）
-- [ ] LLM候補数増加（min(3)→min(5) 検討中。レイテンシ確認後に実施）
-- [ ] LLM出力に読み仮名が混入する問題（ふりがな除去で部分対応済み、プロンプト抑制は未対応）
-
-## ログ収集コマンド
-
-```powershell
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 50 |
-  Select-String "on_convert|bg_wait|completed|engine-init|dict|Input|Backspace"
-```
-
-## 重要な技術的制約
-
-- **TSF スレッド制約**: `RequestEditSession` は `WndProc` から呼べない（ライブ変換実装の最大障壁）
-- **engine DLL のログ**: `tracing::info!` は `rakukan.log` に出ない。`set_dict_status` 経由でのみ TSF ログに届く
-- **TOML セクション順序**: トップレベルキーはセクションヘッダより前に書く必要がある
-- **install.ps1 / build-engine.ps1 エンコーディング**: ASCII のみ（日本語コメント不可）
-- **ABI 変更時のビルド順序**: 必ず `build-engine` → `reinstall` の順で実行
-- **Cargo キャッシュと ZIP 配布**: ZIP 展開ではタイムスタンプが変わらず Cargo が変更検知できない場合がある。`C:\rb\release\.fingerprint\rakukan-dict-*` を直接削除すれば解決

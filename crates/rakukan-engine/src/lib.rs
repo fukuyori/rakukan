@@ -156,7 +156,7 @@ impl RakunEngine {
             .model_variant
             .clone()
             .unwrap_or_else(|| registry().default_model.clone());
-        info!("モデル初期化中: {} (n_gpu_layers={}, main_gpu={})", variant_id, config.n_gpu_layers, config.main_gpu);
+        info!("engine::init: loading model={} gpu_layers={} main_gpu={}", variant_id, config.n_gpu_layers, config.main_gpu);
         let backend = KarukanBackend::from_variant_id(&variant_id)
             .map_err(|e| EngineError::InitFailed(e.to_string()))?
             .with_n_gpu_layers(config.n_gpu_layers)
@@ -166,7 +166,7 @@ impl RakunEngine {
         if config.n_threads > 0 {
             converter.set_n_threads(config.n_threads);
         }
-        info!("モデル初期化完了: {}", converter.model_display_name());
+        info!("engine::init: model ready name={}", converter.model_display_name());
         Ok(converter)
     }
 
@@ -188,7 +188,7 @@ impl RakunEngine {
             let fw = char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c);
             self.hiragana_buf.push(fw);
             self.romaji_input_log.push(c.to_string());
-            debug!("digit {:?} → {:?}", c, fw);
+            debug!("engine::push: digit {:?} → {:?}", c, fw);
             return self.current_preedit();
         }
 
@@ -204,7 +204,7 @@ impl RakunEngine {
                 let fw = char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c);
                 self.hiragana_buf.push(fw);
                 self.romaji_input_log.push(c.to_string());
-                debug!("symbol {:?} → {:?}", c, fw);
+                debug!("engine::push: symbol {:?} → {:?}", c, fw);
                 return self.current_preedit();
             }
         }
@@ -213,7 +213,7 @@ impl RakunEngine {
         self.pending_romaji_buf.push(c);
         match self.romaji.push(c) {
             ConversionEvent::Converted(hiragana) => {
-                debug!("romaji -> hiragana: {:?}", hiragana);
+                debug!("engine::push: romaji → hira={:?}", hiragana);
                 self.hiragana_buf.push_str(&hiragana);
                 // pending_romaji_buf 全体が今の確定分
                 let entry = std::mem::take(&mut self.pending_romaji_buf);
@@ -314,7 +314,7 @@ impl RakunEngine {
     }
 
     pub fn commit(&mut self, text: &str) {
-        debug!("確定: {:?}", text);
+        info!("engine::commit: {:?}", text);
         self.committed.push_str(text);
         if self.committed.chars().count() > 200 {
             // 文境界でトリミング: 直近 2 文を残す。
@@ -381,7 +381,7 @@ impl RakunEngine {
     pub fn is_kanji_ready(&self) -> bool { self.kanji.is_some() }
 
     pub fn set_dict_store(&mut self, store: DictStore) {
-        info!("DictStore セット: user={} entries",
+        info!("engine::dict: store set user_entries={}",
             store.user_entry_count());
         self.dict_store = Some(store);
     }
@@ -418,7 +418,7 @@ impl RakunEngine {
             .map(|d| d.lookup_dict(hiragana, limit))
             .unwrap_or_default();
 
-        info!("merge_candidates: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
+        debug!("engine::merge: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
             hiragana,
             if self.dict_store.is_some() { "Some" } else { "None" },
             dict_cands,

@@ -110,43 +110,11 @@ $trayExe    = Join-Path $installDir "rakukan-tray.exe"
 
 # --- 0/4 Backend (best-effort; never fail install) ---
 $backendJson  = $null
-$configToml   = $null
 if ($roaming) {
     $backendJson = Join-Path $roaming "rakukan\backend.json"
-    $configToml  = Join-Path $roaming "rakukan\config.toml"
 }
 
-# Read gpu_backend from config.toml (takes priority)
-function Read-ConfigTomlGpuBackend([string]$tomlPath) {
-    if (-not $tomlPath -or -not (Test-Path $tomlPath)) { return $null }
-    foreach ($line in (Get-Content $tomlPath -ErrorAction SilentlyContinue)) {
-        $line = $line.Trim()
-        if ($line -match '^#') { continue }
-        if ($line -match '^gpu_backend\s*=\s*"([^"]+)"') {
-            return $Matches[1].ToLower()
-        }
-    }
-    return $null
-}
-
-$configBackend = Read-ConfigTomlGpuBackend $configToml
-if ($configBackend) {
-    # explicit override in config.toml
-    $gpuBackend = $configBackend
-    Write-Host "[0/4] config.toml gpu_backend=$gpuBackend (manual override)"
-    # also update backend.json for cache consistency
-    if ($backendJson) {
-        try {
-            $json = if (Test-Path $backendJson) {
-                Get-Content $backendJson -Raw | ConvertFrom-Json
-            } else {
-                [PSCustomObject]@{}
-            }
-            $json | Add-Member -Force -MemberType NoteProperty -Name "backend" -Value $gpuBackend
-            $json | ConvertTo-Json | Set-Content $backendJson
-        } catch { }
-    }
-} elseif ($backendJson -and (Test-Path -LiteralPath $backendJson)) {
+if ($backendJson -and (Test-Path -LiteralPath $backendJson)) {
     try {
         $gpuBackend = (Get-Content -LiteralPath $backendJson -Raw | ConvertFrom-Json).backend
         Write-Host "[0/4] Using saved backend: $gpuBackend"
@@ -164,18 +132,7 @@ if ($configBackend) {
         }
     } catch { }
 }
-
-# llama-cpp-2 GPU feature flags (compile-time)
-# Only enable the feature matching the detected backend.
-# vulkan requires Vulkan SDK (VULKAN_SDK env var) at compile time.
-if ($gpuBackend -eq "cuda") {
-    $cargoFeatures = "--features=rakukan-engine/cuda"
-} elseif ($gpuBackend -eq "vulkan") {
-    $cargoFeatures = "--features=rakukan-engine/vulkan"
-} else {
-    $cargoFeatures = ""
-}
-Write-Host "[0/4] Cargo GPU features: $(if ($cargoFeatures) { $cargoFeatures } else { '(none - CPU only)' })"
+Write-Host "[0/4] Cargo GPU features: (all backends built by build-engine.ps1)"
 
 # --- 0.5/6 Clean stale CMake cache for llama-cpp-sys-2 (only on backend change) ---
 # The cmake crate skips reconfiguration if the build dir exists.

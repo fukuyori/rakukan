@@ -1,5 +1,54 @@
 # Changelog
 
+## [0.3.8] - 2026-03-23
+
+### Changed
+
+- **`[candidate]` / `[conversion]` セクションを config.toml から削除**（`config.rs`）
+  - 未実装のまま残っていた `page_size` / `use_number_selection` / `show_numbers` / `engine` /
+    `commit_raw_with_enter` / `cancel_behavior` を設定ファイルおよび構造体から除去
+  - `CandidateConfig` / `ConversionConfig` / `CancelBehavior` 構造体を削除
+  - `effective_num_candidates()` を `num_candidates.unwrap_or(9).clamp(1, 9)` に単純化
+  - `num_candidates` キー（旧互換）はコメントアウト例として残存
+
+- **`enable_jis_keys` を削除し `layout = "jis"` に統合**（`config.rs`）
+  - `KeyboardConfig` から `enable_jis_keys: bool` フィールドを削除
+  - JIS キー判定は `layout = "jis"` → `KeyboardLayout::Jis` → `KeymapPreset::MsImeJis` の
+    既存パスで完結しており、独立フラグは不要だった
+
+- **キーボードレイアウトのデフォルトを `jis` に変更**（`config.rs`）
+  - `default_keyboard_layout()` の戻り値を `KeyboardLayout::Jis` に変更
+  - `config.toml` / `default_config_text()` の `layout` も `"jis"` に統一
+
+- **`DefaultInputMode::Katakana` を廃止**（`config.rs`）
+  - `DefaultInputMode` を `Hiragana` / `Alphanumeric` の 2 択に縮小
+  - カタカナモードへの切り替えは F7 / `ModeKatakana` アクションで引き続き動作
+
+- **`default_mode = "alphanumeric"` を有効化**（`config.rs`, `state.rs`）
+  - `doc_mode_on_focus_change()` が初回フォーカス時に `config.input.default_mode` を参照するよう改修
+  - ターミナル（Windows Terminal / ConHost 等）は config に関わらず常に `Alphanumeric`
+
+- **`remember_last_kana_mode` を有効化**（`state.rs`）
+  - `false` に設定した場合、ウィンドウ切り替え時にモードを保存せず毎回デフォルトを適用
+  - `true`（デフォルト）では従来通り DocumentManager ごとに前回モードを復元
+
+- **`default_config_text()` を `config/config.toml` に完全同期**（`config.rs`）
+  - 初回起動時に生成されるテンプレートを開発用 `config.toml` と一致させた
+
+### Fixed
+
+- **keymap: `Ctrl+J` / `Ctrl+K` / `Ctrl+L` が parse できない問題を修正**（`keymap.rs`）
+  - `name_to_vk()` に単一アルファベット（`a`–`z`）のフォールバックを追加
+  - `is_ascii_alphabetic()` を `to_ascii_uppercase()` して VK コード 0x41–0x5A に変換
+  - これにより `Ctrl+A` ～ `Ctrl+Z` が keymap.toml で全て記述可能になった
+
+- **keymap: 全角/半角キー（`Zenkaku`）の VK コードが誤っていた問題を修正**（`keymap.rs`）
+  - `"zenkaku"` / `"hankaku"` / `"kanji"` のマッピングを `0xF3`（VK_DBE_ROMAN）から
+    `0x19`（VK_KANJI）に修正
+  - 従来は `factory.rs` のハードコードフォールバック（`0x19 => ImeToggle`）のみで動作していた
+  - 修正後はキーマップ経由で正常に処理され、`keymap.toml` でのリマップも有効になる
+
+
 ## [0.3.7] - 2026-03-22
 
 ### Fixed

@@ -14,22 +14,11 @@ pub struct AppConfig {
     #[serde(default)]
     pub input: InputConfig,
     #[serde(default)]
-    pub candidate: CandidateConfig,
-    #[serde(default)]
-    pub conversion: ConversionConfig,
-    #[serde(default)]
     pub live_conversion: LiveConversionConfig,
     #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 
-    #[serde(default)]
-    pub gpu_backend: Option<String>,
-    #[serde(default)]
-    pub main_gpu: i32,
-    #[serde(default)]
-    pub model_variant: Option<String>,
-
-    /// 旧形式との互換用。存在する場合は candidate.page_size より優先。
+    /// 旧形式との互換用（config.toml に num_candidates = N と書いた場合に有効）。
     #[serde(default)]
     pub num_candidates: Option<usize>,
 }
@@ -40,13 +29,8 @@ impl Default for AppConfig {
             general: GeneralConfig::default(),
             keyboard: KeyboardConfig::default(),
             input: InputConfig::default(),
-            candidate: CandidateConfig::default(),
-            conversion: ConversionConfig::default(),
             live_conversion: LiveConversionConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
-            gpu_backend: None,
-            main_gpu: 0,
-            model_variant: None,
             num_candidates: None,
         }
     }
@@ -54,9 +38,7 @@ impl Default for AppConfig {
 
 impl AppConfig {
     pub fn effective_num_candidates(&self) -> usize {
-        self.num_candidates
-            .unwrap_or(self.candidate.page_size)
-            .clamp(1, 9)
+        self.num_candidates.unwrap_or(9).clamp(1, 9)
     }
 }
 
@@ -64,11 +46,22 @@ impl AppConfig {
 pub struct GeneralConfig {
     #[serde(default = "default_log_level")]
     pub log_level: String,
+    #[serde(default)]
+    pub gpu_backend: Option<String>,
+    #[serde(default)]
+    pub main_gpu: i32,
+    #[serde(default)]
+    pub model_variant: Option<String>,
 }
 
 impl Default for GeneralConfig {
     fn default() -> Self {
-        Self { log_level: default_log_level() }
+        Self {
+            log_level: default_log_level(),
+            gpu_backend: None,
+            main_gpu: 0,
+            model_variant: None,
+        }
     }
 }
 
@@ -82,15 +75,13 @@ pub enum KeyboardLayout {
     Custom,
 }
 
-fn default_keyboard_layout() -> KeyboardLayout { KeyboardLayout::Us }
+fn default_keyboard_layout() -> KeyboardLayout { KeyboardLayout::Jis }
 fn default_reload_on_mode_switch() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardConfig {
     #[serde(default = "default_keyboard_layout")]
     pub layout: KeyboardLayout,
-    #[serde(default)]
-    pub enable_jis_keys: bool,
     #[serde(default = "default_reload_on_mode_switch")]
     pub reload_on_mode_switch: bool,
 }
@@ -99,21 +90,21 @@ impl Default for KeyboardConfig {
     fn default() -> Self {
         Self {
             layout: default_keyboard_layout(),
-            enable_jis_keys: false,
             reload_on_mode_switch: true,
         }
     }
 }
 
+/// 起動時・初回フォーカス時のデフォルト入力モード。
+/// カタカナモードは廃止（F7 変換は引き続き動作する）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DefaultInputMode {
     Hiragana,
-    Katakana,
     Alphanumeric,
 }
 
-fn default_input_mode() -> DefaultInputMode { DefaultInputMode::Hiragana }
+fn default_input_mode() -> DefaultInputMode { DefaultInputMode::Alphanumeric }
 fn default_remember_last_kana_mode() -> bool { true }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -127,57 +118,6 @@ pub struct InputConfig {
 impl Default for InputConfig {
     fn default() -> Self {
         Self { default_mode: default_input_mode(), remember_last_kana_mode: true }
-    }
-}
-
-fn default_page_size() -> usize { 9 }
-fn default_use_number_selection() -> bool { true }
-fn default_show_numbers() -> bool { true }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CandidateConfig {
-    #[serde(default = "default_page_size")]
-    pub page_size: usize,
-    #[serde(default = "default_use_number_selection")]
-    pub use_number_selection: bool,
-    #[serde(default = "default_show_numbers")]
-    pub show_numbers: bool,
-}
-
-impl Default for CandidateConfig {
-    fn default() -> Self {
-        Self { page_size: 9, use_number_selection: true, show_numbers: true }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum CancelBehavior {
-    MsIme,
-    Simple,
-}
-
-fn default_engine() -> String { "karukan".to_string() }
-fn default_commit_raw_with_enter() -> bool { true }
-fn default_cancel_behavior() -> CancelBehavior { CancelBehavior::MsIme }
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ConversionConfig {
-    #[serde(default = "default_engine")]
-    pub engine: String,
-    #[serde(default = "default_commit_raw_with_enter")]
-    pub commit_raw_with_enter: bool,
-    #[serde(default = "default_cancel_behavior")]
-    pub cancel_behavior: CancelBehavior,
-}
-
-impl Default for ConversionConfig {
-    fn default() -> Self {
-        Self {
-            engine: default_engine(),
-            commit_raw_with_enter: true,
-            cancel_behavior: default_cancel_behavior(),
-        }
     }
 }
 
@@ -337,29 +277,35 @@ pub fn maybe_reload_on_mode_switch() -> bool {
 fn default_config_text() -> &'static str {
     r#"# rakukan 設定ファイル
 # 入力モード変更時に再読込されます。
-# gpu_backend など再ビルドが必要な項目は cargo make install を再実行してください。
 
 [general]
-log_level = "info"
+# ログレベル: error / warn / info / debug / trace
+# debug: 開発中の標準。キー入力ごとの状態変化が見える
+# info:  通常運用。初期化・確定・モード変更のみ
+# trace: 詳細調査時。ループ内・トークン単位まで出力される（低速）
+# 環境変数 RAKUKAN_LOG が設定されている場合はそちらが優先される
+log_level = "debug"
+
+# GPU バックエンド: "cuda" / "vulkan" / "cpu"
+# 未指定の場合は backend.json の保存値または自動検出を使用する
+# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
+# "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
+# "cpu"    : CPU のみ（GPU なし、VMware 等）
+# gpu_backend = "cuda"
+
+# 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
+# main_gpu = 0
+
+# LLM モデルサイズ（"small" / "xsmall"）
+# model_variant = "small"
 
 [keyboard]
-layout = "us"
-enable_jis_keys = false
+layout = "jis"
 reload_on_mode_switch = true
 
 [input]
-default_mode = "hiragana"
+default_mode = "alphanumeric"
 remember_last_kana_mode = true
-
-[candidate]
-page_size = 9
-use_number_selection = true
-show_numbers = true
-
-[conversion]
-engine = "karukan"
-commit_raw_with_enter = true
-cancel_behavior = "ms_ime"
 
 [live_conversion]
 enabled = false
@@ -371,23 +317,7 @@ prefer_dictionary_first = true
 dump_active_config = true
 warn_on_unknown_key = true
 
-# 旧形式との互換用。
+# 旧形式との互換用
 # num_candidates = 9
-
-# ── GPU バックエンド ────────────────────────────────────────────────────────
-# 変更後は cargo make build-engine && cargo make reinstall が必要です。
-# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
-# "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
-# "cpu"    : CPU のみ（GPU なし、VMware 等）
-# コメントを外して gpu_backend の行を有効にしてください。
-# gpu_backend = "cuda"
-# gpu_backend = "vulkan"
-# gpu_backend = "cpu"
-
-# 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
-# main_gpu = 0
-
-# LLM モデルサイズ（"small" / "xsmall"）
-# model_variant = "small"
 "#
 }

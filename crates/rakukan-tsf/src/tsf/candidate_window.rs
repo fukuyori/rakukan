@@ -121,7 +121,7 @@ unsafe fn ensure_class_registered() {
             ..Default::default()
         };
         RegisterClassW(&wc);
-        tracing::debug!("候補ウィンドウクラス登録");
+        tracing::debug!("candwin::class: registered");
     });
 }
 
@@ -305,9 +305,9 @@ pub fn show_with_status(page_candidates: &[String], page_selected: usize, page_i
                 Ok(new_hwnd) if is_valid(new_hwnd) => {
                     set_hwnd(new_hwnd);
                     let _ = ShowWindow(new_hwnd, SW_SHOWNOACTIVATE);
-                    tracing::debug!("候補ウィンドウ作成 hwnd={:?}", new_hwnd);
+                    tracing::debug!("candwin::create: hwnd={:?}", new_hwnd);
                 }
-                Ok(_) | Err(_) => tracing::warn!("候補ウィンドウ作成失敗"),
+                Ok(_) | Err(_) => tracing::warn!("candwin::create: failed"),
             }
         }
     }
@@ -329,7 +329,7 @@ unsafe fn calc_window_y(x: i32, caret_bottom: i32, win_h: i32) -> i32 {
         if caret_bottom + win_h > work_bottom {
             // 上側に反転：4ドット上
             let flipped = caret_bottom - CARET_HEIGHT_ESTIMATE - win_h - 4;
-            tracing::debug!("候補ウィンドウ反転: bottom={} work_bottom={} → y={}", caret_bottom + win_h, work_bottom, flipped);
+            tracing::debug!("candwin::flip: caret_bottom={} win_h={} work_bottom={} → y={}", caret_bottom, win_h, work_bottom, flipped);
             return flipped.max(mi.rcWork.top);
         }
     }
@@ -364,7 +364,7 @@ pub fn destroy() {
     if is_valid(hwnd) {
         unsafe { let _ = DestroyWindow(hwnd); }
         set_hwnd(HWND::default());
-        tracing::debug!("候補ウィンドウ破棄");
+        tracing::debug!("candwin::destroy");
     }
 }
 
@@ -465,7 +465,7 @@ pub fn on_waiting_timer() {
                 engine.bg_reclaim();
                 let llm_limit2 = crate::engine::state::get_num_candidates();
                 if engine.bg_start(llm_limit2) {
-                    tracing::info!("on_waiting_timer: bg_start restarted → re-arm timer");
+                    tracing::debug!("on_waiting_timer: bg_start restarted → re-arm timer");
                     // タイマーを再起動して次のポーリングで取得
                     start_waiting_timer();
                 } else {
@@ -510,5 +510,5 @@ pub fn on_waiting_timer() {
     // composition text を更新するには TSF API が必要だが、ここは WndProc コンテキスト
     // → composition 更新は次のキー入力時にポーリングが拾う（既存の poll ブランチ）
     // ここでは候補ウィンドウだけ更新して、ユーザーに候補が来たことを見せる
-    tracing::info!("on_waiting_timer: showed {} cands for {:?}", page_cands.len(), wait_preedit);
+    tracing::debug!("on_waiting_timer: showed {} cands for {:?}", page_cands.len(), wait_preedit);
 }

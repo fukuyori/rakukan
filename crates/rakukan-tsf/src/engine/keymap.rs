@@ -142,13 +142,22 @@ fn name_to_vk(name: &str) -> Option<u16> {
         "f4"  => 0x73, "f5"  => 0x74, "f6"  => 0x75,
         "f7"  => 0x76, "f8"  => 0x77, "f9"  => 0x78,
         "f10" => 0x79, "f11" => 0x7A, "f12" => 0x7B,
-        "zenkaku" | "hankaku" | "kanji" => 0xF3,
+        "zenkaku" | "hankaku" | "kanji" => 0x19,  // VK_KANJI (全角/半角キー)
         "henkan"              => 0x1C,
         "muhenkan"            => 0x1D,
         "eisuu" | "alphanumeric" => 0xF0,  // 英数キー
         "katakana"               => 0xF1,  // カタカナキー
         "hiragana_key"           => 0xF2,  // ひらがなキー
         "caps"                   => 0x14,  // Caps Lock
+        // 単一アルファベット (a-z → VK 0x41-0x5A)
+        name if name.len() == 1 => {
+            let c = name.chars().next().unwrap();
+            if c.is_ascii_alphabetic() {
+                c.to_ascii_uppercase() as u16
+            } else {
+                return None;
+            }
+        }
         _ => return None,
     })
 }
@@ -206,7 +215,7 @@ impl Keymap {
     pub fn load() -> Self {
         match load_from_file() {
             Ok(km) => { tracing::info!("keymap loaded"); km }
-            Err(e) => { tracing::info!("keymap default ({e})"); Self::default() }
+            Err(e) => { tracing::warn!("keymap: load failed, using default ({e})"); Self::default() }
         }
     }
 

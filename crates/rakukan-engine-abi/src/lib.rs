@@ -456,12 +456,12 @@ impl Drop for DynEngine {
 fn detect_backend() -> String {
     // 1. config.toml
     if let Some(b) = read_config_toml_backend() {
-        tracing::info!("backend from config.toml: {b}");
+        tracing::debug!("backend::select: from config.toml={b}");
         return b;
     }
     // 2. backend.json
     if let Some(b) = read_backend_json() {
-        tracing::info!("backend from backend.json: {b}");
+        tracing::debug!("backend::select: from backend.json={b}");
         return b;
     }
     // 3. デフォルト

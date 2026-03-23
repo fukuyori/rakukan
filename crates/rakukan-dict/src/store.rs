@@ -10,7 +10,7 @@ use std::path::Path;
 use std::sync::{Arc, RwLock};
 
 use anyhow::Result;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::user_dict::UserDict;
 use crate::mozc_dict::MozcDict;
@@ -69,11 +69,11 @@ impl DictStore {
             if p.exists() {
                 match MozcDict::open(p) {
                     Ok(d) => {
-                        info!("MozcDict ロード: {} 読み, {} エントリ", d.n_readings(), d.n_entries());
+                        info!("dict::store: mozc loaded readings={} entries={}", d.n_readings(), d.n_entries());
                         Some(d)
                     }
                     Err(e) => {
-                        warn!("MozcDict ロード失敗 {} (size={}B): {}",
+                        warn!("dict::store: mozc load failed path={} size={}B err={}",
                             p.display(),
                             std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
                             e);
@@ -81,18 +81,18 @@ impl DictStore {
                     }
                 }
             } else {
-                warn!("rakukan.dict が見つかりません: {}", p.display());
+                warn!("dict::store: rakukan.dict not found path={}", p.display());
                 None
             }
         } else {
-            warn!("mozc_path が None（dict_dir が取得できない）");
+            warn!("dict::store: mozc_path is None (dict_dir unavailable)");
             None
         };
 
         info!(
-            "DictStore: user={} entries, mozc={}, mozc_path={:?}",
+            "dict::store: ready user_entries={} mozc={} mozc_path={:?}",
             user.len(),
-            if mozc.is_some() { "有効" } else { "なし" },
+            if mozc.is_some() { "loaded" } else { "none" },
             mozc_path.map(|p| p.display().to_string()),
         );
 
@@ -138,7 +138,7 @@ impl DictStore {
         if let Err(e) = ud.save(path) {
             warn!("user_dict save failed: {e}");
         } else {
-            info!("learned: {:?} -> {:?}", reading, surface);
+            debug!("dict::store: learned reading={:?} surface={:?}", reading, surface);
         }
     }
 
@@ -155,7 +155,7 @@ impl DictStore {
             .as_ref()
             .map(|d| d.lookup(reading, limit).into_iter().map(|(s, _)| s).collect())
             .unwrap_or_default();
-        info!("lookup_dict: reading={:?} mozc={} result_count={}", reading, mozc_loaded, result.len());
+        debug!("dict::store: lookup reading={:?} mozc={} n={}", reading, mozc_loaded, result.len());
         result
     }
 
