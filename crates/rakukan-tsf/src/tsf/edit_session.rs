@@ -5,8 +5,8 @@
 //! ここでは `FnOnce(u32) -> Result<()>` を持つ汎用セッションを提供する。
 
 use windows::{
-    core::implement,
     Win32::UI::TextServices::{ITfEditSession, ITfEditSession_Impl},
+    core::implement,
 };
 
 // Safety: TSF スレッド (STA) からのみ呼ばれる
@@ -35,16 +35,8 @@ impl EditSession {
 
 impl ITfEditSession_Impl for EditSession_Impl {
     fn DoEditSession(&self, ec: u32) -> windows::core::Result<()> {
-        let f = self
-            .func
-            .try_borrow_mut()
-            .ok()
-            .and_then(|mut g| g.take());
+        let f = self.func.try_borrow_mut().ok().and_then(|mut g| g.take());
 
-        if let Some(func) = f {
-            func(ec)
-        } else {
-            Ok(())
-        }
+        if let Some(func) = f { func(ec) } else { Ok(()) }
     }
 }

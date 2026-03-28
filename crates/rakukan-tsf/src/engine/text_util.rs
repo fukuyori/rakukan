@@ -32,7 +32,7 @@ pub(crate) fn fullwidth_symbol_to_ascii(c: char) -> char {
         '」' => ']',
         '\u{FFE5}' => '\x5C',
         '－' => '-',
-        'ー' => '-',   // F10: 長音符 → 半角ハイフン
+        'ー' => '-', // F10: 長音符 → 半角ハイフン
         '，' => ',',
         '．' => '.',
         '［' => '[',
@@ -57,7 +57,7 @@ pub(crate) fn fullwidth_symbol_to_hankaku(c: char) -> char {
         '」' => '｣',
         '\u{FFE5}' => '\x5C',
         '－' => '-',
-        'ー' => 'ｰ',  // F8: 長音符 → 半角長音符
+        'ー' => 'ｰ', // F8: 長音符 → 半角長音符
         _ => {
             let n = c as u32;
             if (0xFF01..=0xFF5E).contains(&n) {
@@ -163,47 +163,206 @@ pub fn to_hiragana(s: &str) -> String {
 /// 半角カタカナ1文字（+ 後続の濁点/半濁点）→ 全角カタカナ1文字
 /// 戻り値: (全角カタカナ, 結合文字を消費したか)
 fn half_kata_to_full(c: char, next: Option<char>) -> Option<(char, bool)> {
-    let dakuten  = next == Some('\u{FF9E}');
-    let handaku  = next == Some('\u{FF9F}');
+    let dakuten = next == Some('\u{FF9E}');
+    let handaku = next == Some('\u{FF9F}');
     let r = match c {
         'ｦ' => ('ヲ', false),
-        'ｧ' => ('ァ', false), 'ｨ' => ('ィ', false), 'ｩ' => ('ゥ', false),
-        'ｪ' => ('ェ', false), 'ｫ' => ('ォ', false),
-        'ｬ' => ('ャ', false), 'ｭ' => ('ュ', false), 'ｮ' => ('ョ', false),
-        'ｯ' => ('ッ', false), 'ｰ' => ('ー', false),
-        'ｱ' => ('ア', false), 'ｲ' => ('イ', false),
-        'ｳ' => if dakuten { ('ヴ', true) } else { ('ウ', false) },
-        'ｴ' => ('エ', false), 'ｵ' => ('オ', false),
-        'ｶ' => if dakuten { ('ガ', true) } else { ('カ', false) },
-        'ｷ' => if dakuten { ('ギ', true) } else { ('キ', false) },
-        'ｸ' => if dakuten { ('グ', true) } else { ('ク', false) },
-        'ｹ' => if dakuten { ('ゲ', true) } else { ('ケ', false) },
-        'ｺ' => if dakuten { ('ゴ', true) } else { ('コ', false) },
-        'ｻ' => if dakuten { ('ザ', true) } else { ('サ', false) },
-        'ｼ' => if dakuten { ('ジ', true) } else { ('シ', false) },
-        'ｽ' => if dakuten { ('ズ', true) } else { ('ス', false) },
-        'ｾ' => if dakuten { ('ゼ', true) } else { ('セ', false) },
-        'ｿ' => if dakuten { ('ゾ', true) } else { ('ソ', false) },
-        'ﾀ' => if dakuten { ('ダ', true) } else { ('タ', false) },
-        'ﾁ' => if dakuten { ('ヂ', true) } else { ('チ', false) },
-        'ﾂ' => if dakuten { ('ヅ', true) } else { ('ツ', false) },
-        'ﾃ' => if dakuten { ('デ', true) } else { ('テ', false) },
-        'ﾄ' => if dakuten { ('ド', true) } else { ('ト', false) },
-        'ﾅ' => ('ナ', false), 'ﾆ' => ('ニ', false), 'ﾇ' => ('ヌ', false),
-        'ﾈ' => ('ネ', false), 'ﾉ' => ('ノ', false),
-        'ﾊ' => if dakuten { ('バ', true) } else if handaku { ('パ', true) } else { ('ハ', false) },
-        'ﾋ' => if dakuten { ('ビ', true) } else if handaku { ('ピ', true) } else { ('ヒ', false) },
-        'ﾌ' => if dakuten { ('ブ', true) } else if handaku { ('プ', true) } else { ('フ', false) },
-        'ﾍ' => if dakuten { ('ベ', true) } else if handaku { ('ペ', true) } else { ('ヘ', false) },
-        'ﾎ' => if dakuten { ('ボ', true) } else if handaku { ('ポ', true) } else { ('ホ', false) },
-        'ﾏ' => ('マ', false), 'ﾐ' => ('ミ', false), 'ﾑ' => ('ム', false),
-        'ﾒ' => ('メ', false), 'ﾓ' => ('モ', false),
-        'ﾔ' => ('ヤ', false), 'ﾕ' => ('ユ', false), 'ﾖ' => ('ヨ', false),
-        'ﾗ' => ('ラ', false), 'ﾘ' => ('リ', false), 'ﾙ' => ('ル', false),
-        'ﾚ' => ('レ', false), 'ﾛ' => ('ロ', false),
-        'ﾜ' => ('ワ', false), 'ﾝ' => ('ン', false),
-        '｡' => ('。', false), '｢' => ('「', false), '｣' => ('」', false),
-        '､' => ('、', false), '･' => ('・', false),
+        'ｧ' => ('ァ', false),
+        'ｨ' => ('ィ', false),
+        'ｩ' => ('ゥ', false),
+        'ｪ' => ('ェ', false),
+        'ｫ' => ('ォ', false),
+        'ｬ' => ('ャ', false),
+        'ｭ' => ('ュ', false),
+        'ｮ' => ('ョ', false),
+        'ｯ' => ('ッ', false),
+        'ｰ' => ('ー', false),
+        'ｱ' => ('ア', false),
+        'ｲ' => ('イ', false),
+        'ｳ' => {
+            if dakuten {
+                ('ヴ', true)
+            } else {
+                ('ウ', false)
+            }
+        }
+        'ｴ' => ('エ', false),
+        'ｵ' => ('オ', false),
+        'ｶ' => {
+            if dakuten {
+                ('ガ', true)
+            } else {
+                ('カ', false)
+            }
+        }
+        'ｷ' => {
+            if dakuten {
+                ('ギ', true)
+            } else {
+                ('キ', false)
+            }
+        }
+        'ｸ' => {
+            if dakuten {
+                ('グ', true)
+            } else {
+                ('ク', false)
+            }
+        }
+        'ｹ' => {
+            if dakuten {
+                ('ゲ', true)
+            } else {
+                ('ケ', false)
+            }
+        }
+        'ｺ' => {
+            if dakuten {
+                ('ゴ', true)
+            } else {
+                ('コ', false)
+            }
+        }
+        'ｻ' => {
+            if dakuten {
+                ('ザ', true)
+            } else {
+                ('サ', false)
+            }
+        }
+        'ｼ' => {
+            if dakuten {
+                ('ジ', true)
+            } else {
+                ('シ', false)
+            }
+        }
+        'ｽ' => {
+            if dakuten {
+                ('ズ', true)
+            } else {
+                ('ス', false)
+            }
+        }
+        'ｾ' => {
+            if dakuten {
+                ('ゼ', true)
+            } else {
+                ('セ', false)
+            }
+        }
+        'ｿ' => {
+            if dakuten {
+                ('ゾ', true)
+            } else {
+                ('ソ', false)
+            }
+        }
+        'ﾀ' => {
+            if dakuten {
+                ('ダ', true)
+            } else {
+                ('タ', false)
+            }
+        }
+        'ﾁ' => {
+            if dakuten {
+                ('ヂ', true)
+            } else {
+                ('チ', false)
+            }
+        }
+        'ﾂ' => {
+            if dakuten {
+                ('ヅ', true)
+            } else {
+                ('ツ', false)
+            }
+        }
+        'ﾃ' => {
+            if dakuten {
+                ('デ', true)
+            } else {
+                ('テ', false)
+            }
+        }
+        'ﾄ' => {
+            if dakuten {
+                ('ド', true)
+            } else {
+                ('ト', false)
+            }
+        }
+        'ﾅ' => ('ナ', false),
+        'ﾆ' => ('ニ', false),
+        'ﾇ' => ('ヌ', false),
+        'ﾈ' => ('ネ', false),
+        'ﾉ' => ('ノ', false),
+        'ﾊ' => {
+            if dakuten {
+                ('バ', true)
+            } else if handaku {
+                ('パ', true)
+            } else {
+                ('ハ', false)
+            }
+        }
+        'ﾋ' => {
+            if dakuten {
+                ('ビ', true)
+            } else if handaku {
+                ('ピ', true)
+            } else {
+                ('ヒ', false)
+            }
+        }
+        'ﾌ' => {
+            if dakuten {
+                ('ブ', true)
+            } else if handaku {
+                ('プ', true)
+            } else {
+                ('フ', false)
+            }
+        }
+        'ﾍ' => {
+            if dakuten {
+                ('ベ', true)
+            } else if handaku {
+                ('ペ', true)
+            } else {
+                ('ヘ', false)
+            }
+        }
+        'ﾎ' => {
+            if dakuten {
+                ('ボ', true)
+            } else if handaku {
+                ('ポ', true)
+            } else {
+                ('ホ', false)
+            }
+        }
+        'ﾏ' => ('マ', false),
+        'ﾐ' => ('ミ', false),
+        'ﾑ' => ('ム', false),
+        'ﾒ' => ('メ', false),
+        'ﾓ' => ('モ', false),
+        'ﾔ' => ('ヤ', false),
+        'ﾕ' => ('ユ', false),
+        'ﾖ' => ('ヨ', false),
+        'ﾗ' => ('ラ', false),
+        'ﾘ' => ('リ', false),
+        'ﾙ' => ('ル', false),
+        'ﾚ' => ('レ', false),
+        'ﾛ' => ('ロ', false),
+        'ﾜ' => ('ワ', false),
+        'ﾝ' => ('ン', false),
+        '｡' => ('。', false),
+        '｢' => ('「', false),
+        '｣' => ('」', false),
+        '､' => ('、', false),
+        '･' => ('・', false),
         _ => return None,
     };
     Some(r)
@@ -216,34 +375,36 @@ fn half_kata_to_full(c: char, next: Option<char>) -> Option<(char, bool)> {
 /// `,` → `，`、`.` → `．` など、純粋な ASCII→全角対応（U+FF01–U+FF5E）を使う。
 /// `ascii_to_fullwidth_symbol`（F6/F7用の和文句読点変換）は経由しない。
 fn ascii_to_fullwidth(s: &str) -> String {
-    s.chars().map(|c| {
-        let n = c as u32;
-        if (0x21..=0x7E).contains(&n) {
-            char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
-        } else {
-            c
-        }
-    }).collect()
+    s.chars()
+        .map(|c| {
+            let n = c as u32;
+            if (0x21..=0x7E).contains(&n) {
+                char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// 文字列を半角英数字にする
 fn fullwidth_to_ascii(s: &str) -> String {
-    s.chars().map(|c| {
-        fullwidth_symbol_to_ascii(c)
-    }).collect()
+    s.chars().map(|c| fullwidth_symbol_to_ascii(c)).collect()
 }
 
 /// 全角文字列を大文字化
 fn fullwidth_to_upper(s: &str) -> String {
-    s.chars().map(|c| {
-        let n = c as u32;
-        // 全角小文字 ａ–ｚ (FF41–FF5A) → 全角大文字 Ａ–Ｚ (FF21–FF3A)
-        if (0xFF41..=0xFF5A).contains(&n) {
-            char::from_u32(n - 0x20).unwrap_or(c)
-        } else {
-            c
-        }
-    }).collect()
+    s.chars()
+        .map(|c| {
+            let n = c as u32;
+            // 全角小文字 ａ–ｚ (FF41–FF5A) → 全角大文字 Ａ–Ｚ (FF21–FF3A)
+            if (0xFF41..=0xFF5A).contains(&n) {
+                char::from_u32(n - 0x20).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// 全角文字列を先頭だけ大文字化（Ｔｅｓｕｔｏ 形式）
@@ -265,15 +426,17 @@ fn fullwidth_to_title(s: &str) -> String {
 }
 
 fn fullwidth_to_lower(s: &str) -> String {
-    s.chars().map(|c| {
-        let n = c as u32;
-        // 全角大文字 Ａ–Ｚ (FF21–FF3A) → 全角小文字 ａ–ｚ (FF41–FF5A)
-        if (0xFF21..=0xFF3A).contains(&n) {
-            char::from_u32(n + 0x20).unwrap_or(c)
-        } else {
-            c
-        }
-    }).collect()
+    s.chars()
+        .map(|c| {
+            let n = c as u32;
+            // 全角大文字 Ａ–Ｚ (FF21–FF3A) → 全角小文字 ａ–ｚ (FF41–FF5A)
+            if (0xFF21..=0xFF3A).contains(&n) {
+                char::from_u32(n + 0x20).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
 }
 
 /// F9 サイクル状態
@@ -296,40 +459,70 @@ pub enum LatinCycle {
 impl LatinCycle {
     /// 現在の文字列からサイクル状態を推定する
     pub fn detect(s: &str) -> Self {
-        let is_half = s.chars().all(|c| (c as u32) < 0x80 || !(0xFF01..=0xFF5E).contains(&(c as u32)));
-        let has_alpha = s.chars().any(|c| c.is_ascii_alphabetic()
-            || (0xFF21..=0xFF3A).contains(&(c as u32))
-            || (0xFF41..=0xFF5A).contains(&(c as u32)));
-        if !has_alpha { return Self::FullLower; }
+        let is_half = s
+            .chars()
+            .all(|c| (c as u32) < 0x80 || !(0xFF01..=0xFF5E).contains(&(c as u32)));
+        let has_alpha = s.chars().any(|c| {
+            c.is_ascii_alphabetic()
+                || (0xFF21..=0xFF3A).contains(&(c as u32))
+                || (0xFF41..=0xFF5A).contains(&(c as u32))
+        });
+        if !has_alpha {
+            return Self::FullLower;
+        }
         if is_half {
-            let all_upper = s.chars().filter(|c| c.is_ascii_alphabetic()).all(|c| c.is_uppercase());
-            let all_lower = s.chars().filter(|c| c.is_ascii_alphabetic()).all(|c| c.is_lowercase());
-            if all_lower { Self::HalfLower }
-            else if all_upper { Self::HalfUpper }
-            else { Self::HalfTitle }
+            let all_upper = s
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .all(|c| c.is_uppercase());
+            let all_lower = s
+                .chars()
+                .filter(|c| c.is_ascii_alphabetic())
+                .all(|c| c.is_lowercase());
+            if all_lower {
+                Self::HalfLower
+            } else if all_upper {
+                Self::HalfUpper
+            } else {
+                Self::HalfTitle
+            }
         } else {
-            let all_upper = s.chars().filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32))).all(|c| (0xFF21..=0xFF3A).contains(&(c as u32)));
-            let all_lower = s.chars().filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32))).all(|c| (0xFF41..=0xFF5A).contains(&(c as u32)));
-            if all_lower { Self::FullLower }
-            else if all_upper { Self::FullUpper }
-            else { Self::FullTitle }
+            let all_upper = s
+                .chars()
+                .filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32)))
+                .all(|c| (0xFF21..=0xFF3A).contains(&(c as u32)));
+            let all_lower = s
+                .chars()
+                .filter(|c| (0xFF21..=0xFF5A).contains(&(*c as u32)))
+                .all(|c| (0xFF41..=0xFF5A).contains(&(c as u32)));
+            if all_lower {
+                Self::FullLower
+            } else if all_upper {
+                Self::FullUpper
+            } else {
+                Self::FullTitle
+            }
         }
     }
 
     /// 次のサイクル状態（F9: 全角サイクル、F10: 半角サイクル）
     pub fn next_full(self) -> Self {
         match self {
-            Self::FullLower | Self::HalfLower | Self::HalfUpper | Self::HalfTitle => Self::FullUpper,
-            Self::FullUpper  => Self::FullTitle,
-            Self::FullTitle  => Self::FullLower,
+            Self::FullLower | Self::HalfLower | Self::HalfUpper | Self::HalfTitle => {
+                Self::FullUpper
+            }
+            Self::FullUpper => Self::FullTitle,
+            Self::FullTitle => Self::FullLower,
         }
     }
 
     pub fn next_half(self) -> Self {
         match self {
-            Self::HalfLower | Self::FullLower | Self::FullUpper | Self::FullTitle => Self::HalfUpper,
-            Self::HalfUpper  => Self::HalfTitle,
-            Self::HalfTitle  => Self::HalfLower,
+            Self::HalfLower | Self::FullLower | Self::FullUpper | Self::FullTitle => {
+                Self::HalfUpper
+            }
+            Self::HalfUpper => Self::HalfTitle,
+            Self::HalfTitle => Self::HalfLower,
         }
     }
 
@@ -388,51 +581,99 @@ pub fn to_half_katakana(s: &str) -> String {
     // 全角カタカナ → 半角カタカナの対応テーブル
     // (全角カタカナ, 半角基底, 結合文字 or None)
     // 結合文字: ﾞ(U+FF9E) / ﾟ(U+FF9F)
-    const DAKUTEN:  char = '\u{FF9E}';
-    const HANDAKU:  char = '\u{FF9F}';
+    const DAKUTEN: char = '\u{FF9E}';
+    const HANDAKU: char = '\u{FF9F}';
 
     fn kata_to_half(c: char) -> (char, Option<char>) {
         match c {
-            'ァ' => ('ｧ', None), 'ア' => ('ｱ', None),
-            'ィ' => ('ｨ', None), 'イ' => ('ｲ', None),
-            'ゥ' => ('ｩ', None), 'ウ' => ('ｳ', None),
-            'ェ' => ('ｪ', None), 'エ' => ('ｴ', None),
-            'ォ' => ('ｫ', None), 'オ' => ('ｵ', None),
-            'カ' => ('ｶ', None), 'ガ' => ('ｶ', Some(DAKUTEN)),
-            'キ' => ('ｷ', None), 'ギ' => ('ｷ', Some(DAKUTEN)),
-            'ク' => ('ｸ', None), 'グ' => ('ｸ', Some(DAKUTEN)),
-            'ケ' => ('ｹ', None), 'ゲ' => ('ｹ', Some(DAKUTEN)),
-            'コ' => ('ｺ', None), 'ゴ' => ('ｺ', Some(DAKUTEN)),
-            'サ' => ('ｻ', None), 'ザ' => ('ｻ', Some(DAKUTEN)),
-            'シ' => ('ｼ', None), 'ジ' => ('ｼ', Some(DAKUTEN)),
-            'ス' => ('ｽ', None), 'ズ' => ('ｽ', Some(DAKUTEN)),
-            'セ' => ('ｾ', None), 'ゼ' => ('ｾ', Some(DAKUTEN)),
-            'ソ' => ('ｿ', None), 'ゾ' => ('ｿ', Some(DAKUTEN)),
-            'タ' => ('ﾀ', None), 'ダ' => ('ﾀ', Some(DAKUTEN)),
-            'チ' => ('ﾁ', None), 'ヂ' => ('ﾁ', Some(DAKUTEN)),
-            'ッ' => ('ｯ', None), 'ツ' => ('ﾂ', None), 'ヅ' => ('ﾂ', Some(DAKUTEN)),
-            'テ' => ('ﾃ', None), 'デ' => ('ﾃ', Some(DAKUTEN)),
-            'ト' => ('ﾄ', None), 'ド' => ('ﾄ', Some(DAKUTEN)),
-            'ナ' => ('ﾅ', None), 'ニ' => ('ﾆ', None), 'ヌ' => ('ﾇ', None),
-            'ネ' => ('ﾈ', None), 'ノ' => ('ﾉ', None),
-            'ハ' => ('ﾊ', None), 'バ' => ('ﾊ', Some(DAKUTEN)), 'パ' => ('ﾊ', Some(HANDAKU)),
-            'ヒ' => ('ﾋ', None), 'ビ' => ('ﾋ', Some(DAKUTEN)), 'ピ' => ('ﾋ', Some(HANDAKU)),
-            'フ' => ('ﾌ', None), 'ブ' => ('ﾌ', Some(DAKUTEN)), 'プ' => ('ﾌ', Some(HANDAKU)),
-            'ヘ' => ('ﾍ', None), 'ベ' => ('ﾍ', Some(DAKUTEN)), 'ペ' => ('ﾍ', Some(HANDAKU)),
-            'ホ' => ('ﾎ', None), 'ボ' => ('ﾎ', Some(DAKUTEN)), 'ポ' => ('ﾎ', Some(HANDAKU)),
-            'マ' => ('ﾏ', None), 'ミ' => ('ﾐ', None), 'ム' => ('ﾑ', None),
-            'メ' => ('ﾒ', None), 'モ' => ('ﾓ', None),
-            'ャ' => ('ｬ', None), 'ヤ' => ('ﾔ', None),
-            'ュ' => ('ｭ', None), 'ユ' => ('ﾕ', None),
-            'ョ' => ('ｮ', None), 'ヨ' => ('ﾖ', None),
-            'ラ' => ('ﾗ', None), 'リ' => ('ﾘ', None), 'ル' => ('ﾙ', None),
-            'レ' => ('ﾚ', None), 'ロ' => ('ﾛ', None),
-            'ヮ' => ('ﾜ', None), 'ワ' => ('ﾜ', None), 'ヲ' => ('ｦ', None),
+            'ァ' => ('ｧ', None),
+            'ア' => ('ｱ', None),
+            'ィ' => ('ｨ', None),
+            'イ' => ('ｲ', None),
+            'ゥ' => ('ｩ', None),
+            'ウ' => ('ｳ', None),
+            'ェ' => ('ｪ', None),
+            'エ' => ('ｴ', None),
+            'ォ' => ('ｫ', None),
+            'オ' => ('ｵ', None),
+            'カ' => ('ｶ', None),
+            'ガ' => ('ｶ', Some(DAKUTEN)),
+            'キ' => ('ｷ', None),
+            'ギ' => ('ｷ', Some(DAKUTEN)),
+            'ク' => ('ｸ', None),
+            'グ' => ('ｸ', Some(DAKUTEN)),
+            'ケ' => ('ｹ', None),
+            'ゲ' => ('ｹ', Some(DAKUTEN)),
+            'コ' => ('ｺ', None),
+            'ゴ' => ('ｺ', Some(DAKUTEN)),
+            'サ' => ('ｻ', None),
+            'ザ' => ('ｻ', Some(DAKUTEN)),
+            'シ' => ('ｼ', None),
+            'ジ' => ('ｼ', Some(DAKUTEN)),
+            'ス' => ('ｽ', None),
+            'ズ' => ('ｽ', Some(DAKUTEN)),
+            'セ' => ('ｾ', None),
+            'ゼ' => ('ｾ', Some(DAKUTEN)),
+            'ソ' => ('ｿ', None),
+            'ゾ' => ('ｿ', Some(DAKUTEN)),
+            'タ' => ('ﾀ', None),
+            'ダ' => ('ﾀ', Some(DAKUTEN)),
+            'チ' => ('ﾁ', None),
+            'ヂ' => ('ﾁ', Some(DAKUTEN)),
+            'ッ' => ('ｯ', None),
+            'ツ' => ('ﾂ', None),
+            'ヅ' => ('ﾂ', Some(DAKUTEN)),
+            'テ' => ('ﾃ', None),
+            'デ' => ('ﾃ', Some(DAKUTEN)),
+            'ト' => ('ﾄ', None),
+            'ド' => ('ﾄ', Some(DAKUTEN)),
+            'ナ' => ('ﾅ', None),
+            'ニ' => ('ﾆ', None),
+            'ヌ' => ('ﾇ', None),
+            'ネ' => ('ﾈ', None),
+            'ノ' => ('ﾉ', None),
+            'ハ' => ('ﾊ', None),
+            'バ' => ('ﾊ', Some(DAKUTEN)),
+            'パ' => ('ﾊ', Some(HANDAKU)),
+            'ヒ' => ('ﾋ', None),
+            'ビ' => ('ﾋ', Some(DAKUTEN)),
+            'ピ' => ('ﾋ', Some(HANDAKU)),
+            'フ' => ('ﾌ', None),
+            'ブ' => ('ﾌ', Some(DAKUTEN)),
+            'プ' => ('ﾌ', Some(HANDAKU)),
+            'ヘ' => ('ﾍ', None),
+            'ベ' => ('ﾍ', Some(DAKUTEN)),
+            'ペ' => ('ﾍ', Some(HANDAKU)),
+            'ホ' => ('ﾎ', None),
+            'ボ' => ('ﾎ', Some(DAKUTEN)),
+            'ポ' => ('ﾎ', Some(HANDAKU)),
+            'マ' => ('ﾏ', None),
+            'ミ' => ('ﾐ', None),
+            'ム' => ('ﾑ', None),
+            'メ' => ('ﾒ', None),
+            'モ' => ('ﾓ', None),
+            'ャ' => ('ｬ', None),
+            'ヤ' => ('ﾔ', None),
+            'ュ' => ('ｭ', None),
+            'ユ' => ('ﾕ', None),
+            'ョ' => ('ｮ', None),
+            'ヨ' => ('ﾖ', None),
+            'ラ' => ('ﾗ', None),
+            'リ' => ('ﾘ', None),
+            'ル' => ('ﾙ', None),
+            'レ' => ('ﾚ', None),
+            'ロ' => ('ﾛ', None),
+            'ヮ' => ('ﾜ', None),
+            'ワ' => ('ﾜ', None),
+            'ヲ' => ('ｦ', None),
             'ン' => ('ﾝ', None),
             'ヴ' => ('ｳ', Some(DAKUTEN)),
             'ー' => ('ｰ', None),
-            '。' => ('｡', None), '「' => ('｢', None), '」' => ('｣', None),
-            '、' => ('､', None), '・' => ('･', None),
+            '。' => ('｡', None),
+            '「' => ('｢', None),
+            '」' => ('｣', None),
+            '、' => ('､', None),
+            '・' => ('･', None),
             _ => (c, None),
         }
     }
@@ -453,7 +694,7 @@ pub fn to_half_katakana(s: &str) -> String {
             continue;
         }
         // 全角句読点・長音符・和文記号 → 半角カタカナ対応記号
-        if matches!(c, '、'|'。'|'「'|'」'|'\u{FFE5}'|'－'|'ー') {
+        if matches!(c, '、' | '。' | '「' | '」' | '\u{FFE5}' | '－' | 'ー') {
             result.push(fullwidth_symbol_to_hankaku(c));
             continue;
         }
@@ -478,38 +719,62 @@ mod tests {
 
     #[test]
     fn katakana_from_hiragana() {
-        assert_eq!(to_katakana("\u{3042}\u{3044}\u{3046}"), "\u{30A2}\u{30A4}\u{30A6}");
+        assert_eq!(
+            to_katakana("\u{3042}\u{3044}\u{3046}"),
+            "\u{30A2}\u{30A4}\u{30A6}"
+        );
     }
 
     #[test]
     fn katakana_symbols_fullwidth() {
-        assert_eq!(to_katakana(",.[\\x5C]"), "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}");
-        assert_eq!(to_katakana("abc123"), "\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}");
+        assert_eq!(
+            to_katakana(",.[\\x5C]"),
+            "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}"
+        );
+        assert_eq!(
+            to_katakana("abc123"),
+            "\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}"
+        );
     }
 
     #[test]
     fn katakana_from_half_kata() {
-        assert_eq!(to_katakana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"), "\u{30AB}\u{30A4}\u{30AE}");
+        assert_eq!(
+            to_katakana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"),
+            "\u{30AB}\u{30A4}\u{30AE}"
+        );
     }
 
     #[test]
     fn hiragana_from_katakana() {
-        assert_eq!(to_hiragana("\u{30A2}\u{30A4}\u{30A6}"), "\u{3042}\u{3044}\u{3046}");
+        assert_eq!(
+            to_hiragana("\u{30A2}\u{30A4}\u{30A6}"),
+            "\u{3042}\u{3044}\u{3046}"
+        );
     }
 
     #[test]
     fn hiragana_symbols_fullwidth() {
-        assert_eq!(to_hiragana(",.[\\x5C]"), "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}");
+        assert_eq!(
+            to_hiragana(",.[\\x5C]"),
+            "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}"
+        );
     }
 
     #[test]
     fn hiragana_from_half_kata() {
-        assert_eq!(to_hiragana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"), "\u{304B}\u{3044}\u{304E}");
+        assert_eq!(
+            to_hiragana("\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"),
+            "\u{304B}\u{3044}\u{304E}"
+        );
     }
 
     #[test]
     fn half_kata_from_hiragana() {
-        assert_eq!(to_half_katakana("\u{3042}\u{3044}\u{3046}"), "\u{FF71}\u{FF72}\u{FF73}");
+        assert_eq!(
+            to_half_katakana("\u{3042}\u{3044}\u{3046}"),
+            "\u{FF71}\u{FF72}\u{FF73}"
+        );
     }
 
     #[test]
@@ -538,7 +803,10 @@ mod tests {
 
     #[test]
     fn half_kata_from_kata() {
-        assert_eq!(to_half_katakana("\u{30AB}\u{30A4}\u{30AE}"), "\u{FF76}\u{FF72}\u{FF77}\u{FF9E}");
+        assert_eq!(
+            to_half_katakana("\u{30AB}\u{30A4}\u{30AE}"),
+            "\u{FF76}\u{FF72}\u{FF77}\u{FF9E}"
+        );
     }
 
     #[test]
@@ -551,8 +819,14 @@ mod tests {
 
     #[test]
     fn half_kata_symbols() {
-        assert_eq!(to_half_katakana("\u{3001}\u{3002}\u{300C}\u{300D}"), "\u{FF64}\u{FF61}\u{FF62}\u{FF63}");
-        assert_eq!(to_half_katakana("\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}"), "abc123");
+        assert_eq!(
+            to_half_katakana("\u{3001}\u{3002}\u{300C}\u{300D}"),
+            "\u{FF64}\u{FF61}\u{FF62}\u{FF63}"
+        );
+        assert_eq!(
+            to_half_katakana("\u{FF41}\u{FF42}\u{FF43}\u{FF11}\u{FF12}\u{FF13}"),
+            "abc123"
+        );
         assert_eq!(to_half_katakana("\u{FFE5}"), "\x5C");
         assert_eq!(to_half_katakana("\u{FF0D}"), "-");
     }
@@ -560,25 +834,39 @@ mod tests {
     #[test]
     fn full_latin_cycle() {
         let s = "tesuto";
-        let s1 = to_full_latin(s);   assert_eq!(s1, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
-        let s2 = to_full_latin(&s1); assert_eq!(s2, "\u{FF34}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
-        let s3 = to_full_latin(&s2); assert_eq!(s3, "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
-        let s4 = to_full_latin(&s3); assert_eq!(s4, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
+        let s1 = to_full_latin(s);
+        assert_eq!(s1, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
+        let s2 = to_full_latin(&s1);
+        assert_eq!(s2, "\u{FF34}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
+        let s3 = to_full_latin(&s2);
+        assert_eq!(s3, "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
+        let s4 = to_full_latin(&s3);
+        assert_eq!(s4, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
     }
 
     #[test]
     fn half_latin_cycle() {
         let s = "tesuto";
-        let s1 = to_half_latin(s);   assert_eq!(s1, "TESUTO");
-        let s2 = to_half_latin(&s1); assert_eq!(s2, "Tesuto");
-        let s3 = to_half_latin(&s2); assert_eq!(s3, "tesuto");
-        let s4 = to_half_latin(&s3); assert_eq!(s4, "TESUTO");
+        let s1 = to_half_latin(s);
+        assert_eq!(s1, "TESUTO");
+        let s2 = to_half_latin(&s1);
+        assert_eq!(s2, "Tesuto");
+        let s3 = to_half_latin(&s2);
+        assert_eq!(s3, "tesuto");
+        let s4 = to_half_latin(&s3);
+        assert_eq!(s4, "TESUTO");
     }
 
     #[test]
     fn romaji_to_full() {
-        assert_eq!(romaji_to_fullwidth_latin("tesuto"),   "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}");
-        assert_eq!(romaji_to_fullwidth_latin("schedule"), "\u{FF53}\u{FF43}\u{FF48}\u{FF45}\u{FF44}\u{FF55}\u{FF4C}\u{FF45}");
+        assert_eq!(
+            romaji_to_fullwidth_latin("tesuto"),
+            "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}"
+        );
+        assert_eq!(
+            romaji_to_fullwidth_latin("schedule"),
+            "\u{FF53}\u{FF43}\u{FF48}\u{FF45}\u{FF44}\u{FF55}\u{FF4C}\u{FF45}"
+        );
     }
 
     #[test]
@@ -587,4 +875,3 @@ mod tests {
         assert_eq!(romaji_to_halfwidth_latin("SCHEDULE"), "schedule");
     }
 }
-

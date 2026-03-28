@@ -87,7 +87,10 @@ impl LlamaCppModel {
     /// * `n_gpu_layers = 0`  — CPU only
     /// * `n_gpu_layers = u32::MAX` — offload all layers to GPU (CUDA / Vulkan)
     pub fn from_file_with_gpu_layers<P: AsRef<Path>, T: AsRef<Path>>(
-        path: P, tokenizer_json: T, n_gpu_layers: u32, main_gpu: i32,
+        path: P,
+        tokenizer_json: T,
+        n_gpu_layers: u32,
+        main_gpu: i32,
     ) -> Result<Self> {
         let backend = get_backend()?;
         let model_params = LlamaModelParams::default()
@@ -96,7 +99,14 @@ impl LlamaCppModel {
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
-        Ok(Self { model, n_ctx: 128, external_tokenizer, n_threads: 0, n_gpu_layers, main_gpu })
+        Ok(Self {
+            model,
+            n_ctx: 128,
+            external_tokenizer,
+            n_threads: 0,
+            n_gpu_layers,
+            main_gpu,
+        })
     }
 
     /// Load a GGUF model with a pre-tokenizer type override.
@@ -134,7 +144,14 @@ impl LlamaCppModel {
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
 
-        Ok(Self { model, n_ctx: 128, external_tokenizer, n_threads: 0, n_gpu_layers: 0, main_gpu: 0 })
+        Ok(Self {
+            model,
+            n_ctx: 128,
+            external_tokenizer,
+            n_threads: 0,
+            n_gpu_layers: 0,
+            main_gpu: 0,
+        })
     }
 
     /// Load a GGUF model with explicit context window size
@@ -151,7 +168,14 @@ impl LlamaCppModel {
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
 
-        Ok(Self { model, n_ctx, external_tokenizer, n_threads: 0, n_gpu_layers: 0, main_gpu: 0 })
+        Ok(Self {
+            model,
+            n_ctx,
+            external_tokenizer,
+            n_threads: 0,
+            n_gpu_layers: 0,
+            main_gpu: 0,
+        })
     }
 
     /// Set the number of threads for inference.
@@ -319,7 +343,9 @@ impl LlamaCppModel {
         let n_ctx_needed = batch_size.max(self.n_ctx);
         let ctx_params = self
             .context_params()
-            .with_n_ctx(Some(NonZeroU32::new(n_ctx_needed).expect("n_ctx must be non-zero")))
+            .with_n_ctx(Some(
+                NonZeroU32::new(n_ctx_needed).expect("n_ctx must be non-zero"),
+            ))
             .with_n_seq_max(beam_size.try_into().unwrap_or(32))
             .with_n_batch(batch_size)
             .with_n_ubatch(batch_size);

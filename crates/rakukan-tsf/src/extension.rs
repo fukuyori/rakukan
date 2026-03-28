@@ -1,14 +1,14 @@
 //! Utility traits
 
 use windows::{
-    core::{GUID, HSTRING, PCWSTR},
     Win32::{
         System::Registry::{
-            RegCloseKey, RegCreateKeyExW, RegDeleteTreeW, RegSetValueExW,
-            HKEY, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ,
+            HKEY, KEY_WRITE, REG_OPTION_NON_VOLATILE, REG_SZ, RegCloseKey, RegCreateKeyExW,
+            RegDeleteTreeW, RegSetValueExW,
         },
         UI::Input::KeyboardAndMouse::{GetKeyState, VIRTUAL_KEY},
     },
+    core::{GUID, HSTRING, PCWSTR},
 };
 
 // ─── StringExt ───────────────────────────────────────────────────────────────
@@ -21,17 +21,30 @@ pub trait StringExt {
 }
 
 impl StringExt for &str {
-    fn to_wide_16(&self) -> Vec<u16> { self.encode_utf16().chain(Some(0)).collect() }
-    fn to_wide_16_unpadded(&self) -> Vec<u16> { self.encode_utf16().collect() }
+    fn to_wide_16(&self) -> Vec<u16> {
+        self.encode_utf16().chain(Some(0)).collect()
+    }
+    fn to_wide_16_unpadded(&self) -> Vec<u16> {
+        self.encode_utf16().collect()
+    }
     fn to_wide(&self) -> Vec<u8> {
-        self.encode_utf16().flat_map(|c| c.to_le_bytes()).chain(Some(0)).collect()
+        self.encode_utf16()
+            .flat_map(|c| c.to_le_bytes())
+            .chain(Some(0))
+            .collect()
     }
 }
 
 impl StringExt for String {
-    fn to_wide_16(&self) -> Vec<u16> { self.as_str().to_wide_16() }
-    fn to_wide_16_unpadded(&self) -> Vec<u16> { self.as_str().to_wide_16_unpadded() }
-    fn to_wide(&self) -> Vec<u8> { self.as_str().to_wide() }
+    fn to_wide_16(&self) -> Vec<u16> {
+        self.as_str().to_wide_16()
+    }
+    fn to_wide_16_unpadded(&self) -> Vec<u16> {
+        self.as_str().to_wide_16_unpadded()
+    }
+    fn to_wide(&self) -> Vec<u8> {
+        self.as_str().to_wide()
+    }
 }
 
 // ─── GUIDExt ─────────────────────────────────────────────────────────────────
@@ -44,10 +57,17 @@ impl GUIDExt for GUID {
     fn to_guid_string(&self) -> String {
         format!(
             "{{{:08x}-{:04x}-{:04x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}}}",
-            self.data1, self.data2, self.data3,
-            self.data4[0], self.data4[1],
-            self.data4[2], self.data4[3], self.data4[4],
-            self.data4[5], self.data4[6], self.data4[7],
+            self.data1,
+            self.data2,
+            self.data3,
+            self.data4[0],
+            self.data4[1],
+            self.data4[2],
+            self.data4[3],
+            self.data4[4],
+            self.data4[5],
+            self.data4[6],
+            self.data4[7],
         )
     }
 }
@@ -78,13 +98,14 @@ impl RegKey for HKEY {
                 None,
                 &mut out,
                 None,
-            ).ok()?;
+            )
+            .ok()?;
         }
         Ok(out)
     }
 
     fn set_string(&self, value_name: &str, value: &str) -> windows::core::Result<()> {
-        let name  = HSTRING::from(value_name);
+        let name = HSTRING::from(value_name);
         let bytes = value.to_wide();
         unsafe {
             RegSetValueExW(
@@ -93,7 +114,8 @@ impl RegKey for HKEY {
                 0,
                 REG_SZ,
                 Some(bytes.as_slice()),
-            ).ok()
+            )
+            .ok()
         }
     }
 
@@ -103,7 +125,7 @@ impl RegKey for HKEY {
     }
 
     fn set_dword(&self, value_name: &str, value: u32) -> windows::core::Result<()> {
-        use windows::Win32::System::Registry::{RegSetValueExW, REG_DWORD};
+        use windows::Win32::System::Registry::{REG_DWORD, RegSetValueExW};
         use windows::core::PCWSTR;
         let name_wide: Vec<u16> = value_name.encode_utf16().chain(Some(0)).collect();
         unsafe {
@@ -113,7 +135,8 @@ impl RegKey for HKEY {
                 0,
                 REG_DWORD,
                 Some(&value.to_le_bytes()),
-            ).ok()
+            )
+            .ok()
         }
     }
 

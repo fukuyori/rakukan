@@ -16,8 +16,8 @@ use super::user_action::UserAction;
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum KeyAction {
-    Convert,           // Space, 変換キー
-    CommitRaw,         // Enter（ひらがなのまま確定）
+    Convert,   // Space, 変換キー
+    CommitRaw, // Enter（ひらがなのまま確定）
     Backspace,
     CancelAll,         // Ctrl+Backspace（プリエディット全破棄）
     Cancel,            // Escape
@@ -34,13 +34,13 @@ pub enum KeyAction {
     CandidatePageUp,   // PageUp
     CandidateN(u8),    // 数字 1–9
     // IME オン/オフ
-    ImeOff,            // 英数キー（IME オン中）
-    ImeOn,             // 英数キー以外（IME オフ中）
-    ImeToggle,         // 全角/半角, Ctrl+Space
+    ImeOff,    // 英数キー（IME オン中）
+    ImeOn,     // 英数キー以外（IME オフ中）
+    ImeToggle, // 全角/半角, Ctrl+Space
     // 入力モード切り替え（IME オン中）
-    ModeHiragana,      // ひらがなキー, Ctrl+Caps
-    ModeKatakana,      // カタカナキー, Alt+Caps
-    ModeAlphanumeric,  // 英数キー
+    ModeHiragana,     // ひらがなキー, Ctrl+Caps
+    ModeKatakana,     // カタカナキー, Alt+Caps
+    ModeAlphanumeric, // 英数キー
     CursorLeft,
     CursorRight,
     /// 文節縮小（Shift+Left）
@@ -52,33 +52,33 @@ pub enum KeyAction {
 impl KeyAction {
     pub fn to_user_action(&self) -> UserAction {
         match self {
-            Self::Convert          => UserAction::Convert,
-            Self::CommitRaw        => UserAction::CommitRaw,
-            Self::Backspace        => UserAction::Backspace,
-            Self::CancelAll        => UserAction::CancelAll,
-            Self::Cancel           => UserAction::Cancel,
-            Self::Hiragana         => UserAction::Hiragana,
-            Self::Katakana         => UserAction::Katakana,
-            Self::HalfKatakana     => UserAction::HalfKatakana,
-            Self::FullLatin        => UserAction::FullLatin,
-            Self::HalfLatin        => UserAction::HalfLatin,
-            Self::CycleKana        => UserAction::CycleKana,
-            Self::FullWidthSpace   => UserAction::FullWidthSpace,
-            Self::CandidateNext    => UserAction::CandidateNext,
-            Self::CandidatePrev    => UserAction::CandidatePrev,
+            Self::Convert => UserAction::Convert,
+            Self::CommitRaw => UserAction::CommitRaw,
+            Self::Backspace => UserAction::Backspace,
+            Self::CancelAll => UserAction::CancelAll,
+            Self::Cancel => UserAction::Cancel,
+            Self::Hiragana => UserAction::Hiragana,
+            Self::Katakana => UserAction::Katakana,
+            Self::HalfKatakana => UserAction::HalfKatakana,
+            Self::FullLatin => UserAction::FullLatin,
+            Self::HalfLatin => UserAction::HalfLatin,
+            Self::CycleKana => UserAction::CycleKana,
+            Self::FullWidthSpace => UserAction::FullWidthSpace,
+            Self::CandidateNext => UserAction::CandidateNext,
+            Self::CandidatePrev => UserAction::CandidatePrev,
             Self::CandidatePageDown => UserAction::CandidatePageDown,
-            Self::CandidatePageUp  => UserAction::CandidatePageUp,
-            Self::CandidateN(n)    => UserAction::CandidateSelect(*n),
-            Self::ImeOff          => UserAction::ImeOff,
-            Self::ImeOn            => UserAction::ImeOn,
-            Self::ImeToggle        => UserAction::ImeToggle,
-            Self::ModeHiragana     => UserAction::ModeHiragana,
-            Self::ModeKatakana     => UserAction::ModeKatakana,
+            Self::CandidatePageUp => UserAction::CandidatePageUp,
+            Self::CandidateN(n) => UserAction::CandidateSelect(*n),
+            Self::ImeOff => UserAction::ImeOff,
+            Self::ImeOn => UserAction::ImeOn,
+            Self::ImeToggle => UserAction::ImeToggle,
+            Self::ModeHiragana => UserAction::ModeHiragana,
+            Self::ModeKatakana => UserAction::ModeKatakana,
             Self::ModeAlphanumeric => UserAction::ModeAlphanumeric,
-            Self::CursorLeft       => UserAction::CursorLeft,
-            Self::CursorRight      => UserAction::CursorRight,
-            Self::SegmentShrink    => UserAction::SegmentShrink,
-            Self::SegmentExtend    => UserAction::SegmentExtend,
+            Self::CursorLeft => UserAction::CursorLeft,
+            Self::CursorRight => UserAction::CursorRight,
+            Self::SegmentShrink => UserAction::SegmentShrink,
+            Self::SegmentExtend => UserAction::SegmentExtend,
         }
     }
 }
@@ -87,68 +87,81 @@ impl KeyAction {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeySpec {
-    pub vk:    u16,
-    pub ctrl:  bool,
+    pub vk: u16,
+    pub ctrl: bool,
     pub shift: bool,
-    pub alt:   bool,
+    pub alt: bool,
 }
 
 impl KeySpec {
     pub fn parse(s: &str) -> Option<Self> {
-        let mut ctrl  = false;
+        let mut ctrl = false;
         let mut shift = false;
-        let mut alt   = false;
+        let mut alt = false;
         let mut vk: Option<u16> = None;
         for part in s.split('+') {
             match part.trim().to_lowercase().as_str() {
-                "ctrl" | "control" => ctrl  = true,
-                "shift"            => shift = true,
-                "alt"              => alt   = true,
+                "ctrl" | "control" => ctrl = true,
+                "shift" => shift = true,
+                "alt" => alt = true,
                 name => vk = Some(name_to_vk(name)?),
             }
         }
-        Some(Self { vk: vk?, ctrl, shift, alt })
+        Some(Self {
+            vk: vk?,
+            ctrl,
+            shift,
+            alt,
+        })
     }
 }
 
 fn name_to_vk(name: &str) -> Option<u16> {
     Some(match name {
-        "backspace" | "bs"    => 0x08,
-        "tab"                 => 0x09,
-        "enter" | "return"    => 0x0D,
-        "escape" | "esc"      => 0x1B,
-        "space"               => 0x20,
+        "backspace" | "bs" => 0x08,
+        "tab" => 0x09,
+        "enter" | "return" => 0x0D,
+        "escape" | "esc" => 0x1B,
+        "space" => 0x20,
         "backquote" | "grave" => 0xC0,
-        "semicolon"           => 0xBA,
-        "equal"               => 0xBB,
-        "comma"               => 0xBC,
-        "minus"               => 0xBD,
-        "period"              => 0xBE,
-        "slash"               => 0xBF,
-        "leftbracket"         => 0xDB,
-        "backslash"           => 0xDC,
-        "rightbracket"        => 0xDD,
-        "quote"               => 0xDE,
-        "pageup"   | "pgup"   => 0x21,
-        "pagedown" | "pgdn"   => 0x22,
-        "end"                 => 0x23,
-        "home"                => 0x24,
-        "left"                => 0x25,
-        "up"                  => 0x26,
-        "right"               => 0x27,
-        "down"                => 0x28,
-        "delete" | "del"      => 0x2E,
-        "f1"  => 0x70, "f2"  => 0x71, "f3"  => 0x72,
-        "f4"  => 0x73, "f5"  => 0x74, "f6"  => 0x75,
-        "f7"  => 0x76, "f8"  => 0x77, "f9"  => 0x78,
-        "f10" => 0x79, "f11" => 0x7A, "f12" => 0x7B,
-        "zenkaku" | "hankaku" | "kanji" => 0x19,  // VK_KANJI (全角/半角キー)
-        "henkan"              => 0x1C,
-        "muhenkan"            => 0x1D,
-        "eisuu" | "alphanumeric" => 0xF0,  // 英数キー
-        "katakana"               => 0xF1,  // カタカナキー
-        "hiragana_key"           => 0xF2,  // ひらがなキー
-        "caps"                   => 0x14,  // Caps Lock
+        "semicolon" => 0xBA,
+        "equal" => 0xBB,
+        "comma" => 0xBC,
+        "minus" => 0xBD,
+        "period" => 0xBE,
+        "slash" => 0xBF,
+        "leftbracket" => 0xDB,
+        "backslash" => 0xDC,
+        "rightbracket" => 0xDD,
+        "quote" => 0xDE,
+        "pageup" | "pgup" => 0x21,
+        "pagedown" | "pgdn" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "delete" | "del" => 0x2E,
+        "f1" => 0x70,
+        "f2" => 0x71,
+        "f3" => 0x72,
+        "f4" => 0x73,
+        "f5" => 0x74,
+        "f6" => 0x75,
+        "f7" => 0x76,
+        "f8" => 0x77,
+        "f9" => 0x78,
+        "f10" => 0x79,
+        "f11" => 0x7A,
+        "f12" => 0x7B,
+        "zenkaku" | "hankaku" | "kanji" => 0x19, // VK_KANJI (全角/半角キー)
+        "henkan" => 0x1C,
+        "muhenkan" => 0x1D,
+        "eisuu" | "alphanumeric" => 0xF0, // 英数キー
+        "katakana" => 0xF1,               // カタカナキー
+        "hiragana_key" => 0xF2,           // ひらがなキー
+        "caps" => 0x14,                   // Caps Lock
         // 単一アルファベット (a-z → VK 0x41-0x5A)
         name if name.len() == 1 => {
             let c = name.chars().next().unwrap();
@@ -175,7 +188,9 @@ pub struct KeymapConfig {
     pub bindings: Vec<KeyBinding>,
 }
 
-fn default_inherit_preset() -> bool { true }
+fn default_inherit_preset() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -187,7 +202,7 @@ pub enum KeymapPreset {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyBinding {
-    pub key:    String,
+    pub key: String,
     pub action: KeyAction,
 }
 
@@ -202,7 +217,10 @@ impl Default for KeymapConfig {
 }
 
 fn bind(key: &str, action: KeyAction) -> KeyBinding {
-    KeyBinding { key: key.to_string(), action }
+    KeyBinding {
+        key: key.to_string(),
+        action,
+    }
 }
 
 // ─── Keymap ──────────────────────────────────────────────────────────────────
@@ -214,8 +232,14 @@ pub struct Keymap {
 impl Keymap {
     pub fn load() -> Self {
         match load_from_file() {
-            Ok(km) => { tracing::info!("keymap loaded"); km }
-            Err(e) => { tracing::warn!("keymap: load failed, using default ({e})"); Self::default() }
+            Ok(km) => {
+                tracing::info!("keymap loaded");
+                km
+            }
+            Err(e) => {
+                tracing::warn!("keymap: load failed, using default ({e})");
+                Self::default()
+            }
         }
     }
 
@@ -233,7 +257,12 @@ impl Keymap {
 
     /// ホットパス — HashMap::get のみ
     pub fn resolve(&self, vk: u16, ctrl: bool, shift: bool, alt: bool) -> Option<&KeyAction> {
-        self.table.get(&KeySpec { vk, ctrl, shift, alt })
+        self.table.get(&KeySpec {
+            vk,
+            ctrl,
+            shift,
+            alt,
+        })
     }
 
     /// VK + 現在の修飾キー状態 → UserAction
@@ -241,11 +270,11 @@ impl Keymap {
     /// キーマップにあればそのアクション、なければ ToUnicode で文字変換。
     pub fn resolve_action(&self, vk: u16) -> Option<UserAction> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetKeyboardState, GetKeyState, ToUnicode, VK_CONTROL, VK_MENU, VK_SHIFT,
+            GetKeyState, GetKeyboardState, ToUnicode, VK_CONTROL, VK_MENU, VK_SHIFT,
         };
-        let ctrl  = unsafe { GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 };
-        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32)   as u16 & 0x8000 != 0 };
-        let alt   = unsafe { GetKeyState(VK_MENU.0 as i32)    as u16 & 0x8000 != 0 };
+        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 };
+        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 };
+        let alt = unsafe { GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 };
 
         // ① キーマップ優先
         if let Some(ka) = self.resolve(vk, ctrl, shift, alt) {
@@ -280,11 +309,11 @@ impl Keymap {
         // 実測 (/*-+. の順に入力): 0x6f=/ 0x6a=* 0x6d=- 0x6b=+ 0x6e=.
         if !ctrl && !alt {
             let ch = match vk {
-                0x6F => Some('/'),  // テンキー /
-                0x6A => Some('*'),  // テンキー *
-                0x6D => Some('-'),  // テンキー -
-                0x6B => Some('+'),  // テンキー +
-                0x6E => Some('.'),  // テンキー .
+                0x6F => Some('/'), // テンキー /
+                0x6A => Some('*'), // テンキー *
+                0x6D => Some('-'), // テンキー -
+                0x6B => Some('+'), // テンキー +
+                0x6E => Some('.'), // テンキー .
                 _ => None,
             };
             if let Some(ch) = ch {
@@ -327,7 +356,9 @@ impl Default for Keymap {
     fn default() -> Self {
         let preset = match super::config::keyboard_layout() {
             super::config::KeyboardLayout::Us => KeymapPreset::MsImeUs,
-            super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => KeymapPreset::MsImeJis,
+            super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => {
+                KeymapPreset::MsImeJis
+            }
         };
         Self::build(resolve_keymap_config(KeymapConfig {
             preset: Some(preset),
@@ -342,7 +373,9 @@ impl Default for Keymap {
 pub fn keymap_save_default() -> Result<()> {
     let path = config_path()?;
     if !path.exists() {
-        if let Some(p) = path.parent() { std::fs::create_dir_all(p)?; }
+        if let Some(p) = path.parent() {
+            std::fs::create_dir_all(p)?;
+        }
         let header = concat!(
             "# rakukan キーバインド設定\n",
             "# IME をオフ→オンにすると反映されます\n",
@@ -511,9 +544,10 @@ pub fn keymap_save_default() -> Result<()> {
 }
 
 fn config_path() -> Result<std::path::PathBuf> {
-    let appdata = std::env::var("APPDATA")
-        .map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
-    Ok(std::path::PathBuf::from(appdata).join("rakukan").join("keymap.toml"))
+    let appdata = std::env::var("APPDATA").map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
+    Ok(std::path::PathBuf::from(appdata)
+        .join("rakukan")
+        .join("keymap.toml"))
 }
 
 fn load_from_file() -> Result<Keymap> {
@@ -525,7 +559,9 @@ fn load_from_file() -> Result<Keymap> {
 fn resolve_keymap_config(mut cfg: KeymapConfig) -> KeymapConfig {
     let layout_preset = match super::config::keyboard_layout() {
         super::config::KeyboardLayout::Us => KeymapPreset::MsImeUs,
-        super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => KeymapPreset::MsImeJis,
+        super::config::KeyboardLayout::Jis | super::config::KeyboardLayout::Custom => {
+            KeymapPreset::MsImeJis
+        }
     };
     let preset = cfg.preset.unwrap_or(layout_preset);
     if !cfg.inherit_preset || matches!(preset, KeymapPreset::Custom) {

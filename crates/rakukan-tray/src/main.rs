@@ -1,44 +1,50 @@
 #![windows_subsystem = "windows"]
 
 use anyhow::Result;
-use std::{mem::size_of, ptr::null_mut, sync::atomic::{AtomicBool, Ordering}, thread};
+use std::{
+    mem::size_of,
+    ptr::null_mut,
+    sync::atomic::{AtomicBool, Ordering},
+    thread,
+};
 
-use windows::core::PCWSTR;
-use windows::core::GUID;
 use windows::Win32::{
-    Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WPARAM, HANDLE, INVALID_HANDLE_VALUE, COLORREF},
+    Foundation::{
+        COLORREF, CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
+    },
     Graphics::Gdi::{
-        CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject,
-        DrawTextW, SelectObject, SetBkMode, SetTextColor,
-        BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER,
-        HBITMAP, HDC, HFONT, TRANSPARENT,
+        BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+        DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
+        HBITMAP, HDC, HFONT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
     },
     System::{
+        Memory::{
+            CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+            OpenFileMappingW, PAGE_READWRITE, UnmapViewOfFile,
+        },
         SystemInformation::GetTickCount64,
-        Memory::{CreateFileMappingW, MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, FILE_MAP_READ, PAGE_READWRITE, MEMORY_MAPPED_VIEW_ADDRESS},
-		Threading::{CreateEventW, OpenEventW, WaitForSingleObject, INFINITE, EVENT_MODIFY_STATE, SetEvent, SYNCHRONIZATION_ACCESS_RIGHTS},
+        Threading::{
+            CreateEventW, EVENT_MODIFY_STATE, INFINITE, OpenEventW, SYNCHRONIZATION_ACCESS_RIGHTS,
+            SetEvent, WaitForSingleObject,
+        },
     },
     UI::{
         Shell::{
-            Shell_NotifyIconW, NOTIFYICONDATAW,
-            NIF_GUID, NIF_ICON, NIF_MESSAGE, NIF_TIP,
-            NIM_ADD, NIM_DELETE, NIM_MODIFY, NIM_SETVERSION,
-            NOTIFYICON_VERSION_4,
+            NIF_GUID, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
+            NIM_SETVERSION, NOTIFYICON_VERSION_4, NOTIFYICONDATAW, Shell_NotifyIconW,
         },
         WindowsAndMessaging::{
-            CreateIconIndirect, DefWindowProcW, DestroyIcon, DispatchMessageW, GetMessageW,
-            LoadCursorW, PostMessageW, RegisterClassW, TranslateMessage,
-            CW_USEDEFAULT, ICONINFO, MSG, WNDCLASSW,
-            WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_TIMER,
-            WS_OVERLAPPEDWINDOW,
-            CreateWindowExW, ShowWindow, SW_HIDE, SetTimer,
-            PostQuitMessage,
-            CreatePopupMenu, AppendMenuW, TrackPopupMenu, SetForegroundWindow,
-            GetCursorPos, TPM_LEFTALIGN, TPM_BOTTOMALIGN, TPM_RIGHTBUTTON,
-            WM_RBUTTONUP,
+            AppendMenuW, CW_USEDEFAULT, CreateIconIndirect, CreatePopupMenu, CreateWindowExW,
+            DefWindowProcW, DestroyIcon, DispatchMessageW, GetCursorPos, GetMessageW, ICONINFO,
+            LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE,
+            SetForegroundWindow, SetTimer, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
+            TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_COMMAND, WM_CREATE,
+            WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
         },
     },
 };
+use windows::core::GUID;
+use windows::core::PCWSTR;
 
 const MAP_NAME: &str = "Local\\rakukan.mode";
 const EVT_NAME: &str = "Local\\rakukan.mode.changed";
@@ -47,7 +53,7 @@ const WM_TRAY: u32 = WM_APP + 1;
 const WM_MODE_UPDATE: u32 = WM_APP + 2;
 
 const ID_MENU_RELOAD: usize = 1002;
-const ID_MENU_EXIT:   usize = 1001;
+const ID_MENU_EXIT: usize = 1001;
 
 /// Stable GUID for the tray icon so Windows can persist settings (e.g. promoted / always visible).
 /// (Must match the GUID referenced from install.ps1 when setting IsPromoted.)
@@ -68,9 +74,7 @@ fn rgb(r: u8, g: u8, b: u8) -> COLORREF {
 fn is_light_mode() -> bool {
     // 1 = light, 0 = dark
     // HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\AppsUseLightTheme
-    use windows::Win32::System::Registry::{
-        RegGetValueW, HKEY_CURRENT_USER, RRF_RT_REG_DWORD,
-    };
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, RRF_RT_REG_DWORD, RegGetValueW};
     let key = to_wide_z("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
     let val = to_wide_z("AppsUseLightTheme");
     let mut data: u32 = 1;
@@ -92,7 +96,6 @@ fn is_light_mode() -> bool {
     // fallback: assume dark taskbar is common -> use white
     false
 }
-
 
 fn to_wide_z(s: &str) -> Vec<u16> {
     let mut v: Vec<u16> = s.encode_utf16().collect();
@@ -142,12 +145,16 @@ fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndMessagin
     if !bits.is_null() {
         let p = bits as *mut u8;
         // light mode: near-white background, dark mode: near-black background
-        let (br, bg, bb) = if light { (240u8, 240u8, 240u8) } else { (24u8, 24u8, 24u8) };
+        let (br, bg, bb) = if light {
+            (240u8, 240u8, 240u8)
+        } else {
+            (24u8, 24u8, 24u8)
+        };
         unsafe {
             for i in 0..(32 * 32) {
-                *p.add(i * 4)     = bb;  // B
-                *p.add(i * 4 + 1) = bg;  // G
-                *p.add(i * 4 + 2) = br;  // R
+                *p.add(i * 4) = bb; // B
+                *p.add(i * 4 + 1) = bg; // G
+                *p.add(i * 4 + 2) = br; // R
                 *p.add(i * 4 + 3) = 255; // A
             }
         }
@@ -186,10 +193,22 @@ fn create_mode_icon(text: &str) -> Result<windows::Win32::UI::WindowsAndMessagin
             SetTextColor(hdc, rgb(255, 255, 255));
         }
     }
-    let mut rc2 = windows::Win32::Foundation::RECT { left: 0, top: 0, right: 32, bottom: 32 };
+    let mut rc2 = windows::Win32::Foundation::RECT {
+        left: 0,
+        top: 0,
+        right: 32,
+        bottom: 32,
+    };
     let mut wbuf = to_wide_z(text);
     wbuf.pop(); // remove NUL for DrawTextW slice
-    let _ = unsafe { DrawTextW(hdc, &mut wbuf, &mut rc2, DT_CENTER | DT_VCENTER | DT_SINGLELINE) };
+    let _ = unsafe {
+        DrawTextW(
+            hdc,
+            &mut wbuf,
+            &mut rc2,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        )
+    };
 
     // GDI does not guarantee alpha channel writes; force opaque alpha for all pixels.
     if !bits.is_null() {
@@ -240,13 +259,13 @@ struct Shared {
 }
 
 impl Drop for Shared {
-	fn drop(&mut self) {
-		unsafe {
-			let _ = UnmapViewOfFile(self.view);
-			let _ = CloseHandle(self.evt);
-			let _ = CloseHandle(self.map);
-		}
-	}
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnmapViewOfFile(self.view);
+            let _ = CloseHandle(self.evt);
+            let _ = CloseHandle(self.map);
+        }
+    }
 }
 
 unsafe impl Send for Shared {}
@@ -261,7 +280,16 @@ impl Shared {
         let map = unsafe { OpenFileMappingW(FILE_MAP_READ.0, false, PCWSTR(map_name.as_ptr())) }
             .or_else(|_| {
                 // create if not exists (so tray can run before IME activates)
-                unsafe { CreateFileMappingW(INVALID_HANDLE_VALUE, None, PAGE_READWRITE, 0, 4, PCWSTR(map_name.as_ptr())) }
+                unsafe {
+                    CreateFileMappingW(
+                        INVALID_HANDLE_VALUE,
+                        None,
+                        PAGE_READWRITE,
+                        0,
+                        4,
+                        PCWSTR(map_name.as_ptr()),
+                    )
+                }
             })?;
 
         let view = unsafe { MapViewOfFile(map, FILE_MAP_READ, 0, 0, 4) };
@@ -270,13 +298,14 @@ impl Shared {
             anyhow::bail!("MapViewOfFile failed");
         }
 
-		let evt = unsafe {
-			OpenEventW(
-				SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE_ACCESS | EVENT_MODIFY_STATE.0),
-				false,
-				PCWSTR(evt_name.as_ptr()),
-			)
-		}.or_else(|_| unsafe { CreateEventW(None, false, false, PCWSTR(evt_name.as_ptr())) })?;
+        let evt = unsafe {
+            OpenEventW(
+                SYNCHRONIZATION_ACCESS_RIGHTS(SYNCHRONIZE_ACCESS | EVENT_MODIFY_STATE.0),
+                false,
+                PCWSTR(evt_name.as_ptr()),
+            )
+        }
+        .or_else(|_| unsafe { CreateEventW(None, false, false, PCWSTR(evt_name.as_ptr())) })?;
 
         Ok(Self { map, evt, view })
     }
@@ -288,9 +317,7 @@ impl Shared {
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match msg {
-        WM_CREATE => {
-            LRESULT(0)
-        }
+        WM_CREATE => LRESULT(0),
         WM_MODE_UPDATE => {
             // wParam: low 16bit open flag, high 16bit mode
             let v = w.0 as u32;
@@ -335,14 +362,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             }
             if id == ID_MENU_EXIT {
                 RUNNING.store(false, Ordering::Release);
-                unsafe { PostQuitMessage(0); }
+                unsafe {
+                    PostQuitMessage(0);
+                }
                 return LRESULT(0);
             }
             unsafe { DefWindowProcW(hwnd, msg, w, l) }
         }
         WM_DESTROY => {
             RUNNING.store(false, Ordering::Release);
-            unsafe { PostQuitMessage(0); }
+            unsafe {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => unsafe { DefWindowProcW(hwnd, msg, w, l) },
@@ -354,8 +385,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
 fn signal_engine_reload() {
     let name = to_wide_z(RELOAD_EVT_NAME);
     unsafe {
-        use windows::Win32::System::Threading::{OpenEventW, SetEvent, EVENT_MODIFY_STATE};
-        match OpenEventW(EVENT_MODIFY_STATE, false, windows::core::PCWSTR(name.as_ptr())) {
+        use windows::Win32::System::Threading::{EVENT_MODIFY_STATE, OpenEventW, SetEvent};
+        match OpenEventW(
+            EVENT_MODIFY_STATE,
+            false,
+            windows::core::PCWSTR(name.as_ptr()),
+        ) {
             Ok(h) => {
                 let _ = SetEvent(h);
                 let _ = windows::Win32::Foundation::CloseHandle(h);
@@ -368,33 +403,49 @@ fn signal_engine_reload() {
 }
 
 fn show_context_menu(hwnd: HWND) -> Result<()> {
-    use windows::Win32::UI::WindowsAndMessaging::{
-        MENU_ITEM_FLAGS, MF_SEPARATOR,
-    };
+    use windows::Win32::UI::WindowsAndMessaging::{MENU_ITEM_FLAGS, MF_SEPARATOR};
     let hmenu = unsafe { CreatePopupMenu()? };
     let txt_reload = to_wide_z("エンジン再起動");
-    let _ = unsafe { AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_RELOAD, PCWSTR(txt_reload.as_ptr())) };
+    let _ = unsafe {
+        AppendMenuW(
+            hmenu,
+            MENU_ITEM_FLAGS(0),
+            ID_MENU_RELOAD,
+            PCWSTR(txt_reload.as_ptr()),
+        )
+    };
     let _ = unsafe { AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null()) };
     let txt_exit = to_wide_z("終了");
-    let _ = unsafe { AppendMenuW(hmenu, MENU_ITEM_FLAGS(0), ID_MENU_EXIT, PCWSTR(txt_exit.as_ptr())) };
+    let _ = unsafe {
+        AppendMenuW(
+            hmenu,
+            MENU_ITEM_FLAGS(0),
+            ID_MENU_EXIT,
+            PCWSTR(txt_exit.as_ptr()),
+        )
+    };
     let mut pt = windows::Win32::Foundation::POINT { x: 0, y: 0 };
     let _ = unsafe { GetCursorPos(&mut pt) };
     // TrackPopupMenu を正しく閉じるために必要
     let _ = unsafe { SetForegroundWindow(hwnd) };
-    let _ = unsafe { TrackPopupMenu(
-        hmenu,
-        TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
-        pt.x,
-        pt.y,
-        0,
-        hwnd,
-        None,
-    ) };
+    let _ = unsafe {
+        TrackPopupMenu(
+            hmenu,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RIGHTBUTTON,
+            pt.x,
+            pt.y,
+            0,
+            hwnd,
+            None,
+        )
+    };
     Ok(())
 }
 
 fn update_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
-    let text = if !open { "A" } else {
+    let text = if !open {
+        "A"
+    } else {
         match mode {
             Mode::Hiragana => "あ",
             Mode::Katakana => "ア",
@@ -426,7 +477,9 @@ fn update_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
 
 fn add_notify_icon(hwnd: HWND, open: bool, mode: Mode) -> Result<()> {
     // NIM_ADD でアイコンを必ず設定しないと、環境によってはトレイに表示されない。
-    let text = if !open { "A" } else {
+    let text = if !open {
+        "A"
+    } else {
         match mode {
             Mode::Hiragana => "あ",
             Mode::Katakana => "ア",
@@ -502,42 +555,44 @@ fn main() -> Result<()> {
         LAST_UPDATE_MS.store(GetTickCount64(), Ordering::Release);
         let _ = SetTimer(hwnd, TIMER_ID, 1000, None);
 
-		let shared = Shared::open_or_create()?;
+        let shared = Shared::open_or_create()?;
 
-		// notifier thread
-		// HWND is not Send; pass its raw value across threads.
-		let hwnd2 = hwnd.0 as usize;
-		let evt_for_shutdown = shared.evt; // HANDLE is Copy
-		let watcher = thread::spawn(move || {
-			// shared is owned by this thread; it will be dropped at thread end.
-			while RUNNING.load(Ordering::Acquire) {
-					let _ = WaitForSingleObject(shared.evt, INFINITE);
-				if !RUNNING.load(Ordering::Acquire) { break; }
-					let (open, mode) = decode(shared.read());
-				let mode_id = match mode {
-					Mode::Hiragana => 0u32,
-					Mode::Katakana => 1u32,
-					Mode::Alnum => 2u32,
-				};
-				let w = WPARAM(((mode_id as u32) << 16 | (open as u32)) as usize);
-				let hwnd_send = HWND(hwnd2 as *mut core::ffi::c_void);
-					let _ = PostMessageW(hwnd_send, WM_MODE_UPDATE, w, LPARAM(0));
-			}
-		});
+        // notifier thread
+        // HWND is not Send; pass its raw value across threads.
+        let hwnd2 = hwnd.0 as usize;
+        let evt_for_shutdown = shared.evt; // HANDLE is Copy
+        let watcher = thread::spawn(move || {
+            // shared is owned by this thread; it will be dropped at thread end.
+            while RUNNING.load(Ordering::Acquire) {
+                let _ = WaitForSingleObject(shared.evt, INFINITE);
+                if !RUNNING.load(Ordering::Acquire) {
+                    break;
+                }
+                let (open, mode) = decode(shared.read());
+                let mode_id = match mode {
+                    Mode::Hiragana => 0u32,
+                    Mode::Katakana => 1u32,
+                    Mode::Alnum => 2u32,
+                };
+                let w = WPARAM(((mode_id as u32) << 16 | (open as u32)) as usize);
+                let hwnd_send = HWND(hwnd2 as *mut core::ffi::c_void);
+                let _ = PostMessageW(hwnd_send, WM_MODE_UPDATE, w, LPARAM(0));
+            }
+        });
 
         // message loop
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, HWND(null_mut()), 0, 0).into() {
-			let _ = TranslateMessage(&msg);
+            let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
 
-		let _ = delete_notify_icon(hwnd);
+        let _ = delete_notify_icon(hwnd);
 
-		// stop watcher and wait
-		RUNNING.store(false, Ordering::Release);
-		let _ = SetEvent(evt_for_shutdown);
-		let _ = watcher.join();
+        // stop watcher and wait
+        RUNNING.store(false, Ordering::Release);
+        let _ = SetEvent(evt_for_shutdown);
+        let _ = watcher.join();
     }
     Ok(())
 }

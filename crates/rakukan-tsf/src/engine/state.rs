@@ -5,12 +5,12 @@
 //! - ホットパス: `try_lock()` のみ使用。取れなければ即リターン。
 //! - 非ホットパス（Activate, BG スレッド): `lock()` を使用可。
 
-use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::sync::atomic::{AtomicU8, AtomicBool, Ordering as AO};
-use windows::core::GUID;
 use super::input_mode::InputMode;
 use rakukan_engine_abi::{DynEngine, install_dir};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AO};
+use std::sync::{LazyLock, Mutex, MutexGuard};
+use windows::core::GUID;
 
 // ─── INPUT_MODE_ATOMIC ────────────────────────────────────────────────────────
 // IMEState.input_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
@@ -22,8 +22,8 @@ static INPUT_MODE_ATOMIC: AtomicU8 = AtomicU8::new(0);
 
 pub fn input_mode_set_atomic(mode: InputMode) {
     let v = match mode {
-        InputMode::Hiragana     => 0u8,
-        InputMode::Katakana     => 1u8,
+        InputMode::Hiragana => 0u8,
+        InputMode::Katakana => 1u8,
         InputMode::Alphanumeric => 2u8,
     };
     INPUT_MODE_ATOMIC.store(v, AO::Release);
@@ -67,8 +67,12 @@ pub fn engine_start_bg_init() {
         // 既存エンジンで辞書・モデルがまだ未ロードなら起動する
         if let Ok(mut g) = RAKUKAN_ENGINE.try_lock() {
             if let Some(eng) = g.0.as_mut() {
-                if !eng.is_dict_ready()  { eng.start_load_dict(); }
-                if !eng.is_kanji_ready() { eng.start_load_model(); }
+                if !eng.is_dict_ready() {
+                    eng.start_load_dict();
+                }
+                if !eng.is_kanji_ready() {
+                    eng.start_load_model();
+                }
             }
         }
         tracing::debug!("engine_start_bg_init: already started, skipping DLL load");
@@ -87,7 +91,10 @@ pub fn engine_start_bg_init() {
                             return;
                         }
                         match create_engine() {
-                            Ok(e) => { g.0 = Some(e); Ok(()) }
+                            Ok(e) => {
+                                g.0 = Some(e);
+                                Ok(())
+                            }
                             Err(e) => Err(e),
                         }
                     }
@@ -99,12 +106,18 @@ pub fn engine_start_bg_init() {
                     // 辞書・モデルのバックグラウンドロードを起動
                     if let Ok(mut g) = RAKUKAN_ENGINE.lock() {
                         if let Some(eng) = g.0.as_mut() {
-                            tracing::debug!("engine-init: is_dict_ready={} is_kanji_ready={}", eng.is_dict_ready(), eng.is_kanji_ready());
-                            if !eng.is_dict_ready()  {
+                            tracing::debug!(
+                                "engine-init: is_dict_ready={} is_kanji_ready={}",
+                                eng.is_dict_ready(),
+                                eng.is_kanji_ready()
+                            );
+                            if !eng.is_dict_ready() {
                                 tracing::info!("engine-init: calling start_load_dict");
                                 eng.start_load_dict();
                             }
-                            if !eng.is_kanji_ready() { eng.start_load_model(); }
+                            if !eng.is_kanji_ready() {
+                                eng.start_load_model();
+                            }
                         }
                     }
                     tracing::info!("engine-init: engine created successfully");
@@ -124,7 +137,8 @@ pub fn engine_start_bg_init() {
 /// ホットパス用: ブロックしない。取れなければ Err を返す。
 #[inline]
 pub fn engine_try_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
-    RAKUKAN_ENGINE.try_lock()
+    RAKUKAN_ENGINE
+        .try_lock()
         .map_err(|_| anyhow::anyhow!("engine busy"))
 }
 
@@ -152,8 +166,12 @@ pub fn engine_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrappe
             drop(g);
             if let Ok(mut g2) = RAKUKAN_ENGINE.lock() {
                 if let Some(eng) = g2.0.as_mut() {
-                    if !eng.is_dict_ready()   { eng.start_load_dict(); }
-                    if !eng.is_kanji_ready()  { eng.start_load_model(); }
+                    if !eng.is_dict_ready() {
+                        eng.start_load_dict();
+                    }
+                    if !eng.is_kanji_ready() {
+                        eng.start_load_model();
+                    }
                 }
             }
             return engine_get();
@@ -204,7 +222,9 @@ pub fn engine_reload() {
                                 if let Ok(mut g2) = RAKUKAN_ENGINE.lock() {
                                     if let Some(eng) = g2.0.as_mut() {
                                         eng.start_load_dict();
-                                        if !eng.is_kanji_ready() { eng.start_load_model(); }
+                                        if !eng.is_kanji_ready() {
+                                            eng.start_load_model();
+                                        }
                                     }
                                 }
                             } else {
@@ -229,9 +249,7 @@ pub fn start_reload_watcher() {
     std::thread::Builder::new()
         .name("rakukan-reload-watcher".into())
         .spawn(|| {
-            use windows::Win32::System::Threading::{
-                CreateEventW, WaitForSingleObject, INFINITE,
-            };
+            use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
             let name: Vec<u16> = "Local\\rakukan.engine.reload\0".encode_utf16().collect();
             let evt = unsafe {
                 CreateEventW(
@@ -271,7 +289,11 @@ fn create_engine() -> anyhow::Result<DynEngine> {
     // engine DLL の存在を事前確認してわかりやすいエラーを出す
     for backend in &["cpu", "vulkan", "cuda"] {
         let p = dir.join(format!("rakukan_engine_{backend}.dll"));
-        tracing::debug!("  {}: {}", backend, if p.exists() { "found" } else { "not found" });
+        tracing::debug!(
+            "  {}: {}",
+            backend,
+            if p.exists() { "found" } else { "not found" }
+        );
     }
 
     let cfg = build_engine_config_json();
@@ -286,17 +308,20 @@ fn build_engine_config_json() -> String {
     let cfg = super::config::current_config();
     let num_candidates = cfg.effective_num_candidates();
     let main_gpu = cfg.general.main_gpu;
-    let n_gpu_layers: u32 = u32::MAX;  // DLL 側（cpu DLL は 0 に上書き）
+    let n_gpu_layers: u32 = u32::MAX; // DLL 側（cpu DLL は 0 に上書き）
     let model_variant = cfg.general.model_variant.clone();
 
-    tracing::info!("engine config: num_candidates={num_candidates} main_gpu={main_gpu} model_variant={model_variant:?}");
+    tracing::info!(
+        "engine config: num_candidates={num_candidates} main_gpu={main_gpu} model_variant={model_variant:?}"
+    );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
-        None    => String::new(),
+        None => String::new(),
     };
-    format!(r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0{mv_json}}}"#)
+    format!(
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0{mv_json}}}"#
+    )
 }
-
 
 /// config.toml から num_candidates を読む（ホットパスで使う軽量版）
 pub fn get_num_candidates() -> usize {
@@ -305,10 +330,14 @@ pub fn get_num_candidates() -> usize {
 
 impl std::ops::Deref for EngineWrapper {
     type Target = Option<DynEngine>;
-    fn deref(&self) -> &Self::Target { &self.0 }
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }
 impl std::ops::DerefMut for EngineWrapper {
-    fn deref_mut(&mut self) -> &mut Self::Target { &mut self.0 }
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
 }
 
 /// ホットパス用: EngineWrapper の MutexGuard 型エイリアス
@@ -326,7 +355,7 @@ pub struct IMEState {
 pub static IME_STATE: LazyLock<Mutex<IMEState>> = LazyLock::new(|| {
     Mutex::new(IMEState {
         input_mode: InputMode::default(),
-        cookies:    HashMap::new(),
+        cookies: HashMap::new(),
     })
 });
 
@@ -337,7 +366,9 @@ impl IMEState {
     /// ホットパス用: ブロックしない
     #[inline]
     pub fn try_get() -> anyhow::Result<MutexGuard<'static, IMEState>> {
-        IME_STATE.try_lock().map_err(|_| anyhow::anyhow!("ime_state busy"))
+        IME_STATE
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("ime_state busy"))
     }
 
     pub fn set_mode(&mut self, mode: InputMode) {
@@ -368,12 +399,17 @@ pub static COMPOSITION: LazyLock<Mutex<CompositionWrapper>> =
 /// ホットパス用: ブロックしない
 #[inline]
 pub fn composition_try_get() -> anyhow::Result<MutexGuard<'static, CompositionWrapper>> {
-    COMPOSITION.try_lock().map_err(|_| anyhow::anyhow!("composition busy"))
+    COMPOSITION
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("composition busy"))
 }
 
 pub fn composition_set(comp: Option<ITfComposition>) -> anyhow::Result<()> {
     // set はホットパスでもブロックを許容（短い操作のため）
-    let mut g = COMPOSITION.lock().map_err(|p| { let _ = p; anyhow::anyhow!("composition poison") })?;
+    let mut g = COMPOSITION.lock().map_err(|p| {
+        let _ = p;
+        anyhow::anyhow!("composition poison")
+    })?;
     g.0 = comp;
     Ok(())
 }
@@ -404,15 +440,15 @@ pub enum SessionState {
         pos_y: i32,
     },
     /// 文節分割表示状態。
-    /// Shift+Left/Right で境界を調整中。Space で target を変換、Enter で target 確定。
-    /// - target   : 変換対象（実線アンダーライン）
-    /// - remainder: 変換しない残り（点線アンダーライン）
+    /// Left/Right で選択文節を移動、Shift+Left/Right で選択範囲を調整する。
     SplitPreedit {
-        target: String,
-        remainder: String,
+        blocks: Vec<SplitBlock>,
+        sel_start: usize,
+        sel_end: usize,
     },
     Selecting {
         original_preedit: String,
+        original_surface: String,
         candidates: Vec<String>,
         selected: usize,
         page_size: usize,
@@ -421,9 +457,78 @@ pub enum SessionState {
         pos_y: i32,
         /// 句読点保留（「、」「。」押下時にセット、確定時に末尾連結）
         punct_pending: Option<char>,
+        prefix: String,
         /// 文節分割後に変換した場合の残り部分（確定後に次のプリエディットになる）
         remainder: String,
     },
+    /// ライブ変換表示中。
+    ///
+    /// BG 変換が完了しトップ候補を composition に表示している状態。
+    /// キーを押していないので候補ウィンドウは出ない（Preedit の視覚的な上書き）。
+    ///
+    /// - `reading` : エンジンの hiragana_buf（Space 押下時の変換キー）
+    /// - `preview` : BG 変換のトップ候補（現在 composition に表示中）
+    ///
+    /// 遷移:
+    ///   Enter        → `preview` をコミット
+    ///   Space        → `reading` で on_convert（通常変換フロー）
+    ///   Input(c)     → Preedit へ戻し新文字を処理
+    ///   Backspace/ESC → Preedit へ戻し `reading` を再表示
+    ///   IME オフ     → `preview` をコミット
+    LiveConv {
+        reading: String,
+        preview: String,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct SplitBlock {
+    pub reading: String,
+    pub display: String,
+}
+
+fn split_reading_parts(
+    blocks: &[SplitBlock],
+    sel_start: usize,
+    sel_end: usize,
+) -> (String, String, String) {
+    let sel_start = sel_start.min(blocks.len());
+    let sel_end = sel_end.clamp(sel_start, blocks.len());
+    let prefix = blocks[..sel_start]
+        .iter()
+        .map(|b| b.reading.as_str())
+        .collect::<String>();
+    let target = blocks[sel_start..sel_end]
+        .iter()
+        .map(|b| b.reading.as_str())
+        .collect::<String>();
+    let suffix = blocks[sel_end..]
+        .iter()
+        .map(|b| b.reading.as_str())
+        .collect::<String>();
+    (prefix, target, suffix)
+}
+
+fn split_display_parts(
+    blocks: &[SplitBlock],
+    sel_start: usize,
+    sel_end: usize,
+) -> (String, String, String) {
+    let sel_start = sel_start.min(blocks.len());
+    let sel_end = sel_end.clamp(sel_start, blocks.len());
+    let prefix = blocks[..sel_start]
+        .iter()
+        .map(|b| b.display.as_str())
+        .collect::<String>();
+    let target = blocks[sel_start..sel_end]
+        .iter()
+        .map(|b| b.display.as_str())
+        .collect::<String>();
+    let suffix = blocks[sel_end..]
+        .iter()
+        .map(|b| b.display.as_str())
+        .collect::<String>();
+    (prefix, target, suffix)
 }
 
 pub static SESSION_STATE: LazyLock<Mutex<SessionState>> =
@@ -432,6 +537,16 @@ pub static SESSION_STATE: LazyLock<Mutex<SessionState>> =
 pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+// ─── LIVE_PREVIEW キュー（Phase 1B: WM_TIMER → handle_action 橋渡し）─────────
+//
+// WM_TIMER コールバック（WndProc）から RequestEditSession が呼べない場合の
+// フォールバック。タイマーが変換結果をここに書き込み、次のキー入力時に
+// handle_action が読み出して composition を更新する。
+//
+// Phase 1A（WM_TIMER から直接 RequestEditSession）が確認できれば使わなくなる。
+
+pub static LIVE_PREVIEW_QUEUE: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+pub static LIVE_PREVIEW_READY: AtomicBool = AtomicBool::new(false);
 
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
     SESSION_STATE
@@ -455,6 +570,26 @@ impl SessionState {
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
     }
 
+    /// ライブ変換表示状態へ遷移。
+    /// `reading` = hiragana_buf（変換キー）、`preview` = BG トップ候補。
+    pub fn set_live_conv(&mut self, reading: String, preview: String) {
+        *self = SessionState::LiveConv { reading, preview };
+        SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn is_live_conv(&self) -> bool {
+        matches!(self, SessionState::LiveConv { .. })
+    }
+
+    /// LiveConv の (reading, preview) を返す。
+    pub fn live_conv_parts(&self) -> Option<(&str, &str)> {
+        if let SessionState::LiveConv { reading, preview } = self {
+            Some((reading.as_str(), preview.as_str()))
+        } else {
+            None
+        }
+    }
+
     pub fn set_waiting(&mut self, text: String, pos_x: i32, pos_y: i32) {
         *self = SessionState::Waiting { text, pos_x, pos_y };
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
@@ -465,8 +600,20 @@ impl SessionState {
     /// SplitPreedit 中もキーを IME が消費する必要があるため SESSION_SELECTING を true に保つ。
     /// false にすると OnTestKeyDown が FALSE を返し、アプリが Shift+左/右を直接処理して
     /// コンポジション内の文字が消える原因になる。
-    pub fn set_split_preedit(&mut self, target: String, remainder: String) {
-        *self = SessionState::SplitPreedit { target, remainder };
+    pub fn set_split_preedit_blocks(
+        &mut self,
+        blocks: Vec<SplitBlock>,
+        sel_start: usize,
+        sel_end: usize,
+    ) {
+        let len = blocks.len();
+        let sel_start = sel_start.min(len.saturating_sub(1));
+        let sel_end = sel_end.clamp(sel_start.saturating_add(1), len);
+        *self = SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        };
         SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
     }
 
@@ -474,43 +621,151 @@ impl SessionState {
         matches!(self, SessionState::SplitPreedit { .. })
     }
 
-    pub fn split_target(&self) -> Option<&str> {
-        if let SessionState::SplitPreedit { target, .. } = self { Some(target) } else { None }
+    pub fn split_target(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_reading_parts(blocks, *sel_start, *sel_end).1)
+        } else {
+            None
+        }
     }
 
-    pub fn split_remainder(&self) -> Option<&str> {
-        if let SessionState::SplitPreedit { remainder, .. } = self { Some(remainder) } else { None }
+    pub fn split_prefix(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_reading_parts(blocks, *sel_start, *sel_end).0)
+        } else {
+            None
+        }
     }
 
-    /// Shift+Left: target の末尾1文字を remainder の先頭へ移動。
-    /// target が1文字以下になる場合は false を返して何もしない。
-    pub fn split_shrink(&mut self) -> bool {
-        if let SessionState::SplitPreedit { target, remainder } = self {
-            let last = target.char_indices().next_back().map(|(i, _)| i);
-            match last {
-                Some(i) if i > 0 => {
-                    let ch: String = target[i..].to_string();
-                    target.truncate(i);
-                    remainder.insert_str(0, &ch);
-                    true
-                }
-                _ => false,
+    pub fn split_remainder(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_reading_parts(blocks, *sel_start, *sel_end).2)
+        } else {
+            None
+        }
+    }
+
+    pub fn split_display_prefix(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_display_parts(blocks, *sel_start, *sel_end).0)
+        } else {
+            None
+        }
+    }
+
+    pub fn split_display_target(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_display_parts(blocks, *sel_start, *sel_end).1)
+        } else {
+            None
+        }
+    }
+
+    pub fn split_display_remainder(&self) -> Option<String> {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            Some(split_display_parts(blocks, *sel_start, *sel_end).2)
+        } else {
+            None
+        }
+    }
+
+    pub fn split_move_left(&mut self) -> bool {
+        if let SessionState::SplitPreedit {
+            sel_start, sel_end, ..
+        } = self
+        {
+            let width = sel_end.saturating_sub(*sel_start);
+            if *sel_start > 0 {
+                *sel_start -= 1;
+                *sel_end = *sel_start + width;
+                true
+            } else {
+                false
             }
         } else {
             false
         }
     }
 
-    /// Shift+Right: remainder の先頭1文字を target の末尾へ移動。
-    /// remainder が空なら false を返す。
+    pub fn split_move_right(&mut self) -> bool {
+        if let SessionState::SplitPreedit {
+            blocks,
+            sel_start,
+            sel_end,
+        } = self
+        {
+            let width = sel_end.saturating_sub(*sel_start);
+            if *sel_end < blocks.len() {
+                *sel_start += 1;
+                *sel_end = (*sel_start + width).min(blocks.len());
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Shift+Left: 選択範囲の右端を左へ縮める。
+    pub fn split_shrink(&mut self) -> bool {
+        if let SessionState::SplitPreedit {
+            sel_start, sel_end, ..
+        } = self
+        {
+            if *sel_end > sel_start.saturating_add(1) {
+                *sel_end -= 1;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Shift+Right: 選択範囲の右端を右へ広げる。
     pub fn split_extend(&mut self) -> bool {
-        if let SessionState::SplitPreedit { target, remainder } = self {
-            if remainder.is_empty() { return false; }
-            let end = remainder.char_indices().nth(1).map(|(i, _)| i).unwrap_or(remainder.len());
-            let ch: String = remainder[..end].to_string();
-            remainder.drain(..end);
-            target.push_str(&ch);
-            true
+        if let SessionState::SplitPreedit {
+            blocks, sel_end, ..
+        } = self
+        {
+            if *sel_end < blocks.len() {
+                *sel_end += 1;
+                true
+            } else {
+                false
+            }
         } else {
             false
         }
@@ -520,24 +775,37 @@ impl SessionState {
         &mut self,
         candidates: Vec<String>,
         original_preedit: String,
+        original_surface: String,
         pos_x: i32,
         pos_y: i32,
         llm_pending: bool,
     ) {
-        self.activate_selecting_with_remainder(candidates, original_preedit, pos_x, pos_y, llm_pending, String::new());
+        self.activate_selecting_with_affixes(
+            candidates,
+            original_preedit,
+            original_surface,
+            pos_x,
+            pos_y,
+            llm_pending,
+            String::new(),
+            String::new(),
+        );
     }
 
-    pub fn activate_selecting_with_remainder(
+    pub fn activate_selecting_with_affixes(
         &mut self,
         candidates: Vec<String>,
         original_preedit: String,
+        original_surface: String,
         pos_x: i32,
         pos_y: i32,
         llm_pending: bool,
+        prefix: String,
         remainder: String,
     ) {
         *self = SessionState::Selecting {
             original_preedit,
+            original_surface,
             candidates,
             selected: 0,
             page_size: 9,
@@ -545,6 +813,7 @@ impl SessionState {
             pos_x,
             pos_y,
             punct_pending: None,
+            prefix,
             remainder,
         };
         SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
@@ -562,8 +831,12 @@ impl SessionState {
         match self {
             SessionState::Preedit { text } => Some(text.as_str()),
             SessionState::Waiting { text, .. } => Some(text.as_str()),
-            SessionState::Selecting { original_preedit, .. } => Some(original_preedit.as_str()),
-            SessionState::SplitPreedit { target, .. } => Some(target.as_str()),
+            SessionState::Selecting {
+                original_preedit, ..
+            } => Some(original_preedit.as_str()),
+            SessionState::SplitPreedit { .. } => None,
+            // LiveConv では preview（変換後テキスト）を表示テキストとして返す
+            SessionState::LiveConv { preview, .. } => Some(preview.as_str()),
             SessionState::Idle => None,
         }
     }
@@ -577,19 +850,25 @@ impl SessionState {
 
     pub fn current_candidate(&self) -> Option<&str> {
         match self {
-            SessionState::Selecting { candidates, selected, .. } => {
-                candidates.get(*selected).map(|s| s.as_str())
-            }
+            SessionState::Selecting {
+                candidates,
+                selected,
+                ..
+            } => candidates.get(*selected).map(|s| s.as_str()),
             _ => None,
         }
     }
 
     pub fn original_preedit(&self) -> Option<&str> {
         match self {
-            SessionState::Selecting { original_preedit, .. } => Some(original_preedit.as_str()),
+            SessionState::Selecting {
+                original_preedit, ..
+            } => Some(original_preedit.as_str()),
             SessionState::Preedit { text } => Some(text.as_str()),
             SessionState::Waiting { text, .. } => Some(text.as_str()),
-            SessionState::SplitPreedit { target, .. } => Some(target.as_str()),
+            SessionState::SplitPreedit { .. } => None,
+            // LiveConv では reading（ひらがな）が元のプリエディット
+            SessionState::LiveConv { reading, .. } => Some(reading.as_str()),
             SessionState::Idle => None,
         }
     }
@@ -612,17 +891,48 @@ impl SessionState {
         }
     }
 
+    pub fn selecting_prefix_clone(&self) -> String {
+        if let SessionState::Selecting { prefix, .. } = self {
+            prefix.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn selecting_original_surface(&self) -> Option<&str> {
+        if let SessionState::Selecting {
+            original_surface, ..
+        } = self
+        {
+            Some(original_surface.as_str())
+        } else {
+            None
+        }
+    }
+
     pub fn current_page(&self) -> usize {
         match self {
-            SessionState::Selecting { selected, page_size, .. } => selected / page_size,
+            SessionState::Selecting {
+                selected,
+                page_size,
+                ..
+            } => selected / page_size,
             _ => 0,
         }
     }
 
     pub fn total_pages(&self) -> usize {
         match self {
-            SessionState::Selecting { candidates, page_size, .. } => {
-                if candidates.is_empty() { 0 } else { (candidates.len() + page_size - 1) / page_size }
+            SessionState::Selecting {
+                candidates,
+                page_size,
+                ..
+            } => {
+                if candidates.is_empty() {
+                    0
+                } else {
+                    (candidates.len() + page_size - 1) / page_size
+                }
             }
             _ => 0,
         }
@@ -630,7 +940,12 @@ impl SessionState {
 
     pub fn page_candidates(&self) -> &[String] {
         match self {
-            SessionState::Selecting { candidates, selected, page_size, .. } => {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                page_size,
+                ..
+            } => {
                 if candidates.is_empty() {
                     return &[];
                 }
@@ -644,7 +959,11 @@ impl SessionState {
 
     pub fn page_selected(&self) -> usize {
         match self {
-            SessionState::Selecting { selected, page_size, .. } => selected % page_size,
+            SessionState::Selecting {
+                selected,
+                page_size,
+                ..
+            } => selected % page_size,
             _ => 0,
         }
     }
@@ -659,8 +978,16 @@ impl SessionState {
     }
 
     pub fn next_with_page_wrap(&mut self) {
-        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
-            if candidates.is_empty() { return; }
+        if let SessionState::Selecting {
+            candidates,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            if candidates.is_empty() {
+                return;
+            }
             let next_idx = (*selected + 1) % candidates.len();
             let cur_page = *selected / *page_size;
             let next_page = next_idx / *page_size;
@@ -673,15 +1000,34 @@ impl SessionState {
     }
 
     pub fn prev(&mut self) {
-        if let SessionState::Selecting { candidates, selected, .. } = self {
-            if candidates.is_empty() { return; }
-            *selected = if *selected == 0 { candidates.len() - 1 } else { *selected - 1 };
+        if let SessionState::Selecting {
+            candidates,
+            selected,
+            ..
+        } = self
+        {
+            if candidates.is_empty() {
+                return;
+            }
+            *selected = if *selected == 0 {
+                candidates.len() - 1
+            } else {
+                *selected - 1
+            };
         }
     }
 
     pub fn next_page(&mut self) {
-        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
-            if candidates.is_empty() { return; }
+        if let SessionState::Selecting {
+            candidates,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            if candidates.is_empty() {
+                return;
+            }
             let total_pages = (candidates.len() + *page_size - 1) / *page_size;
             let cur = *selected / *page_size;
             let next = (cur + 1) % total_pages;
@@ -690,8 +1036,16 @@ impl SessionState {
     }
 
     pub fn prev_page(&mut self) {
-        if let SessionState::Selecting { candidates, selected, page_size, .. } = self {
-            if candidates.is_empty() { return; }
+        if let SessionState::Selecting {
+            candidates,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            if candidates.is_empty() {
+                return;
+            }
             let total_pages = (candidates.len() + *page_size - 1) / *page_size;
             let cur = *selected / *page_size;
             let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
@@ -700,9 +1054,16 @@ impl SessionState {
     }
 
     pub fn select_nth_in_page(&mut self, n: usize) -> bool {
-        if n < 1 { return false; }
+        if n < 1 {
+            return false;
+        }
         match self {
-            SessionState::Selecting { candidates, selected, page_size, .. } => {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                page_size,
+                ..
+            } => {
                 let idx = (*selected / *page_size) * *page_size + (n - 1);
                 if idx < candidates.len() {
                     *selected = idx;
@@ -774,26 +1135,49 @@ use std::sync::atomic::Ordering as AtomicOrdering;
 pub static LANGBAR_UPDATE_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[allow(dead_code)]
-pub fn langbar_update_set()   { LANGBAR_UPDATE_PENDING.store(true,  AtomicOrdering::Release); }
-pub fn langbar_update_take() -> bool { LANGBAR_UPDATE_PENDING.swap(false, AtomicOrdering::AcqRel) }
+pub fn langbar_update_set() {
+    LANGBAR_UPDATE_PENDING.store(true, AtomicOrdering::Release);
+}
+pub fn langbar_update_take() -> bool {
+    LANGBAR_UPDATE_PENDING.swap(false, AtomicOrdering::AcqRel)
+}
 
 // ─── DocumentManager モードストア ────────────────────────────────────────────
 //
 // MS-IME準拠: アプリ（DocumentManager）ごとに InputMode を記憶する。
 //
-// # キー
-// ITfDocumentMgr の COM ポインタ値（usize）をキーに使う。
-// DocumentManager はアプリウィンドウのライフタイムに結びつき、
-// ウィンドウが閉じれば解放されるため、古いエントリは自然に無効化される。
-// エントリ数は開いているウィンドウ数に比例するため上限は設けない
-// （数百件で問題になるレベルではない）。
+// # キー戦略
+// Edge・Firefox 等のブラウザはページ遷移やタブ切り替えのたびに
+// DocumentManager を新規作成・破棄する。DM ポインタだけをキーにすると
+// DM が再作成されるたびにモードがリセットされる。
 //
-// # ターミナル判定
-// Windows Terminal / ConHost のウィンドウクラス名で判定し、
-// 初回フォーカス時に Alphanumeric をデフォルトにする。
+// そのため DM ポインタと HWND の 2 段階フォールバックを採用する:
+//   1. dm_modes: DM ポインタ → モード（正確なマッチ）
+//   2. hwnd_modes: HWND → モード（DM 再作成時のフォールバック）
+//   3. dm_to_hwnd: DM ポインタ → HWND（保存時に HWND も更新するために必要）
+//
+// モードの保存タイミング（focus が離れるとき）:
+//   - dm_modes[prev_dm_ptr] = 現在モード
+//   - dm_to_hwnd で prev_dm_ptr の HWND を引いて hwnd_modes[hwnd] = 現在モード
+//
+// モードの復元タイミング（focus が来るとき）:
+//   - dm_modes に next_dm_ptr が存在: それを返す
+//   - なければ hwnd_modes に next_hwnd が存在: それを返す（ブラウザの DM 再作成対応）
+//   - なければ config.input.default_mode を返す
 
-static DOC_MODE_STORE: LazyLock<Mutex<HashMap<usize, InputMode>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
+struct ModeStore {
+    dm_modes: HashMap<usize, InputMode>,   // DM ptr → mode
+    hwnd_modes: HashMap<usize, InputMode>, // HWND → mode（DM 再作成時フォールバック）
+    dm_to_hwnd: HashMap<usize, usize>,     // DM ptr → HWND（保存時の HWND 特定用）
+}
+
+static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
+    Mutex::new(ModeStore {
+        dm_modes: HashMap::new(),
+        hwnd_modes: HashMap::new(),
+        dm_to_hwnd: HashMap::new(),
+    })
+});
 
 /// DocumentManager のフォーカス変化時に呼ぶ。
 ///
@@ -805,9 +1189,9 @@ static DOC_MODE_STORE: LazyLock<Mutex<HashMap<usize, InputMode>>> =
 pub fn doc_mode_on_focus_change(
     prev_dm_ptr: usize,
     next_dm_ptr: usize,
-    next_hwnd:   usize,
+    next_hwnd: usize,
 ) -> Option<InputMode> {
-    use super::config::{current_config, DefaultInputMode};
+    use super::config::{DefaultInputMode, current_config};
 
     let cfg = current_config();
     let remember = cfg.input.remember_last_kana_mode;
@@ -815,22 +1199,38 @@ pub fn doc_mode_on_focus_change(
     // config.input.default_mode → InputMode へ変換
     let config_default = match cfg.input.default_mode {
         DefaultInputMode::Alphanumeric => InputMode::Alphanumeric,
-        DefaultInputMode::Hiragana     => InputMode::Hiragana,
+        DefaultInputMode::Hiragana => InputMode::Hiragana,
     };
 
     let mut store = match DOC_MODE_STORE.try_lock() {
-        Ok(g)  => g,
+        Ok(g) => g,
         Err(_) => return None,
     };
 
     // 前の DocumentManager のモードを保存
-    // remember_last_kana_mode=false の場合は保存しない（次回もデフォルトを返す）
     if prev_dm_ptr != 0 && remember {
-        store.insert(prev_dm_ptr, input_mode_get_atomic());
+        let mode = input_mode_get_atomic();
+        store.dm_modes.insert(prev_dm_ptr, mode);
+        // HWND も更新（ブラウザが DM を再作成しても HWND 経由で復元できるように）
+        if let Some(&hwnd) = store.dm_to_hwnd.get(&prev_dm_ptr) {
+            if hwnd != 0 {
+                store.hwnd_modes.insert(hwnd, mode);
+                tracing::debug!(
+                    "doc_mode: saved mode={mode:?} for dm={prev_dm_ptr:#x} hwnd={hwnd:#x}"
+                );
+            }
+        } else {
+            tracing::debug!("doc_mode: saved mode={mode:?} for dm={prev_dm_ptr:#x} (hwnd unknown)");
+        }
     }
 
     if next_dm_ptr == 0 {
         return None;
+    }
+
+    // DM→HWND マッピングを更新（フォーカスが来るたびに記録）
+    if next_hwnd != 0 {
+        store.dm_to_hwnd.insert(next_dm_ptr, next_hwnd);
     }
 
     // 初回フォーカス時のデフォルトモードを決定
@@ -846,18 +1246,28 @@ pub fn doc_mode_on_focus_change(
     };
 
     let mode = if remember {
-        if let Some(&saved) = store.get(&next_dm_ptr) {
-            // 既知の DocumentManager → 前回モードを復元
-            tracing::debug!("doc_mode: restored mode={saved:?} for dm={next_dm_ptr:#x}");
+        if let Some(&saved) = store.dm_modes.get(&next_dm_ptr) {
+            // 既知の DM → 前回モードを復元
+            tracing::debug!("doc_mode: restored mode={saved:?} from dm={next_dm_ptr:#x}");
+            saved
+        } else if let Some(&saved) = store.hwnd_modes.get(&next_hwnd) {
+            // DM は新規だが同じ HWND → HWND 経由で復元（ブラウザの DM 再作成対応）
+            tracing::debug!(
+                "doc_mode: restored mode={saved:?} from hwnd={next_hwnd:#x} (dm={next_dm_ptr:#x} is new)"
+            );
+            store.dm_modes.insert(next_dm_ptr, saved);
             saved
         } else {
-            // 初回フォーカス → デフォルトモードを記録して返す
+            // 完全初回 → デフォルトモードを記録して返す
             let m = resolve_default(next_hwnd);
-            store.insert(next_dm_ptr, m);
+            store.dm_modes.insert(next_dm_ptr, m);
+            if next_hwnd != 0 {
+                store.hwnd_modes.insert(next_hwnd, m);
+            }
             m
         }
     } else {
-        // remember=false: 毎回デフォルトモードを適用（保存・復元ともに行わない）
+        // remember=false: 毎回デフォルトモードを適用
         resolve_default(next_hwnd)
     };
 
@@ -865,9 +1275,12 @@ pub fn doc_mode_on_focus_change(
 }
 
 /// DocumentManager が破棄されたとき（OnUninitDocumentMgr）にエントリを削除する。
+/// hwnd_modes は残す（同じ HWND で DM が再作成されたとき復元に使うため）。
 pub fn doc_mode_remove(dm_ptr: usize) {
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
-        store.remove(&dm_ptr);
+        store.dm_modes.remove(&dm_ptr);
+        store.dm_to_hwnd.remove(&dm_ptr);
+        tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
     }
 }
 
@@ -878,7 +1291,9 @@ pub fn doc_mode_remove(dm_ptr: usize) {
 /// - 旧来の ConHost:   `ConsoleWindowClass`
 /// - VSCode 統合ターミナル等は親が上記クラスを持つ場合あり（簡易判定のみ）
 fn is_terminal_hwnd(hwnd_val: usize) -> bool {
-    if hwnd_val == 0 { return false; }
+    if hwnd_val == 0 {
+        return false;
+    }
 
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
@@ -886,7 +1301,9 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
     let hwnd = HWND(hwnd_val as *mut _);
     let mut buf = [0u16; 256];
     let len = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
-    if len == 0 { return false; }
+    if len == 0 {
+        return false;
+    }
 
     let class_name = String::from_utf16_lossy(&buf[..len]);
     tracing::trace!("doc_mode: hwnd={hwnd_val:#x} class={class_name:?}");
@@ -898,4 +1315,89 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
         | "VirtualConsoleClass"          // mintty 等
         | "mintty"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SessionState, SplitBlock};
+
+    fn sample_blocks() -> Vec<SplitBlock> {
+        vec![
+            SplitBlock {
+                reading: "わがはい".into(),
+                display: "吾輩".into(),
+            },
+            SplitBlock {
+                reading: "は".into(),
+                display: "は".into(),
+            },
+            SplitBlock {
+                reading: "ねこ".into(),
+                display: "猫".into(),
+            },
+            SplitBlock {
+                reading: "で".into(),
+                display: "で".into(),
+            },
+            SplitBlock {
+                reading: "ある".into(),
+                display: "ある".into(),
+            },
+        ]
+    }
+
+    #[test]
+    fn split_move_right_moves_selection_window() {
+        let mut sess = SessionState::Idle;
+        sess.set_split_preedit_blocks(sample_blocks(), 0, 1);
+
+        assert!(sess.split_move_right());
+        assert_eq!(sess.split_display_prefix().as_deref(), Some("吾輩"));
+        assert_eq!(sess.split_display_target().as_deref(), Some("は"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some("猫である"));
+
+        assert!(sess.split_move_right());
+        assert_eq!(sess.split_display_prefix().as_deref(), Some("吾輩は"));
+        assert_eq!(sess.split_display_target().as_deref(), Some("猫"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some("である"));
+    }
+
+    #[test]
+    fn split_extend_grows_selection_without_losing_anchor() {
+        let mut sess = SessionState::Idle;
+        sess.set_split_preedit_blocks(sample_blocks(), 0, 1);
+
+        assert!(sess.split_extend());
+        assert_eq!(sess.split_display_prefix().as_deref(), Some(""));
+        assert_eq!(sess.split_display_target().as_deref(), Some("吾輩は"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some("猫である"));
+
+        assert!(sess.split_extend());
+        assert_eq!(sess.split_display_target().as_deref(), Some("吾輩は猫"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some("である"));
+    }
+
+    #[test]
+    fn split_shrink_keeps_at_least_one_block_selected() {
+        let mut sess = SessionState::Idle;
+        sess.set_split_preedit_blocks(sample_blocks(), 0, 3);
+
+        assert!(sess.split_shrink());
+        assert_eq!(sess.split_display_target().as_deref(), Some("吾輩は"));
+        assert!(sess.split_shrink());
+        assert_eq!(sess.split_display_target().as_deref(), Some("吾輩"));
+        assert!(!sess.split_shrink());
+        assert_eq!(sess.split_display_target().as_deref(), Some("吾輩"));
+    }
+
+    #[test]
+    fn split_move_right_stops_at_last_block() {
+        let mut sess = SessionState::Idle;
+        sess.set_split_preedit_blocks(sample_blocks(), 4, 5);
+
+        assert!(!sess.split_move_right());
+        assert_eq!(sess.split_display_prefix().as_deref(), Some("吾輩は猫で"));
+        assert_eq!(sess.split_display_target().as_deref(), Some("ある"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some(""));
+    }
 }

@@ -28,6 +28,7 @@ memmap2               = "0.9"
 tokenizers            = "0.21"
 toml.workspace        = true
 tracing-subscriber    = { workspace = true }
+vibrato              = "0.5.2"
 
 # 辞書統合
 rakukan-dict   = { path = "../rakukan-dict" }

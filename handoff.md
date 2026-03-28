@@ -1,132 +1,118 @@
-# Rakukan 引き継ぎ資料 (v0.3.8)
+# Rakukan 引き継ぎ資料 (v0.4.0)
 
-更新日: 2026-03-23
-
----
+更新日: 2026-03-28
 
 ## 現在の状態
 
-**バージョン:** v0.3.8
-**ビルドパス:** `C:\Users\n_fuk\source\rust\rakukan`（または `D:\home\source\rust\rakukan`）
-**インストール先:** `%LOCALAPPDATA%\rakukan\`
-**ログ:** `%LOCALAPPDATA%\rakukan\rakukan.log`
+- **バージョン:** v0.4.0
+- **位置づけ:** ライブ変換 Phase 1 と分節再変換 UI が実用段階
+- **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
+- **インストール先:** `%LOCALAPPDATA%\rakukan\`
+- **設定:** `%APPDATA%\rakukan\config.toml`
+- **ログ:** `%LOCALAPPDATA%\rakukan\rakukan.log`
 
----
+## 0.4.0 時点でできていること
 
-## v0.3.8 で完了した変更
+### ライブ変換
 
-### config.toml 整理（`config.rs`）
-- `[candidate]` / `[conversion]` セクションを削除（未実装のため）
-- `CandidateConfig` / `ConversionConfig` / `CancelBehavior` 構造体を削除
-- `effective_num_candidates()` を `num_candidates.unwrap_or(9).clamp(1, 9)` に単純化
-- `enable_jis_keys` フィールドを削除（`layout = "jis"` に統合）
-- キーボードレイアウトのデフォルトを `"jis"` に変更
-- `default_config_text()` を `config/config.toml` と完全同期
+- ひらがな入力後、短い停止でトップ候補を自動表示
+- `Enter` でライブ変換結果をそのまま確定
+- `Space` で通常の再変換操作へ移行
+- `F6` 後の `Enter` で元の漢字に戻る問題は解消済み
 
-### 入力モード初期化（`config.rs`, `state.rs`）
-- `DefaultInputMode::Katakana` を廃止（F7 変換は引き続き動作）
-- `default_mode = "alphanumeric"` が初回フォーカス時に有効になるよう実装
-- `remember_last_kana_mode = false` 時、毎回デフォルトモードを適用するよう実装
-- ターミナル（Windows Terminal / ConHost）は config に関わらず常に `Alphanumeric`
+### 分節再変換
 
-### keymap バグ修正（`keymap.rs`）
-- `Ctrl+J/K/L` 等が parse できない問題を修正（`name_to_vk` に a-z フォールバックを追加）
-- 全角/半角キー（`Zenkaku`）の VK コードを `0xF3` → `0x19`（VK_KANJI）に修正
+- `Space` 後に分節選択へ入れる
+- `Left/Right` で選択文節を移動
+- `Shift+Left/Right` で選択範囲を縮小・拡張
+- 選択中の文節だけ再変換し、前後の表示は保持
+- `Enter` で全文を安定して確定
 
----
+### 分節境界
 
-## 動作確認ポイント
+- Phase 1 として `Vibrato` を導入済み
+- `engine_segment_surface` を engine / ABI / TSF に追加済み
+- 同梱辞書は `assets/vibrato/system.dic`
+- 辞書が無い場合は従来ヒューリスティックへフォールバック
+
+### 開発運用
+
+- engine ABI バージョンチェックあり
+- 古い engine DLL を読んだ場合、更新漏れがログで分かる
+
+## 主な変更ファイル
+
+- `crates/rakukan-tsf/src/engine/state.rs`
+  - `LiveConv`
+  - `SplitPreedit` の分節選択状態
+- `crates/rakukan-tsf/src/tsf/factory.rs`
+  - ライブ変換遷移
+  - 分節移動・拡張・再変換・確定
+- `crates/rakukan-tsf/src/tsf/candidate_window.rs`
+  - ライブ変換タイマー
+- `crates/rakukan-engine/src/segmenter.rs`
+  - Vibrato 分節補助
+- `crates/rakukan-engine/src/ffi.rs`
+- `crates/rakukan-engine-abi/src/lib.rs`
+
+## 確認コマンド
 
 ```powershell
+# TSF 層のみビルド
 cargo make build-tsf
+
+# engine DLL を含むビルド
+cargo make build-engine
+
+# 実機反映
 cargo make reinstall
+
+# ログ確認
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 ```
 
-確認項目:
-1. `rakukan.log` に `debug` レベルのログが出ること
-2. 一般アプリ初回フォーカス時に Alphanumeric モードで起動すること
-3. 別ウィンドウに切り替えて戻ったとき前回モードが復元されること
-4. 全角/半角キーで IME オン/オフが切り替わること
-5. keymap ロード時に `cannot parse` ワーニングが出ないこと
+## 現在の確認ポイント
 
----
+1. ライブ変換表示が自然か
+2. `Space` 後の分節移動が `Left/Right` で素直に動くか
+3. `Shift+Left/Right` で範囲調整できるか
+4. 再変換後も状態が崩れないか
+5. `Enter` で全文が安定確定するか
 
-## 既知バグ（未対応）
+## 残タスク
 
-### B-1: LLM 出力に読み仮名が混入
-- 症状: `健診(けんしん)や` のようにルビ形式の読みが付く
-- 対策候補: 出力後処理での strip、またはプロンプト側での抑制
-- 優先度: 中
+### 優先度: 高
 
----
+- **[Live-2] display_attr 拡張**
+  - Preedit / LiveConv / Selecting の見た目をさらに分ける
 
-## 次の実装候補
+- **[Live-3] config フラグ整理**
+  - `live_conversion.enabled`
+  - `live_conversion.debounce_ms`
 
-### 優先度: 高（メイン機能）
-
-#### Phase 4a: LiveConv 基盤
-- `SessionState::LiveConv` バリアント追加
-- `bg_take_top1` API 実装
-- タイマー汎化・config フラグ追加
-
-#### Phase 4b: キーストローク統合
-- キーストローク毎の `bg_start`
-- `on_live_timer` を `WM_TIMER` 経由で実装
-- 重要制約: `RequestEditSession` は `WndProc` から呼べない → `PostMessage` で TSF スレッドに委譲
-
-#### Phase 4c: 仕上げ
-- デバウンス処理・ビジュアルポリッシュ・アプリ互換性テスト
+- **[Num-1] 数字プレースホルダ応急処置**
+  - `200えん -> 2000円` 系の誤変換抑制
 
 ### 優先度: 中
-- 各モジュールへのログ追加（ライブ変換実装前の整備）
-- SplitPreedit 多文節チェーン改善
-- LLM 候補数増加（`num_candidates.min(3)` → `.min(5)`、レイテンシ要確認）
-- 数字・かな混在入力（`123abc` 混在ケース）
 
----
+- **速度改善**
+  - 現状の体感遅延は分節化そのものより `Space` 時の同期待ちが主因
+  - `bg_wait_ms(...)` の待ち方見直しや `peek` 系 API が本命
 
-## アーキテクチャ早見表
+- **長文・句読点混じりでの分節精度確認**
 
-```
-rakukan-tsf          TSF レイヤー（Windows IME 登録・UI）
-rakukan-engine       変換エンジン（LLM + 辞書）
-rakukan-engine-abi   ABI ブリッジ（FFI 境界）
-rakukan-dict-builder 辞書ビルド
-```
+- **`bg_peek_top1` 系 API**
+  - Space 後の再取得コストを下げる候補
 
-重要制約:
-- TSF スレッドからのみ `RequestEditSession` 呼び出し可（WndProc 不可）
-- エンジン DLL 変更時は `cargo make build-engine` 必須
-- `generate_beam_search_d1_greedy_batch` は `n_batch > n_ctx` で C レベル abort()
-- CUDA ランタイム DLL は System32 に配置必須
+### 優先度: 低
 
----
+- **Segment ベースの本格文節管理**
+  - TSF 推定を減らし、engine 主導へ寄せる
 
-## ファイルパス早見表
+- **数字・助数詞の構造対応**
 
-| 用途 | パス |
-|------|------|
-| ソース | `C:\Users\n_fuk\source\rust\rakukan` |
-| ビルド成果物 | `C:\rb\release` |
-| インストール先 | `%LOCALAPPDATA%\rakukan\` |
-| config.toml | `%APPDATA%\rakukan\config.toml` |
-| keymap.toml | `%APPDATA%\rakukan\keymap.toml` |
-| ログ | `%LOCALAPPDATA%\rakukan\rakukan.log` |
-| 辞書 | `%APPDATA%\rakukan\dict\rakukan.dict` |
-| LLM モデル | `snapshots/main/*.gguf` |
+## 補足
 
----
-
-## クイックデバッグコマンド
-
-```powershell
-# ログ末尾確認
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 20
-
-# 再インストール（TSF のみ）
-cargo make reinstall
-
-# エンジン DLL 変更後
-cargo make build-engine
-cargo make reinstall
-```
+- TSF だけ変えた場合は `build-tsf` でよい
+- engine / ABI を変えた場合は `build-engine` と `reinstall` が必要
+- 公開 API だけで「標準 IME トレイの隣に必ず表示」は難しく、今後の課題として保留

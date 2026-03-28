@@ -28,7 +28,7 @@ pub struct UserDict {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserEntry {
-    pub reading:  String,
+    pub reading: String,
     pub surfaces: Vec<String>,
 }
 
@@ -40,9 +40,13 @@ impl UserDict {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(path)?;
-        let ud: Self = toml::from_str(&text)
-            .map_err(|e| anyhow::anyhow!("user_dict parse error: {e}"))?;
-        info!("user_dict: loaded {} entries from {}", ud.entries.len(), path.display());
+        let ud: Self =
+            toml::from_str(&text).map_err(|e| anyhow::anyhow!("user_dict parse error: {e}"))?;
+        info!(
+            "user_dict: loaded {} entries from {}",
+            ud.entries.len(),
+            path.display()
+        );
         Ok(ud)
     }
 
@@ -54,7 +58,11 @@ impl UserDict {
         let text = toml::to_string_pretty(self)
             .map_err(|e| anyhow::anyhow!("user_dict serialize error: {e}"))?;
         std::fs::write(path, text)?;
-        debug!("user_dict: saved {} entries to {}", self.entries.len(), path.display());
+        debug!(
+            "user_dict: saved {} entries to {}",
+            self.entries.len(),
+            path.display()
+        );
         Ok(())
     }
 
@@ -75,7 +83,7 @@ impl UserDict {
             e.surfaces.insert(0, surface.to_string());
         } else {
             self.entries.push(UserEntry {
-                reading:  reading.to_string(),
+                reading: reading.to_string(),
                 surfaces: vec![surface.to_string()],
             });
         }

@@ -58,7 +58,10 @@ fn strip_furigana(text: &str) -> String {
         if let Some(close_ch) = close {
             // 閉じ括弧を探す（同一行内のみ、最大30文字先まで）
             let lookahead = chars[i + 1..].iter().take(30);
-            let end_pos = lookahead.enumerate().find(|&(_, &x)| x == close_ch).map(|(j, _)| j);
+            let end_pos = lookahead
+                .enumerate()
+                .find(|&(_, &x)| x == close_ch)
+                .map(|(j, _)| j);
             if let Some(end) = end_pos {
                 let inner: String = chars[i + 1..i + 1 + end].iter().collect();
                 // 内容がひらがな・カタカナ（長音符含む）のみなら除去
@@ -151,7 +154,12 @@ impl KanaKanjiConverter {
 
     /// Create a new converter with the specified backend and configuration
     pub fn with_config(backend: Backend, config: ConversionConfig) -> Result<Self> {
-        let model = LlamaCppModel::from_file_with_gpu_layers(&backend.gguf_path, &backend.tokenizer_json_path, backend.n_gpu_layers, backend.main_gpu)?;
+        let model = LlamaCppModel::from_file_with_gpu_layers(
+            &backend.gguf_path,
+            &backend.tokenizer_json_path,
+            backend.n_gpu_layers,
+            backend.main_gpu,
+        )?;
         Ok(KanaKanjiConverter {
             model,
             config,

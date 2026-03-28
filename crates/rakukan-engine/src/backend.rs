@@ -22,9 +22,9 @@ pub enum Backend {
 impl fmt::Display for Backend {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Backend::Cuda   => write!(f, "CUDA"),
+            Backend::Cuda => write!(f, "CUDA"),
             Backend::Vulkan => write!(f, "Vulkan"),
-            Backend::Cpu    => write!(f, "CPU"),
+            Backend::Cpu => write!(f, "CPU"),
         }
     }
 }
@@ -54,11 +54,14 @@ pub fn select_backend() -> BackendSelection {
     // 環境変数による強制指定
     if let Ok(forced) = std::env::var("RAKUKAN_BACKEND") {
         let backend = match forced.to_lowercase().as_str() {
-            "cuda"   => Backend::Cuda,
+            "cuda" => Backend::Cuda,
             "vulkan" => Backend::Vulkan,
-            "cpu"    => Backend::Cpu,
+            "cpu" => Backend::Cpu,
             other => {
-                tracing::warn!("backend::detect: unknown RAKUKAN_BACKEND={:?}, fallback to cpu", other);
+                tracing::warn!(
+                    "backend::detect: unknown RAKUKAN_BACKEND={:?}, fallback to cpu",
+                    other
+                );
                 Backend::Cpu
             }
         };
@@ -90,9 +93,9 @@ fn load_saved_config() -> Option<BackendSelection> {
     let config: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     let backend = match config["backend"].as_str()? {
-        "cuda"   => Backend::Cuda,
+        "cuda" => Backend::Cuda,
         "vulkan" => Backend::Vulkan,
-        _        => Backend::Cpu,
+        _ => Backend::Cpu,
     };
 
     let gpus = config["detected_gpus"]
@@ -100,7 +103,10 @@ fn load_saved_config() -> Option<BackendSelection> {
         .map(|arr| {
             arr.iter()
                 .filter_map(|v| v.as_str())
-                .map(|name| GpuInfo { name: name.to_string(), vram_mb: None })
+                .map(|name| GpuInfo {
+                    name: name.to_string(),
+                    vram_mb: None,
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -126,7 +132,9 @@ fn detect_at_runtime() -> BackendSelection {
             };
         } else {
             // CUDA GPU はあるが Toolkit なし → Vulkan へ
-            tracing::warn!("backend::detect: NVIDIA GPU found but CUDA Toolkit missing, trying Vulkan");
+            tracing::warn!(
+                "backend::detect: NVIDIA GPU found but CUDA Toolkit missing, trying Vulkan"
+            );
         }
     }
 
@@ -160,22 +168,24 @@ fn detect_gpus_wmi() -> Vec<GpuInfo> {
         // PowerShell の WMI クエリを使用
         let output = Command::new("powershell")
             .args([
-                "-NoProfile", "-Command",
+                "-NoProfile",
+                "-Command",
                 "Get-CimInstance Win32_VideoController | \
                  Where-Object { $_.Name -notmatch 'Microsoft Basic' } | \
-                 Select-Object -ExpandProperty Name"
+                 Select-Object -ExpandProperty Name",
             ])
             .output();
 
         match output {
-            Ok(out) if out.status.success() => {
-                String::from_utf8_lossy(&out.stdout)
-                    .lines()
-                    .map(|l| l.trim())
-                    .filter(|l| !l.is_empty())
-                    .map(|name| GpuInfo { name: name.to_string(), vram_mb: None })
-                    .collect()
-            }
+            Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .map(|l| l.trim())
+                .filter(|l| !l.is_empty())
+                .map(|name| GpuInfo {
+                    name: name.to_string(),
+                    vram_mb: None,
+                })
+                .collect(),
             _ => vec![],
         }
     }
@@ -186,7 +196,8 @@ fn detect_gpus_wmi() -> Vec<GpuInfo> {
 }
 
 fn has_nvidia_gpu(gpus: &[GpuInfo]) -> bool {
-    gpus.iter().any(|g| g.name.to_lowercase().contains("nvidia"))
+    gpus.iter()
+        .any(|g| g.name.to_lowercase().contains("nvidia"))
 }
 
 fn nvidia_smi_available() -> bool {
@@ -204,8 +215,9 @@ fn vulkan_available() -> bool {
         // レジストリでVulkanドライバーを確認
         let output = Command::new("powershell")
             .args([
-                "-NoProfile", "-Command",
-                "Test-Path 'HKLM:\\SOFTWARE\\Khronos\\Vulkan\\Drivers'"
+                "-NoProfile",
+                "-Command",
+                "Test-Path 'HKLM:\\SOFTWARE\\Khronos\\Vulkan\\Drivers'",
             ])
             .output();
 
@@ -246,25 +258,37 @@ mod tests {
 
     #[test]
     fn test_env_override_cuda() {
-        unsafe { std::env::set_var("RAKUKAN_BACKEND", "cuda"); }
+        unsafe {
+            std::env::set_var("RAKUKAN_BACKEND", "cuda");
+        }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cuda);
-        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
+        unsafe {
+            std::env::remove_var("RAKUKAN_BACKEND");
+        }
     }
 
     #[test]
     fn test_env_override_cpu() {
-        unsafe { std::env::set_var("RAKUKAN_BACKEND", "cpu"); }
+        unsafe {
+            std::env::set_var("RAKUKAN_BACKEND", "cpu");
+        }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
+        unsafe {
+            std::env::remove_var("RAKUKAN_BACKEND");
+        }
     }
 
     #[test]
     fn test_env_override_unknown_falls_back_to_cpu() {
-        unsafe { std::env::set_var("RAKUKAN_BACKEND", "unknown_backend"); }
+        unsafe {
+            std::env::set_var("RAKUKAN_BACKEND", "unknown_backend");
+        }
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        unsafe { std::env::remove_var("RAKUKAN_BACKEND"); }
+        unsafe {
+            std::env::remove_var("RAKUKAN_BACKEND");
+        }
     }
 }

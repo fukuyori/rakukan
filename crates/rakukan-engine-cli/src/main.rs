@@ -10,9 +10,9 @@
 //! cargo run -p rakukan-engine-cli -- --model jinen-v1-small-q5
 //! ```
 
-use rakukan_engine::{RakunEngine, EngineConfig};
 use anyhow::Result;
 use clap::Parser;
+use rakukan_engine::{EngineConfig, RakunEngine};
 use std::io::{self, BufRead, Write};
 
 #[derive(Parser, Debug)]
@@ -87,7 +87,9 @@ fn main() -> Result<()> {
 // ── 非対話モード ─────────────────────────────────────────────────────────────
 
 fn run_once(engine: &mut RakunEngine, romaji: &str, n: usize) -> Result<()> {
-    for c in romaji.chars() { engine.push_char(c); }
+    for c in romaji.chars() {
+        engine.push_char(c);
+    }
 
     let reading = engine.current_preedit().hiragana;
     eprintln!("入力:     {}", romaji);
@@ -116,15 +118,27 @@ fn run_interactive(engine: &mut RakunEngine, n: usize) -> Result<()> {
         stdout.lock().flush()?;
 
         let mut line = String::new();
-        if stdin.lock().read_line(&mut line)? == 0 { break; }
+        if stdin.lock().read_line(&mut line)? == 0 {
+            break;
+        }
         let line = line.trim();
 
         match line {
-            "" => { eprintln!("（入力なし）"); }
-            "quit" | "exit" | "q" => { eprintln!("終了します。"); break; }
-            "reset" | "r" => { engine.reset_preedit(); eprintln!("リセットしました。"); }
+            "" => {
+                eprintln!("（入力なし）");
+            }
+            "quit" | "exit" | "q" => {
+                eprintln!("終了します。");
+                break;
+            }
+            "reset" | "r" => {
+                engine.reset_preedit();
+                eprintln!("リセットしました。");
+            }
             input => {
-                for c in input.chars() { engine.push_char(c); }
+                for c in input.chars() {
+                    engine.push_char(c);
+                }
                 let reading = engine.current_preedit().hiragana;
                 eprintln!("ひらがな: {}  →  変換中...", reading);
 
@@ -147,7 +161,8 @@ fn run_interactive(engine: &mut RakunEngine, n: usize) -> Result<()> {
                 let choice = choice.trim();
 
                 let committed = if let Ok(idx) = choice.parse::<usize>() {
-                    candidates.get(idx.saturating_sub(1))
+                    candidates
+                        .get(idx.saturating_sub(1))
                         .cloned()
                         .unwrap_or_else(|| candidates[0].clone())
                 } else {
@@ -171,7 +186,11 @@ fn print_model_list() {
     println!("{:<40} {}", "ID", "表示名");
     println!("{}", "─".repeat(70));
     for m in &models {
-        let mark = if m.is_default { " ← デフォルト" } else { "" };
+        let mark = if m.is_default {
+            " ← デフォルト"
+        } else {
+            ""
+        };
         println!("{:<40} {}{}", m.id, m.display_name, mark);
     }
     println!("\n使い方: rakukan-cli --model <ID>");

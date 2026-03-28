@@ -18,70 +18,73 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 2;
+
 // ─── EngineVTable ──────────────────────────────────────────────────────────────
 // DLL からロードした関数ポインタのコレクション
 
 struct EngineVTable {
     // ライフサイクル
-    create:               unsafe extern "C" fn(*const c_char) -> *mut c_void,
-    destroy:              unsafe extern "C" fn(*mut c_void),
-    free_string:          unsafe extern "C" fn(*mut c_char),
+    create: unsafe extern "C" fn(*const c_char) -> *mut c_void,
+    destroy: unsafe extern "C" fn(*mut c_void),
+    free_string: unsafe extern "C" fn(*mut c_char),
 
     // 文字入力
-    push_char:            unsafe extern "C" fn(*mut c_void, u32) -> u8,
-    push_raw:             unsafe extern "C" fn(*mut c_void, u32),
+    push_char: unsafe extern "C" fn(*mut c_void, u32) -> u8,
+    push_raw: unsafe extern "C" fn(*mut c_void, u32),
     push_fullwidth_alpha: unsafe extern "C" fn(*mut c_void, u32),
-    backspace:            unsafe extern "C" fn(*mut c_void) -> bool,
-    flush_n:              unsafe extern "C" fn(*mut c_void) -> bool,
+    backspace: unsafe extern "C" fn(*mut c_void) -> bool,
+    flush_n: unsafe extern "C" fn(*mut c_void) -> bool,
 
     // プリエディット
-    preedit_display:      unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    preedit_is_empty:     unsafe extern "C" fn(*mut c_void) -> bool,
-    hiragana_text:        unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    romaji_log_str:       unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    preedit_display: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    preedit_is_empty: unsafe extern "C" fn(*mut c_void) -> bool,
+    hiragana_text: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    romaji_log_str: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
     hiragana_from_romaji_log: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    committed_text:       unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    committed_text: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
 
     // BG 変換
-    bg_start:             unsafe extern "C" fn(*mut c_void, u32) -> bool,
-    bg_status:            unsafe extern "C" fn(*mut c_void) -> *const c_char,
-    bg_take_candidates:   unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
-    bg_reclaim:           unsafe extern "C" fn(*mut c_void),
-    bg_wait_ms:           unsafe extern "C" fn(*mut c_void, u64) -> u8,
+    bg_start: unsafe extern "C" fn(*mut c_void, u32) -> bool,
+    bg_status: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+    bg_take_candidates: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    bg_reclaim: unsafe extern "C" fn(*mut c_void),
+    bg_wait_ms: unsafe extern "C" fn(*mut c_void, u64) -> u8,
 
     // 確定・リセット
-    commit:               unsafe extern "C" fn(*mut c_void, *const c_char),
-    commit_as_hiragana:   unsafe extern "C" fn(*mut c_void),
-    reset_preedit:        unsafe extern "C" fn(*mut c_void),
-    force_preedit:        unsafe extern "C" fn(*mut c_void, *const c_char),
-    reset_all:            unsafe extern "C" fn(*mut c_void),
+    commit: unsafe extern "C" fn(*mut c_void, *const c_char),
+    commit_as_hiragana: unsafe extern "C" fn(*mut c_void),
+    reset_preedit: unsafe extern "C" fn(*mut c_void),
+    force_preedit: unsafe extern "C" fn(*mut c_void, *const c_char),
+    reset_all: unsafe extern "C" fn(*mut c_void),
 
     // 変換（同期）
-    convert_sync:         unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    merge_candidates:     unsafe extern "C" fn(*mut c_void, *const c_char, u32) -> *mut c_char,
+    convert_sync: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    merge_candidates: unsafe extern "C" fn(*mut c_void, *const c_char, u32) -> *mut c_char,
+    segment_surface: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
 
     // 非同期初期化
-    start_load_model:     unsafe extern "C" fn(*mut c_void),
-    poll_model_ready:     unsafe extern "C" fn(*mut c_void) -> bool,
-    start_load_dict:      unsafe extern "C" fn(*mut c_void),
-    poll_dict_ready:      unsafe extern "C" fn(*mut c_void) -> bool,
+    start_load_model: unsafe extern "C" fn(*mut c_void),
+    poll_model_ready: unsafe extern "C" fn(*mut c_void) -> bool,
+    start_load_dict: unsafe extern "C" fn(*mut c_void),
+    poll_dict_ready: unsafe extern "C" fn(*mut c_void) -> bool,
 
     // ステータス
-    is_kanji_ready:       unsafe extern "C" fn(*mut c_void) -> bool,
-    is_dict_ready:        unsafe extern "C" fn(*mut c_void) -> bool,
-    backend_label:        unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    n_gpu_layers:         unsafe extern "C" fn(*mut c_void) -> u32,
-    main_gpu:             unsafe extern "C" fn(*mut c_void) -> i32,
+    is_kanji_ready: unsafe extern "C" fn(*mut c_void) -> bool,
+    is_dict_ready: unsafe extern "C" fn(*mut c_void) -> bool,
+    backend_label: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    n_gpu_layers: unsafe extern "C" fn(*mut c_void) -> u32,
+    main_gpu: unsafe extern "C" fn(*mut c_void) -> i32,
 
     // Static
     available_models_json: unsafe extern "C" fn() -> *mut c_char,
 
     // 学習
-    learn:                unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+    learn: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
 
     // 診断
-    last_error:           unsafe extern "C" fn() -> *mut c_char,
-    dict_status:          unsafe extern "C" fn() -> *mut c_char,
+    last_error: unsafe extern "C" fn() -> *mut c_char,
+    dict_status: unsafe extern "C" fn() -> *mut c_char,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -96,48 +99,72 @@ macro_rules! load_sym {
     }};
 }
 
+macro_rules! load_sym_opt {
+    ($lib:expr, $name:literal) => {{
+        let sym = unsafe { $lib.get($name) };
+        sym.ok().map(|sym: Symbol<_>| *sym)
+    }};
+}
+
 impl EngineVTable {
     unsafe fn load(lib: &Library) -> Result<Self> {
+        let abi_version: Option<unsafe extern "C" fn() -> u32> =
+            load_sym_opt!(lib, b"engine_abi_version\0");
+        let Some(abi_version) = abi_version else {
+            bail!(
+                "installed engine DLL is outdated: missing engine_abi_version; run `cargo make build-engine` and `cargo make reinstall`"
+            );
+        };
+        let actual = unsafe { abi_version() };
+        if actual != EXPECTED_ENGINE_ABI_VERSION {
+            bail!(
+                "installed engine DLL ABI mismatch: expected {}, got {}; run `cargo make build-engine` and `cargo make reinstall`",
+                EXPECTED_ENGINE_ABI_VERSION,
+                actual
+            );
+        }
+
         Ok(EngineVTable {
-            create:               load_sym!(lib, b"engine_create\0"),
-            destroy:              load_sym!(lib, b"engine_destroy\0"),
-            free_string:          load_sym!(lib, b"engine_free_string\0"),
-            push_char:            load_sym!(lib, b"engine_push_char\0"),
-            push_raw:             load_sym!(lib, b"engine_push_raw\0"),
+            create: load_sym!(lib, b"engine_create\0"),
+            destroy: load_sym!(lib, b"engine_destroy\0"),
+            free_string: load_sym!(lib, b"engine_free_string\0"),
+            push_char: load_sym!(lib, b"engine_push_char\0"),
+            push_raw: load_sym!(lib, b"engine_push_raw\0"),
             push_fullwidth_alpha: load_sym!(lib, b"engine_push_fullwidth_alpha\0"),
-            backspace:            load_sym!(lib, b"engine_backspace\0"),
-            flush_n:              load_sym!(lib, b"engine_flush_n\0"),
-            preedit_display:      load_sym!(lib, b"engine_preedit_display\0"),
-            preedit_is_empty:     load_sym!(lib, b"engine_preedit_is_empty\0"),
-            hiragana_text:        load_sym!(lib, b"engine_hiragana_text\0"),
-            romaji_log_str:       load_sym!(lib, b"engine_romaji_log_str\0"),
+            backspace: load_sym!(lib, b"engine_backspace\0"),
+            flush_n: load_sym!(lib, b"engine_flush_n\0"),
+            preedit_display: load_sym!(lib, b"engine_preedit_display\0"),
+            preedit_is_empty: load_sym!(lib, b"engine_preedit_is_empty\0"),
+            hiragana_text: load_sym!(lib, b"engine_hiragana_text\0"),
+            romaji_log_str: load_sym!(lib, b"engine_romaji_log_str\0"),
             hiragana_from_romaji_log: load_sym!(lib, b"engine_hiragana_from_romaji_log\0"),
-            committed_text:       load_sym!(lib, b"engine_committed_text\0"),
-            bg_start:             load_sym!(lib, b"engine_bg_start\0"),
-            bg_status:            load_sym!(lib, b"engine_bg_status\0"),
-            bg_take_candidates:   load_sym!(lib, b"engine_bg_take_candidates\0"),
-            bg_reclaim:           load_sym!(lib, b"engine_bg_reclaim\0"),
-            bg_wait_ms:           load_sym!(lib, b"engine_bg_wait_ms\0"),
-            commit:               load_sym!(lib, b"engine_commit\0"),
-            commit_as_hiragana:   load_sym!(lib, b"engine_commit_as_hiragana\0"),
-            reset_preedit:        load_sym!(lib, b"engine_reset_preedit\0"),
-            force_preedit:        load_sym!(lib, b"engine_force_preedit\0"),
-            reset_all:            load_sym!(lib, b"engine_reset_all\0"),
-            convert_sync:         load_sym!(lib, b"engine_convert_sync\0"),
-            merge_candidates:     load_sym!(lib, b"engine_merge_candidates\0"),
-            start_load_model:     load_sym!(lib, b"engine_start_load_model\0"),
-            poll_model_ready:     load_sym!(lib, b"engine_poll_model_ready\0"),
-            start_load_dict:      load_sym!(lib, b"engine_start_load_dict\0"),
-            poll_dict_ready:      load_sym!(lib, b"engine_poll_dict_ready\0"),
-            is_kanji_ready:       load_sym!(lib, b"engine_is_kanji_ready\0"),
-            is_dict_ready:        load_sym!(lib, b"engine_is_dict_ready\0"),
-            backend_label:        load_sym!(lib, b"engine_backend_label\0"),
-            n_gpu_layers:         load_sym!(lib, b"engine_n_gpu_layers\0"),
-            main_gpu:             load_sym!(lib, b"engine_main_gpu\0"),
+            committed_text: load_sym!(lib, b"engine_committed_text\0"),
+            bg_start: load_sym!(lib, b"engine_bg_start\0"),
+            bg_status: load_sym!(lib, b"engine_bg_status\0"),
+            bg_take_candidates: load_sym!(lib, b"engine_bg_take_candidates\0"),
+            bg_reclaim: load_sym!(lib, b"engine_bg_reclaim\0"),
+            bg_wait_ms: load_sym!(lib, b"engine_bg_wait_ms\0"),
+            commit: load_sym!(lib, b"engine_commit\0"),
+            commit_as_hiragana: load_sym!(lib, b"engine_commit_as_hiragana\0"),
+            reset_preedit: load_sym!(lib, b"engine_reset_preedit\0"),
+            force_preedit: load_sym!(lib, b"engine_force_preedit\0"),
+            reset_all: load_sym!(lib, b"engine_reset_all\0"),
+            convert_sync: load_sym!(lib, b"engine_convert_sync\0"),
+            merge_candidates: load_sym!(lib, b"engine_merge_candidates\0"),
+            segment_surface: load_sym!(lib, b"engine_segment_surface\0"),
+            start_load_model: load_sym!(lib, b"engine_start_load_model\0"),
+            poll_model_ready: load_sym!(lib, b"engine_poll_model_ready\0"),
+            start_load_dict: load_sym!(lib, b"engine_start_load_dict\0"),
+            poll_dict_ready: load_sym!(lib, b"engine_poll_dict_ready\0"),
+            is_kanji_ready: load_sym!(lib, b"engine_is_kanji_ready\0"),
+            is_dict_ready: load_sym!(lib, b"engine_is_dict_ready\0"),
+            backend_label: load_sym!(lib, b"engine_backend_label\0"),
+            n_gpu_layers: load_sym!(lib, b"engine_n_gpu_layers\0"),
+            main_gpu: load_sym!(lib, b"engine_main_gpu\0"),
             available_models_json: load_sym!(lib, b"engine_available_models_json\0"),
-            learn:                 load_sym!(lib, b"engine_learn\0"),
-            last_error:            load_sym!(lib, b"engine_last_error\0"),
-            dict_status:           load_sym!(lib, b"engine_dict_status\0"),
+            learn: load_sym!(lib, b"engine_learn\0"),
+            last_error: load_sym!(lib, b"engine_last_error\0"),
+            dict_status: load_sym!(lib, b"engine_dict_status\0"),
         })
     }
 }
@@ -147,9 +174,9 @@ impl EngineVTable {
 /// 動的にロードされた rakukan-engine DLL のラッパー。
 /// `RakunEngine` と同じ API を提供する。
 pub struct DynEngine {
-    handle:  *mut c_void,
-    vtable:  EngineVTable,
-    _lib:    Arc<Library>,   // DLL をアンロードしないよう保持
+    handle: *mut c_void,
+    vtable: EngineVTable,
+    _lib: Arc<Library>, // DLL をアンロードしないよう保持
 }
 
 // ロードした DLL は同一スレッドから使う（TSF STA モデル）
@@ -173,7 +200,11 @@ impl DynEngine {
             bail!("engine_create returned null");
         }
 
-        Ok(DynEngine { handle, vtable, _lib: Arc::new(lib) })
+        Ok(DynEngine {
+            handle,
+            vtable,
+            _lib: Arc::new(lib),
+        })
     }
 
     /// バックエンドを自動検出して適切な DLL をロードする。
@@ -187,7 +218,11 @@ impl DynEngine {
     }
 
     /// 指定バックエンド名の DLL をロードする。
-    pub fn load_backend(install_dir: &Path, backend: &str, config_json: Option<&str>) -> Result<Self> {
+    pub fn load_backend(
+        install_dir: &Path,
+        backend: &str,
+        config_json: Option<&str>,
+    ) -> Result<Self> {
         let dll_name = format!("rakukan_engine_{}.dll", backend);
         let dll_path = install_dir.join(&dll_name);
         if !dll_path.exists() {
@@ -205,7 +240,9 @@ impl DynEngine {
 
     /// DLL が返した C 文字列を Rust String に変換して解放する
     unsafe fn take_cstr(&self, ptr: *mut c_char) -> Option<String> {
-        if ptr.is_null() { return None; }
+        if ptr.is_null() {
+            return None;
+        }
         let s = unsafe { CStr::from_ptr(ptr).to_string_lossy().into_owned() };
         unsafe { (self.vtable.free_string)(ptr) };
         Some(s)
@@ -219,15 +256,21 @@ impl DynEngine {
     // ── 文字入力 ────────────────────────────────────────────────────────────
 
     pub fn push_char(&mut self, c: char) {
-        unsafe { (self.vtable.push_char)(self.handle, c as u32); }
+        unsafe {
+            (self.vtable.push_char)(self.handle, c as u32);
+        }
     }
 
     pub fn push_raw(&mut self, c: char) {
-        unsafe { (self.vtable.push_raw)(self.handle, c as u32); }
+        unsafe {
+            (self.vtable.push_raw)(self.handle, c as u32);
+        }
     }
 
     pub fn push_fullwidth_alpha(&mut self, c: char) {
-        unsafe { (self.vtable.push_fullwidth_alpha)(self.handle, c as u32); }
+        unsafe {
+            (self.vtable.push_fullwidth_alpha)(self.handle, c as u32);
+        }
     }
 
     pub fn backspace(&mut self) -> bool {
@@ -307,7 +350,9 @@ impl DynEngine {
 
     /// Done 状態の converter を engine に戻す
     pub fn bg_reclaim(&mut self) {
-        unsafe { (self.vtable.bg_reclaim)(self.handle); }
+        unsafe {
+            (self.vtable.bg_reclaim)(self.handle);
+        }
     }
 
     /// BG 変換完了を最大 `timeout_ms` ミリ秒ブロック待機する。
@@ -320,24 +365,34 @@ impl DynEngine {
 
     pub fn commit(&mut self, text: &str) {
         let cs = Self::to_cstring(text);
-        unsafe { (self.vtable.commit)(self.handle, cs.as_ptr()); }
+        unsafe {
+            (self.vtable.commit)(self.handle, cs.as_ptr());
+        }
     }
 
     pub fn commit_as_hiragana(&mut self) {
-        unsafe { (self.vtable.commit_as_hiragana)(self.handle); }
+        unsafe {
+            (self.vtable.commit_as_hiragana)(self.handle);
+        }
     }
 
     pub fn reset_preedit(&mut self) {
-        unsafe { (self.vtable.reset_preedit)(self.handle); }
+        unsafe {
+            (self.vtable.reset_preedit)(self.handle);
+        }
     }
 
     pub fn force_preedit(&mut self, text: String) {
         let c = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
-        unsafe { (self.vtable.force_preedit)(self.handle, c.as_ptr()); }
+        unsafe {
+            (self.vtable.force_preedit)(self.handle, c.as_ptr());
+        }
     }
 
     pub fn reset_all(&mut self) {
-        unsafe { (self.vtable.reset_all)(self.handle); }
+        unsafe {
+            (self.vtable.reset_all)(self.handle);
+        }
     }
 
     // ── 変換（同期フォールバック）──────────────────────────────────────────
@@ -347,7 +402,7 @@ impl DynEngine {
             let ptr = (self.vtable.convert_sync)(self.handle);
             match self.take_cstr(ptr) {
                 Some(json) => serde_json::from_str(&json).unwrap_or_default(),
-                None       => vec![],
+                None => vec![],
             }
         }
     }
@@ -359,7 +414,18 @@ impl DynEngine {
             let ptr = (self.vtable.merge_candidates)(self.handle, cjson.as_ptr(), limit as u32);
             match self.take_cstr(ptr) {
                 Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-                None    => vec![],
+                None => vec![],
+            }
+        }
+    }
+
+    pub fn segment_surface(&self, surface: &str) -> Vec<String> {
+        let csurface = Self::to_cstring(surface);
+        unsafe {
+            let ptr = (self.vtable.segment_surface)(self.handle, csurface.as_ptr());
+            match self.take_cstr(ptr) {
+                Some(json) => serde_json::from_str(&json).unwrap_or_default(),
+                None => vec![],
             }
         }
     }
@@ -367,7 +433,9 @@ impl DynEngine {
     // ── 非同期初期化 ────────────────────────────────────────────────────────
 
     pub fn start_load_model(&mut self) {
-        unsafe { (self.vtable.start_load_model)(self.handle); }
+        unsafe {
+            (self.vtable.start_load_model)(self.handle);
+        }
     }
 
     /// true = モデルが新たに利用可能になった（langbar 更新トリガー）
@@ -376,7 +444,9 @@ impl DynEngine {
     }
 
     pub fn start_load_dict(&mut self) {
-        unsafe { (self.vtable.start_load_dict)(self.handle); }
+        unsafe {
+            (self.vtable.start_load_dict)(self.handle);
+        }
     }
 
     /// true = 辞書が新たに利用可能になった
@@ -419,13 +489,17 @@ impl DynEngine {
     pub fn learn(&mut self, reading: &str, surface: &str) {
         let r = Self::to_cstring(reading);
         let s = Self::to_cstring(surface);
-        unsafe { (self.vtable.learn)(self.handle, r.as_ptr(), s.as_ptr()); }
+        unsafe {
+            (self.vtable.learn)(self.handle, r.as_ptr(), s.as_ptr());
+        }
     }
 
     /// エンジン DLL 側の最後のエラー/ステータスメッセージを返す（診断用）
     pub fn last_error(&self) -> String {
         let ptr = unsafe { (self.vtable.last_error)() };
-        if ptr.is_null() { return String::new(); }
+        if ptr.is_null() {
+            return String::new();
+        }
         let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
@@ -435,7 +509,9 @@ impl DynEngine {
 
     pub fn dict_status(&self) -> String {
         let ptr = unsafe { (self.vtable.dict_status)() };
-        if ptr.is_null() { return String::new(); }
+        if ptr.is_null() {
+            return String::new();
+        }
         let s = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_string_lossy()
             .into_owned();
@@ -446,7 +522,9 @@ impl DynEngine {
 
 impl Drop for DynEngine {
     fn drop(&mut self) {
-        unsafe { (self.vtable.destroy)(self.handle); }
+        unsafe {
+            (self.vtable.destroy)(self.handle);
+        }
     }
 }
 
@@ -479,10 +557,18 @@ fn read_config_toml_backend() -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     for line in text.lines() {
         let line = line.trim();
-        if line.starts_with('#') { continue; }
+        if line.starts_with('#') {
+            continue;
+        }
         if let Some(rest) = line.strip_prefix("gpu_backend") {
             let rest = rest.trim().trim_start_matches('=').trim();
-            let val = rest.split('#').next().unwrap_or("").trim().trim_matches('"').trim_matches('\'');
+            let val = rest
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'');
             if matches!(val, "cuda" | "vulkan" | "cpu") {
                 return Some(val.to_string());
             }
@@ -496,7 +582,11 @@ fn read_backend_json() -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     let v: serde_json::Value = serde_json::from_str(&text).ok()?;
     let b = v["backend"].as_str()?.to_string();
-    if matches!(b.as_str(), "cuda" | "vulkan" | "cpu") { Some(b) } else { None }
+    if matches!(b.as_str(), "cuda" | "vulkan" | "cpu") {
+        Some(b)
+    } else {
+        None
+    }
 }
 
 // ─── DLL ディレクトリ検出 ──────────────────────────────────────────────────────

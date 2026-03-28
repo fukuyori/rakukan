@@ -34,37 +34,77 @@ use std::time::Instant;
 #[derive(Debug, Clone)]
 pub enum DiagEvent {
     // ライフサイクル
-    Activate         { tid: u32 },
+    Activate {
+        tid: u32,
+    },
     Deactivate,
 
     // コンパートメント（KEYBOARD_OPENCLOSE）
     /// set_open_close の結果
-    CompartmentSet   { open: bool, ok: bool, err: Option<String> },
+    CompartmentSet {
+        open: bool,
+        ok: bool,
+        err: Option<String>,
+    },
     /// get_open_close で読んだ値
-    CompartmentRead  { value: i32 },
+    CompartmentRead {
+        value: i32,
+    },
 
     // 言語バー
-    LangbarAdd       { ok: bool, err: Option<String> },
+    LangbarAdd {
+        ok: bool,
+        err: Option<String>,
+    },
 
     // キーイベント
     /// OnKeyDown でアクションを処理した
-    KeyHandled       { vk: u16, action: &'static str, ate: bool },
+    KeyHandled {
+        vk: u16,
+        action: &'static str,
+        ate: bool,
+    },
     /// OnKeyDown でアクションが解決されなかった / 前提条件を満たさず無視
-    KeyIgnored       { vk: u16, reason: &'static str },
+    KeyIgnored {
+        vk: u16,
+        reason: &'static str,
+    },
 
     // 入力・変換
-    InputChar        { ch: char, preedit_after: String },
-    Backspace        { preedit_after: String },
-    Convert          { preedit: String, kanji_ready: bool, result: String },
-    CommitRaw        { preedit: String },
-    ModeChange       { from: String, to: &'static str },
+    InputChar {
+        ch: char,
+        preedit_after: String,
+    },
+    Backspace {
+        preedit_after: String,
+    },
+    Convert {
+        preedit: String,
+        kanji_ready: bool,
+        result: String,
+    },
+    CommitRaw {
+        preedit: String,
+    },
+    ModeChange {
+        from: String,
+        to: &'static str,
+    },
 
     // エラー
-    Error            { site: &'static str, msg: String },
-    Panic            { site: &'static str },
+    Error {
+        site: &'static str,
+        msg: String,
+    },
+    Panic {
+        site: &'static str,
+    },
 
     // タイミング（Span の Drop で自動挿入）
-    Timing           { label: &'static str, elapsed_us: u64 },
+    Timing {
+        label: &'static str,
+        elapsed_us: u64,
+    },
 }
 
 // ─── リングバッファ ──────────────────────────────────────────────────────────
@@ -72,18 +112,18 @@ pub enum DiagEvent {
 const RING_CAP: usize = 256;
 
 struct Ring {
-    buf:   Vec<(u64 /* elapsed_us */, DiagEvent)>,
-    head:  usize,
-    full:  bool,
+    buf: Vec<(u64 /* elapsed_us */, DiagEvent)>,
+    head: usize,
+    full: bool,
     epoch: Instant,
 }
 
 impl Ring {
     fn new() -> Self {
         Self {
-            buf:   Vec::with_capacity(RING_CAP),
-            head:  0,
-            full:  false,
+            buf: Vec::with_capacity(RING_CAP),
+            head: 0,
+            full: false,
             epoch: Instant::now(),
         }
     }
@@ -104,7 +144,7 @@ impl Ring {
     /// 古い順に収集（DoubleEndedIterator が不要になる）
     fn collect_asc(&self) -> Vec<&(u64, DiagEvent)> {
         let start = if self.full { self.head } else { 0 };
-        let len   = self.buf.len();
+        let len = self.buf.len();
         (0..len).map(|i| &self.buf[(start + i) % len]).collect()
     }
 }
@@ -124,14 +164,18 @@ pub fn event(ev: DiagEvent) {
 
 /// RAII タイミング計測。Drop 時に DiagEvent::Timing を記録する。
 pub struct Span {
-    label:   &'static str,
-    start:   Instant,
-    active:  bool,
+    label: &'static str,
+    start: Instant,
+    active: bool,
 }
 
 impl Span {
     pub fn new(label: &'static str) -> Self {
-        Self { label, start: Instant::now(), active: true }
+        Self {
+            label,
+            start: Instant::now(),
+            active: true,
+        }
     }
 }
 
@@ -139,7 +183,10 @@ impl Drop for Span {
     fn drop(&mut self) {
         if self.active {
             let us = self.start.elapsed().as_micros() as u64;
-            event(DiagEvent::Timing { label: self.label, elapsed_us: us });
+            event(DiagEvent::Timing {
+                label: self.label,
+                elapsed_us: us,
+            });
             // 5ms を超えたら WARN（体感で遅いと感じる閾値）
             if us > 5_000 {
                 tracing::warn!("⚠ SLOW [{label}] {us}µs", label = self.label);
@@ -171,7 +218,7 @@ fn dump_state() {
 
     // InputMode
     match crate::engine::state::ime_state_get() {
-        Ok(s)  => tracing::info!("  input_mode  = {:?}", s.input_mode),
+        Ok(s) => tracing::info!("  input_mode  = {:?}", s.input_mode),
         Err(e) => tracing::warn!("  input_mode  = LOCK ERROR: {e}"),
     }
 
@@ -191,17 +238,20 @@ fn dump_state() {
     // Composition
     match crate::engine::state::composition_clone() {
         Ok(Some(_)) => tracing::info!("  composition = active"),
-        Ok(None)    => tracing::info!("  composition = None"),
-        Err(e)      => tracing::warn!("  composition = LOCK ERROR: {e}"),
+        Ok(None) => tracing::info!("  composition = None"),
+        Err(e) => tracing::warn!("  composition = LOCK ERROR: {e}"),
     }
 }
 
 fn dump_events() {
     // 直近 60 件を新しい順で出力
     let events: Vec<_> = {
-        let Ok(r) = RING.lock() else { return; };
+        let Ok(r) = RING.lock() else {
+            return;
+        };
         r.collect_asc()
-            .into_iter().rev()
+            .into_iter()
+            .rev()
             .take(60)
             .map(|(ts, ev)| (*ts, format!("{ev:?}")))
             .collect()
@@ -219,7 +269,9 @@ fn dump_events() {
 fn dump_timing() {
     use std::collections::HashMap;
 
-    let Ok(r) = RING.lock() else { return; };
+    let Ok(r) = RING.lock() else {
+        return;
+    };
     let mut stats: HashMap<&'static str, (u64, u64, u64, u32)> = HashMap::new();
 
     for (_, ev) in r.collect_asc() {
@@ -232,7 +284,9 @@ fn dump_timing() {
         }
     }
 
-    if stats.is_empty() { return; }
+    if stats.is_empty() {
+        return;
+    }
 
     tracing::info!("─── Timing Stats ────────────────────────");
     let mut rows: Vec<_> = stats.into_iter().collect();
@@ -240,8 +294,6 @@ fn dump_timing() {
 
     for (label, (min, max, sum, n)) in rows {
         let avg = sum / n as u64;
-        tracing::info!(
-            "  {label:<20}  n={n:>3}  avg={avg:>6}µs  min={min:>6}µs  max={max:>6}µs"
-        );
+        tracing::info!("  {label:<20}  n={n:>3}  avg={avg:>6}µs  min={min:>6}µs  max={max:>6}µs");
     }
 }

@@ -9,14 +9,14 @@ mod extension;
 mod globals;
 mod tsf;
 
-use globals::{DllModule, DLL_INSTANCE, GUID_TEXT_SERVICE};
+use globals::{DLL_INSTANCE, DllModule, GUID_TEXT_SERVICE};
 use std::ffi::c_void;
 use windows::{
-    core::{GUID, IUnknown, Interface},
     Win32::{
         Foundation::{BOOL, E_FAIL, HINSTANCE, S_FALSE, S_OK, TRUE},
         System::Com::IClassFactory,
     },
+    core::{GUID, IUnknown, Interface},
 };
 
 #[allow(overflowing_literals)]
@@ -42,9 +42,11 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
         // subscriber 初期化は config より先に行う必要があるため、
         // ここで直接ファイルを読み込む（init_config_manager より前）。
         let config_log_level = {
-            let config_path = std::env::var("APPDATA").ok()
+            let config_path = std::env::var("APPDATA")
+                .ok()
                 .map(|p| format!("{}\\rakukan\\config.toml", p));
-            config_path.and_then(|p| std::fs::read_to_string(p).ok())
+            config_path
+                .and_then(|p| std::fs::read_to_string(p).ok())
                 .and_then(|s| {
                     s.lines()
                         .find(|l| l.trim_start().starts_with("log_level"))
@@ -55,15 +57,16 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
         };
 
         let make_filter = |scope: &str| {
-            tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
-                    format!("{}={}", scope, config_log_level)
-                ))
+            tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG").unwrap_or_else(|_| {
+                tracing_subscriber::EnvFilter::new(format!("{}={}", scope, config_log_level))
+            })
         };
 
         if !log_path.is_empty() {
             if let Ok(f) = std::fs::OpenOptions::new()
-                .create(true).append(true).open(&log_path)
+                .create(true)
+                .append(true)
+                .open(&log_path)
             {
                 let _ = tracing_subscriber::fmt()
                     .with_env_filter(make_filter("rakukan_tsf"))
@@ -75,7 +78,10 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 .with_env_filter(make_filter("rakukan"))
                 .try_init();
         }
-        tracing::info!("rakukan TSF DLL loaded  build={}", option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown"));
+        tracing::info!(
+            "rakukan TSF DLL loaded  build={}",
+            option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown")
+        );
         let _ = crate::engine::config::config_save_default();
         crate::engine::config::init_config_manager();
         let _ = crate::engine::keymap::keymap_save_default();
@@ -90,7 +96,9 @@ pub unsafe extern "system" fn DllGetClassObject(
     riid: *const GUID,
     ppv: *mut *mut c_void,
 ) -> windows::core::HRESULT {
-    if ppv.is_null() { return E_FAIL; }
+    if ppv.is_null() {
+        return E_FAIL;
+    }
     *ppv = std::ptr::null_mut();
     if *rclsid != GUID_TEXT_SERVICE {
         return CLASS_E_CLASSNOTAVAILABLE;
@@ -113,22 +121,33 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> windows::core::HRESULT {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
     // デバッグ: 各ステップを個別に実行してエラー箇所を特定
-    let log_path = format!("{}\\rakukan\\register_debug.log",
-        std::env::var("LOCALAPPDATA").unwrap_or_default());
+    let log_path = format!(
+        "{}\\rakukan\\register_debug.log",
+        std::env::var("LOCALAPPDATA").unwrap_or_default()
+    );
     let mut log = String::new();
 
     macro_rules! step {
         ($label:expr, $expr:expr) => {{
             match $expr {
-                Ok(v) => { log.push_str(&format!("OK: {}
-", $label)); v }
+                Ok(v) => {
+                    log.push_str(&format!(
+                        "OK: {}
+",
+                        $label
+                    ));
+                    v
+                }
                 Err(e) => {
-                    let msg = format!("FAIL: {} — {}
-", $label, e);
+                    let msg = format!(
+                        "FAIL: {} — {}
+",
+                        $label, e
+                    );
                     log.push_str(&msg);
                     let _ = std::fs::write(&log_path, &log);
                     CoUninitialize();
@@ -138,19 +157,31 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
         }};
     }
 
-    log.push_str("DllRegisterServer start
-");
+    log.push_str(
+        "DllRegisterServer start
+",
+    );
 
     let dll_path = step!("get_path", crate::globals::DllModule::get_path());
-    log.push_str(&format!("dll_path: {dll_path}
-"));
+    log.push_str(&format!(
+        "dll_path: {dll_path}
+"
+    ));
 
-    step!("clsid_register", tsf::registration::clsid_register(&dll_path));
-    step!("profile_register", tsf::registration::profile_register(&dll_path));
+    step!(
+        "clsid_register",
+        tsf::registration::clsid_register(&dll_path)
+    );
+    step!(
+        "profile_register",
+        tsf::registration::profile_register(&dll_path)
+    );
     step!("category_register", tsf::registration::category_register());
 
-    log.push_str("DllRegisterServer success
-");
+    log.push_str(
+        "DllRegisterServer success
+",
+    );
     let _ = std::fs::write(&log_path, &log);
 
     CoUninitialize();
@@ -159,11 +190,14 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllUnregisterServer() -> windows::core::HRESULT {
-    use windows::Win32::System::Com::{CoInitializeEx, CoUninitialize, COINIT_APARTMENTTHREADED};
+    use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
     let r = match tsf::registration::unregister_server() {
         Ok(_) => S_OK,
-        Err(e) => { tracing::error!("DllUnregisterServer: {e}"); E_FAIL }
+        Err(e) => {
+            tracing::error!("DllUnregisterServer: {e}");
+            E_FAIL
+        }
     };
     CoUninitialize();
     r

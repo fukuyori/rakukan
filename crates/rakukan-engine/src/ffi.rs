@@ -8,8 +8,10 @@
 //! - `*mut c_void` ハンドルは `engine_destroy` で解放すること
 //! - caller が渡す `*const c_char` は関数呼び出しの間だけ有効であればよい
 
+use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
-use crate::{RakunEngine, EngineConfig};
+
+pub const ENGINE_ABI_VERSION: u32 = 2;
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -23,7 +25,9 @@ unsafe fn to_cstr(s: String) -> *mut c_char {
 
 /// `*const c_char` → &str（unsafe, null チェックなし）
 unsafe fn from_cstr<'a>(ptr: *const c_char) -> &'a str {
-    if ptr.is_null() { return ""; }
+    if ptr.is_null() {
+        return "";
+    }
     unsafe { CStr::from_ptr(ptr).to_str().unwrap_or("") }
 }
 
@@ -50,7 +54,9 @@ pub extern "C" fn engine_create(config_json: *const c_char) -> *mut c_void {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_destroy(handle: *mut c_void) {
     if !handle.is_null() {
-        unsafe { drop(Box::from_raw(handle as *mut RakunEngine)); }
+        unsafe {
+            drop(Box::from_raw(handle as *mut RakunEngine));
+        }
     }
 }
 
@@ -58,8 +64,16 @@ pub extern "C" fn engine_destroy(handle: *mut c_void) {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_free_string(s: *mut c_char) {
     if !s.is_null() {
-        unsafe { drop(CString::from_raw(s)); }
+        unsafe {
+            drop(CString::from_raw(s));
+        }
     }
+}
+
+/// engine DLL の ABI バージョンを返す。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_abi_version() -> u32 {
+    ENGINE_ABI_VERSION
 }
 
 // ─── 文字入力 ──────────────────────────────────────────────────────────────────
@@ -176,8 +190,8 @@ pub extern "C" fn engine_bg_status(handle: *mut c_void) -> *const c_char {
     let _engine = unsafe { &*(handle as *const RakunEngine) };
     match crate::conv_cache::status() {
         "running" => b"running\0".as_ptr() as *const c_char,
-        "done"    => b"done\0".as_ptr()    as *const c_char,
-        _         => b"idle\0".as_ptr()    as *const c_char,
+        "done" => b"done\0".as_ptr() as *const c_char,
+        _ => b"idle\0".as_ptr() as *const c_char,
     }
 }
 
@@ -185,7 +199,10 @@ pub extern "C" fn engine_bg_status(handle: *mut c_void) -> *const c_char {
 /// 戻り値: JSON 文字列 `["候補1","候補2",...]` または null（未完了/不一致）
 /// 戻り値は `engine_free_string` で解放すること。
 #[unsafe(no_mangle)]
-pub extern "C" fn engine_bg_take_candidates(handle: *mut c_void, key: *const c_char) -> *mut c_char {
+pub extern "C" fn engine_bg_take_candidates(
+    handle: *mut c_void,
+    key: *const c_char,
+) -> *mut c_char {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     let key_str = unsafe { from_cstr(key) };
     match engine.bg_take_candidates(key_str) {
@@ -209,9 +226,7 @@ pub extern "C" fn engine_bg_reclaim(handle: *mut c_void) {
 /// Space 押下時に UIスレッドから呼ぶ用途を想定。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_bg_wait_ms(_handle: *mut c_void, timeout_ms: u64) -> u8 {
-    let done = crate::conv_cache::wait_done_timeout(
-        std::time::Duration::from_millis(timeout_ms),
-    );
+    let done = crate::conv_cache::wait_done_timeout(std::time::Duration::from_millis(timeout_ms));
     if done { 1 } else { 0 }
 }
 
@@ -243,7 +258,11 @@ pub extern "C" fn engine_reset_preedit(handle: *mut c_void) {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_force_preedit(handle: *mut c_void, text: *const c_char) {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    let s = unsafe { std::ffi::CStr::from_ptr(text).to_string_lossy().into_owned() };
+    let s = unsafe {
+        std::ffi::CStr::from_ptr(text)
+            .to_string_lossy()
+            .into_owned()
+    };
     engine.force_preedit(s);
 }
 
@@ -277,9 +296,9 @@ pub extern "C" fn engine_convert_sync(handle: *mut c_void) -> *mut c_char {
 /// `engine_free_string` で解放すること。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_merge_candidates(
-    handle:   *mut c_void,
+    handle: *mut c_void,
     llm_json: *const c_char,
-    limit:    u32,
+    limit: u32,
 ) -> *mut c_char {
     let engine = unsafe { &*(handle as *const RakunEngine) };
     let s = unsafe { from_cstr(llm_json) };
@@ -298,14 +317,31 @@ pub extern "C" fn engine_merge_candidates(
     unsafe { to_cstr(json) }
 }
 
+/// surface を分節して JSON 配列で返す。
+/// 戻り値: JSON `["変換","が"]`
+/// `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_segment_surface(
+    handle: *mut c_void,
+    surface: *const c_char,
+) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    let surface = unsafe { from_cstr(surface) };
+    let segments = engine.segment_surface(surface);
+    let json = serde_json::to_string(&segments).unwrap_or_else(|_| "[]".into());
+    unsafe { to_cstr(json) }
+}
+
 // ─── 初期化（非同期）──────────────────────────────────────────────────────────
 
 /// モデル（漢字変換 LLM）のロードをバックグラウンドで開始する。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    if engine.is_kanji_ready() { return; }
-    set_last_error(String::new());  // clear
+    if engine.is_kanji_ready() {
+        return;
+    }
+    set_last_error(String::new()); // clear
     let config = engine.get_config().clone();
     std::thread::spawn(move || {
         set_last_error("model loading...".to_string());
@@ -323,8 +359,8 @@ pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
 }
 
 // pending converter をスレッド間で渡すための一時置き場
-use std::sync::{Mutex, LazyLock};
 use crate::kanji::KanaKanjiConverter;
+use std::sync::{LazyLock, Mutex};
 static PENDING_CONVERTER: LazyLock<Mutex<Option<KanaKanjiConverter>>> =
     LazyLock::new(|| Mutex::new(None));
 
@@ -333,7 +369,9 @@ static PENDING_CONVERTER: LazyLock<Mutex<Option<KanaKanjiConverter>>> =
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    if engine.is_kanji_ready() { return false; }  // already ready
+    if engine.is_kanji_ready() {
+        return false;
+    } // already ready
     if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
         if let Some(conv) = g.take() {
             engine.set_kanji_converter(conv);
@@ -347,11 +385,12 @@ pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
 /// 辞書のロードをバックグラウンドで開始する。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_start_load_dict(handle: *mut c_void) {
-    static DICT_LOADING: std::sync::atomic::AtomicBool =
-        std::sync::atomic::AtomicBool::new(false);
+    static DICT_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
     let engine = unsafe { &*(handle as *const RakunEngine) };
-    if engine.is_dict_ready() { return; }
+    if engine.is_dict_ready() {
+        return;
+    }
 
     // 多重 spawn 防止
     if DICT_LOADING.swap(true, std::sync::atomic::Ordering::AcqRel) {
@@ -363,7 +402,7 @@ pub extern "C" fn engine_start_load_dict(handle: *mut c_void) {
 
     // DictStore をロードしてエンジンに渡す（同様に poll パターン）
     std::thread::spawn(move || {
-        use crate::dict::loader::{load_dict, LoadResult};
+        use crate::dict::loader::{LoadResult, load_dict};
 
         set_dict_status(format!(
             "starting: build={}",
@@ -385,15 +424,16 @@ pub extern "C" fn engine_start_load_dict(handle: *mut c_void) {
     });
 }
 
-static PENDING_DICT: LazyLock<Mutex<Option<crate::DictStore>>> =
-    LazyLock::new(|| Mutex::new(None));
+static PENDING_DICT: LazyLock<Mutex<Option<crate::DictStore>>> = LazyLock::new(|| Mutex::new(None));
 
 /// 辞書が pending に届いていたら engine に注入する。
 /// 戻り値: true = 注入した
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_poll_dict_ready(handle: *mut c_void) -> bool {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    if engine.is_dict_ready() { return false; }
+    if engine.is_dict_ready() {
+        return false;
+    }
     if let Ok(mut g) = PENDING_DICT.try_lock() {
         if let Some(store) = g.take() {
             engine.set_dict_store(store);
@@ -454,25 +494,36 @@ pub extern "C" fn engine_main_gpu(handle: *mut c_void) -> i32 {
 /// 選択した候補をユーザー辞書に学習する。
 /// reading: ひらがな読み、surface: 確定した漢字表記
 #[unsafe(no_mangle)]
-pub extern "C" fn engine_learn(handle: *mut c_void, reading: *const c_char, surface: *const c_char) {
-    let engine  = unsafe { &mut *(handle as *mut RakunEngine) };
+pub extern "C" fn engine_learn(
+    handle: *mut c_void,
+    reading: *const c_char,
+    surface: *const c_char,
+) {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     let reading = unsafe { from_cstr(reading) }.to_string();
     let surface = unsafe { from_cstr(surface) }.to_string();
-    if reading.is_empty() || surface.is_empty() { return; }
+    if reading.is_empty() || surface.is_empty() {
+        return;
+    }
     engine.learn(&reading, &surface);
 }
 
 // ─── 最後のエラーメッセージ（診断用）────────────────────────────────────────
 
 static LAST_ERROR: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new(String::new()));
-static DICT_STATUS: LazyLock<Mutex<String>> = LazyLock::new(|| Mutex::new("not started".to_string()));
+static DICT_STATUS: LazyLock<Mutex<String>> =
+    LazyLock::new(|| Mutex::new("not started".to_string()));
 
 fn set_last_error(msg: String) {
-    if let Ok(mut g) = LAST_ERROR.lock() { *g = msg; }
+    if let Ok(mut g) = LAST_ERROR.lock() {
+        *g = msg;
+    }
 }
 
 fn set_dict_status(msg: String) {
-    if let Ok(mut g) = DICT_STATUS.lock() { *g = msg; }
+    if let Ok(mut g) = DICT_STATUS.lock() {
+        *g = msg;
+    }
 }
 
 /// 最後に発生したエラーメッセージを返す（TSF 側ログ用）

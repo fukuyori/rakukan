@@ -14,7 +14,9 @@ pub mod kana;
 pub mod kanji;
 pub mod romaji;
 
-pub use kana::{hiragana_to_halfwidth_katakana, hiragana_to_katakana, katakana_to_hiragana, normalize_nfkc};
+pub use kana::{
+    hiragana_to_halfwidth_katakana, hiragana_to_katakana, katakana_to_hiragana, normalize_nfkc,
+};
 pub use kanji::{Backend, KanaKanjiConverter};
 pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter};
 
@@ -23,14 +25,15 @@ pub mod backend;
 pub mod conv_cache;
 pub mod dict;
 pub mod ffi;
+pub mod segmenter;
 pub use backend::{BackendSelection, GpuInfo, select_backend};
 // Backend は kanji::Backend と名前が被るため、rakukan の Backend は別名でエクスポート
 pub use backend::Backend as RakunBackend;
 
-pub use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
 pub use rakukan_dict::mozc_dict::MozcDict;
+pub use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
 
-use kanji::{registry, Backend as KarukanBackend};
+use kanji::{Backend as KarukanBackend, registry};
 use thiserror::Error;
 use tracing::{debug, info};
 
@@ -48,12 +51,27 @@ fn last_n_sentences_start(text: &str, n: usize) -> usize {
     let mut i = 0;
     while i < len {
         let ch = chars[i].1;
-        if matches!(ch, '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '!' | '?' | '.' | '\u{FF0E}' | '\n') {
+        if matches!(
+            ch,
+            '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '!' | '?' | '.' | '\u{FF0E}' | '\n'
+        ) {
             // 句読点・空白が連続する場合はまとめてスキップ
             let mut j = i + 1;
-            while j < len && matches!(chars[j].1,
-                '\u{3002}' | '\u{FF01}' | '\u{FF1F}' | '!' | '?' | '.' | '\u{FF0E}'
-                | ' ' | '\u{3000}' | '\n') {
+            while j < len
+                && matches!(
+                    chars[j].1,
+                    '\u{3002}'
+                        | '\u{FF01}'
+                        | '\u{FF1F}'
+                        | '!'
+                        | '?'
+                        | '.'
+                        | '\u{FF0E}'
+                        | ' '
+                        | '\u{3000}'
+                        | '\n'
+                )
+            {
                 j += 1;
             }
             if j < len {
@@ -71,8 +89,6 @@ fn last_n_sentences_start(text: &str, n: usize) -> usize {
         0
     }
 }
-
-
 
 #[derive(Debug, Error)]
 pub enum EngineError {
@@ -98,7 +114,13 @@ pub struct EngineConfig {
 
 impl Default for EngineConfig {
     fn default() -> Self {
-        Self { model_variant: None, num_candidates: 5, n_threads: 0, n_gpu_layers: 0u32, main_gpu: 0 }
+        Self {
+            model_variant: None,
+            num_candidates: 5,
+            n_threads: 0,
+            n_gpu_layers: 0u32,
+            main_gpu: 0,
+        }
     }
 }
 
@@ -156,17 +178,23 @@ impl RakunEngine {
             .model_variant
             .clone()
             .unwrap_or_else(|| registry().default_model.clone());
-        info!("engine::init: loading model={} gpu_layers={} main_gpu={}", variant_id, config.n_gpu_layers, config.main_gpu);
+        info!(
+            "engine::init: loading model={} gpu_layers={} main_gpu={}",
+            variant_id, config.n_gpu_layers, config.main_gpu
+        );
         let backend = KarukanBackend::from_variant_id(&variant_id)
             .map_err(|e| EngineError::InitFailed(e.to_string()))?
             .with_n_gpu_layers(config.n_gpu_layers)
             .with_main_gpu(config.main_gpu);
-        let mut converter = KanaKanjiConverter::new(backend)
-            .map_err(|e| EngineError::InitFailed(e.to_string()))?;
+        let mut converter =
+            KanaKanjiConverter::new(backend).map_err(|e| EngineError::InitFailed(e.to_string()))?;
         if config.n_threads > 0 {
             converter.set_n_threads(config.n_threads);
         }
-        info!("engine::init: model ready name={}", converter.model_display_name());
+        info!(
+            "engine::init: model ready name={}",
+            converter.model_display_name()
+        );
         Ok(converter)
     }
 
@@ -303,7 +331,10 @@ impl RakunEngine {
         if self.hiragana_buf.is_empty() {
             return Ok(vec![]);
         }
-        let kanji = self.kanji.as_ref().ok_or(EngineError::ModelNotInitialized)?;
+        let kanji = self
+            .kanji
+            .as_ref()
+            .ok_or(EngineError::ModelNotInitialized)?;
         kanji
             .convert(&self.hiragana_buf, &self.committed, num_candidates)
             .map_err(|e| EngineError::ConversionFailed(e.to_string()))
@@ -311,6 +342,13 @@ impl RakunEngine {
 
     pub fn convert_default(&self) -> Result<Vec<String>, EngineError> {
         self.convert(self.config.num_candidates)
+    }
+
+    pub fn segment_surface(&self, surface: &str) -> Vec<String> {
+        if surface.is_empty() {
+            return Vec::new();
+        }
+        segmenter::segment_surface(surface)
     }
 
     pub fn commit(&mut self, text: &str) {
@@ -341,7 +379,9 @@ impl RakunEngine {
 
     pub fn commit_as_hiragana(&mut self) {
         let text = self.hiragana_buf.clone();
-        if !text.is_empty() { self.commit(&text); }
+        if !text.is_empty() {
+            self.commit(&text);
+        }
     }
 
     pub fn current_preedit(&self) -> PreeditState {
@@ -351,7 +391,9 @@ impl RakunEngine {
         }
     }
 
-    pub fn preedit_is_empty(&self) -> bool { self.hiragana_buf.is_empty() && self.pending_romaji_buf.is_empty() }
+    pub fn preedit_is_empty(&self) -> bool {
+        self.hiragana_buf.is_empty() && self.pending_romaji_buf.is_empty()
+    }
 
     /// ローマ字入力ログを結合した文字列を返す（F9/F10 のローマ字復元用）
     pub fn romaji_log_str(&self) -> String {
@@ -362,7 +404,9 @@ impl RakunEngine {
     /// F9/F10 で force_preedit した後でも log は保持されているため復元可能。
     pub fn hiragana_from_romaji_log(&self) -> String {
         let romaji = self.romaji_input_log.concat();
-        if romaji.is_empty() { return String::new(); }
+        if romaji.is_empty() {
+            return String::new();
+        }
         let mut conv = RomajiConverter::new();
         let mut result = String::new();
         for c in romaji.chars() {
@@ -376,13 +420,21 @@ impl RakunEngine {
         result.push_str(&conv.flush());
         result
     }
-    pub fn get_config(&self) -> &EngineConfig { &self.config }
-    pub fn committed_text(&self) -> &str { &self.committed }
-    pub fn is_kanji_ready(&self) -> bool { self.kanji.is_some() }
+    pub fn get_config(&self) -> &EngineConfig {
+        &self.config
+    }
+    pub fn committed_text(&self) -> &str {
+        &self.committed
+    }
+    pub fn is_kanji_ready(&self) -> bool {
+        self.kanji.is_some()
+    }
 
     pub fn set_dict_store(&mut self, store: DictStore) {
-        info!("engine::dict: store set user_entries={}",
-            store.user_entry_count());
+        info!(
+            "engine::dict: store set user_entries={}",
+            store.user_entry_count()
+        );
         self.dict_store = Some(store);
     }
 
@@ -408,28 +460,40 @@ impl RakunEngine {
         let hiragana = &self.hiragana_buf;
 
         // 優先順位: ユーザー辞書 → LLM → mozc
-        let user_cands: Vec<String> = self.dict_store
+        let user_cands: Vec<String> = self
+            .dict_store
             .as_ref()
             .map(|d| d.lookup_user(hiragana))
             .unwrap_or_default();
 
-        let dict_cands: Vec<String> = self.dict_store
+        let dict_cands: Vec<String> = self
+            .dict_store
             .as_ref()
             .map(|d| d.lookup_dict(hiragana, limit))
             .unwrap_or_default();
 
-        debug!("engine::merge: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
+        debug!(
+            "engine::merge: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
             hiragana,
-            if self.dict_store.is_some() { "Some" } else { "None" },
+            if self.dict_store.is_some() {
+                "Some"
+            } else {
+                "None"
+            },
             dict_cands,
-            llm_candidates);
+            llm_candidates
+        );
 
         let mut merged: Vec<String> = Vec::new();
 
         // 1. ユーザー辞書候補（最優先）
         for c in &user_cands {
-            if merged.len() >= limit { break; }
-            if !merged.contains(c) { merged.push(c.clone()); }
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(c) {
+                merged.push(c.clone());
+            }
         }
 
         // 辞書候補に確保するスロット数（limit の半分、最低3件）
@@ -440,8 +504,12 @@ impl RakunEngine {
         // 2. LLM候補（文脈考慮、上限 llm_limit）
         let mut llm_count = 0;
         for c in llm_candidates {
-            if llm_count >= llm_limit { break; }
-            if merged.len() >= limit { break; }
+            if llm_count >= llm_limit {
+                break;
+            }
+            if merged.len() >= limit {
+                break;
+            }
             if !merged.contains(&c) {
                 merged.push(c);
                 llm_count += 1;
@@ -450,8 +518,12 @@ impl RakunEngine {
 
         // 3. mozc候補（残りスロットを全て使用）
         for c in dict_cands {
-            if merged.len() >= limit { break; }
-            if !merged.contains(&c) { merged.push(c); }
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(&c) {
+                merged.push(c);
+            }
         }
 
         if merged.is_empty() {
@@ -464,7 +536,7 @@ impl RakunEngine {
     pub fn backend_label(&self) -> String {
         match &self.kanji {
             Some(conv) => conv.model_display_name().to_string(),
-            None       => "初期化中...".to_string(),
+            None => "初期化中...".to_string(),
         }
     }
 
@@ -484,15 +556,22 @@ impl RakunEngine {
             self.kanji = Some(old);
         }
 
-        let hiragana  = self.hiragana_buf.clone();
+        let hiragana = self.hiragana_buf.clone();
         let committed = self.committed.clone();
-        if hiragana.is_empty() { return false; }
-        if !self.is_kanji_ready() { return false; }
+        if hiragana.is_empty() {
+            return false;
+        }
+        if !self.is_kanji_ready() {
+            return false;
+        }
 
         if let Some(conv) = self.kanji.take() {
             match conv_cache::start(hiragana, committed, conv, n_cands) {
-                Some(returned) => { self.kanji = Some(returned); false }
-                None           => true,
+                Some(returned) => {
+                    self.kanji = Some(returned);
+                    false
+                }
+                None => true,
             }
         } else {
             false
@@ -570,13 +649,15 @@ mod context_trim_tests {
 
     #[test]
     fn no_boundary() {
-        let text = "\u{6587}\u{5883}\u{754C}\u{306E}\u{306A}\u{3044}\u{30C6}\u{30AD}\u{30B9}\u{30C8}";
+        let text =
+            "\u{6587}\u{5883}\u{754C}\u{306E}\u{306A}\u{3044}\u{30C6}\u{30AD}\u{30B9}\u{30C8}";
         assert_eq!(last_n_sentences_start(text, 2), 0);
     }
 
     #[test]
     fn single_boundary_want_two() {
-        let text = "\u{6700}\u{521D}\u{306E}\u{6587}\u{3002}\u{4E8C}\u{756A}\u{76EE}\u{306E}\u{6587}";
+        let text =
+            "\u{6700}\u{521D}\u{306E}\u{6587}\u{3002}\u{4E8C}\u{756A}\u{76EE}\u{306E}\u{6587}";
         // \u{5883}\u{754C}\u{304C}1\u{500B}\u{3057}\u{304B}\u{306A}\u{3044} \u{2192} \u{5148}\u{982D}\u{3092}\u{8FD4}\u{3059}
         assert_eq!(last_n_sentences_start(text, 2), 0);
     }
@@ -586,7 +667,10 @@ mod context_trim_tests {
         let text = "\u{6700}\u{521D}\u{306E}\u{6587}\u{3002}\u{4E8C}\u{756A}\u{76EE}\u{306E}\u{6587}\u{3002}\u{4E09}\u{756A}\u{76EE}\u{306E}\u{6587}";
         // \u{5883}\u{754C}\u{304C}2\u{500B} [\u{300C}\u{4E8C}\u{756A}\u{76EE}\u{300D}\u{5148}\u{982D}, \u{300C}\u{4E09}\u{756A}\u{76EE}\u{300D}\u{5148}\u{982D}]\u{3001}n=2 \u{2192} \u{5148}\u{982D}\u{304B}\u{3089}2\u{500B}\u{76EE}\u{306E}\u{5883}\u{754C} = \u{300C}\u{4E8C}\u{756A}\u{76EE}\u{300D}\u{5148}\u{982D}
         let start = last_n_sentences_start(text, 2);
-        assert_eq!(&text[start..], "\u{4E8C}\u{756A}\u{76EE}\u{306E}\u{6587}\u{3002}\u{4E09}\u{756A}\u{76EE}\u{306E}\u{6587}");
+        assert_eq!(
+            &text[start..],
+            "\u{4E8C}\u{756A}\u{76EE}\u{306E}\u{6587}\u{3002}\u{4E09}\u{756A}\u{76EE}\u{306E}\u{6587}"
+        );
     }
 
     #[test]
@@ -602,7 +686,10 @@ mod context_trim_tests {
         let text = "\u{4E00}\u{884C}\u{76EE}\n\u{4E8C}\u{884C}\u{76EE}\n\u{4E09}\u{884C}\u{76EE}";
         // \u{5883}\u{754C}2\u{500B} [\u{300C}\u{4E8C}\u{884C}\u{76EE}\u{300D}\u{5148}\u{982D}, \u{300C}\u{4E09}\u{884C}\u{76EE}\u{300D}\u{5148}\u{982D}]\u{3001}n=2 \u{2192} \u{300C}\u{4E8C}\u{884C}\u{76EE}\u{300D}\u{5148}\u{982D}
         let start = last_n_sentences_start(text, 2);
-        assert_eq!(&text[start..], "\u{4E8C}\u{884C}\u{76EE}\n\u{4E09}\u{884C}\u{76EE}");
+        assert_eq!(
+            &text[start..],
+            "\u{4E8C}\u{884C}\u{76EE}\n\u{4E09}\u{884C}\u{76EE}"
+        );
     }
 
     #[test]

@@ -98,33 +98,111 @@ fn fullwidth_katakana_to_halfwidth(text: &str) -> String {
             'ン' => result.push('ﾝ'),
             'ー' => result.push('ｰ'),
             // Dakuten (゛) decomposition: ガ→ｶﾞ etc.
-            'ガ' => { result.push('ｶ'); result.push('ﾞ'); }
-            'ギ' => { result.push('ｷ'); result.push('ﾞ'); }
-            'グ' => { result.push('ｸ'); result.push('ﾞ'); }
-            'ゲ' => { result.push('ｹ'); result.push('ﾞ'); }
-            'ゴ' => { result.push('ｺ'); result.push('ﾞ'); }
-            'ザ' => { result.push('ｻ'); result.push('ﾞ'); }
-            'ジ' => { result.push('ｼ'); result.push('ﾞ'); }
-            'ズ' => { result.push('ｽ'); result.push('ﾞ'); }
-            'ゼ' => { result.push('ｾ'); result.push('ﾞ'); }
-            'ゾ' => { result.push('ｿ'); result.push('ﾞ'); }
-            'ダ' => { result.push('ﾀ'); result.push('ﾞ'); }
-            'ヂ' => { result.push('ﾁ'); result.push('ﾞ'); }
-            'ヅ' => { result.push('ﾂ'); result.push('ﾞ'); }
-            'デ' => { result.push('ﾃ'); result.push('ﾞ'); }
-            'ド' => { result.push('ﾄ'); result.push('ﾞ'); }
-            'バ' => { result.push('ﾊ'); result.push('ﾞ'); }
-            'ビ' => { result.push('ﾋ'); result.push('ﾞ'); }
-            'ブ' => { result.push('ﾌ'); result.push('ﾞ'); }
-            'ベ' => { result.push('ﾍ'); result.push('ﾞ'); }
-            'ボ' => { result.push('ﾎ'); result.push('ﾞ'); }
-            'ヴ' => { result.push('ｳ'); result.push('ﾞ'); }
+            'ガ' => {
+                result.push('ｶ');
+                result.push('ﾞ');
+            }
+            'ギ' => {
+                result.push('ｷ');
+                result.push('ﾞ');
+            }
+            'グ' => {
+                result.push('ｸ');
+                result.push('ﾞ');
+            }
+            'ゲ' => {
+                result.push('ｹ');
+                result.push('ﾞ');
+            }
+            'ゴ' => {
+                result.push('ｺ');
+                result.push('ﾞ');
+            }
+            'ザ' => {
+                result.push('ｻ');
+                result.push('ﾞ');
+            }
+            'ジ' => {
+                result.push('ｼ');
+                result.push('ﾞ');
+            }
+            'ズ' => {
+                result.push('ｽ');
+                result.push('ﾞ');
+            }
+            'ゼ' => {
+                result.push('ｾ');
+                result.push('ﾞ');
+            }
+            'ゾ' => {
+                result.push('ｿ');
+                result.push('ﾞ');
+            }
+            'ダ' => {
+                result.push('ﾀ');
+                result.push('ﾞ');
+            }
+            'ヂ' => {
+                result.push('ﾁ');
+                result.push('ﾞ');
+            }
+            'ヅ' => {
+                result.push('ﾂ');
+                result.push('ﾞ');
+            }
+            'デ' => {
+                result.push('ﾃ');
+                result.push('ﾞ');
+            }
+            'ド' => {
+                result.push('ﾄ');
+                result.push('ﾞ');
+            }
+            'バ' => {
+                result.push('ﾊ');
+                result.push('ﾞ');
+            }
+            'ビ' => {
+                result.push('ﾋ');
+                result.push('ﾞ');
+            }
+            'ブ' => {
+                result.push('ﾌ');
+                result.push('ﾞ');
+            }
+            'ベ' => {
+                result.push('ﾍ');
+                result.push('ﾞ');
+            }
+            'ボ' => {
+                result.push('ﾎ');
+                result.push('ﾞ');
+            }
+            'ヴ' => {
+                result.push('ｳ');
+                result.push('ﾞ');
+            }
             // Handakuten (゜) decomposition: パ→ﾊﾟ etc.
-            'パ' => { result.push('ﾊ'); result.push('ﾟ'); }
-            'ピ' => { result.push('ﾋ'); result.push('ﾟ'); }
-            'プ' => { result.push('ﾌ'); result.push('ﾟ'); }
-            'ペ' => { result.push('ﾍ'); result.push('ﾟ'); }
-            'ポ' => { result.push('ﾎ'); result.push('ﾟ'); }
+            'パ' => {
+                result.push('ﾊ');
+                result.push('ﾟ');
+            }
+            'ピ' => {
+                result.push('ﾋ');
+                result.push('ﾟ');
+            }
+            'プ' => {
+                result.push('ﾌ');
+                result.push('ﾟ');
+            }
+            'ペ' => {
+                result.push('ﾍ');
+                result.push('ﾟ');
+            }
+            'ポ' => {
+                result.push('ﾎ');
+                result.push('ﾟ');
+            }
             // Katakana punctuation
             '。' => result.push('｡'),
             '「' => result.push('｢'),

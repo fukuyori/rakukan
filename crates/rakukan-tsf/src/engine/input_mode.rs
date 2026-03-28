@@ -18,8 +18,8 @@ impl InputMode {
 
     pub fn label(&self) -> &'static str {
         match self {
-            Self::Hiragana     => "あ",
-            Self::Katakana     => "ア",
+            Self::Hiragana => "あ",
+            Self::Katakana => "ア",
             Self::Alphanumeric => "A",
         }
     }

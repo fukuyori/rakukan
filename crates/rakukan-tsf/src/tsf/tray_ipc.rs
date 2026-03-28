@@ -14,7 +14,10 @@ use std::sync::OnceLock;
 use windows::Win32::{
     Foundation::{CloseHandle, HANDLE, INVALID_HANDLE_VALUE},
     System::{
-        Memory::{CreateFileMappingW, MapViewOfFile, UnmapViewOfFile, FILE_MAP_WRITE, PAGE_READWRITE, MEMORY_MAPPED_VIEW_ADDRESS},
+        Memory::{
+            CreateFileMappingW, FILE_MAP_WRITE, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
+            PAGE_READWRITE, UnmapViewOfFile,
+        },
         Threading::{CreateEventW, SetEvent},
     },
 };
@@ -93,7 +96,9 @@ pub fn init() -> windows::core::Result<()> {
 /// 現在モードを共有し、トレイへ通知する。
 pub fn publish(open: bool, mode: InputMode) {
     let _ = init();
-    let Some(ipc) = IPC.get().copied() else { return; };
+    let Some(ipc) = IPC.get().copied() else {
+        return;
+    };
     unsafe {
         (ipc.view.Value as *mut u32).write_volatile(encode(open, mode));
         let _ = SetEvent(ipc.evt);

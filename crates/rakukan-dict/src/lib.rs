@@ -6,9 +6,9 @@
 //!
 //! 辞書ファイルは %LOCALAPPDATA%\rakukan\dict\ に配置する。
 
-pub mod user_dict;
-pub mod store;
 pub mod mozc_dict;
+pub mod store;
+pub mod user_dict;
 
 pub use store::DictStore;
 
@@ -22,7 +22,12 @@ pub fn dict_dir() -> Option<PathBuf> {
     }
     #[cfg(not(target_os = "windows"))]
     if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".config").join("rakukan").join("dict"));
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("rakukan")
+                .join("dict"),
+        );
     }
     None
 }
@@ -31,11 +36,20 @@ pub fn dict_dir() -> Option<PathBuf> {
 pub fn user_dict_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     if let Ok(appdata) = std::env::var("APPDATA") {
-        return Some(PathBuf::from(appdata).join("rakukan").join("user_dict.toml"));
+        return Some(
+            PathBuf::from(appdata)
+                .join("rakukan")
+                .join("user_dict.toml"),
+        );
     }
     #[cfg(not(target_os = "windows"))]
     if let Ok(home) = std::env::var("HOME") {
-        return Some(PathBuf::from(home).join(".config").join("rakukan").join("user_dict.toml"));
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("rakukan")
+                .join("user_dict.toml"),
+        );
     }
     None
 }

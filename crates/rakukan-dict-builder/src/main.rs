@@ -83,7 +83,7 @@ struct Args {
 struct Entry {
     reading: String,
     surface: String,
-    cost:    u16,
+    cost: u16,
 }
 
 /// mozc TSV を読み込んでエントリ列を返す
@@ -104,7 +104,13 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
         let cols: Vec<&str> = line.splitn(5, '\t').collect();
         // mozc format: reading TAB lid TAB rid TAB cost TAB surface
         if cols.len() < 5 {
-            tracing::warn!("{}:{} カラム不足 ({} cols): {:?}", path.display(), lineno + 1, cols.len(), line);
+            tracing::warn!(
+                "{}:{} カラム不足 ({} cols): {:?}",
+                path.display(),
+                lineno + 1,
+                cols.len(),
+                line
+            );
             skipped += 1;
             continue;
         }
@@ -120,7 +126,12 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
                 65535u16
             }
             Err(_) => {
-                tracing::warn!("{}:{} cost パース失敗: {:?}", path.display(), lineno + 1, cost_str);
+                tracing::warn!(
+                    "{}:{} cost パース失敗: {:?}",
+                    path.display(),
+                    lineno + 1,
+                    cost_str
+                );
                 skipped += 1;
                 continue;
             }
@@ -137,12 +148,18 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
             continue;
         }
 
-        entries.push(Entry { reading, surface, cost });
+        entries.push(Entry {
+            reading,
+            surface,
+            cost,
+        });
     }
 
     tracing::info!(
         "{}: {} エントリ読み込み、{} スキップ",
-        path.display(), entries.len(), skipped
+        path.display(),
+        entries.len(),
+        skipped
     );
     Ok(entries)
 }
@@ -153,7 +170,7 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
 struct ReadingGroup {
     reading: String,
     /// cost 昇順にソートされた (surface, cost) リスト
-    tokens:  Vec<(String, u16)>,
+    tokens: Vec<(String, u16)>,
 }
 
 /// symbol.tsv パーサー
@@ -181,7 +198,7 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
             continue;
         }
 
-        let surface  = cols[1].trim().to_string();
+        let surface = cols[1].trim().to_string();
         let readings_raw = cols[2];
 
         if surface.is_empty() {
@@ -191,11 +208,15 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
 
         // readings フィールドはスペース区切りの複数トークン
         // ひらがな（U+3041–U+309F）と長音符（U+30FC）のみで構成されるトークンを読みとして採用
-        let hira_readings: Vec<&str> = readings_raw.split(' ')
-            .filter(|t| !t.is_empty() && t.chars().all(|c| {
-                let n = c as u32;
-                (0x3041..=0x309F).contains(&n) || c == 'ー'
-            }))
+        let hira_readings: Vec<&str> = readings_raw
+            .split(' ')
+            .filter(|t| {
+                !t.is_empty()
+                    && t.chars().all(|c| {
+                        let n = c as u32;
+                        (0x3041..=0x309F).contains(&n) || c == 'ー'
+                    })
+            })
             .collect();
 
         if hira_readings.is_empty() {
@@ -217,7 +238,9 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
 
     tracing::info!(
         "{}: {} symbol entries, {} skipped",
-        path.display(), entries.len(), skipped
+        path.display(),
+        entries.len(),
+        skipped
     );
     Ok(entries)
 }
@@ -251,7 +274,7 @@ fn build_groups(entries: Vec<Entry>, max_per_reading: usize) -> Vec<ReadingGroup
 // ─── バイナリ書き出し ─────────────────────────────────────────────────────────
 
 const MAGIC: &[u8; 4] = b"RKND";
-const VERSION: u32     = 1;
+const VERSION: u32 = 1;
 
 fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
     // ── ヒープ構築 ──────────────────────────────────────────────────────────
@@ -260,16 +283,16 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
 
     // Index エントリ（後でバイナリに書く）
     struct IndexEntry {
-        reading_off:   u32,
-        reading_len:   u16,
+        reading_off: u32,
+        reading_len: u16,
         entries_start: u32,
-        n_tokens:      u16,
+        n_tokens: u16,
     }
 
     struct EntryRecord {
         surface_off: u32,
         surface_len: u16,
-        cost:        u16,
+        cost: u16,
     }
 
     let mut index_entries: Vec<IndexEntry> = Vec::with_capacity(groups.len());
@@ -307,11 +330,14 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
     }
 
     let n_readings = groups.len() as u32;
-    let n_entries  = entry_records.len() as u32;
+    let n_entries = entry_records.len() as u32;
 
     tracing::info!(
         "書き込み: {} 読み、{} エントリ、reading_heap={} bytes、surface_heap={} bytes",
-        n_readings, n_entries, reading_heap.len(), surface_heap.len()
+        n_readings,
+        n_entries,
+        reading_heap.len(),
+        surface_heap.len()
     );
 
     // ── ファイル書き込み ─────────────────────────────────────────────────────
@@ -362,9 +388,7 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
 fn main() -> Result<()> {
     let args = Args::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter("info")
-        .init();
+    tracing_subscriber::fmt().with_env_filter("info").init();
 
     // 全入力 TSV を読み込んでマージ
     let mut all_entries: Vec<Entry> = Vec::new();
@@ -390,11 +414,7 @@ fn main() -> Result<()> {
     // バイナリ書き出し
     write_dict(&groups, &args.output)?;
 
-    println!(
-        "完了: {} 読み → {}",
-        groups.len(),
-        args.output.display()
-    );
+    println!("完了: {} 読み → {}", groups.len(), args.output.display());
     Ok(())
 }
 
@@ -426,19 +446,35 @@ mod tests {
     #[test]
     fn test_group_cost_sort() {
         let entries = vec![
-            Entry { reading: "にほん".into(), surface: "二本".into(), cost: 7800 },
-            Entry { reading: "にほん".into(), surface: "日本".into(), cost: 3394 },
+            Entry {
+                reading: "にほん".into(),
+                surface: "二本".into(),
+                cost: 7800,
+            },
+            Entry {
+                reading: "にほん".into(),
+                surface: "日本".into(),
+                cost: 3394,
+            },
         ];
         let groups = build_groups(entries, 50);
-        assert_eq!(groups[0].tokens[0].0, "日本");   // cost 3394 が先頭
+        assert_eq!(groups[0].tokens[0].0, "日本"); // cost 3394 が先頭
         assert_eq!(groups[0].tokens[1].0, "二本");
     }
 
     #[test]
     fn test_group_dedup() {
         let entries = vec![
-            Entry { reading: "tes".into(), surface: "X".into(), cost: 100 },
-            Entry { reading: "tes".into(), surface: "X".into(), cost: 200 }, // 重複
+            Entry {
+                reading: "tes".into(),
+                surface: "X".into(),
+                cost: 100,
+            },
+            Entry {
+                reading: "tes".into(),
+                surface: "X".into(),
+                cost: 200,
+            }, // 重複
         ];
         let groups = build_groups(entries, 50);
         assert_eq!(groups[0].tokens.len(), 1); // 重複除去
@@ -447,9 +483,21 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let entries = vec![
-            Entry { reading: "にほん".into(),   surface: "日本".into(),   cost: 3394 },
-            Entry { reading: "にほん".into(),   surface: "二本".into(),   cost: 7800 },
-            Entry { reading: "にほんご".into(), surface: "日本語".into(), cost: 4000 },
+            Entry {
+                reading: "にほん".into(),
+                surface: "日本".into(),
+                cost: 3394,
+            },
+            Entry {
+                reading: "にほん".into(),
+                surface: "二本".into(),
+                cost: 7800,
+            },
+            Entry {
+                reading: "にほんご".into(),
+                surface: "日本語".into(),
+                cost: 4000,
+            },
         ];
         let groups = build_groups(entries, 50);
         let tmp = tempfile::NamedTempFile::new().unwrap();

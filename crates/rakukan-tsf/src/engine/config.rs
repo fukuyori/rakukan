@@ -65,7 +65,9 @@ impl Default for GeneralConfig {
     }
 }
 
-fn default_log_level() -> String { "info".to_string() }
+fn default_log_level() -> String {
+    "info".to_string()
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -75,8 +77,12 @@ pub enum KeyboardLayout {
     Custom,
 }
 
-fn default_keyboard_layout() -> KeyboardLayout { KeyboardLayout::Jis }
-fn default_reload_on_mode_switch() -> bool { true }
+fn default_keyboard_layout() -> KeyboardLayout {
+    KeyboardLayout::Jis
+}
+fn default_reload_on_mode_switch() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct KeyboardConfig {
@@ -104,8 +110,12 @@ pub enum DefaultInputMode {
     Alphanumeric,
 }
 
-fn default_input_mode() -> DefaultInputMode { DefaultInputMode::Alphanumeric }
-fn default_remember_last_kana_mode() -> bool { true }
+fn default_input_mode() -> DefaultInputMode {
+    DefaultInputMode::Alphanumeric
+}
+fn default_remember_last_kana_mode() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
@@ -117,12 +127,19 @@ pub struct InputConfig {
 
 impl Default for InputConfig {
     fn default() -> Self {
-        Self { default_mode: default_input_mode(), remember_last_kana_mode: true }
+        Self {
+            default_mode: default_input_mode(),
+            remember_last_kana_mode: true,
+        }
     }
 }
 
-fn default_debounce_ms() -> u64 { 80 }
-fn default_prefer_dictionary_first() -> bool { true }
+fn default_debounce_ms() -> u64 {
+    80
+}
+fn default_prefer_dictionary_first() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveConversionConfig {
@@ -147,8 +164,12 @@ impl Default for LiveConversionConfig {
     }
 }
 
-fn default_dump_active_config() -> bool { true }
-fn default_warn_on_unknown_key() -> bool { true }
+fn default_dump_active_config() -> bool {
+    true
+}
+fn default_warn_on_unknown_key() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DiagnosticsConfig {
@@ -160,7 +181,10 @@ pub struct DiagnosticsConfig {
 
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
-        Self { dump_active_config: true, warn_on_unknown_key: true }
+        Self {
+            dump_active_config: true,
+            warn_on_unknown_key: true,
+        }
     }
 }
 
@@ -176,7 +200,11 @@ impl ConfigManager {
         let path = config_path().unwrap_or_else(|_| PathBuf::from("config.toml"));
         let current = load_app_config_from_path(&path).unwrap_or_default();
         let last_modified = file_modified(&path);
-        Self { path, last_modified, current }
+        Self {
+            path,
+            last_modified,
+            current,
+        }
     }
 
     fn reload_if_changed(&mut self) -> Result<bool> {
@@ -195,8 +223,7 @@ static CONFIG_MANAGER: LazyLock<Mutex<ConfigManager>> =
     LazyLock::new(|| Mutex::new(ConfigManager::new()));
 
 pub fn config_path() -> Result<PathBuf> {
-    let appdata = std::env::var("APPDATA")
-        .map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
+    let appdata = std::env::var("APPDATA").map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
     Ok(PathBuf::from(appdata).join("rakukan").join("config.toml"))
 }
 
@@ -213,7 +240,9 @@ pub fn load_app_config_from_path(path: &PathBuf) -> Result<AppConfig> {
 pub fn config_save_default() -> Result<()> {
     let path = config_path()?;
     if !path.exists() {
-        if let Some(parent) = path.parent() { std::fs::create_dir_all(parent)?; }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&path, default_config_text())?;
         tracing::info!("config.toml created: {}", path.display());
     }
@@ -229,7 +258,8 @@ pub fn init_config_manager() {
 }
 
 pub fn current_config() -> AppConfig {
-    CONFIG_MANAGER.lock()
+    CONFIG_MANAGER
+        .lock()
         .map(|g| g.current.clone())
         .unwrap_or_default()
 }

@@ -8,27 +8,24 @@ use crate::{
 };
 use anyhow::Result;
 use windows::{
-    core::Interface,
     Win32::{
         System::{
-            Com::{CoCreateInstance, CLSCTX_INPROC_SERVER},
+            Com::{CLSCTX_INPROC_SERVER, CoCreateInstance},
             Registry::HKEY_CLASSES_ROOT,
         },
         UI::{
             Input::KeyboardAndMouse::HKL,
             TextServices::{
                 CLSID_TF_CategoryMgr, CLSID_TF_InputProcessorProfiles,
-                ITfCategoryMgr, ITfInputProcessorProfileMgr, ITfInputProcessorProfiles,
-                GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER,
-                GUID_TFCAT_TIPCAP_COMLESS,
-                GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
-                GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT,
-                GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
-                GUID_TFCAT_TIPCAP_UIELEMENTENABLED,
-                GUID_TFCAT_TIP_KEYBOARD,
+                GUID_TFCAT_DISPLAYATTRIBUTEPROVIDER, GUID_TFCAT_TIP_KEYBOARD,
+                GUID_TFCAT_TIPCAP_COMLESS, GUID_TFCAT_TIPCAP_IMMERSIVESUPPORT,
+                GUID_TFCAT_TIPCAP_INPUTMODECOMPARTMENT, GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
+                GUID_TFCAT_TIPCAP_UIELEMENTENABLED, ITfCategoryMgr, ITfInputProcessorProfileMgr,
+                ITfInputProcessorProfiles,
             },
         },
     },
+    core::Interface,
 };
 
 /// 日本語 LANGID（固定値）
@@ -80,19 +77,18 @@ pub fn profile_register(dll_path: &str) -> Result<()> {
 
     unsafe {
         // ITfInputProcessorProfiles を取得
-        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
-            &CLSID_TF_InputProcessorProfiles,
-            None,
-            CLSCTX_INPROC_SERVER,
-        ).map_err(|e| anyhow::anyhow!("CoCreateInstance Profiles: {e}"))?;
+        let profiles: ITfInputProcessorProfiles =
+            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("CoCreateInstance Profiles: {e}"))?;
 
         // CLSID を TSF に登録（RegisterProfile の前に必要）
-        profiles.Register(&GUID_TEXT_SERVICE)
+        profiles
+            .Register(&GUID_TEXT_SERVICE)
             .map_err(|e| anyhow::anyhow!("Register: {e}"))?;
 
         // ITfInputProcessorProfileMgr にキャストして RegisterProfile
-        let mgr: ITfInputProcessorProfileMgr = Interface::cast(&profiles)
-            .map_err(|e| anyhow::anyhow!("cast ProfileMgr: {e}"))?;
+        let mgr: ITfInputProcessorProfileMgr =
+            Interface::cast(&profiles).map_err(|e| anyhow::anyhow!("cast ProfileMgr: {e}"))?;
 
         mgr.RegisterProfile(
             &GUID_TEXT_SERVICE,
@@ -103,9 +99,10 @@ pub fn profile_register(dll_path: &str) -> Result<()> {
             0,
             HKL(std::ptr::null_mut()),
             0,
-            true,   // bEnabledByDefault
+            true, // bEnabledByDefault
             0,
-        ).map_err(|e| anyhow::anyhow!("RegisterProfile: {e}"))?;
+        )
+        .map_err(|e| anyhow::anyhow!("RegisterProfile: {e}"))?;
     }
 
     Ok(())
@@ -125,14 +122,13 @@ pub fn category_register() -> Result<()> {
     ];
 
     unsafe {
-        let catmgr: ITfCategoryMgr = CoCreateInstance(
-            &CLSID_TF_CategoryMgr,
-            None,
-            CLSCTX_INPROC_SERVER,
-        ).map_err(|e| anyhow::anyhow!("CoCreateInstance CategoryMgr: {e}"))?;
+        let catmgr: ITfCategoryMgr =
+            CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("CoCreateInstance CategoryMgr: {e}"))?;
 
         for cat in CATEGORIES {
-            catmgr.RegisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)
+            catmgr
+                .RegisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)
                 .map_err(|e| anyhow::anyhow!("RegisterCategory: {e}"))?;
         }
     }
@@ -158,11 +154,9 @@ fn clsid_unregister() -> Result<()> {
 
 fn profile_unregister() -> Result<()> {
     unsafe {
-        let profiles: ITfInputProcessorProfiles = CoCreateInstance(
-            &CLSID_TF_InputProcessorProfiles,
-            None,
-            CLSCTX_INPROC_SERVER,
-        ).map_err(|e| anyhow::anyhow!("{e}"))?;
+        let profiles: ITfInputProcessorProfiles =
+            CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // モダン API
         if let Ok(mgr) = Interface::cast::<ITfInputProcessorProfileMgr>(&profiles) {
@@ -186,9 +180,9 @@ fn category_unregister() -> Result<()> {
     ];
 
     unsafe {
-        if let Ok(catmgr) = CoCreateInstance::<_, ITfCategoryMgr>(
-            &CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER,
-        ) {
+        if let Ok(catmgr) =
+            CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+        {
             for cat in CATEGORIES {
                 let _ = catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE);
             }

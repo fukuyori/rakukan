@@ -12,8 +12,8 @@ use std::sync::{Arc, RwLock};
 use anyhow::Result;
 use tracing::{debug, info, warn};
 
-use crate::user_dict::UserDict;
 use crate::mozc_dict::MozcDict;
+use crate::user_dict::UserDict;
 
 #[derive(Debug, Clone)]
 pub struct DictResult {
@@ -47,10 +47,7 @@ pub struct DictStore {
 
 impl DictStore {
     /// 各辞書を読み込んで DictStore を構築する
-    pub fn load(
-        user_path: Option<&Path>,
-        mozc_path: Option<&Path>,
-    ) -> Result<Self> {
+    pub fn load(user_path: Option<&Path>, mozc_path: Option<&Path>) -> Result<Self> {
         // ユーザー辞書: 失敗しても空で続行（パスエラー・パースエラー問わず）
         let user = if let Some(p) = user_path {
             match UserDict::load(p) {
@@ -69,14 +66,20 @@ impl DictStore {
             if p.exists() {
                 match MozcDict::open(p) {
                     Ok(d) => {
-                        info!("dict::store: mozc loaded readings={} entries={}", d.n_readings(), d.n_entries());
+                        info!(
+                            "dict::store: mozc loaded readings={} entries={}",
+                            d.n_readings(),
+                            d.n_entries()
+                        );
                         Some(d)
                     }
                     Err(e) => {
-                        warn!("dict::store: mozc load failed path={} size={}B err={}",
+                        warn!(
+                            "dict::store: mozc load failed path={} size={}B err={}",
                             p.display(),
                             std::fs::metadata(p).map(|m| m.len()).unwrap_or(0),
-                            e);
+                            e
+                        );
                         None
                     }
                 }
@@ -138,24 +141,41 @@ impl DictStore {
         if let Err(e) = ud.save(path) {
             warn!("user_dict save failed: {e}");
         } else {
-            debug!("dict::store: learned reading={:?} surface={:?}", reading, surface);
+            debug!(
+                "dict::store: learned reading={:?} surface={:?}",
+                reading, surface
+            );
         }
     }
 
     /// ひらがな読みからユーザー辞書候補のみを返す（merge_candidates 用）
     pub fn lookup_user(&self, reading: &str) -> Vec<String> {
-        let Ok(user) = self.inner.user.read() else { return vec![]; };
+        let Ok(user) = self.inner.user.read() else {
+            return vec![];
+        };
         user.get(reading).cloned().unwrap_or_default()
     }
 
     /// ひらがな読みから mozc 候補を返す（ユーザー辞書を除く）
     pub fn lookup_dict(&self, reading: &str, limit: usize) -> Vec<String> {
         let mozc_loaded = self.inner.mozc.is_some();
-        let result: Vec<String> = self.inner.mozc
+        let result: Vec<String> = self
+            .inner
+            .mozc
             .as_ref()
-            .map(|d| d.lookup(reading, limit).into_iter().map(|(s, _)| s).collect())
+            .map(|d| {
+                d.lookup(reading, limit)
+                    .into_iter()
+                    .map(|(s, _)| s)
+                    .collect()
+            })
             .unwrap_or_default();
-        debug!("dict::store: lookup reading={:?} mozc={} n={}", reading, mozc_loaded, result.len());
+        debug!(
+            "dict::store: lookup reading={:?} mozc={} n={}",
+            reading,
+            mozc_loaded,
+            result.len()
+        );
         result
     }
 
@@ -164,34 +184,53 @@ impl DictStore {
     pub fn lookup(&self, reading: &str, limit: usize) -> DictResult {
         let user_cands = {
             let Ok(user) = self.inner.user.read() else {
-                return DictResult { candidates: vec![], source: DictSource::None };
+                return DictResult {
+                    candidates: vec![],
+                    source: DictSource::None,
+                };
             };
             user.get(reading).cloned()
         };
 
-        let mozc_cands: Vec<String> = self.inner.mozc
+        let mozc_cands: Vec<String> = self
+            .inner
+            .mozc
             .as_ref()
-            .map(|d| d.lookup(reading, limit).into_iter().map(|(s, _)| s).collect())
+            .map(|d| {
+                d.lookup(reading, limit)
+                    .into_iter()
+                    .map(|(s, _)| s)
+                    .collect()
+            })
             .unwrap_or_default();
 
         let has_user = user_cands.is_some();
         let has_mozc = !mozc_cands.is_empty();
 
         if !has_user && !has_mozc {
-            return DictResult { candidates: vec![], source: DictSource::None };
+            return DictResult {
+                candidates: vec![],
+                source: DictSource::None,
+            };
         }
 
         let mut merged: Vec<String> = Vec::new();
 
         if let Some(u) = user_cands {
             for s in u {
-                if !merged.contains(&s) { merged.push(s); }
+                if !merged.contains(&s) {
+                    merged.push(s);
+                }
             }
         }
 
         for s in &mozc_cands {
-            if merged.len() >= limit { break; }
-            if !merged.contains(s) { merged.push(s.clone()); }
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(s) {
+                merged.push(s.clone());
+            }
         }
 
         merged.truncate(limit);
@@ -199,13 +238,18 @@ impl DictStore {
         let source = match (has_user, has_mozc) {
             (true, false) => DictSource::User,
             (false, true) => DictSource::Mozc,
-            _             => DictSource::Merged,
+            _ => DictSource::Merged,
         };
 
-        DictResult { candidates: merged, source }
+        DictResult {
+            candidates: merged,
+            source,
+        }
     }
 
-    pub fn is_mozc_loaded(&self) -> bool { self.inner.mozc.is_some() }
+    pub fn is_mozc_loaded(&self) -> bool {
+        self.inner.mozc.is_some()
+    }
     pub fn user_entry_count(&self) -> usize {
         self.inner.user.read().map(|u| u.len()).unwrap_or(0)
     }
@@ -216,7 +260,8 @@ mod tests {
     use super::*;
 
     fn make_store(user: &[(&str, &str)]) -> DictStore {
-        let user_map: HashMap<String, Vec<String>> = user.iter()
+        let user_map: HashMap<String, Vec<String>> = user
+            .iter()
             .map(|(r, s)| (r.to_string(), vec![s.to_string()]))
             .collect();
         DictStore {

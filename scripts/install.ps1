@@ -368,6 +368,18 @@ $dictDir   = Join-Path $env:LOCALAPPDATA "rakukan\dict"
 New-Item -ItemType Directory -Force -Path $dictDir | Out-Null
 $forceDict = $env:RAKUKAN_FORCE_DICT -eq "1"
 
+# --- Vibrato dictionary (optional bundle) ---
+$vibratoSrc = Join-Path $PSScriptRoot "..\assets\vibrato\system.dic"
+$vibratoDir = Join-Path $dictDir "vibrato"
+$vibratoDst = Join-Path $vibratoDir "system.dic"
+if (Test-Path -LiteralPath $vibratoSrc) {
+    New-Item -ItemType Directory -Force -Path $vibratoDir | Out-Null
+    Copy-Item -LiteralPath $vibratoSrc -Destination $vibratoDst -Force
+    Write-Host "  -> vibrato\system.dic"
+} else {
+    Write-Host "  [INFO] Vibrato dictionary not bundled yet: $vibratoSrc"
+}
+
 # --- 5a: mozc dictionary (Apache 2.0) ---
 Write-Host "  [5a] mozc dictionary (Apache 2.0)..."
 Write-Host "  Source: https://github.com/google/mozc"

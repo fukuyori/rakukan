@@ -25,9 +25,12 @@ pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
     if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
         let repo_slug = repo_id.replace('/', "--");
         let candidate = std::path::PathBuf::from(home)
-            .join(".cache").join("huggingface").join("hub")
+            .join(".cache")
+            .join("huggingface")
+            .join("hub")
             .join(format!("models--{}", repo_slug))
-            .join("snapshots").join("main")
+            .join("snapshots")
+            .join("main")
             .join(filename);
         if candidate.exists() && candidate.metadata().map(|m| m.len() > 0).unwrap_or(false) {
             tracing::info!("Using pre-downloaded model: {:?}", candidate);

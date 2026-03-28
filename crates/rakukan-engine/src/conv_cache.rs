@@ -41,10 +41,10 @@ use crate::kanji::KanaKanjiConverter;
 
 /// ワーカーへの変換リクエスト（single-slot 上書き式キュー）
 struct Request {
-    hiragana:  String,
+    hiragana: String,
     committed: String,
     converter: KanaKanjiConverter,
-    n:         usize,
+    n: usize,
 }
 
 // ─── キャッシュ状態 ────────────────────────────────────────────────────────────
@@ -55,11 +55,15 @@ enum State {
     /// ワーカーが変換処理を実行中
     Running { key: String },
     /// 変換完了。`take_ready()` または `reclaim()` で回収するまで保持
-    Done { key: String, converter: KanaKanjiConverter, candidates: Vec<String> },
+    Done {
+        key: String,
+        converter: KanaKanjiConverter,
+        candidates: Vec<String>,
+    },
 }
 
 struct Inner {
-    state:   State,
+    state: State,
     /// 上書き式 single-slot キュー。`start()` が積み、ワーカーが取り出す。
     /// Running 中に新リクエストが来た場合も上書きし、
     /// ワーカーは変換完了時に pending があれば warm-up 済み converter を再利用する。
@@ -69,7 +73,7 @@ struct Inner {
 struct Cache {
     inner: Mutex<Inner>,
     /// ワーカー ↔ 待機側（`wait_done_timeout`）の通知用 Condvar
-    cond:  Condvar,
+    cond: Condvar,
 }
 
 // KanaKanjiConverter は raw pointer を含むが、常駐ワーカースレッドを
@@ -79,8 +83,11 @@ unsafe impl Sync for Cache {}
 
 static CACHE: LazyLock<Arc<Cache>> = LazyLock::new(|| {
     let cache = Arc::new(Cache {
-        inner: Mutex::new(Inner { state: State::Idle, pending: None }),
-        cond:  Condvar::new(),
+        inner: Mutex::new(Inner {
+            state: State::Idle,
+            pending: None,
+        }),
+        cond: Condvar::new(),
     });
     let worker = Arc::clone(&cache);
     std::thread::Builder::new()
@@ -99,7 +106,9 @@ fn worker_loop(cache: Arc<Cache>) {
             let mut inner = cache.inner.lock().unwrap();
             loop {
                 if let Some(req) = inner.pending.take() {
-                    inner.state = State::Running { key: req.hiragana.clone() };
+                    inner.state = State::Running {
+                        key: req.hiragana.clone(),
+                    };
                     // Idle → Running の遷移を wait_done_timeout（pending 待機中）に通知。
                     // この notify がないと bg_start 直後に wait_done_timeout を呼んだ側が
                     // Condvar に入れず、Running 状態のチェックが走る前に即タイムアウトする。
@@ -110,28 +119,34 @@ fn worker_loop(cache: Arc<Cache>) {
             }
         };
 
-        let key       = req.hiragana.clone();
+        let key = req.hiragana.clone();
         let committed = req.committed.clone();
-        let n         = req.n;
+        let n = req.n;
         let converter = req.converter;
 
         let t = std::time::Instant::now();
-        let (converter, candidates) = match std::panic::catch_unwind(
-            std::panic::AssertUnwindSafe(|| converter.convert(&key, &committed, n))
-        ) {
-            Ok(Ok(cands)) => {
-                tracing::trace!("conv-worker: {}ms {} cands key={:?}", t.elapsed().as_millis(), cands.len(), key);
-                (converter, cands)
-            }
-            Ok(Err(e)) => {
-                tracing::warn!("conv-worker error: {e}");
-                (converter, vec![])
-            }
-            Err(_) => {
-                tracing::error!("conv-worker PANIC");
-                (converter, vec![])
-            }
-        };
+        let (converter, candidates) =
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                converter.convert(&key, &committed, n)
+            })) {
+                Ok(Ok(cands)) => {
+                    tracing::trace!(
+                        "conv-worker: {}ms {} cands key={:?}",
+                        t.elapsed().as_millis(),
+                        cands.len(),
+                        key
+                    );
+                    (converter, cands)
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("conv-worker error: {e}");
+                    (converter, vec![])
+                }
+                Err(_) => {
+                    tracing::error!("conv-worker PANIC");
+                    (converter, vec![])
+                }
+            };
 
         let mut inner = cache.inner.lock().unwrap();
         if let Some(pending) = inner.pending.as_mut() {
@@ -139,7 +154,11 @@ fn worker_loop(cache: Arc<Cache>) {
             // warm-up 済み converter を次のリクエストに引き渡す（再初期化コストを節約）
             pending.converter = converter;
         } else {
-            inner.state = State::Done { key, converter, candidates };
+            inner.state = State::Done {
+                key,
+                converter,
+                candidates,
+            };
         }
         // Done 遷移を wait_done_timeout に通知
         cache.cond.notify_all();
@@ -157,12 +176,14 @@ fn worker_loop(cache: Arc<Cache>) {
 /// - `None`       = ワーカーに渡した（converter の所有権はキャッシュへ）
 /// - `Some(conv)` = 渡せなかった（同一キー実行中 or lock 取得失敗）
 pub fn start(
-    hiragana:  String,
+    hiragana: String,
     committed: String,
     converter: KanaKanjiConverter,
-    n:         usize,
+    n: usize,
 ) -> Option<KanaKanjiConverter> {
-    if hiragana.is_empty() { return Some(converter); }
+    if hiragana.is_empty() {
+        return Some(converter);
+    }
 
     let cache = &**CACHE;
     let Ok(mut inner) = cache.inner.try_lock() else {
@@ -182,7 +203,12 @@ pub fn start(
         }
     }
 
-    inner.pending = Some(Request { hiragana, committed, converter, n });
+    inner.pending = Some(Request {
+        hiragana,
+        committed,
+        converter,
+        n,
+    });
     cache.cond.notify_one();
     None
 }
@@ -200,18 +226,33 @@ pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
     let cache = &**CACHE;
     let mut inner = cache.inner.lock().ok()?;
 
-    let State::Done { .. } = &inner.state else { return None; };
-    let State::Done { key: k, converter, candidates } =
-        std::mem::replace(&mut inner.state, State::Idle) else { unreachable!() };
+    let State::Done { .. } = &inner.state else {
+        return None;
+    };
+    let State::Done {
+        key: k,
+        converter,
+        candidates,
+    } = std::mem::replace(&mut inner.state, State::Idle)
+    else {
+        unreachable!()
+    };
 
     let matched = k == key;
     if !matched {
         tracing::warn!(
             "conv-cache: take_ready MISMATCH cache_key={:?}({} bytes) req_key={:?}({} bytes)",
-            k, k.len(), key, key.len()
+            k,
+            k.len(),
+            key,
+            key.len()
         );
         // キー不一致 → Done 状態を復元し、呼び出し元には None を返す
-        inner.state = State::Done { key: k, converter, candidates };
+        inner.state = State::Done {
+            key: k,
+            converter,
+            candidates,
+        };
         return None;
     }
     tracing::trace!("conv-cache: take_ready MATCH key={:?}", key);
@@ -226,8 +267,10 @@ pub fn try_reclaim_done() -> Option<KanaKanjiConverter> {
     let cache = &**CACHE;
     let mut inner = cache.inner.try_lock().ok()?;
     if let State::Done { .. } = &inner.state {
-        let State::Done { converter, key, .. } =
-            std::mem::replace(&mut inner.state, State::Idle) else { unreachable!() };
+        let State::Done { converter, key, .. } = std::mem::replace(&mut inner.state, State::Idle)
+        else {
+            unreachable!()
+        };
         tracing::trace!("conv-cache: reclaim Done key={:?}", key);
         Some(converter)
     } else {
@@ -255,12 +298,18 @@ pub fn reclaim_nonblocking() -> Option<KanaKanjiConverter> {
 /// `blocking lock` を使用。`try_lock()` だと Done 書き込み中を見落とすため。
 pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
     let cache = &**CACHE;
-    let Ok(inner) = cache.inner.lock() else { return false; };
+    let Ok(inner) = cache.inner.lock() else {
+        return false;
+    };
 
     // すでに Done なら即 true
-    if matches!(&inner.state, State::Done { .. }) { return true; }
+    if matches!(&inner.state, State::Done { .. }) {
+        return true;
+    }
     // Idle かつ pending なし → ワーカーが拾うものがない（変換が起動されていない）
-    if matches!(&inner.state, State::Idle) && inner.pending.is_none() { return false; }
+    if matches!(&inner.state, State::Idle) && inner.pending.is_none() {
+        return false;
+    }
     // 以下は Condvar で待機:
     //   - Idle && pending=Some: bg_start 直後のレース（ワーカーがまだ拾っていない）
     //   - Running: 変換中
@@ -270,14 +319,20 @@ pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
     loop {
         let remaining = match deadline.checked_duration_since(std::time::Instant::now()) {
             Some(d) => d,
-            None    => return false, // タイムアウト
+            None => return false, // タイムアウト
         };
         let (g, timed_out) = cache.cond.wait_timeout(guard, remaining).unwrap();
         guard = g;
-        if matches!(&guard.state, State::Done { .. }) { return true; }
+        if matches!(&guard.state, State::Done { .. }) {
+            return true;
+        }
         // pending も Running もなくなった（外部からキャンセル等）
-        if matches!(&guard.state, State::Idle) && guard.pending.is_none() { return false; }
-        if timed_out.timed_out() { return false; }
+        if matches!(&guard.state, State::Idle) && guard.pending.is_none() {
+            return false;
+        }
+        if timed_out.timed_out() {
+            return false;
+        }
     }
 }
 
@@ -288,9 +343,9 @@ pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
 pub fn status() -> &'static str {
     match CACHE.inner.lock() {
         Ok(s) => match &s.state {
-            State::Idle           => "idle",
+            State::Idle => "idle",
             State::Running { .. } => "running",
-            State::Done    { .. } => "done",
+            State::Done { .. } => "done",
         },
         Err(_) => "idle", // poisoned — フォールバック
     }

@@ -9,9 +9,9 @@
 //! 3. `step_open_mozc`      — MozcDict::open（mmap + ヘッダー検証）
 //! 4. `step_load_store`     — DictStore::load（user 辞書込み）
 
-use std::path::PathBuf;
-use rakukan_dict::{find_mozc_dict, user_dict_path, DictStore};
 use rakukan_dict::mozc_dict::MozcDict;
+use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
+use std::path::PathBuf;
 
 /// ローダーの各ステップ結果
 pub enum LoadResult {
@@ -30,7 +30,10 @@ pub fn load_dict() -> LoadResult {
     // ── Step 2: mozc ファイルの事前プローブ ───────────────────────────────────
     if let Some(ref p) = mozc_path {
         if let Err(reason) = step_probe_mozc(p) {
-            return LoadResult::Failed { step: "probe_mozc", reason };
+            return LoadResult::Failed {
+                step: "probe_mozc",
+                reason,
+            };
         }
     } else {
         return LoadResult::Failed {
@@ -42,7 +45,10 @@ pub fn load_dict() -> LoadResult {
     // ── Step 3: MozcDict::open ────────────────────────────────────────────────
     let mozc_path_ref = mozc_path.as_deref().unwrap();
     if let Err(reason) = step_open_mozc(mozc_path_ref) {
-        return LoadResult::Failed { step: "open_mozc", reason };
+        return LoadResult::Failed {
+            step: "open_mozc",
+            reason,
+        };
     }
 
     // ── Step 4: DictStore::load ───────────────────────────────────────────────
@@ -100,8 +106,7 @@ fn step_probe_mozc(path: &std::path::Path) -> Result<(), String> {
 
     // マジックバイト確認（最初の4バイトを読む）
     use std::io::Read;
-    let mut f = std::fs::File::open(path)
-        .map_err(|e| format!("File::open failed: {e}"))?;
+    let mut f = std::fs::File::open(path).map_err(|e| format!("File::open failed: {e}"))?;
     let mut magic = [0u8; 4];
     f.read_exact(&mut magic)
         .map_err(|e| format!("read_exact failed: {e}"))?;

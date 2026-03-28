@@ -17,16 +17,16 @@
 
 use std::path::Path;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use memmap2::Mmap;
 
 // ─── フォーマット定数 ─────────────────────────────────────────────────────────
 
-const MAGIC:   &[u8; 4] = b"RKND";
-const VERSION: u32      = 1;
+const MAGIC: &[u8; 4] = b"RKND";
+const VERSION: u32 = 1;
 
-const HEADER_SIZE:       usize = 16;
-const INDEX_ENTRY_SIZE:  usize = 12;
+const HEADER_SIZE: usize = 16;
+const INDEX_ENTRY_SIZE: usize = 12;
 const ENTRY_RECORD_SIZE: usize = 8;
 
 // ─── MozcDict ────────────────────────────────────────────────────────────────
@@ -36,11 +36,11 @@ const ENTRY_RECORD_SIZE: usize = 8;
 /// `MozcDict` は `Mmap` を内部に持ち、辞書ファイルをゼロコピーで参照する。
 /// 複数スレッドからの読み取りは安全（`Mmap` は `Sync`）。
 pub struct MozcDict {
-    mmap:       Mmap,
-    n_entries:  u32,
+    mmap: Mmap,
+    n_entries: u32,
     n_readings: u32,
     // 各セクションの開始オフセット（mmap 内）
-    index_off:   usize,
+    index_off: usize,
     reading_heap_off: usize,
     entries_off: usize,
     surface_heap_off: usize,
@@ -73,18 +73,21 @@ impl MozcDict {
             bail!("rakukan.dict: バージョン不一致 (got {version}, expected {VERSION})");
         }
 
-        let n_entries  = u32_le(&mmap, 8);
+        let n_entries = u32_le(&mmap, 8);
         let n_readings = u32_le(&mmap, 12);
 
         // セクションオフセット計算
-        let index_off        = HEADER_SIZE;
+        let index_off = HEADER_SIZE;
         let reading_heap_off = index_off + n_readings as usize * INDEX_ENTRY_SIZE;
-        let entries_off      = reading_heap_off + reading_heap_size(&mmap, n_readings, index_off)?;
+        let entries_off = reading_heap_off + reading_heap_size(&mmap, n_readings, index_off)?;
         let surface_heap_off = entries_off + n_entries as usize * ENTRY_RECORD_SIZE;
 
         if surface_heap_off > mmap.len() {
-            bail!("rakukan.dict: ファイルサイズ不足 ({}B, expected >= {}B)",
-                mmap.len(), surface_heap_off);
+            bail!(
+                "rakukan.dict: ファイルサイズ不足 ({}B, expected >= {}B)",
+                mmap.len(),
+                surface_heap_off
+            );
         }
 
         tracing::debug!(
@@ -115,14 +118,13 @@ impl MozcDict {
 
         let mut results = Vec::with_capacity(count);
         for i in 0..count {
-            let record_off = self.entries_off
-                + (entries_start as usize + i) * ENTRY_RECORD_SIZE;
+            let record_off = self.entries_off + (entries_start as usize + i) * ENTRY_RECORD_SIZE;
             let surface_off = u32_le(&self.mmap, record_off) as usize;
             let surface_len = u16_le(&self.mmap, record_off + 4) as usize;
-            let cost        = u16_le(&self.mmap, record_off + 6);
+            let cost = u16_le(&self.mmap, record_off + 6);
 
             let surface_start = self.surface_heap_off + surface_off;
-            let surface_end   = surface_start + surface_len;
+            let surface_end = surface_start + surface_len;
             if surface_end > self.mmap.len() {
                 tracing::warn!("surface 範囲外: reading={reading:?}");
                 break;
@@ -137,10 +139,14 @@ impl MozcDict {
     }
 
     /// ユニーク読み数
-    pub fn n_readings(&self) -> usize { self.n_readings as usize }
+    pub fn n_readings(&self) -> usize {
+        self.n_readings as usize
+    }
 
     /// 全エントリ数
-    pub fn n_entries(&self) -> usize { self.n_entries as usize }
+    pub fn n_entries(&self) -> usize {
+        self.n_entries as usize
+    }
 
     // ─ 内部ヘルパー ──────────────────────────────────────────────────────────
 
@@ -150,10 +156,10 @@ impl MozcDict {
         let mut hi = self.n_readings as usize;
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
-            let r   = self.reading_at(mid);
+            let r = self.reading_at(mid);
             match r.as_deref().cmp(&Some(reading)) {
-                std::cmp::Ordering::Equal   => return Some(mid),
-                std::cmp::Ordering::Less    => lo = mid + 1,
+                std::cmp::Ordering::Equal => return Some(mid),
+                std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,
             }
         }
@@ -166,7 +172,7 @@ impl MozcDict {
         let reading_off = u32_le(&self.mmap, base) as usize;
         let reading_len = u16_le(&self.mmap, base + 4) as usize;
         let start = self.reading_heap_off + reading_off;
-        let end   = start + reading_len;
+        let end = start + reading_len;
         if end > self.entries_off {
             return None;
         }
@@ -177,7 +183,7 @@ impl MozcDict {
     fn index_entry(&self, i: usize) -> (u32, u16) {
         let base = self.index_off + i * INDEX_ENTRY_SIZE;
         let entries_start = u32_le(&self.mmap, base + 6);
-        let n_tokens      = u16_le(&self.mmap, base + 10);
+        let n_tokens = u16_le(&self.mmap, base + 10);
         (entries_start, n_tokens)
     }
 }
@@ -238,13 +244,22 @@ mod tests {
         }
 
         let n_readings = map.len() as u32;
-        let n_entries  = entries.len() as u32;
+        let n_entries = entries.len() as u32;
 
         let mut reading_heap: Vec<u8> = Vec::new();
         let mut surface_heap: Vec<u8> = Vec::new();
 
-        struct IdxEntry { reading_off: u32, reading_len: u16, entries_start: u32, n_tokens: u16 }
-        struct EntRecord { surface_off: u32, surface_len: u16, cost: u16 }
+        struct IdxEntry {
+            reading_off: u32,
+            reading_len: u16,
+            entries_start: u32,
+            n_tokens: u16,
+        }
+        struct EntRecord {
+            surface_off: u32,
+            surface_len: u16,
+            cost: u16,
+        }
 
         let mut idx_entries: Vec<IdxEntry> = Vec::new();
         let mut ent_records: Vec<EntRecord> = Vec::new();
@@ -303,24 +318,20 @@ mod tests {
     #[test]
     fn test_lookup_basic() {
         let data = build_test_dict(&[
-            ("にほん",   "日本",   3394),
-            ("にほん",   "二本",   7800),
+            ("にほん", "日本", 3394),
+            ("にほん", "二本", 7800),
             ("にほんご", "日本語", 4000),
         ]);
         let dict = open_test(&data);
         let results = dict.lookup("にほん", 10);
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].0, "日本");    // cost 3394
-        assert_eq!(results[1].0, "二本");    // cost 7800
+        assert_eq!(results[0].0, "日本"); // cost 3394
+        assert_eq!(results[1].0, "二本"); // cost 7800
     }
 
     #[test]
     fn test_lookup_limit() {
-        let data = build_test_dict(&[
-            ("tes", "A", 100),
-            ("tes", "B", 200),
-            ("tes", "C", 300),
-        ]);
+        let data = build_test_dict(&[("tes", "A", 100), ("tes", "B", 200), ("tes", "C", 300)]);
         let dict = open_test(&data);
         let results = dict.lookup("tes", 2);
         assert_eq!(results.len(), 2);
@@ -335,11 +346,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let data = build_test_dict(&[
-            ("a", "X", 1),
-            ("b", "Y", 2),
-            ("b", "Z", 3),
-        ]);
+        let data = build_test_dict(&[("a", "X", 1), ("b", "Y", 2), ("b", "Z", 3)]);
         let dict = open_test(&data);
         assert_eq!(dict.n_readings(), 2);
         assert_eq!(dict.n_entries(), 3);

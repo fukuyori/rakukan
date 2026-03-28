@@ -24,11 +24,11 @@ pub enum UserAction {
     Cancel,
 
     // ─── 文字種変換（プリエディット確定前）──────────────────────────────
-    Hiragana,           // F6
-    Katakana,           // F7
-    HalfKatakana,       // F8
-    FullLatin,          // F9
-    HalfLatin,          // F10
+    Hiragana,     // F6
+    Katakana,     // F7
+    HalfKatakana, // F8
+    FullLatin,    // F9
+    HalfLatin,    // F10
     /// 無変換: ひらがな→カタカナ→半角カタカナ 循環
     CycleKana,
 
