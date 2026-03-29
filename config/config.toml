@@ -16,11 +16,17 @@ log_level = "debug"
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
 # gpu_backend = "cuda"
 
+# GPU に載せるレイヤー数
+# 0 で CPU のみ、未指定で全レイヤーを GPU にオフロード
+# GPU 競合や他アプリの異常終了がある場合は 8 / 16 / 24 など小さめを試す
+# n_gpu_layers = 16
+
 # 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
 # main_gpu = 0
 
-# LLM モデルサイズ（"small" / "xsmall"）
-# model_variant = "small"
+# LLM モデル ID
+# model_variant = "jinen-v1-small-q5"
+# model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
 layout = "jis"

@@ -22,6 +22,16 @@ impl Default for ConversionConfig {
     }
 }
 
+fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
+    let reading_chars = reading.chars().count();
+    // 長めの文でも途中で切れにくいよう、固定値ではなく読み長に応じて伸ばす。
+    // jinen 系では 1 文字あたり 1 token 未満になることもあるが、かなり長い文では
+    // 15 token では不足しやすいため、余裕を持って 2 倍 + 8 を上限付きで使う。
+    config_max_new_tokens
+        .max(reading_chars.saturating_mul(2).saturating_add(8))
+        .min(128)
+}
+
 /// Build a prompt in jinen format
 pub fn build_jinen_prompt(katakana: &str, context: &str) -> String {
     format!(
@@ -187,6 +197,8 @@ impl KanaKanjiConverter {
         context: &str,
         num_candidates: usize,
     ) -> Result<Vec<String>> {
+        let max_new_tokens = generation_budget(reading, self.config.max_new_tokens);
+
         // Convert hiragana to katakana (model expects katakana input)
         let katakana = hiragana_to_katakana(reading);
 
@@ -201,9 +213,7 @@ impl KanaKanjiConverter {
 
         if num_candidates == 1 {
             // Single candidate: use greedy decoding (faster)
-            let output_tokens = self
-                .model
-                .generate(&tokens, self.config.max_new_tokens, eos)?;
+            let output_tokens = self.model.generate(&tokens, max_new_tokens, eos)?;
             let generated = &output_tokens[tokens.len()..];
             let text = self.model.decode(generated, true)?;
             let clean = clean_model_output(&text);
@@ -217,12 +227,9 @@ impl KanaKanjiConverter {
             // Cap beam_size at 3 to balance quality and speed — true beam search
             // runs eval_sequence() per beam per step so cost grows quickly.
             let beam_size = num_candidates.min(3);
-            let results = self.model.generate_beam_search(
-                &tokens,
-                self.config.max_new_tokens,
-                eos,
-                beam_size,
-            )?;
+            let results =
+                self.model
+                    .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;
 
             for (output_tokens, _score) in results {
                 let text = self.model.decode(&output_tokens, true)?;
@@ -258,6 +265,12 @@ impl KanaKanjiConverter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn generation_budget_grows_with_reading_length() {
+        assert_eq!(generation_budget("かな", 15), 15);
+        assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 30);
+    }
 
     #[test]
 

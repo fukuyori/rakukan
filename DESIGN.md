@@ -1,7 +1,7 @@
 # Rakukan 詳細設計書
 
-バージョン: v0.4.0  
-最終更新: 2026-03-28
+バージョン: v0.4.1  
+最終更新: 2026-03-29
 
 ---
 
@@ -410,7 +410,8 @@ load_auto(dir, config_json)
 log_level = "debug"         # error/warn/info/debug/trace
 # gpu_backend = "cuda"      # cuda/vulkan/cpu（未指定=自動検出）
 # main_gpu = 0
-# model_variant = "small"   # small/xsmall
+# model_variant = "jinen-v1-small-q5"
+# model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
 layout = "jis"              # us/jis/custom（デフォルト: jis）

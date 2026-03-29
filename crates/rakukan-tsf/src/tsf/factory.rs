@@ -880,7 +880,6 @@ impl TextServiceFactory_Impl {
                                     sess.activate_selecting(
                                         merged,
                                         wait_preedit.clone(),
-                                        first.clone(),
                                         pos_x,
                                         pos_y,
                                         false,
@@ -1261,7 +1260,18 @@ impl TextServiceFactory_Impl {
             );
         }
         if preedit_empty {
-            return Ok(false);
+            use crate::engine::input_mode::InputMode;
+            drop(guard);
+            match crate::engine::state::input_mode_get_atomic() {
+                InputMode::Hiragana | InputMode::Katakana => {
+                    commit_text(ctx, tid, "　".into())?;
+                    return Ok(true);
+                }
+                InputMode::Alphanumeric => {
+                    commit_text(ctx, tid, " ".into())?;
+                    return Ok(true);
+                }
+            }
         }
 
         // ── LiveConv（ライブ変換表示中）: Space → reading で通常変換へ ──────
@@ -1296,13 +1306,10 @@ impl TextServiceFactory_Impl {
             if sess.is_split_preedit() {
                 let prefix = sess.split_display_prefix().unwrap_or_default();
                 let target = sess.split_target().unwrap_or_default();
-                let surface = sess.split_display_target().unwrap_or_default();
                 let remainder = sess.split_display_remainder().unwrap_or_default();
                 drop(sess);
                 candidate_window::stop_live_timer();
-                return convert_split_target(
-                    ctx, tid, sink, guard, prefix, target, surface, remainder,
-                );
+                return convert_split_target(ctx, tid, sink, guard, prefix, target, remainder);
             }
         }
 
@@ -1803,7 +1810,6 @@ impl TextServiceFactory_Impl {
             sess.activate_selecting(
                 candidates.clone(),
                 preedit.clone(),
-                first.clone(),
                 caret.left,
                 caret.bottom,
                 llm_pending,
@@ -2106,7 +2112,7 @@ impl TextServiceFactory_Impl {
             if sess.is_selecting() {
                 // 変換中 → ESC → 未変換状態へ戻す（2回目のESCでプリエディット全消去）
                 // 文節分割後の変換の場合は remainder も復元して full に戻す
-                let original = sess.selecting_original_surface().unwrap_or("").to_string();
+                let original = sess.original_preedit().unwrap_or("").to_string();
                 let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.selecting_remainder_clone();
                 let full = format!("{prefix}{original}{remainder}");
@@ -2783,7 +2789,6 @@ impl TextServiceFactory_Impl {
             sess.activate_selecting(
                 candidates,
                 preedit.clone(),
-                first.clone(),
                 caret.left,
                 caret.bottom,
                 llm_pending,
@@ -3039,7 +3044,6 @@ fn convert_split_target(
     mut guard: crate::engine::state::EngineGuard,
     prefix: String,
     target: String,
-    original_surface: String,
     remainder: String,
 ) -> Result<bool> {
     let engine = match guard.as_mut() {
@@ -3060,7 +3064,7 @@ fn convert_split_target(
     engine.force_preedit(target.clone());
 
     let llm_limit = crate::engine::state::get_num_candidates();
-    const DICT_LIMIT: usize = 20;
+    const DICT_LIMIT: usize = 32;
     const SPLIT_WAIT_MS: u64 = 1500;
     let kanji_ready = engine.is_kanji_ready();
 
@@ -3068,7 +3072,7 @@ fn convert_split_target(
     // bg_start は self.kanji を move するため、後から convert_sync を呼べなくなる。
     // 先に同期変換で辞書候補を取得しておき、LLM完了後にマージする戦略を取る。
     let sync_cands: Vec<String> = if kanji_ready {
-        engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &target)
+        engine_convert_sync_segment(engine, llm_limit, DICT_LIMIT, &target)
     } else {
         vec![target.clone()]
     };
@@ -3089,7 +3093,7 @@ fn convert_split_target(
 
     let candidates = match bg_cands {
         Some(llm_cands) if !llm_cands.is_empty() => {
-            let m = engine.merge_candidates(llm_cands, DICT_LIMIT);
+            let m = merge_segment_candidates(engine, llm_cands, DICT_LIMIT);
             tracing::debug!("merge_candidates → {:?}", m);
             if m.is_empty() { sync_cands } else { m }
         }
@@ -3117,7 +3121,6 @@ fn convert_split_target(
         sess.activate_selecting_with_affixes(
             candidates,
             target.clone(),
-            original_surface,
             caret.left,
             caret.bottom,
             false,
@@ -3450,6 +3453,41 @@ fn engine_convert_sync_multi(
     }
 }
 
+fn merge_segment_candidates(
+    engine: &rakukan_engine_abi::DynEngine,
+    llm_cands: Vec<String>,
+    dict_limit: usize,
+) -> Vec<String> {
+    let mut merged = engine.merge_candidates(vec![], dict_limit);
+    for cand in llm_cands {
+        if merged.len() >= dict_limit {
+            break;
+        }
+        if !merged.contains(&cand) {
+            merged.push(cand);
+        }
+    }
+    merged
+}
+
+fn engine_convert_sync_segment(
+    engine: &mut rakukan_engine_abi::DynEngine,
+    llm_limit: usize,
+    dict_limit: usize,
+    preedit: &str,
+) -> Vec<String> {
+    let llm_cands: Vec<String> = engine.convert_sync();
+    let _ = llm_limit; // DynEngine::convert_sync は num_candidates を内部設定から読む
+
+    let merged = merge_segment_candidates(engine, llm_cands, dict_limit);
+    tracing::debug!("merge_segment_candidates → {:?}", merged);
+    if merged.is_empty() {
+        vec![preedit.to_string()]
+    } else {
+        merged
+    }
+}
+
 // ─── OnTestKeyDown ヘルパー ──────────────────────────────────────────────────
 
 #[inline]
@@ -3457,14 +3495,14 @@ fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
     match action {
         UserAction::Input(_) | UserAction::InputRaw(_) | UserAction::FullWidthSpace => true,
         UserAction::Backspace => has_preedit,
+        UserAction::Convert => true,
         UserAction::ImeToggle
         | UserAction::ImeOff
         | UserAction::ImeOn
         | UserAction::ModeHiragana
         | UserAction::ModeKatakana
         | UserAction::ModeAlphanumeric => true,
-        UserAction::Convert
-        | UserAction::CommitRaw
+        UserAction::CommitRaw
         | UserAction::Cancel
         | UserAction::CancelAll
         | UserAction::Hiragana

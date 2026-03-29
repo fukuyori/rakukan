@@ -631,14 +631,7 @@ pub fn on_waiting_timer() {
             Ok(s) => s,
             Err(_) => return,
         };
-        sess.activate_selecting(
-            merged,
-            wait_preedit.clone(),
-            wait_preedit.clone(),
-            pos_x,
-            pos_y,
-            false,
-        );
+        sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
         page_cands = sess.page_candidates().to_vec();
         page_info_str = sess.page_info().to_string();
     }

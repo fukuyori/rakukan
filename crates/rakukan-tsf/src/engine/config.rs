@@ -49,6 +49,8 @@ pub struct GeneralConfig {
     #[serde(default)]
     pub gpu_backend: Option<String>,
     #[serde(default)]
+    pub n_gpu_layers: Option<u32>,
+    #[serde(default)]
     pub main_gpu: i32,
     #[serde(default)]
     pub model_variant: Option<String>,
@@ -59,6 +61,7 @@ impl Default for GeneralConfig {
         Self {
             log_level: default_log_level(),
             gpu_backend: None,
+            n_gpu_layers: None,
             main_gpu: 0,
             model_variant: None,
         }
@@ -323,11 +326,17 @@ log_level = "debug"
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
 # gpu_backend = "cuda"
 
+# GPU に載せるレイヤー数
+# 0 で CPU のみ、未指定で全レイヤーを GPU にオフロード
+# GPU 競合や他アプリの異常終了がある場合は 8 / 16 / 24 など小さめを試す
+# n_gpu_layers = 16
+
 # 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
 # main_gpu = 0
 
-# LLM モデルサイズ（"small" / "xsmall"）
-# model_variant = "small"
+# LLM モデル ID
+# model_variant = "jinen-v1-small-q5"
+# model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
 layout = "jis"

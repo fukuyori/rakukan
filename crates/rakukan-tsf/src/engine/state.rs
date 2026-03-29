@@ -308,11 +308,11 @@ fn build_engine_config_json() -> String {
     let cfg = super::config::current_config();
     let num_candidates = cfg.effective_num_candidates();
     let main_gpu = cfg.general.main_gpu;
-    let n_gpu_layers: u32 = u32::MAX; // DLL 側（cpu DLL は 0 に上書き）
+    let n_gpu_layers = cfg.general.n_gpu_layers.unwrap_or(u32::MAX);
     let model_variant = cfg.general.model_variant.clone();
 
     tracing::info!(
-        "engine config: num_candidates={num_candidates} main_gpu={main_gpu} model_variant={model_variant:?}"
+        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?}"
     );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
@@ -448,7 +448,6 @@ pub enum SessionState {
     },
     Selecting {
         original_preedit: String,
-        original_surface: String,
         candidates: Vec<String>,
         selected: usize,
         page_size: usize,
@@ -775,7 +774,6 @@ impl SessionState {
         &mut self,
         candidates: Vec<String>,
         original_preedit: String,
-        original_surface: String,
         pos_x: i32,
         pos_y: i32,
         llm_pending: bool,
@@ -783,7 +781,6 @@ impl SessionState {
         self.activate_selecting_with_affixes(
             candidates,
             original_preedit,
-            original_surface,
             pos_x,
             pos_y,
             llm_pending,
@@ -796,7 +793,6 @@ impl SessionState {
         &mut self,
         candidates: Vec<String>,
         original_preedit: String,
-        original_surface: String,
         pos_x: i32,
         pos_y: i32,
         llm_pending: bool,
@@ -805,7 +801,6 @@ impl SessionState {
     ) {
         *self = SessionState::Selecting {
             original_preedit,
-            original_surface,
             candidates,
             selected: 0,
             page_size: 9,
@@ -896,17 +891,6 @@ impl SessionState {
             prefix.clone()
         } else {
             String::new()
-        }
-    }
-
-    pub fn selecting_original_surface(&self) -> Option<&str> {
-        if let SessionState::Selecting {
-            original_surface, ..
-        } = self
-        {
-            Some(original_surface.as_str())
-        } else {
-            None
         }
     }
 

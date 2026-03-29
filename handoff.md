@@ -1,17 +1,17 @@
-# Rakukan 引き継ぎ資料 (v0.4.0)
+# Rakukan 引き継ぎ資料 (v0.4.1)
 
 更新日: 2026-03-28
 
 ## 現在の状態
 
-- **バージョン:** v0.4.0
+- **バージョン:** v0.4.1
 - **位置づけ:** ライブ変換 Phase 1 と分節再変換 UI が実用段階
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`
 - **ログ:** `%LOCALAPPDATA%\rakukan\rakukan.log`
 
-## 0.4.0 時点でできていること
+## 0.4.1 時点でできていること
 
 ### ライブ変換
 
