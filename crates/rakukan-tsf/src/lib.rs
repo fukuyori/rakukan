@@ -69,7 +69,9 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 .open(&log_path)
             {
                 let _ = tracing_subscriber::fmt()
+                    .compact()
                     .with_env_filter(make_filter("rakukan_tsf"))
+                    .with_ansi(false)
                     .with_writer(std::sync::Mutex::new(f))
                     .try_init();
             }

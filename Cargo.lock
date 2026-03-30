@@ -1778,7 +1778,7 @@ checksum = "69cdb34c158ceb288df11e18b4bd39de994f6657d83847bdffdbd7f346754b0f"
 
 [[package]]
 name = "rakukan-dict"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "memmap2",
@@ -1791,7 +1791,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-dict-builder"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1801,7 +1801,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -1824,7 +1824,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-abi"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "libloading",
@@ -1835,7 +1835,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-cli"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1846,7 +1846,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tray"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "windows",
@@ -1854,7 +1854,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tsf"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "embed-resource",
@@ -1869,7 +1869,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-vibrato-builder"
-version = "0.4.1"
+version = "0.4.2"
 dependencies = [
  "anyhow",
  "clap",

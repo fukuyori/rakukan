@@ -320,7 +320,7 @@ fn default_config_text() -> &'static str {
 log_level = "debug"
 
 # GPU バックエンド: "cuda" / "vulkan" / "cpu"
-# 未指定の場合は backend.json の保存値または自動検出を使用する
+# 未指定の場合は CPU を使用する
 # "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
 # "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
 # "cpu"    : CPU のみ（GPU なし、VMware 等）

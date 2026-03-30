@@ -109,26 +109,32 @@ $regFile    = Join-Path $installDir "registered.txt"
 $trayExe    = Join-Path $installDir "rakukan-tray.exe"
 
 # --- 0/4 Backend (best-effort; never fail install) ---
-$backendJson  = $null
+$configToml = $null
 if ($roaming) {
-    $backendJson = Join-Path $roaming "rakukan\backend.json"
+    $configToml = Join-Path $roaming "rakukan\config.toml"
 }
 
-if ($backendJson -and (Test-Path -LiteralPath $backendJson)) {
+$gpuBackend = $null
+if ($configToml -and (Test-Path -LiteralPath $configToml)) {
     try {
-        $gpuBackend = (Get-Content -LiteralPath $backendJson -Raw | ConvertFrom-Json).backend
-        Write-Host "[0/4] Using saved backend: $gpuBackend"
-    } catch {
-        $gpuBackend = "cpu"
-        Write-Host "[0/4] Saved backend unreadable -> cpu"
-    }
+        foreach ($line in Get-Content -LiteralPath $configToml) {
+            if ($line -match '^\s*gpu_backend\s*=\s*"([^"]+)"') {
+                $gpuBackend = $Matches[1].ToLower()
+                break
+            }
+        }
+    } catch { }
+}
+
+if ($gpuBackend -in @("cuda", "vulkan", "cpu")) {
+    Write-Host "[0/4] Using config.toml backend: $gpuBackend"
 } else {
     $gpuBackend = "cpu"
-    Write-Host "[0/4] Backend config not available -> running detect-gpu.ps1"
+    Write-Host "[0/4] gpu_backend not set in config.toml -> running detect-gpu.ps1"
     try {
-        & "$PSScriptRoot\detect-gpu.ps1" -SaveResult
-        if ($backendJson -and (Test-Path -LiteralPath $backendJson)) {
-            $gpuBackend = (Get-Content -LiteralPath $backendJson -Raw | ConvertFrom-Json).backend
+        $detected = & "$PSScriptRoot\detect-gpu.ps1" -SaveResult
+        if ($detected -and ($detected.Trim().ToLower() -in @("cuda","vulkan","cpu"))) {
+            $gpuBackend = $detected.Trim().ToLower()
         }
     } catch { }
 }

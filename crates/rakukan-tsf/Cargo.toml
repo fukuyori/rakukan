@@ -32,6 +32,7 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_UI_WindowsAndMessaging",
     "Win32_Graphics_Gdi",
+    "Win32_Graphics_Dxgi",
     "Win32_System_Ole",
     "Win32_System_Memory",
     "Win32_System_Threading",

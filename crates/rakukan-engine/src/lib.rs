@@ -351,6 +351,24 @@ impl RakunEngine {
         segmenter::segment_surface(surface)
     }
 
+    pub fn segment_candidate(&self, surface: &str, reading: &str) -> Vec<segmenter::SegmentBlock> {
+        if surface.is_empty() {
+            return Vec::new();
+        }
+        segmenter::segment_candidate(surface, reading)
+    }
+
+    pub fn segment_candidates(
+        &self,
+        reading: &str,
+        candidates: &[String],
+    ) -> Vec<segmenter::SegmentCandidate> {
+        if candidates.is_empty() {
+            return Vec::new();
+        }
+        segmenter::segment_candidates(reading, candidates)
+    }
+
     pub fn commit(&mut self, text: &str) {
         info!("engine::commit: {:?}", text);
         self.committed.push_str(text);
@@ -534,10 +552,7 @@ impl RakunEngine {
     }
 
     pub fn backend_label(&self) -> String {
-        match &self.kanji {
-            Some(conv) => conv.model_display_name().to_string(),
-            None => "初期化中...".to_string(),
-        }
+        compiled_backend_label().to_string()
     }
 
     // ─── Background 変換 API ──────────────────────────────────────────────────
@@ -591,6 +606,14 @@ impl RakunEngine {
         Some(cands)
     }
 
+    pub fn bg_take_segmented_candidates(
+        &mut self,
+        key: &str,
+    ) -> Option<Vec<segmenter::SegmentCandidate>> {
+        let cands = self.bg_take_candidates(key)?;
+        Some(self.segment_candidates(key, &cands))
+    }
+
     /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）
     pub fn bg_reclaim(&mut self) {
         if let Some(conv) = conv_cache::reclaim_nonblocking() {
@@ -628,6 +651,21 @@ impl RakunEngine {
             .collect();
         models.sort_by(|a, b| a.id.cmp(&b.id));
         models
+    }
+}
+
+fn compiled_backend_label() -> &'static str {
+    #[cfg(feature = "cuda")]
+    {
+        "CUDA"
+    }
+    #[cfg(all(not(feature = "cuda"), feature = "vulkan"))]
+    {
+        "Vulkan"
+    }
+    #[cfg(all(not(feature = "cuda"), not(feature = "vulkan")))]
+    {
+        "CPU"
     }
 }
 

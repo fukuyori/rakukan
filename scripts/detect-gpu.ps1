@@ -215,20 +215,8 @@ Write-Host "  確定: $finalBackend" -ForegroundColor Green
 # 環境変数にセット（呼び出し元スクリプトで参照可能）
 $env:RAKUKAN_BACKEND = $finalBackend
 
-# 設定ファイルに保存（Rust コードが起動時に読む）
-$configDir = Join-Path $env:APPDATA "rakukan"
-if (-not (Test-Path $configDir)) { New-Item -ItemType Directory $configDir | Out-Null }
-
-$config = @{
-    backend = $finalBackend
-    detected_gpus = @($gpus | ForEach-Object { $_.Name })
-    vulkan_available = $hasVulkan
-    cuda_available = $hasCuda
-    selected_at = (Get-Date -Format "yyyy-MM-dd HH:mm:ss")
-}
-$config | ConvertTo-Json | Set-Content (Join-Path $configDir "backend.json")
-
-Write-Host "  設定を保存しました: $configDir\backend.json" -ForegroundColor Gray
+# backend.json には保存しない。設定の正は config.toml とする。
+Write-Host "  backend.json には保存しません。gpu_backend は config.toml で管理します。" -ForegroundColor Gray
 Write-Host ""
 
 # 戻り値

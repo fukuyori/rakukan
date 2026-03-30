@@ -6,11 +6,16 @@
 //! - 非ホットパス（Activate, BG スレッド): `lock()` を使用可。
 
 use super::input_mode::InputMode;
-use rakukan_engine_abi::{DynEngine, install_dir};
+use rakukan_engine_abi::{DynEngine, SegmentCandidate as EngineSegmentCandidate, install_dir};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering as AO};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
-use windows::core::GUID;
+use std::time::{SystemTime, UNIX_EPOCH};
+use windows::Win32::Graphics::Dxgi::{
+    CreateDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
+};
+use windows::core::{GUID, Interface};
 
 // ─── INPUT_MODE_ATOMIC ────────────────────────────────────────────────────────
 // IMEState.input_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
@@ -53,6 +58,8 @@ pub static RAKUKAN_ENGINE: LazyLock<Mutex<EngineWrapper>> =
 /// バックグラウンドエンジン初期化が既に起動済みかどうかのフラグ。
 /// Activate ごとに重複スポーンしないために使う。
 static ENGINE_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+static LAST_GPU_MEMORY_LOG_MS: AtomicU64 = AtomicU64::new(0);
+const GPU_MEMORY_LOG_INTERVAL_MS: u64 = 30_000;
 
 /// エンジン DLL のロードをバックグラウンドスレッドで開始する。
 ///
@@ -300,6 +307,7 @@ fn create_engine() -> anyhow::Result<DynEngine> {
     let engine = DynEngine::load_auto(&dir, Some(&cfg))
         .map_err(|e| anyhow::anyhow!("DLL load failed (dir={}): {e}", dir.display()))?;
     tracing::info!("engine created: backend={}", engine.backend_label());
+    maybe_log_gpu_memory(&engine);
     Ok(engine)
 }
 
@@ -326,6 +334,78 @@ fn build_engine_config_json() -> String {
 /// config.toml から num_candidates を読む（ホットパスで使う軽量版）
 pub fn get_num_candidates() -> usize {
     super::config::effective_num_candidates()
+}
+
+pub fn maybe_log_gpu_memory(engine: &DynEngine) {
+    if !tracing::enabled!(tracing::Level::DEBUG) {
+        return;
+    }
+
+    let backend = engine.backend_label();
+    if backend.eq_ignore_ascii_case("cpu") || engine.n_gpu_layers() == 0 {
+        return;
+    }
+
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+    let last_ms = LAST_GPU_MEMORY_LOG_MS.load(AO::Acquire);
+    if now_ms.saturating_sub(last_ms) < GPU_MEMORY_LOG_INTERVAL_MS {
+        return;
+    }
+    if LAST_GPU_MEMORY_LOG_MS
+        .compare_exchange(last_ms, now_ms, AO::AcqRel, AO::Acquire)
+        .is_err()
+    {
+        return;
+    }
+
+    let adapter_index = super::config::current_config().general.main_gpu.max(0) as u32;
+    match query_local_gpu_memory(adapter_index) {
+        Ok((adapter_name, info)) => {
+            let used_mb = info.CurrentUsage / (1024 * 1024);
+            let budget_mb = info.Budget / (1024 * 1024);
+            let available_mb = budget_mb.saturating_sub(used_mb);
+            tracing::debug!(
+                "gpu memory: backend={} adapter={} used={}MB budget={}MB available={}MB n_gpu_layers={}",
+                backend,
+                adapter_name,
+                used_mb,
+                budget_mb,
+                available_mb,
+                engine.n_gpu_layers()
+            );
+        }
+        Err(err) => {
+            tracing::debug!(
+                "gpu memory: backend={} adapter_index={} unavailable: {}",
+                backend,
+                adapter_index,
+                err
+            );
+        }
+    }
+}
+
+fn query_local_gpu_memory(
+    adapter_index: u32,
+) -> anyhow::Result<(String, DXGI_QUERY_VIDEO_MEMORY_INFO)> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1()? };
+    let adapter1: IDXGIAdapter1 = unsafe { factory.EnumAdapters1(adapter_index)? };
+    let adapter_name = unsafe {
+        let desc = adapter1.GetDesc1()?;
+        wides_to_string(&desc.Description)
+    };
+    let adapter3: IDXGIAdapter3 = adapter1.cast()?;
+    let mut info = DXGI_QUERY_VIDEO_MEMORY_INFO::default();
+    unsafe { adapter3.QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &mut info)? };
+    Ok((adapter_name, info))
+}
+
+fn wides_to_string(wides: &[u16]) -> String {
+    let len = wides.iter().position(|&c| c == 0).unwrap_or(wides.len());
+    String::from_utf16_lossy(&wides[..len])
 }
 
 impl std::ops::Deref for EngineWrapper {
@@ -442,13 +522,12 @@ pub enum SessionState {
     /// 文節分割表示状態。
     /// Left/Right で選択文節を移動、Shift+Left/Right で選択範囲を調整する。
     SplitPreedit {
-        blocks: Vec<SplitBlock>,
-        sel_start: usize,
-        sel_end: usize,
+        conversion: ConversionState,
     },
     Selecting {
         original_preedit: String,
         candidates: Vec<String>,
+        structured_candidates: Vec<EngineSegmentCandidate>,
         selected: usize,
         page_size: usize,
         llm_pending: bool,
@@ -457,8 +536,15 @@ pub enum SessionState {
         /// 句読点保留（「、」「。」押下時にセット、確定時に末尾連結）
         punct_pending: Option<char>,
         prefix: String,
+        prefix_reading: String,
         /// 文節分割後に変換した場合の残り部分（確定後に次のプリエディットになる）
         remainder: String,
+        /// 文節分割後に変換した場合の残り部分の読み
+        remainder_reading: String,
+        /// SplitPreedit から Selecting に入ったときの前方ブロック。
+        split_prefix_blocks: Vec<SplitBlock>,
+        /// SplitPreedit から Selecting に入ったときの後方ブロック。
+        split_suffix_blocks: Vec<SplitBlock>,
     },
     /// ライブ変換表示中。
     ///
@@ -486,48 +572,438 @@ pub struct SplitBlock {
     pub display: String,
 }
 
-fn split_reading_parts(
-    blocks: &[SplitBlock],
-    sel_start: usize,
-    sel_end: usize,
-) -> (String, String, String) {
-    let sel_start = sel_start.min(blocks.len());
-    let sel_end = sel_end.clamp(sel_start, blocks.len());
-    let prefix = blocks[..sel_start]
-        .iter()
-        .map(|b| b.reading.as_str())
-        .collect::<String>();
-    let target = blocks[sel_start..sel_end]
-        .iter()
-        .map(|b| b.reading.as_str())
-        .collect::<String>();
-    let suffix = blocks[sel_end..]
-        .iter()
-        .map(|b| b.reading.as_str())
-        .collect::<String>();
-    (prefix, target, suffix)
+#[allow(dead_code)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConversionSegment {
+    pub reading: String,
+    pub surface: String,
 }
 
-fn split_display_parts(
-    blocks: &[SplitBlock],
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ConversionCandidateView {
+    pub candidates: Vec<EngineSegmentCandidate>,
+    pub selected: usize,
+    pub page_size: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub struct ConversionState {
+    pub segments: Vec<ConversionSegment>,
+    pub focused_index: usize,
+    pub candidate_view: Option<ConversionCandidateView>,
+}
+
+#[allow(dead_code)]
+impl ConversionState {
+    pub fn from_split_blocks(blocks: &[SplitBlock], focused_index: usize) -> Option<Self> {
+        if blocks.is_empty() {
+            return None;
+        }
+        let segments = blocks
+            .iter()
+            .map(|block| ConversionSegment {
+                reading: block.reading.clone(),
+                surface: block.display.clone(),
+            })
+            .collect::<Vec<_>>();
+        let focused_index = focused_index.min(segments.len().saturating_sub(1));
+        Some(Self {
+            segments,
+            focused_index,
+            candidate_view: None,
+        })
+    }
+
+    pub fn focused(&self) -> Option<&ConversionSegment> {
+        self.segments.get(self.focused_index)
+    }
+
+    pub fn focused_mut(&mut self) -> Option<&mut ConversionSegment> {
+        self.segments.get_mut(self.focused_index)
+    }
+
+    pub fn composed_surface(&self) -> String {
+        self.segments
+            .iter()
+            .map(|seg| seg.surface.as_str())
+            .collect::<String>()
+    }
+
+    pub fn composed_reading(&self) -> String {
+        self.segments
+            .iter()
+            .map(|seg| seg.reading.as_str())
+            .collect::<String>()
+    }
+
+    pub fn display_parts(&self) -> (String, String, String) {
+        let focused_index = self.focused_index.min(self.segments.len());
+        let prefix = self.segments[..focused_index]
+            .iter()
+            .map(|seg| seg.surface.as_str())
+            .collect::<String>();
+        let target = self
+            .segments
+            .get(focused_index)
+            .map(|seg| seg.surface.clone())
+            .unwrap_or_default();
+        let suffix = self.segments[focused_index.saturating_add(1)..]
+            .iter()
+            .map(|seg| seg.surface.as_str())
+            .collect::<String>();
+        (prefix, target, suffix)
+    }
+
+    pub fn reading_parts(&self) -> (String, String, String) {
+        let focused_index = self.focused_index.min(self.segments.len());
+        let prefix = self.segments[..focused_index]
+            .iter()
+            .map(|seg| seg.reading.as_str())
+            .collect::<String>();
+        let target = self
+            .segments
+            .get(focused_index)
+            .map(|seg| seg.reading.clone())
+            .unwrap_or_default();
+        let suffix = self.segments[focused_index.saturating_add(1)..]
+            .iter()
+            .map(|seg| seg.reading.as_str())
+            .collect::<String>();
+        (prefix, target, suffix)
+    }
+
+    pub fn focus_left(&mut self) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        if self.focused_index == 0 {
+            self.focused_index = self.segments.len() - 1;
+        } else {
+            self.focused_index -= 1;
+        }
+        self.clear_candidate_view();
+        true
+    }
+
+    pub fn focus_right(&mut self) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        self.focused_index = (self.focused_index + 1) % self.segments.len();
+        self.clear_candidate_view();
+        true
+    }
+
+    pub fn width_expand_right(&mut self) -> bool {
+        if self.focused_index + 1 >= self.segments.len() {
+            return false;
+        }
+
+        let moved = {
+            let next = &mut self.segments[self.focused_index + 1];
+            let Some(ch) = take_first_char(&mut next.reading) else {
+                return false;
+            };
+            if next.surface == next.reading {
+                next.surface = next.reading.clone();
+            }
+            ch
+        };
+
+        if let Some(current) = self.focused_mut() {
+            current.reading.push(moved);
+            current.surface = current.reading.clone();
+        }
+
+        if self.segments[self.focused_index + 1].reading.is_empty() {
+            self.segments.remove(self.focused_index + 1);
+        } else {
+            self.segments[self.focused_index + 1].surface =
+                self.segments[self.focused_index + 1].reading.clone();
+        }
+        self.clear_candidate_view();
+        true
+    }
+
+    pub fn width_shrink_right(&mut self) -> bool {
+        let Some(current) = self.focused() else {
+            return false;
+        };
+        if current.reading.chars().count() <= 1 {
+            return false;
+        }
+
+        let moved = {
+            let current = self.focused_mut().expect("focused segment must exist");
+            let Some(ch) = take_last_char(&mut current.reading) else {
+                return false;
+            };
+            if current.surface == current.reading.clone() + &ch.to_string() {
+                current.surface = current.reading.clone();
+            }
+            ch
+        };
+
+        if self.focused_index + 1 < self.segments.len() {
+            let next = &mut self.segments[self.focused_index + 1];
+            next.reading.insert(0, moved);
+            next.surface = next.reading.clone();
+        } else {
+            self.segments.push(ConversionSegment {
+                reading: moved.to_string(),
+                surface: moved.to_string(),
+            });
+        }
+        self.clear_candidate_view();
+        true
+    }
+
+    pub fn set_candidate_view(&mut self, candidates: Vec<EngineSegmentCandidate>) {
+        self.candidate_view = Some(ConversionCandidateView {
+            candidates,
+            selected: 0,
+            page_size: 9,
+        });
+    }
+
+    pub fn clear_candidate_view(&mut self) {
+        self.candidate_view = None;
+    }
+
+    pub fn has_candidate_view(&self) -> bool {
+        self.candidate_view.is_some()
+    }
+
+    pub fn candidate_surface(&self) -> Option<&str> {
+        let view = self.candidate_view.as_ref()?;
+        view.candidates
+            .get(view.selected)
+            .map(|candidate| candidate.surface.as_str())
+    }
+
+    pub fn current_structured_candidate_clone(&self) -> Option<EngineSegmentCandidate> {
+        let view = self.candidate_view.as_ref()?;
+        view.candidates.get(view.selected).cloned()
+    }
+
+    pub fn next_candidate(&mut self) -> bool {
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        if view.candidates.is_empty() {
+            return false;
+        }
+        view.selected = (view.selected + 1) % view.candidates.len();
+        true
+    }
+
+    pub fn prev_candidate(&mut self) -> bool {
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        if view.candidates.is_empty() {
+            return false;
+        }
+        view.selected = if view.selected == 0 {
+            view.candidates.len() - 1
+        } else {
+            view.selected - 1
+        };
+        true
+    }
+
+    pub fn current_page(&self) -> usize {
+        self.candidate_view
+            .as_ref()
+            .map(|view| view.selected / view.page_size)
+            .unwrap_or(0)
+    }
+
+    pub fn total_pages(&self) -> usize {
+        let Some(view) = self.candidate_view.as_ref() else {
+            return 0;
+        };
+        if view.candidates.is_empty() {
+            0
+        } else {
+            view.candidates.len().div_ceil(view.page_size)
+        }
+    }
+
+    pub fn page_candidates(&self) -> Vec<String> {
+        let Some(view) = self.candidate_view.as_ref() else {
+            return Vec::new();
+        };
+        if view.candidates.is_empty() {
+            return Vec::new();
+        }
+        let start = (view.selected / view.page_size) * view.page_size;
+        let end = (start + view.page_size).min(view.candidates.len());
+        view.candidates[start..end]
+            .iter()
+            .map(|candidate| candidate.surface.clone())
+            .collect()
+    }
+
+    pub fn page_selected(&self) -> usize {
+        self.candidate_view
+            .as_ref()
+            .map(|view| view.selected % view.page_size)
+            .unwrap_or(0)
+    }
+
+    pub fn page_info(&self) -> String {
+        let total = self.total_pages();
+        if total <= 1 {
+            String::new()
+        } else {
+            format!("{}/{}", self.current_page() + 1, total)
+        }
+    }
+
+    pub fn next_candidate_with_page_wrap(&mut self) -> bool {
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        if view.candidates.is_empty() {
+            return false;
+        }
+        let next_idx = (view.selected + 1) % view.candidates.len();
+        let cur_page = view.selected / view.page_size;
+        let next_page = next_idx / view.page_size;
+        view.selected = if next_page != cur_page {
+            next_page * view.page_size
+        } else {
+            next_idx
+        };
+        true
+    }
+
+    pub fn next_candidate_page(&mut self) -> bool {
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        if view.candidates.is_empty() {
+            return false;
+        }
+        let total_pages = view.candidates.len().div_ceil(view.page_size);
+        let cur = view.selected / view.page_size;
+        let next = (cur + 1) % total_pages;
+        view.selected = next * view.page_size;
+        true
+    }
+
+    pub fn prev_candidate_page(&mut self) -> bool {
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        if view.candidates.is_empty() {
+            return false;
+        }
+        let total_pages = view.candidates.len().div_ceil(view.page_size);
+        let cur = view.selected / view.page_size;
+        let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
+        view.selected = prev * view.page_size;
+        true
+    }
+
+    pub fn select_nth_candidate_in_page(&mut self, n: usize) -> bool {
+        if n < 1 {
+            return false;
+        }
+        let Some(view) = self.candidate_view.as_mut() else {
+            return false;
+        };
+        let idx = (view.selected / view.page_size) * view.page_size + (n - 1);
+        if idx < view.candidates.len() {
+            view.selected = idx;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn replace_focused_with_candidate(&mut self, candidate: &EngineSegmentCandidate) -> bool {
+        if self.segments.is_empty() {
+            return false;
+        }
+        let replacement = candidate
+            .segments
+            .iter()
+            .map(|segment| ConversionSegment {
+                reading: segment.reading.clone(),
+                surface: segment.surface.clone(),
+            })
+            .collect::<Vec<_>>();
+        if replacement.is_empty() {
+            return false;
+        }
+        let focused_index = self
+            .focused_index
+            .min(self.segments.len().saturating_sub(1));
+        self.segments
+            .splice(focused_index..focused_index + 1, replacement);
+        self.focused_index = focused_index.min(self.segments.len().saturating_sub(1));
+        self.clear_candidate_view();
+        true
+    }
+}
+
+#[allow(dead_code)]
+fn take_first_char(text: &mut String) -> Option<char> {
+    let ch = text.chars().next()?;
+    text.drain(..ch.len_utf8());
+    Some(ch)
+}
+
+#[allow(dead_code)]
+fn take_last_char(text: &mut String) -> Option<char> {
+    let ch = text.chars().next_back()?;
+    let len = text.len().saturating_sub(ch.len_utf8());
+    text.truncate(len);
+    Some(ch)
+}
+
+fn block_to_segment(block: &SplitBlock) -> ConversionSegment {
+    ConversionSegment {
+        reading: block.reading.clone(),
+        surface: block.display.clone(),
+    }
+}
+
+fn conversion_from_blocks(
+    blocks: Vec<SplitBlock>,
     sel_start: usize,
     sel_end: usize,
-) -> (String, String, String) {
-    let sel_start = sel_start.min(blocks.len());
-    let sel_end = sel_end.clamp(sel_start, blocks.len());
-    let prefix = blocks[..sel_start]
-        .iter()
-        .map(|b| b.display.as_str())
-        .collect::<String>();
-    let target = blocks[sel_start..sel_end]
-        .iter()
-        .map(|b| b.display.as_str())
-        .collect::<String>();
-    let suffix = blocks[sel_end..]
-        .iter()
-        .map(|b| b.display.as_str())
-        .collect::<String>();
-    (prefix, target, suffix)
+) -> Option<ConversionState> {
+    if blocks.is_empty() {
+        return None;
+    }
+    let len = blocks.len();
+    let sel_start = sel_start.min(len.saturating_sub(1));
+    let sel_end = sel_end.clamp(sel_start.saturating_add(1), len);
+
+    let mut segments = Vec::with_capacity(sel_start + 1 + len.saturating_sub(sel_end));
+    segments.extend(blocks[..sel_start].iter().map(block_to_segment));
+    segments.push(ConversionSegment {
+        reading: blocks[sel_start..sel_end]
+            .iter()
+            .map(|b| b.reading.as_str())
+            .collect::<String>(),
+        surface: blocks[sel_start..sel_end]
+            .iter()
+            .map(|b| b.display.as_str())
+            .collect::<String>(),
+    });
+    segments.extend(blocks[sel_end..].iter().map(block_to_segment));
+
+    Some(ConversionState {
+        segments,
+        focused_index: sel_start,
+        candidate_view: None,
+    })
 }
 
 pub static SESSION_STATE: LazyLock<Mutex<SessionState>> =
@@ -546,6 +1022,7 @@ pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
 
 pub static LIVE_PREVIEW_QUEUE: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
 pub static LIVE_PREVIEW_READY: AtomicBool = AtomicBool::new(false);
+pub static SUPPRESS_LIVE_COMMIT_ONCE: AtomicBool = AtomicBool::new(false);
 
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
     SESSION_STATE
@@ -605,14 +1082,16 @@ impl SessionState {
         sel_start: usize,
         sel_end: usize,
     ) {
-        let len = blocks.len();
-        let sel_start = sel_start.min(len.saturating_sub(1));
-        let sel_end = sel_end.clamp(sel_start.saturating_add(1), len);
-        *self = SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        };
+        let conversion =
+            conversion_from_blocks(blocks, sel_start, sel_end).unwrap_or_else(|| ConversionState {
+                segments: vec![ConversionSegment {
+                    reading: String::new(),
+                    surface: String::new(),
+                }],
+                focused_index: 0,
+                candidate_view: None,
+            });
+        *self = SessionState::SplitPreedit { conversion };
         SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
     }
 
@@ -620,151 +1099,115 @@ impl SessionState {
         matches!(self, SessionState::SplitPreedit { .. })
     }
 
+    pub fn split_conversion_clone(&self) -> Option<ConversionState> {
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.clone())
+        } else {
+            None
+        }
+    }
+
+    pub fn set_split_conversion(&mut self, conversion: ConversionState) {
+        *self = SessionState::SplitPreedit { conversion };
+        SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn split_candidate_active(&self) -> bool {
+        matches!(
+            self,
+            SessionState::SplitPreedit { conversion } if conversion.has_candidate_view()
+        )
+    }
+
+    pub fn clear_split_candidate_view(&mut self) -> bool {
+        if let SessionState::SplitPreedit { conversion } = self {
+            if conversion.has_candidate_view() {
+                conversion.clear_candidate_view();
+                return true;
+            }
+        }
+        false
+    }
+
     pub fn split_target(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_reading_parts(blocks, *sel_start, *sel_end).1)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.reading_parts().1)
         } else {
             None
         }
     }
 
     pub fn split_prefix(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_reading_parts(blocks, *sel_start, *sel_end).0)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.reading_parts().0)
         } else {
             None
         }
     }
 
     pub fn split_remainder(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_reading_parts(blocks, *sel_start, *sel_end).2)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.reading_parts().2)
         } else {
             None
         }
     }
 
     pub fn split_display_prefix(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_display_parts(blocks, *sel_start, *sel_end).0)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.display_parts().0)
         } else {
             None
         }
     }
 
     pub fn split_display_target(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_display_parts(blocks, *sel_start, *sel_end).1)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.display_parts().1)
         } else {
             None
         }
     }
 
     pub fn split_display_remainder(&self) -> Option<String> {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            Some(split_display_parts(blocks, *sel_start, *sel_end).2)
+        if let SessionState::SplitPreedit { conversion } = self {
+            Some(conversion.display_parts().2)
         } else {
             None
         }
     }
 
     pub fn split_move_left(&mut self) -> bool {
-        if let SessionState::SplitPreedit {
-            sel_start, sel_end, ..
-        } = self
-        {
-            let width = sel_end.saturating_sub(*sel_start);
-            if *sel_start > 0 {
-                *sel_start -= 1;
-                *sel_end = *sel_start + width;
-                true
-            } else {
-                false
-            }
+        if let SessionState::SplitPreedit { conversion } = self {
+            conversion.focus_left()
         } else {
             false
         }
     }
 
     pub fn split_move_right(&mut self) -> bool {
-        if let SessionState::SplitPreedit {
-            blocks,
-            sel_start,
-            sel_end,
-        } = self
-        {
-            let width = sel_end.saturating_sub(*sel_start);
-            if *sel_end < blocks.len() {
-                *sel_start += 1;
-                *sel_end = (*sel_start + width).min(blocks.len());
-                true
-            } else {
-                false
-            }
+        if let SessionState::SplitPreedit { conversion } = self {
+            conversion.focus_right()
         } else {
             false
         }
     }
 
     /// Shift+Left: 選択範囲の右端を左へ縮める。
+    #[allow(dead_code)]
     pub fn split_shrink(&mut self) -> bool {
-        if let SessionState::SplitPreedit {
-            sel_start, sel_end, ..
-        } = self
-        {
-            if *sel_end > sel_start.saturating_add(1) {
-                *sel_end -= 1;
-                true
-            } else {
-                false
-            }
+        if let SessionState::SplitPreedit { conversion } = self {
+            conversion.width_shrink_right()
         } else {
             false
         }
     }
 
     /// Shift+Right: 選択範囲の右端を右へ広げる。
+    #[allow(dead_code)]
     pub fn split_extend(&mut self) -> bool {
-        if let SessionState::SplitPreedit {
-            blocks, sel_end, ..
-        } = self
-        {
-            if *sel_end < blocks.len() {
-                *sel_end += 1;
-                true
-            } else {
-                false
-            }
+        if let SessionState::SplitPreedit { conversion } = self {
+            conversion.width_expand_right()
         } else {
             false
         }
@@ -786,6 +1229,10 @@ impl SessionState {
             llm_pending,
             String::new(),
             String::new(),
+            String::new(),
+            String::new(),
+            Vec::new(),
+            Vec::new(),
         );
     }
 
@@ -797,11 +1244,16 @@ impl SessionState {
         pos_y: i32,
         llm_pending: bool,
         prefix: String,
+        prefix_reading: String,
         remainder: String,
+        remainder_reading: String,
+        split_prefix_blocks: Vec<SplitBlock>,
+        split_suffix_blocks: Vec<SplitBlock>,
     ) {
         *self = SessionState::Selecting {
             original_preedit,
             candidates,
+            structured_candidates: Vec::new(),
             selected: 0,
             page_size: 9,
             llm_pending,
@@ -809,13 +1261,21 @@ impl SessionState {
             pos_y,
             punct_pending: None,
             prefix,
+            prefix_reading,
             remainder,
+            remainder_reading,
+            split_prefix_blocks,
+            split_suffix_blocks,
         };
         SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
     }
 
     pub fn is_selecting(&self) -> bool {
         matches!(self, SessionState::Selecting { .. })
+    }
+
+    pub fn is_candidate_list_active(&self) -> bool {
+        self.is_selecting() || self.split_candidate_active()
     }
 
     pub fn is_waiting(&self) -> bool {
@@ -850,6 +1310,21 @@ impl SessionState {
                 selected,
                 ..
             } => candidates.get(*selected).map(|s| s.as_str()),
+            SessionState::SplitPreedit { conversion } => conversion.candidate_surface(),
+            _ => None,
+        }
+    }
+
+    pub fn current_structured_candidate_clone(&self) -> Option<EngineSegmentCandidate> {
+        match self {
+            SessionState::Selecting {
+                structured_candidates,
+                selected,
+                ..
+            } => structured_candidates.get(*selected).cloned(),
+            SessionState::SplitPreedit { conversion } => {
+                conversion.current_structured_candidate_clone()
+            }
             _ => None,
         }
     }
@@ -886,11 +1361,54 @@ impl SessionState {
         }
     }
 
+    pub fn selecting_remainder_reading_clone(&self) -> String {
+        if let SessionState::Selecting {
+            remainder_reading, ..
+        } = self
+        {
+            remainder_reading.clone()
+        } else {
+            String::new()
+        }
+    }
+
     pub fn selecting_prefix_clone(&self) -> String {
         if let SessionState::Selecting { prefix, .. } = self {
             prefix.clone()
         } else {
             String::new()
+        }
+    }
+
+    pub fn selecting_prefix_reading_clone(&self) -> String {
+        if let SessionState::Selecting { prefix_reading, .. } = self {
+            prefix_reading.clone()
+        } else {
+            String::new()
+        }
+    }
+
+    pub fn selecting_prefix_blocks_clone(&self) -> Vec<SplitBlock> {
+        if let SessionState::Selecting {
+            split_prefix_blocks,
+            ..
+        } = self
+        {
+            split_prefix_blocks.clone()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn selecting_suffix_blocks_clone(&self) -> Vec<SplitBlock> {
+        if let SessionState::Selecting {
+            split_suffix_blocks,
+            ..
+        } = self
+        {
+            split_suffix_blocks.clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -901,6 +1419,7 @@ impl SessionState {
                 page_size,
                 ..
             } => selected / page_size,
+            SessionState::SplitPreedit { conversion } => conversion.current_page(),
             _ => 0,
         }
     }
@@ -918,11 +1437,12 @@ impl SessionState {
                     (candidates.len() + page_size - 1) / page_size
                 }
             }
+            SessionState::SplitPreedit { conversion } => conversion.total_pages(),
             _ => 0,
         }
     }
 
-    pub fn page_candidates(&self) -> &[String] {
+    pub fn page_candidates(&self) -> Vec<String> {
         match self {
             SessionState::Selecting {
                 candidates,
@@ -931,13 +1451,14 @@ impl SessionState {
                 ..
             } => {
                 if candidates.is_empty() {
-                    return &[];
+                    return Vec::new();
                 }
                 let start = (selected / page_size) * page_size;
                 let end = (start + page_size).min(candidates.len());
-                &candidates[start..end]
+                candidates[start..end].to_vec()
             }
-            _ => &[],
+            SessionState::SplitPreedit { conversion } => conversion.page_candidates(),
+            _ => Vec::new(),
         }
     }
 
@@ -948,6 +1469,7 @@ impl SessionState {
                 page_size,
                 ..
             } => selected % page_size,
+            SessionState::SplitPreedit { conversion } => conversion.page_selected(),
             _ => 0,
         }
     }
@@ -962,78 +1484,98 @@ impl SessionState {
     }
 
     pub fn next_with_page_wrap(&mut self) {
-        if let SessionState::Selecting {
-            candidates,
-            selected,
-            page_size,
-            ..
-        } = self
-        {
-            if candidates.is_empty() {
-                return;
+        match self {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                page_size,
+                ..
+            } => {
+                if candidates.is_empty() {
+                    return;
+                }
+                let next_idx = (*selected + 1) % candidates.len();
+                let cur_page = *selected / *page_size;
+                let next_page = next_idx / *page_size;
+                *selected = if next_page != cur_page {
+                    next_page * *page_size
+                } else {
+                    next_idx
+                };
             }
-            let next_idx = (*selected + 1) % candidates.len();
-            let cur_page = *selected / *page_size;
-            let next_page = next_idx / *page_size;
-            *selected = if next_page != cur_page {
-                next_page * *page_size
-            } else {
-                next_idx
-            };
+            SessionState::SplitPreedit { conversion } => {
+                let _ = conversion.next_candidate_with_page_wrap();
+            }
+            _ => {}
         }
     }
 
     pub fn prev(&mut self) {
-        if let SessionState::Selecting {
-            candidates,
-            selected,
-            ..
-        } = self
-        {
-            if candidates.is_empty() {
-                return;
+        match self {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                ..
+            } => {
+                if candidates.is_empty() {
+                    return;
+                }
+                *selected = if *selected == 0 {
+                    candidates.len() - 1
+                } else {
+                    *selected - 1
+                };
             }
-            *selected = if *selected == 0 {
-                candidates.len() - 1
-            } else {
-                *selected - 1
-            };
+            SessionState::SplitPreedit { conversion } => {
+                let _ = conversion.prev_candidate();
+            }
+            _ => {}
         }
     }
 
     pub fn next_page(&mut self) {
-        if let SessionState::Selecting {
-            candidates,
-            selected,
-            page_size,
-            ..
-        } = self
-        {
-            if candidates.is_empty() {
-                return;
+        match self {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                page_size,
+                ..
+            } => {
+                if candidates.is_empty() {
+                    return;
+                }
+                let total_pages = candidates.len().div_ceil(*page_size);
+                let cur = *selected / *page_size;
+                let next = (cur + 1) % total_pages;
+                *selected = next * *page_size;
             }
-            let total_pages = (candidates.len() + *page_size - 1) / *page_size;
-            let cur = *selected / *page_size;
-            let next = (cur + 1) % total_pages;
-            *selected = next * *page_size;
+            SessionState::SplitPreedit { conversion } => {
+                let _ = conversion.next_candidate_page();
+            }
+            _ => {}
         }
     }
 
     pub fn prev_page(&mut self) {
-        if let SessionState::Selecting {
-            candidates,
-            selected,
-            page_size,
-            ..
-        } = self
-        {
-            if candidates.is_empty() {
-                return;
+        match self {
+            SessionState::Selecting {
+                candidates,
+                selected,
+                page_size,
+                ..
+            } => {
+                if candidates.is_empty() {
+                    return;
+                }
+                let total_pages = candidates.len().div_ceil(*page_size);
+                let cur = *selected / *page_size;
+                let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
+                *selected = prev * *page_size;
             }
-            let total_pages = (candidates.len() + *page_size - 1) / *page_size;
-            let cur = *selected / *page_size;
-            let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
-            *selected = prev * *page_size;
+            SessionState::SplitPreedit { conversion } => {
+                let _ = conversion.prev_candidate_page();
+            }
+            _ => {}
         }
     }
 
@@ -1056,6 +1598,7 @@ impl SessionState {
                     false
                 }
             }
+            SessionState::SplitPreedit { conversion } => conversion.select_nth_candidate_in_page(n),
             _ => false,
         }
     }
@@ -1303,7 +1846,28 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionState, SplitBlock};
+    use super::{ConversionState, SessionState, SplitBlock};
+
+    fn ascii_blocks() -> Vec<SplitBlock> {
+        vec![
+            SplitBlock {
+                reading: "a".into(),
+                display: "A".into(),
+            },
+            SplitBlock {
+                reading: "b".into(),
+                display: "B".into(),
+            },
+            SplitBlock {
+                reading: "c".into(),
+                display: "C".into(),
+            },
+            SplitBlock {
+                reading: "d".into(),
+                display: "D".into(),
+            },
+        ]
+    }
 
     fn sample_blocks() -> Vec<SplitBlock> {
         vec![
@@ -1383,5 +1947,93 @@ mod tests {
         assert_eq!(sess.split_display_prefix().as_deref(), Some("吾輩は猫で"));
         assert_eq!(sess.split_display_target().as_deref(), Some("ある"));
         assert_eq!(sess.split_display_remainder().as_deref(), Some(""));
+    }
+
+    #[test]
+    fn split_operations_keep_full_text_and_valid_selection_after_repetition() {
+        let mut sess = SessionState::Idle;
+        sess.set_split_preedit_blocks(ascii_blocks(), 0, 1);
+
+        assert!(sess.split_extend());
+        assert!(sess.split_move_right());
+        assert!(sess.split_shrink());
+        assert!(sess.split_move_right());
+        assert!(sess.split_extend());
+        assert!(sess.split_move_left());
+
+        let full = format!(
+            "{}{}{}",
+            sess.split_display_prefix().unwrap_or_default(),
+            sess.split_display_target().unwrap_or_default(),
+            sess.split_display_remainder().unwrap_or_default()
+        );
+        assert_eq!(full, "ABCD");
+
+        let target = sess.split_display_target().unwrap_or_default();
+        assert!(!target.is_empty());
+        assert_eq!(sess.split_display_prefix().as_deref(), Some("A"));
+        assert_eq!(sess.split_display_target().as_deref(), Some("BC"));
+        assert_eq!(sess.split_display_remainder().as_deref(), Some("D"));
+    }
+
+    #[test]
+    fn conversion_state_focus_moves_with_wraparound() {
+        let blocks = vec![
+            SplitBlock {
+                reading: "あ".into(),
+                display: "亜".into(),
+            },
+            SplitBlock {
+                reading: "い".into(),
+                display: "伊".into(),
+            },
+            SplitBlock {
+                reading: "う".into(),
+                display: "宇".into(),
+            },
+        ];
+        let mut conv = ConversionState::from_split_blocks(&blocks, 0).unwrap();
+
+        assert_eq!(
+            conv.display_parts(),
+            ("".into(), "亜".into(), "伊宇".into())
+        );
+        assert!(conv.focus_left());
+        assert_eq!(
+            conv.display_parts(),
+            ("亜伊".into(), "宇".into(), "".into())
+        );
+        assert!(conv.focus_right());
+        assert_eq!(
+            conv.display_parts(),
+            ("".into(), "亜".into(), "伊宇".into())
+        );
+    }
+
+    #[test]
+    fn conversion_state_width_expand_and_shrink_move_one_character() {
+        let blocks = vec![
+            SplitBlock {
+                reading: "あ".into(),
+                display: "あ".into(),
+            },
+            SplitBlock {
+                reading: "いう".into(),
+                display: "いう".into(),
+            },
+        ];
+        let mut conv = ConversionState::from_split_blocks(&blocks, 0).unwrap();
+
+        assert!(conv.width_expand_right());
+        assert_eq!(
+            conv.reading_parts(),
+            ("".into(), "あい".into(), "う".into())
+        );
+
+        assert!(conv.width_shrink_right());
+        assert_eq!(
+            conv.reading_parts(),
+            ("".into(), "あ".into(), "いう".into())
+        );
     }
 }

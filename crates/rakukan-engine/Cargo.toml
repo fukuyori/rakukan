@@ -38,6 +38,5 @@ tempfile = { workspace = true }
 
 [features]
 # GPU バックエンド（llama-cpp-2 の feature を通じて有効化）
-# install.ps1 が backend.json を読んで自動選択する
 cuda   = ["llama-cpp-2/cuda"]
 vulkan = ["llama-cpp-2/vulkan"]

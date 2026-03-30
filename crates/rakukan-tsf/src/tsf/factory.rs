@@ -652,6 +652,7 @@ impl TextServiceFactory_Impl {
         }
         if config_changed {
             tracing::info!("runtime config reloaded on input mode switch");
+            crate::engine::state::engine_reload();
         }
     }
 
@@ -687,20 +688,8 @@ impl TextServiceFactory_Impl {
                         llm_pending,
                         candidates.len()
                     ),
-                    SessionState::SplitPreedit {
-                        blocks,
-                        sel_start,
-                        sel_end,
-                    } => {
-                        let target = blocks
-                            [(*sel_start).min(blocks.len())..(*sel_end).min(blocks.len())]
-                            .iter()
-                            .map(|b| b.display.as_str())
-                            .collect::<String>();
-                        let remainder = blocks[(*sel_end).min(blocks.len())..]
-                            .iter()
-                            .map(|b| b.display.as_str())
-                            .collect::<String>();
+                    SessionState::SplitPreedit { conversion } => {
+                        let (_, target, remainder) = conversion.display_parts();
                         format!("Split({:?}+{:?})", target, remainder)
                     }
                     SessionState::LiveConv { reading, preview } => {
@@ -922,7 +911,7 @@ impl TextServiceFactory_Impl {
             UserAction::InputRaw(c) => self.on_input_raw(c, ctx, tid, sink, guard),
             UserAction::FullWidthSpace => self.on_full_width_space(ctx, tid, guard),
             UserAction::Convert => self.on_convert(ctx, tid, sink, guard),
-            UserAction::CommitRaw => self.on_commit_raw(ctx, tid, guard),
+            UserAction::CommitRaw => self.on_commit_raw(ctx, tid, sink, guard),
             UserAction::Backspace => self.on_backspace(ctx, tid, sink, guard),
             UserAction::Cancel | UserAction::CancelAll => self.on_cancel(ctx, tid, sink, guard),
             UserAction::Hiragana => {
@@ -949,7 +938,7 @@ impl TextServiceFactory_Impl {
             UserAction::CandidatePageUp => {
                 self.on_candidate_page(ctx, tid, sink, guard, CandidateDir::Prev)
             }
-            UserAction::CandidateSelect(n) => self.on_candidate_select(n, ctx, tid, guard),
+            UserAction::CandidateSelect(n) => self.on_candidate_select(n, ctx, tid, sink, guard),
             UserAction::CursorLeft => self.on_segment_move_left(ctx, tid, sink, guard),
             UserAction::CursorRight => self.on_segment_move_right(ctx, tid, sink, guard),
             UserAction::Punctuate(c) => self.on_punctuate(c, ctx, tid, sink, guard),
@@ -1007,9 +996,12 @@ impl TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(true),
         };
+        crate::engine::state::maybe_log_gpu_memory(engine);
         let _t = diag::span("Input");
 
         if let Ok(mut sess) = session_get() {
+            crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
+                .store(false, std::sync::atomic::Ordering::Release);
             if sess.is_live_conv() {
                 let (reading, preview) = sess
                     .live_conv_parts()
@@ -1048,34 +1040,19 @@ impl TextServiceFactory_Impl {
                 return Ok(true);
             }
             if sess.is_split_preedit() {
-                let full = format!(
-                    "{}{}{}",
-                    sess.split_prefix().unwrap_or_default(),
-                    sess.split_target().unwrap_or_default(),
-                    sess.split_remainder().unwrap_or_default()
-                );
-                sess.set_preedit(full.clone());
-                drop(sess);
-                candidate_window::hide();
-                candidate_window::stop_live_timer();
-                engine.force_preedit(full);
-            }
-        }
-
-        self.prepare_for_direct_input()?;
-
-        if session_is_selecting_fast() {
-            let mut sess = session_get()?;
-            if sess.is_selecting() {
-                let committed_text = sess
-                    .current_candidate()
-                    .or_else(|| sess.original_preedit())
-                    .unwrap_or("")
-                    .to_string();
+                let Some((conversion, learning)) = materialize_split_conversion_for_commit(&sess)
+                else {
+                    return Ok(false);
+                };
+                let full_text = conversion.composed_surface();
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
-                engine.commit(&committed_text);
+                candidate_window::stop_live_timer();
+                if let Some((reading, surface)) = learning {
+                    engine.learn(&reading, &surface);
+                }
+                engine.commit(&full_text);
                 engine.reset_preedit();
                 drop(guard);
 
@@ -1097,7 +1074,61 @@ impl TextServiceFactory_Impl {
                 });
                 engine2.bg_start(n_cands2);
                 drop(guard2);
-                commit_then_start_composition(ctx, tid, sink, committed_text, preedit)?;
+                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
+                return Ok(true);
+            }
+        }
+
+        self.prepare_for_direct_input()?;
+
+        if session_is_selecting_fast() {
+            let mut sess = session_get()?;
+            if sess.is_selecting() {
+                let selected_text = sess
+                    .current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string();
+                let reading = sess.original_preedit().unwrap_or("").to_string();
+                let prefix = sess.selecting_prefix_clone();
+                let punct = sess.take_punct_pending();
+                let remainder = sess.take_selecting_remainder();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                candidate_window::stop_live_timer();
+                let committed_text = if let Some(p) = punct {
+                    format!("{selected_text}{p}")
+                } else {
+                    selected_text.clone()
+                };
+                let full_text = format!("{prefix}{committed_text}{remainder}");
+                if selected_text != reading {
+                    engine.learn(&reading, &selected_text);
+                }
+                engine.commit(&full_text);
+                engine.reset_preedit();
+                drop(guard);
+
+                let mut guard2 = engine_try_get_or_create()?;
+                let engine2 = match guard2.as_mut() {
+                    Some(e) => e,
+                    None => return Ok(true),
+                };
+                if c.is_ascii_uppercase() {
+                    engine2.push_fullwidth_alpha(c);
+                } else {
+                    engine2.push_char(c);
+                }
+                let preedit = engine2.preedit_display();
+                let n_cands2 = crate::engine::state::get_num_candidates();
+                diag::event(DiagEvent::InputChar {
+                    ch: c,
+                    preedit_after: preedit.clone(),
+                });
+                engine2.bg_start(n_cands2);
+                drop(guard2);
+                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
                 return Ok(true);
             }
         }
@@ -1156,7 +1187,10 @@ impl TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
+        crate::engine::state::maybe_log_gpu_memory(engine);
         if let Ok(mut sess) = session_get() {
+            crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
+                .store(false, std::sync::atomic::Ordering::Release);
             if sess.is_live_conv() {
                 let (reading, preview) = sess
                     .live_conv_parts()
@@ -1187,21 +1221,81 @@ impl TextServiceFactory_Impl {
                 return Ok(true);
             }
             if sess.is_split_preedit() {
-                let full = format!(
-                    "{}{}{}",
-                    sess.split_prefix().unwrap_or_default(),
-                    sess.split_target().unwrap_or_default(),
-                    sess.split_remainder().unwrap_or_default()
-                );
-                sess.set_preedit(full.clone());
+                let Some((conversion, learning)) = materialize_split_conversion_for_commit(&sess)
+                else {
+                    return Ok(false);
+                };
+                let full_text = conversion.composed_surface();
+                sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
-                engine.force_preedit(full);
+                if let Some((reading, surface)) = learning {
+                    engine.learn(&reading, &surface);
+                }
+                engine.commit(&full_text);
+                engine.reset_preedit();
+                drop(guard);
+
+                let mut guard2 = engine_try_get_or_create()?;
+                let engine2 = match guard2.as_mut() {
+                    Some(e) => e,
+                    None => return Ok(true),
+                };
+                engine2.push_raw(c);
+                let preedit = engine2.preedit_display();
+                let n_cands2 = crate::engine::state::get_num_candidates();
+                engine2.bg_start(n_cands2);
+                drop(guard2);
+                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
+                return Ok(true);
             }
         }
 
         self.prepare_for_direct_input()?;
+        if session_is_selecting_fast() {
+            let mut sess = session_get()?;
+            if sess.is_selecting() {
+                let selected_text = sess
+                    .current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string();
+                let reading = sess.original_preedit().unwrap_or("").to_string();
+                let prefix = sess.selecting_prefix_clone();
+                let punct = sess.take_punct_pending();
+                let remainder = sess.take_selecting_remainder();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                candidate_window::stop_live_timer();
+                let committed_text = if let Some(p) = punct {
+                    format!("{selected_text}{p}")
+                } else {
+                    selected_text.clone()
+                };
+                let full_text = format!("{prefix}{committed_text}{remainder}");
+                if selected_text != reading {
+                    engine.learn(&reading, &selected_text);
+                }
+                engine.commit(&full_text);
+                engine.reset_preedit();
+                drop(guard);
+
+                let mut guard2 = engine_try_get_or_create()?;
+                let engine2 = match guard2.as_mut() {
+                    Some(e) => e,
+                    None => return Ok(true),
+                };
+                engine2.push_raw(c);
+                let preedit = engine2.preedit_display();
+                let n_cands2 = crate::engine::state::get_num_candidates();
+                engine2.bg_start(n_cands2);
+                drop(guard2);
+                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
+                return Ok(true);
+            }
+        }
         engine.push_raw(c);
         let preedit = engine.preedit_display();
         let n_cands = crate::engine::state::get_num_candidates();
@@ -1246,6 +1340,7 @@ impl TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
+        crate::engine::state::maybe_log_gpu_memory(engine);
         let _t = diag::span("Convert");
         update_caret_rect(ctx.clone(), tid);
         engine.flush_pending_n();
@@ -1302,14 +1397,39 @@ impl TextServiceFactory_Impl {
 
         // ── SplitPreedit 中: target のみを変換対象にして候補表示 ──
         {
-            let sess = session_get()?;
+            let mut sess = session_get()?;
             if sess.is_split_preedit() {
-                let prefix = sess.split_display_prefix().unwrap_or_default();
+                if sess.split_candidate_active() {
+                    sess.next_with_page_wrap();
+                    let page_cands = sess.page_candidates();
+                    let page_sel = sess.page_selected();
+                    let page_info = sess.page_info();
+                    let cand_text = sess
+                        .current_candidate()
+                        .map(str::to_string)
+                        .or_else(|| sess.split_display_target())
+                        .unwrap_or_default();
+                    let prefix = sess.split_display_prefix().unwrap_or_default();
+                    let remainder = sess.split_display_remainder().unwrap_or_default();
+                    drop(sess);
+                    drop(guard);
+                    candidate_window::update_selection(page_sel, &page_info);
+                    candidate_window::show(
+                        &page_cands,
+                        page_sel,
+                        &page_info,
+                        caret_rect_get().left,
+                        caret_rect_get().bottom,
+                    );
+                    update_composition_candidate_parts(
+                        ctx, tid, sink, prefix, cand_text, remainder,
+                    )?;
+                    return Ok(true);
+                }
                 let target = sess.split_target().unwrap_or_default();
-                let remainder = sess.split_display_remainder().unwrap_or_default();
                 drop(sess);
                 candidate_window::stop_live_timer();
-                return convert_split_target(ctx, tid, sink, guard, prefix, target, remainder);
+                return convert_split_target(ctx, tid, sink, guard, target);
             }
         }
 
@@ -1842,12 +1962,14 @@ impl TextServiceFactory_Impl {
         &self,
         ctx: ITfContext,
         tid: u32,
+        sink: ITfCompositionSink,
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(false),
         };
+        crate::engine::state::maybe_log_gpu_memory(engine);
         {
             let mut sess = session_get()?;
             // ── LiveConv（ライブ変換プレビュー表示中）: Enter → preview をコミット ──
@@ -1878,6 +2000,16 @@ impl TextServiceFactory_Impl {
             }
             // ── SplitPreedit: target をそのまま確定、remainder を次のプリエディットへ ──
             if sess.is_split_preedit() {
+                if sess.split_candidate_active() {
+                    let candidate = sess.current_structured_candidate_clone();
+                    drop(sess);
+                    if let Some(candidate) = candidate {
+                        return apply_structured_candidate_to_split_conversion(
+                            ctx, tid, sink, engine, candidate,
+                        );
+                    }
+                    return Ok(true);
+                }
                 let full = format!(
                     "{}{}{}",
                     sess.split_display_prefix().unwrap_or_default(),
@@ -1919,13 +2051,17 @@ impl TextServiceFactory_Impl {
                     .unwrap_or("")
                     .to_string();
                 let reading = sess.original_preedit().unwrap_or("").to_string();
-                let prefix = sess.selecting_prefix_clone();
                 let punct = sess.take_punct_pending();
+                let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.take_selecting_remainder();
+                let prefix_reading = sess.selecting_prefix_reading_clone();
+                let remainder_reading = sess.selecting_remainder_reading_clone();
+                let structured_candidate = sess.current_structured_candidate_clone();
+                let prefix_blocks = sess.selecting_prefix_blocks_clone();
+                let suffix_blocks = sess.selecting_suffix_blocks_clone();
+                let return_to_split = !prefix_reading.is_empty() || !remainder_reading.is_empty();
                 sess.set_idle();
                 drop(sess);
-                candidate_window::hide();
-                candidate_window::stop_live_timer(); // [Phase0]
                 let commit_text = if let Some(p) = punct {
                     format!("{text}{p}")
                 } else {
@@ -1934,6 +2070,31 @@ impl TextServiceFactory_Impl {
                 if text != reading {
                     engine.learn(&reading, &text);
                 }
+                if return_to_split {
+                    if let Some(candidate) = structured_candidate {
+                        return apply_structured_candidate_to_split_preedit(
+                            ctx,
+                            tid,
+                            sink,
+                            engine,
+                            candidate,
+                            prefix_blocks,
+                            suffix_blocks,
+                        );
+                    }
+                    return apply_selecting_candidate_to_split_preedit(
+                        ctx,
+                        tid,
+                        sink,
+                        engine,
+                        commit_text,
+                        reading,
+                        prefix_blocks,
+                        suffix_blocks,
+                    );
+                }
+                candidate_window::hide();
+                candidate_window::stop_live_timer(); // [Phase0]
                 let full_text = format!("{prefix}{commit_text}{remainder}");
                 engine.commit(&full_text);
                 engine.reset_preedit();
@@ -1946,6 +2107,63 @@ impl TextServiceFactory_Impl {
             }
         }
         engine.flush_pending_n();
+        if crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
+            .swap(false, std::sync::atomic::Ordering::AcqRel)
+        {
+            tracing::debug!("[Live] on_commit_raw[fallback]: suppressed once");
+        } else if crate::engine::config::current_config()
+            .live_conversion
+            .enabled
+        {
+            const LIVE_COMMIT_WAIT_MS: u64 = 180;
+            let reading = engine.hiragana_text().to_string();
+            if !reading.is_empty() {
+                let n_cands = crate::engine::state::get_num_candidates();
+                let bg_before = engine.bg_status();
+                tracing::debug!(
+                    "[Live] on_commit_raw[fallback]: reading={:?} bg_before={}",
+                    reading,
+                    bg_before
+                );
+                if engine.is_kanji_ready() && bg_before == "idle" {
+                    let _ = engine.bg_start(n_cands);
+                }
+                if matches!(engine.bg_status(), "running" | "idle") {
+                    let completed = engine.bg_wait_ms(LIVE_COMMIT_WAIT_MS);
+                    tracing::debug!(
+                        "[Live] on_commit_raw[fallback]: bg_wait({LIVE_COMMIT_WAIT_MS}ms) completed={}",
+                        completed
+                    );
+                }
+                if engine.bg_status() == "done" {
+                    if let Some(preview) = engine
+                        .bg_take_candidates(&reading)
+                        .and_then(|c| c.into_iter().next())
+                    {
+                        if !preview.is_empty() && preview != reading {
+                            if let Ok(mut sess) = session_get() {
+                                sess.set_idle();
+                            }
+                            candidate_window::hide();
+                            candidate_window::stop_live_timer();
+                            engine.learn(&reading, &preview);
+                            engine.commit(&preview);
+                            engine.reset_preedit();
+                            drop(guard);
+                            tracing::info!(
+                                "[Live] on_commit_raw[fallback]: commit preview {:?}",
+                                preview
+                            );
+                            diag::event(DiagEvent::CommitRaw {
+                                preedit: preview.clone(),
+                            });
+                            end_composition(ctx, tid, preview)?;
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
         let preedit = engine.preedit_display();
         if preedit.is_empty() {
             return Ok(false);
@@ -2091,6 +2309,25 @@ impl TextServiceFactory_Impl {
             }
             // SplitPreedit → ESC → 全体を未変換プリエディットに戻す
             if sess.is_split_preedit() {
+                if sess.split_candidate_active() {
+                    let prefix = sess.split_display_prefix().unwrap_or_default();
+                    let target = sess.split_display_target().unwrap_or_default();
+                    let suffix = sess.split_display_remainder().unwrap_or_default();
+                    let full_reading = format!(
+                        "{}{}{}",
+                        sess.split_prefix().unwrap_or_default(),
+                        sess.split_target().unwrap_or_default(),
+                        sess.split_remainder().unwrap_or_default()
+                    );
+                    let _ = sess.clear_split_candidate_view();
+                    drop(sess);
+                    candidate_window::hide();
+                    candidate_window::stop_live_timer();
+                    engine.force_preedit(full_reading);
+                    drop(guard);
+                    update_composition_candidate_parts(ctx, tid, sink, prefix, target, suffix)?;
+                    return Ok(true);
+                }
                 let full = format!(
                     "{}{}{}",
                     sess.split_prefix().unwrap_or_default(),
@@ -2216,6 +2453,8 @@ impl TextServiceFactory_Impl {
         };
         let t = convert_fn(&source);
         engine.force_preedit(t.clone());
+        crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_split_preedit() || sess.is_live_conv() {
                 sess.set_preedit(t.clone());
@@ -2270,7 +2509,12 @@ impl TextServiceFactory_Impl {
         });
         let t = if has_kana {
             // かな → romaji_log_str でローマ字を復元して変換
-            let romaji = engine.romaji_log_str();
+            let hira = engine.hiragana_from_romaji_log();
+            let pending_suffix = p
+                .strip_prefix(&hira)
+                .map(str::to_string)
+                .unwrap_or_default();
+            let romaji = format!("{}{}", engine.romaji_log_str(), pending_suffix);
             if full {
                 text_util::romaji_to_fullwidth_latin(&romaji)
             } else {
@@ -2285,6 +2529,8 @@ impl TextServiceFactory_Impl {
             }
         };
         engine.force_preedit(t.clone());
+        crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
+            .store(true, std::sync::atomic::Ordering::Release);
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_split_preedit() || sess.is_live_conv() {
                 sess.set_preedit(t.clone());
@@ -2338,23 +2584,35 @@ impl TextServiceFactory_Impl {
             .unwrap_or(false);
         drop(guard);
         let mut sess = session_get()?;
-        if !sess.is_selecting() {
+        if !sess.is_candidate_list_active() {
             return Ok(has_pre);
         }
         match dir {
             CandidateDir::Next => sess.next_with_page_wrap(),
             CandidateDir::Prev => sess.prev(),
         }
-        let page_cands = sess.page_candidates().to_vec();
+        let page_cands = sess.page_candidates();
         let page_sel = sess.page_selected();
         let page_info = sess.page_info();
-        let text = sess
-            .current_candidate()
-            .or_else(|| sess.original_preedit())
-            .unwrap_or("")
-            .to_string();
-        let prefix = sess.selecting_prefix_clone();
-        let remainder = sess.selecting_remainder_clone();
+        let (text, prefix, remainder) = if sess.split_candidate_active() {
+            (
+                sess.current_candidate()
+                    .map(str::to_string)
+                    .or_else(|| sess.split_display_target())
+                    .unwrap_or_default(),
+                sess.split_display_prefix().unwrap_or_default(),
+                sess.split_display_remainder().unwrap_or_default(),
+            )
+        } else {
+            (
+                sess.current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string(),
+                sess.selecting_prefix_clone(),
+                sess.selecting_remainder_clone(),
+            )
+        };
         drop(sess);
         candidate_window::update_selection(page_sel, &page_info);
         candidate_window::show(
@@ -2382,23 +2640,35 @@ impl TextServiceFactory_Impl {
             .unwrap_or(false);
         drop(guard);
         let mut sess = session_get()?;
-        if !sess.is_selecting() {
+        if !sess.is_candidate_list_active() {
             return Ok(has_pre);
         }
         match dir {
             CandidateDir::Next => sess.next_page(),
             CandidateDir::Prev => sess.prev_page(),
         }
-        let page_cands = sess.page_candidates().to_vec();
+        let page_cands = sess.page_candidates();
         let page_sel = sess.page_selected();
         let page_info = sess.page_info();
-        let text = sess
-            .current_candidate()
-            .or_else(|| sess.original_preedit())
-            .unwrap_or("")
-            .to_string();
-        let prefix = sess.selecting_prefix_clone();
-        let remainder = sess.selecting_remainder_clone();
+        let (text, prefix, remainder) = if sess.split_candidate_active() {
+            (
+                sess.current_candidate()
+                    .map(str::to_string)
+                    .or_else(|| sess.split_display_target())
+                    .unwrap_or_default(),
+                sess.split_display_prefix().unwrap_or_default(),
+                sess.split_display_remainder().unwrap_or_default(),
+            )
+        } else {
+            (
+                sess.current_candidate()
+                    .or_else(|| sess.original_preedit())
+                    .unwrap_or("")
+                    .to_string(),
+                sess.selecting_prefix_clone(),
+                sess.selecting_remainder_clone(),
+            )
+        };
         drop(sess);
         let caret = caret_rect_get();
         candidate_window::show(&page_cands, page_sel, &page_info, caret.left, caret.bottom);
@@ -2411,6 +2681,7 @@ impl TextServiceFactory_Impl {
         n: u8,
         ctx: ITfContext,
         tid: u32,
+        sink: ITfCompositionSink,
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
         let engine = match guard.as_mut() {
@@ -2419,10 +2690,20 @@ impl TextServiceFactory_Impl {
         };
         let has_pre = !engine.preedit_is_empty();
         let mut sess = session_get()?;
-        if !sess.is_selecting() {
+        if !sess.is_candidate_list_active() {
             return Ok(has_pre);
         }
         if !sess.select_nth_in_page(n as usize) {
+            return Ok(true);
+        }
+        if sess.split_candidate_active() {
+            let structured_candidate = sess.current_structured_candidate_clone();
+            drop(sess);
+            if let Some(candidate) = structured_candidate {
+                return apply_structured_candidate_to_split_conversion(
+                    ctx, tid, sink, engine, candidate,
+                );
+            }
             return Ok(true);
         }
         let text = sess
@@ -2434,9 +2715,14 @@ impl TextServiceFactory_Impl {
         let prefix = sess.selecting_prefix_clone();
         let punct = sess.take_punct_pending();
         let remainder = sess.take_selecting_remainder();
+        let prefix_reading = sess.selecting_prefix_reading_clone();
+        let remainder_reading = sess.selecting_remainder_reading_clone();
+        let structured_candidate = sess.current_structured_candidate_clone();
+        let prefix_blocks = sess.selecting_prefix_blocks_clone();
+        let suffix_blocks = sess.selecting_suffix_blocks_clone();
+        let return_to_split = !prefix_reading.is_empty() || !remainder_reading.is_empty();
         sess.set_idle();
         drop(sess);
-        candidate_window::hide();
         let commit_text = if let Some(p) = punct {
             format!("{text}{p}")
         } else {
@@ -2445,6 +2731,30 @@ impl TextServiceFactory_Impl {
         if text != reading {
             engine.learn(&reading, &text);
         }
+        if return_to_split {
+            if let Some(candidate) = structured_candidate {
+                return apply_structured_candidate_to_split_preedit(
+                    ctx,
+                    tid,
+                    sink,
+                    engine,
+                    candidate,
+                    prefix_blocks,
+                    suffix_blocks,
+                );
+            }
+            return apply_selecting_candidate_to_split_preedit(
+                ctx,
+                tid,
+                sink,
+                engine,
+                commit_text,
+                reading,
+                prefix_blocks,
+                suffix_blocks,
+            );
+        }
+        candidate_window::hide();
         diag::event(DiagEvent::Convert {
             preedit: text.clone(),
             kanji_ready: true,
@@ -2834,6 +3144,7 @@ impl TextServiceFactory_Impl {
             let target = sess.split_display_target().unwrap_or_default();
             let suffix = sess.split_display_remainder().unwrap_or_default();
             drop(sess);
+            candidate_window::hide();
             drop(guard);
             update_composition_candidate_parts(ctx, tid, sink, prefix, target, suffix)?;
             return Ok(true);
@@ -2894,39 +3205,38 @@ impl TextServiceFactory_Impl {
                 .or_else(|| sess.original_preedit())
                 .unwrap_or("")
                 .to_string();
-            let outer_remainder = sess.selecting_remainder_clone();
-            tracing::debug!(
-                "  Selecting: original={:?} surface={:?} outer_rem={:?}",
-                original,
-                current_surface,
-                outer_remainder,
-            );
-            let blocks = build_split_blocks_from_surface(
+            let prefix_blocks = sess.selecting_prefix_blocks_clone();
+            let suffix_blocks = sess.selecting_suffix_blocks_clone();
+            let (blocks, sel_start, sel_end) = rebuild_split_blocks_from_selection(
                 engine,
                 &original,
                 &current_surface,
-                &outer_remainder,
+                &prefix_blocks,
+                &suffix_blocks,
             );
-            if blocks.len() <= 1 {
+            if sel_start == sel_end {
                 return Ok(true);
             }
-            let len = blocks.len();
-            let prefix = blocks[..len.saturating_sub(1)]
+            let prefix = blocks[..sel_start]
                 .iter()
                 .map(|b| b.display.as_str())
                 .collect::<String>();
-            let target = blocks[len.saturating_sub(1)..]
+            let target = blocks[sel_start..sel_end]
+                .iter()
+                .map(|b| b.display.as_str())
+                .collect::<String>();
+            let suffix = blocks[sel_end..]
                 .iter()
                 .map(|b| b.display.as_str())
                 .collect::<String>();
             tracing::debug!("  → SplitPreedit: prefix={:?} target={:?}", prefix, target,);
-            sess.set_split_preedit_blocks(blocks, len.saturating_sub(1), len);
+            sess.set_split_preedit_blocks(blocks, sel_start, sel_end);
             drop(sess);
             candidate_window::hide();
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, prefix, target, String::new())?;
+            update_composition_candidate_parts(ctx, tid, sink, prefix, target, suffix)?;
             // update_composition 後に state が保持されているか確認
             if let Ok(s) = crate::engine::state::session_get() {
                 tracing::debug!("  after update_composition: state={:?}", &*s);
@@ -2936,29 +3246,8 @@ impl TextServiceFactory_Impl {
 
         // SplitPreedit → 境界を1ブロック縮める
         if sess.is_split_preedit() {
-            let before_target = sess.split_display_target().unwrap_or_default();
-            let shrank = sess.split_shrink();
-            tracing::debug!(
-                "  SplitPreedit: before_target={:?} shrank={}",
-                before_target,
-                shrank
-            );
-            if !shrank {
-                return Ok(true);
-            }
-            let prefix = sess.split_display_prefix().unwrap_or_default();
-            let target = sess.split_display_target().unwrap_or_default();
-            let suffix = sess.split_display_remainder().unwrap_or_default();
-            tracing::debug!(
-                "  → new prefix={:?} target={:?} suffix={:?}",
-                prefix,
-                target,
-                suffix
-            );
             drop(sess);
-            drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, prefix, target, suffix)?;
-            return Ok(true);
+            return Self::shift_split_boundary_left(ctx, tid, sink, engine);
         }
 
         tracing::debug!("  → no matching state, eat={}", !engine.preedit_is_empty());
@@ -2987,6 +3276,7 @@ impl TextServiceFactory_Impl {
             let target = sess.split_display_target().unwrap_or_default();
             let suffix = sess.split_display_remainder().unwrap_or_default();
             drop(sess);
+            candidate_window::hide();
             drop(guard);
             update_composition_candidate_parts(ctx, tid, sink, prefix, target, suffix)?;
             return Ok(true);
@@ -3007,44 +3297,80 @@ impl TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        let mut sess = session_get()?;
+        let sess = session_get()?;
 
         if sess.is_split_preedit() {
-            if !sess.split_extend() {
-                return Ok(true);
-            }
-            let prefix = sess.split_display_prefix().unwrap_or_default();
-            let target = sess.split_display_target().unwrap_or_default();
-            let remainder = sess.split_display_remainder().unwrap_or_default();
             drop(sess);
-            drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, prefix, target, remainder)?;
-            return Ok(true);
+            return Self::shift_split_boundary_right(ctx, tid, sink, engine);
         }
 
         Ok(!engine.preedit_is_empty())
+    }
+
+    fn shift_split_boundary_left(
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        engine: &mut rakukan_engine_abi::DynEngine,
+    ) -> Result<bool> {
+        let sess = session_get()?;
+        let Some(mut conversion) = sess.split_conversion_clone() else {
+            return Ok(true);
+        };
+        drop(sess);
+
+        tracing::debug!(
+            "shift_split_boundary_left: before={}",
+            debug_conversion_segments(&conversion),
+        );
+
+        if !conversion.width_shrink_right() {
+            tracing::debug!("shift_split_boundary_left: selected too short, nothing to shrink");
+            return Ok(true);
+        }
+        apply_split_conversion_state(ctx, tid, sink, engine, conversion)
+    }
+
+    fn shift_split_boundary_right(
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        engine: &mut rakukan_engine_abi::DynEngine,
+    ) -> Result<bool> {
+        let sess = session_get()?;
+        let Some(mut conversion) = sess.split_conversion_clone() else {
+            return Ok(true);
+        };
+        drop(sess);
+
+        tracing::debug!(
+            "shift_split_boundary_right: before={}",
+            debug_conversion_segments(&conversion),
+        );
+
+        if !conversion.width_expand_right() {
+            tracing::debug!("shift_split_boundary_right: no suffix to extend into");
+            return Ok(true);
+        }
+        apply_split_conversion_state(ctx, tid, sink, engine, conversion)
     }
 }
 
 // ─── 変換ヘルパー ─────────────────────────────────────────────────────────────
 
-/// target 文字列を変換して `Selecting` 状態へ遷移する。
+/// focused segment を変換して split 内の候補ビューを開く。
 ///
-/// `on_segment_shrink` / `on_segment_extend` の共通処理。
-/// 境界変更直後に候補を再取得し、候補ウィンドウを表示する。
+/// `SplitPreedit` 中の `Space` で使う。
+/// `ConversionState` に candidate_view を設定し、候補ウィンドウを更新する。
 ///
 /// # 引数
-/// - `target`    : 変換対象（ひらがな）
-/// - `remainder` : 変換しない残り部分。確定後に次のプリエディットになる。
-///                 空文字列の場合は全体変換（remainder なし）として扱う。
+/// - `target` : 変換対象（focused segment の読み）
 fn convert_split_target(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
     mut guard: crate::engine::state::EngineGuard,
-    prefix: String,
     target: String,
-    remainder: String,
 ) -> Result<bool> {
     let engine = match guard.as_mut() {
         Some(e) => e,
@@ -3054,11 +3380,7 @@ fn convert_split_target(
         return Ok(false);
     }
 
-    tracing::debug!(
-        "convert_split_target: target={:?} remainder={:?}",
-        target,
-        remainder
-    );
+    tracing::debug!("convert_split_target: target={:?}", target);
 
     engine.bg_reclaim();
     engine.force_preedit(target.clone());
@@ -3109,29 +3431,31 @@ fn convert_split_target(
         "convert_split_target: candidates={:?}",
         &candidates[..candidates.len().min(3)]
     );
-    let first = candidates
-        .first()
-        .cloned()
-        .unwrap_or_else(|| target.clone());
+    let structured_candidates = build_structured_candidates(engine, &target, &candidates);
     drop(guard);
 
     let caret = caret_rect_get();
-    let (page_cands, page_info, prefix_for_display, remainder_for_display) = {
+    let (page_cands, page_info, prefix_for_display, candidate_for_display, remainder_for_display) = {
         let mut sess = session_get()?;
-        sess.activate_selecting_with_affixes(
-            candidates,
-            target.clone(),
-            caret.left,
-            caret.bottom,
-            false,
-            prefix.clone(),
-            remainder.clone(),
-        );
+        let Some(mut conversion) = sess.split_conversion_clone() else {
+            return Ok(false);
+        };
+        conversion.set_candidate_view(structured_candidates);
+        let page_cands = conversion.page_candidates();
+        let page_info = conversion.page_info();
+        let prefix_for_display = conversion.display_parts().0;
+        let remainder_for_display = conversion.display_parts().2;
+        let candidate_for_display = conversion
+            .candidate_surface()
+            .unwrap_or(target.as_str())
+            .to_string();
+        sess.set_split_conversion(conversion);
         (
-            sess.page_candidates().to_vec(),
-            sess.page_info(),
-            prefix,
-            remainder,
+            page_cands,
+            page_info,
+            prefix_for_display,
+            candidate_for_display,
+            remainder_for_display,
         )
     };
     candidate_window::show_with_status(&page_cands, 0, &page_info, caret.left, caret.bottom, None);
@@ -3140,139 +3464,378 @@ fn convert_split_target(
         tid,
         sink,
         prefix_for_display,
-        first,
+        candidate_for_display,
         remainder_for_display,
     )?;
     Ok(true)
 }
 
-fn is_kana_char(c: char) -> bool {
-    let n = c as u32;
-    (0x3041..=0x3096).contains(&n)
-        || (0x30A1..=0x30FA).contains(&n)
-        || (0x30FC..=0x30FC).contains(&n)
-        || (0xFF66..=0xFF9F).contains(&n)
+fn apply_selecting_candidate_to_split_preedit(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    engine: &mut rakukan_engine_abi::DynEngine,
+    selected_text: String,
+    reading: String,
+    prefix_blocks: Vec<SplitBlock>,
+    suffix_blocks: Vec<SplitBlock>,
+) -> Result<bool> {
+    tracing::debug!(
+        "apply_selecting_candidate_to_split_preedit: reading={:?} selected={:?} prefix={} suffix={}",
+        reading,
+        selected_text,
+        debug_blocks(&prefix_blocks),
+        debug_blocks(&suffix_blocks),
+    );
+    let (blocks, sel_start, sel_end) =
+        rebuild_split_blocks_from_selection(engine, &reading, &selected_text, &prefix_blocks, &[]);
+    if sel_start == sel_end {
+        return Ok(false);
+    }
+
+    let selected_blocks = blocks[sel_start..sel_end].to_vec();
+    let reconverted_suffix_blocks = reconvert_suffix_blocks(engine, &suffix_blocks);
+    let mut final_blocks =
+        Vec::with_capacity(sel_start + selected_blocks.len() + reconverted_suffix_blocks.len());
+    final_blocks.extend_from_slice(&blocks[..sel_start]);
+    final_blocks.extend(selected_blocks.clone());
+    final_blocks.extend(reconverted_suffix_blocks);
+    tracing::debug!(
+        "apply_selecting_candidate_to_split_preedit: selected={} final={}",
+        debug_blocks(&selected_blocks),
+        debug_blocks(&final_blocks),
+    );
+
+    let (next_sel_start, next_sel_end) = if final_blocks.len() > sel_end {
+        (sel_end, sel_end + 1)
+    } else {
+        (sel_start, sel_end)
+    };
+
+    let (prefix_disp, target_disp, suffix_disp) = {
+        let mut sess = session_get()?;
+        sess.set_split_preedit_blocks(final_blocks, next_sel_start, next_sel_end);
+        (
+            sess.split_display_prefix().unwrap_or_default(),
+            sess.split_display_target().unwrap_or_default(),
+            sess.split_display_remainder().unwrap_or_default(),
+        )
+    };
+    candidate_window::hide();
+    candidate_window::stop_live_timer();
+    engine.bg_reclaim();
+    update_composition_candidate_parts(ctx, tid, sink, prefix_disp, target_disp, suffix_disp)?;
+    Ok(true)
 }
 
-fn split_surface_runs(surface: &str) -> Vec<String> {
-    let mut runs = Vec::new();
-    let mut buf = String::new();
-    let mut prev_kind: Option<u8> = None;
-
-    for c in surface.chars() {
-        let kind = if is_kana_char(c) {
-            0u8
-        } else if c.is_ascii_alphanumeric() {
-            1u8
-        } else {
-            // 漢字・記号・その他は 1 文字ごとに独立ブロックへ分ける
-            2u8
-        };
-
-        match prev_kind {
-            Some(prev) if prev == kind && kind != 2 => buf.push(c),
-            Some(_) => {
-                if !buf.is_empty() {
-                    runs.push(std::mem::take(&mut buf));
-                }
-                buf.push(c);
-            }
-            None => buf.push(c),
-        }
-
-        if kind == 2 {
-            runs.push(std::mem::take(&mut buf));
-            prev_kind = None;
-        } else {
-            prev_kind = Some(kind);
-        }
+fn apply_structured_candidate_to_split_preedit(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    engine: &mut rakukan_engine_abi::DynEngine,
+    candidate: rakukan_engine_abi::SegmentCandidate,
+    prefix_blocks: Vec<SplitBlock>,
+    suffix_blocks: Vec<SplitBlock>,
+) -> Result<bool> {
+    let selected_blocks = candidate
+        .segments
+        .into_iter()
+        .map(|seg| SplitBlock {
+            reading: seg.reading,
+            display: seg.surface,
+        })
+        .collect::<Vec<_>>();
+    if selected_blocks.is_empty() {
+        return Ok(false);
     }
 
-    if !buf.is_empty() {
-        runs.push(buf);
-    }
-    runs
+    tracing::debug!(
+        "apply_structured_candidate_to_split_preedit: selected={} prefix={} suffix={}",
+        debug_blocks(&selected_blocks),
+        debug_blocks(&prefix_blocks),
+        debug_blocks(&suffix_blocks),
+    );
+
+    let reconverted_suffix_blocks = reconvert_suffix_blocks(engine, &suffix_blocks);
+    let sel_start = prefix_blocks.len();
+    let sel_end = sel_start + selected_blocks.len();
+    let mut final_blocks = Vec::with_capacity(sel_end + reconverted_suffix_blocks.len());
+    final_blocks.extend(prefix_blocks);
+    final_blocks.extend(selected_blocks);
+    final_blocks.extend(reconverted_suffix_blocks);
+
+    let (next_sel_start, next_sel_end) = if final_blocks.len() > sel_end {
+        (sel_end, sel_end + 1)
+    } else {
+        (sel_start, sel_end)
+    };
+
+    let (prefix_disp, target_disp, suffix_disp) = {
+        let mut sess = session_get()?;
+        sess.set_split_preedit_blocks(final_blocks, next_sel_start, next_sel_end);
+        (
+            sess.split_display_prefix().unwrap_or_default(),
+            sess.split_display_target().unwrap_or_default(),
+            sess.split_display_remainder().unwrap_or_default(),
+        )
+    };
+    candidate_window::hide();
+    candidate_window::stop_live_timer();
+    engine.bg_reclaim();
+    update_composition_candidate_parts(ctx, tid, sink, prefix_disp, target_disp, suffix_disp)?;
+    Ok(true)
 }
 
-fn char_boundaries(s: &str) -> Vec<usize> {
-    let mut out = s.char_indices().map(|(i, _)| i).collect::<Vec<_>>();
-    out.push(s.len());
-    out
-}
-
-fn align_split_blocks(reading: &str, runs: &[String]) -> Option<Vec<SplitBlock>> {
-    if runs.is_empty() {
-        return if reading.is_empty() {
-            Some(Vec::new())
-        } else {
-            None
-        };
-    }
-
-    if runs.len() == 1 {
-        return Some(vec![SplitBlock {
-            reading: reading.to_string(),
-            display: runs[0].clone(),
-        }]);
-    }
-
-    let display = runs[0].clone();
-    let is_kana = display.chars().next().map(is_kana_char).unwrap_or(false);
-    if is_kana && reading.starts_with(display.as_str()) {
-        let mut rest = align_split_blocks(&reading[display.len()..], &runs[1..])?;
-        let mut blocks = Vec::with_capacity(rest.len() + 1);
-        blocks.push(SplitBlock {
-            reading: display.clone(),
-            display,
-        });
-        blocks.append(&mut rest);
-        return Some(blocks);
-    }
-
-    let boundaries = char_boundaries(reading);
-    for &end in boundaries.iter().rev().skip(1) {
-        let current = &reading[..end];
-        let remaining = &reading[end..];
-        if current.is_empty() {
-            continue;
-        }
-        if let Some(mut rest) = align_split_blocks(remaining, &runs[1..]) {
-            let mut blocks = Vec::with_capacity(rest.len() + 1);
-            blocks.push(SplitBlock {
-                reading: current.to_string(),
-                display: display.clone(),
-            });
-            blocks.append(&mut rest);
-            return Some(blocks);
-        }
-    }
-
-    None
-}
-
-fn split_reading_evenly(reading: &str, count: usize) -> Vec<String> {
-    if count == 0 {
+fn reconvert_suffix_blocks(
+    engine: &mut rakukan_engine_abi::DynEngine,
+    suffix_blocks: &[SplitBlock],
+) -> Vec<SplitBlock> {
+    if suffix_blocks.is_empty() {
         return Vec::new();
     }
-    let chars: Vec<char> = reading.chars().collect();
-    if chars.is_empty() {
-        return vec![String::new(); count];
+
+    let suffix_reading = suffix_blocks
+        .iter()
+        .map(|b| b.reading.as_str())
+        .collect::<String>();
+    if suffix_reading.is_empty() {
+        return suffix_blocks.to_vec();
     }
-    let mut parts = Vec::with_capacity(count);
-    let mut start = 0usize;
-    for idx in 0..count {
-        let remaining_chars = chars.len().saturating_sub(start);
-        let remaining_parts = count - idx;
-        let take = if remaining_parts <= 1 {
-            remaining_chars
+    let original_surface = suffix_blocks
+        .iter()
+        .map(|b| b.display.as_str())
+        .collect::<String>();
+    tracing::debug!(
+        "reconvert_suffix_blocks: input reading={:?} surface={:?} blocks={}",
+        suffix_reading,
+        original_surface,
+        debug_blocks(suffix_blocks),
+    );
+
+    engine.bg_reclaim();
+    engine.force_preedit(suffix_reading.clone());
+    let llm_limit = crate::engine::state::get_num_candidates();
+    const DICT_LIMIT: usize = 32;
+    let suffix_surface = if engine.is_kanji_ready() {
+        engine_convert_sync_segment(engine, llm_limit, DICT_LIMIT, &suffix_reading)
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| suffix_reading.clone())
+    } else {
+        suffix_reading.clone()
+    };
+    engine.bg_reclaim();
+    let reconverted = segment_target_blocks(engine, &suffix_reading, &suffix_surface);
+    tracing::debug!(
+        "reconvert_suffix_blocks: output surface={:?} blocks={}",
+        suffix_surface,
+        debug_blocks(&reconverted),
+    );
+    if should_keep_original_suffix_blocks(suffix_blocks, &reconverted, &original_surface) {
+        tracing::debug!("reconvert_suffix_blocks: keeping original suffix blocks");
+        suffix_blocks.to_vec()
+    } else {
+        tracing::debug!("reconvert_suffix_blocks: adopting reconverted suffix blocks");
+        reconverted
+    }
+}
+
+fn build_structured_candidates(
+    engine: &rakukan_engine_abi::DynEngine,
+    reading: &str,
+    candidates: &[String],
+) -> Vec<rakukan_engine_abi::SegmentCandidate> {
+    candidates
+        .iter()
+        .map(|surface| rakukan_engine_abi::SegmentCandidate {
+            surface: surface.clone(),
+            segments: engine.segment_candidate(surface, reading),
+        })
+        .collect()
+}
+
+fn materialize_split_conversion_for_commit(
+    sess: &SessionState,
+) -> Option<(
+    crate::engine::state::ConversionState,
+    Option<(String, String)>,
+)> {
+    let mut conversion = sess.split_conversion_clone()?;
+    let learning = if sess.split_candidate_active() {
+        let candidate = sess.current_structured_candidate_clone()?;
+        let reading = conversion.focused()?.reading.clone();
+        let surface = candidate.surface.clone();
+        if !conversion.replace_focused_with_candidate(&candidate) {
+            return None;
+        }
+        if !reading.is_empty() && surface != reading {
+            Some((reading, surface))
         } else {
-            (remaining_chars / remaining_parts).max(1)
-        };
-        let end = (start + take).min(chars.len());
-        parts.push(chars[start..end].iter().collect());
-        start = end;
+            None
+        }
+    } else {
+        None
+    };
+    Some((conversion, learning))
+}
+
+fn apply_split_conversion_state(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    engine: &mut rakukan_engine_abi::DynEngine,
+    conversion: crate::engine::state::ConversionState,
+) -> Result<bool> {
+    tracing::debug!(
+        "apply_split_conversion_state: after={}",
+        debug_conversion_segments(&conversion),
+    );
+    let (prefix_disp, target_disp, suffix_disp) = conversion.display_parts();
+    engine.bg_reclaim();
+    engine.force_preedit(conversion.composed_reading());
+    {
+        let mut sess = session_get()?;
+        sess.set_split_conversion(conversion);
     }
-    parts
+    candidate_window::hide();
+    candidate_window::stop_live_timer();
+    update_composition_candidate_parts(ctx, tid, sink, prefix_disp, target_disp, suffix_disp)?;
+    Ok(true)
+}
+
+fn apply_structured_candidate_to_split_conversion(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    engine: &mut rakukan_engine_abi::DynEngine,
+    candidate: rakukan_engine_abi::SegmentCandidate,
+) -> Result<bool> {
+    let mut conversion = {
+        let sess = session_get()?;
+        let Some(conversion) = sess.split_conversion_clone() else {
+            return Ok(false);
+        };
+        conversion
+    };
+    let reading = conversion
+        .focused()
+        .map(|segment| segment.reading.clone())
+        .unwrap_or_default();
+    if !reading.is_empty() && candidate.surface != reading {
+        engine.learn(&reading, &candidate.surface);
+    }
+    if !conversion.replace_focused_with_candidate(&candidate) {
+        return Ok(false);
+    }
+    candidate_window::hide();
+    candidate_window::stop_live_timer();
+    apply_split_conversion_state(ctx, tid, sink, engine, conversion)
+}
+
+fn debug_conversion_segments(conversion: &crate::engine::state::ConversionState) -> String {
+    conversion
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, seg)| {
+            if index == conversion.focused_index {
+                format!("[{}<{}>]", seg.surface, seg.reading)
+            } else {
+                format!("{}<{}>", seg.surface, seg.reading)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" | ")
+}
+
+fn should_keep_original_suffix_blocks(
+    original: &[SplitBlock],
+    reconverted: &[SplitBlock],
+    original_surface: &str,
+) -> bool {
+    if reconverted.is_empty() {
+        return true;
+    }
+
+    let reconverted_surface = reconverted
+        .iter()
+        .map(|b| b.display.as_str())
+        .collect::<String>();
+    if reconverted_surface.chars().count() + 2 < original_surface.chars().count() {
+        return true;
+    }
+
+    match (original.first(), reconverted.first()) {
+        (Some(orig), Some(new))
+            if is_all_hiragana_or_katakana(&orig.display)
+                && is_all_hiragana_or_katakana(&new.display)
+                && new.display.chars().count() < orig.display.chars().count() =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn is_all_hiragana_or_katakana(text: &str) -> bool {
+    !text.is_empty()
+        && text.chars().all(|c| {
+            matches!(
+                c as u32,
+                0x3041..=0x3096 | 0x30A1..=0x30FA | 0x30FC | 0xFF66..=0xFF9F
+            )
+        })
+}
+
+fn segment_target_blocks(
+    engine: &rakukan_engine_abi::DynEngine,
+    reading: &str,
+    surface: &str,
+) -> Vec<SplitBlock> {
+    let mut blocks = engine
+        .segment_candidate(surface, reading)
+        .into_iter()
+        .map(|seg| SplitBlock {
+            reading: seg.reading,
+            display: seg.surface,
+        })
+        .collect::<Vec<_>>();
+
+    if blocks.is_empty() {
+        blocks.push(SplitBlock {
+            reading: reading.to_string(),
+            display: surface.to_string(),
+        });
+    }
+    tracing::debug!(
+        "segment_target_blocks: reading={:?} surface={:?} blocks={}",
+        reading,
+        surface,
+        debug_blocks(&blocks),
+    );
+    blocks
+}
+
+fn rebuild_split_blocks_from_selection(
+    engine: &rakukan_engine_abi::DynEngine,
+    reading: &str,
+    surface: &str,
+    prefix_blocks: &[SplitBlock],
+    suffix_blocks: &[SplitBlock],
+) -> (Vec<SplitBlock>, usize, usize) {
+    let target_blocks = segment_target_blocks(engine, reading, surface);
+    if target_blocks.is_empty() {
+        return (Vec::new(), 0, 0);
+    }
+
+    let sel_start = prefix_blocks.len();
+    let sel_end = sel_start + target_blocks.len();
+    let mut blocks =
+        Vec::with_capacity(prefix_blocks.len() + target_blocks.len() + suffix_blocks.len());
+    blocks.extend_from_slice(prefix_blocks);
+    blocks.extend(target_blocks);
+    blocks.extend_from_slice(suffix_blocks);
+    (blocks, sel_start, sel_end)
 }
 
 fn build_split_blocks_from_surface(
@@ -3281,86 +3844,30 @@ fn build_split_blocks_from_surface(
     surface: &str,
     outer_remainder: &str,
 ) -> Vec<SplitBlock> {
-    let engine_runs = engine.segment_surface(surface);
-    let runs = if !engine_runs.is_empty()
-        && engine_runs.concat() == surface
-        && engine_runs.iter().any(|run| run != surface)
-    {
-        tracing::debug!("[segment] vibrato surface={surface:?} blocks={engine_runs:?}");
-        engine_runs
-    } else {
-        let fallback = split_surface_runs(surface);
-        tracing::debug!(
-            "[segment] heuristic surface={surface:?} engine_runs={engine_runs:?} blocks={fallback:?}"
-        );
-        fallback
-    };
-    if runs.is_empty() {
-        return outer_remainder
-            .chars()
-            .map(|c| SplitBlock {
-                reading: c.to_string(),
-                display: c.to_string(),
-            })
-            .collect();
+    let mut blocks = segment_target_blocks(engine, reading, surface);
+
+    if !outer_remainder.is_empty() {
+        blocks.extend(outer_remainder.chars().map(|c| SplitBlock {
+            reading: c.to_string(),
+            display: c.to_string(),
+        }));
     }
-
-    let mut blocks = Vec::new();
-    let mut cursor = 0usize;
-    let mut idx = 0usize;
-
-    while idx < runs.len() {
-        let run = &runs[idx];
-        let is_kana = run.chars().next().map(is_kana_char).unwrap_or(false);
-        let remaining = &reading[cursor..];
-
-        if is_kana && remaining.starts_with(run) {
-            blocks.push(SplitBlock {
-                reading: run.clone(),
-                display: run.clone(),
-            });
-            cursor += run.len();
-            idx += 1;
-            continue;
-        }
-
-        let next_anchor = runs
-            .iter()
-            .enumerate()
-            .skip(idx + 1)
-            .find(|(_, next_run)| next_run.chars().next().map(is_kana_char).unwrap_or(false))
-            .map(|(j, next_run)| (j, next_run.clone()));
-
-        let (end_idx, reading_chunk) = if let Some((anchor_idx, anchor_run)) = next_anchor {
-            if let Some((pos, _)) = remaining.match_indices(anchor_run.as_str()).last() {
-                (anchor_idx, remaining[..pos].to_string())
-            } else {
-                (runs.len(), remaining.to_string())
-            }
-        } else {
-            (runs.len(), remaining.to_string())
-        };
-
-        let displays = &runs[idx..end_idx];
-        let mut group_blocks = align_split_blocks(&reading_chunk, displays).unwrap_or_else(|| {
-            let reading_parts = split_reading_evenly(&reading_chunk, displays.len());
-            displays
-                .iter()
-                .cloned()
-                .zip(reading_parts)
-                .map(|(display, reading)| SplitBlock { reading, display })
-                .collect::<Vec<_>>()
-        });
-        cursor += reading_chunk.len();
-        blocks.append(&mut group_blocks);
-        idx = end_idx;
-    }
-
-    blocks.extend(outer_remainder.chars().map(|c| SplitBlock {
-        reading: c.to_string(),
-        display: c.to_string(),
-    }));
+    tracing::debug!(
+        "build_split_blocks_from_surface: reading={:?} surface={:?} outer_remainder={:?} blocks={}",
+        reading,
+        surface,
+        outer_remainder,
+        debug_blocks(&blocks),
+    );
     blocks
+}
+
+fn debug_blocks(blocks: &[SplitBlock]) -> String {
+    blocks
+        .iter()
+        .map(|b| format!("{}<{}>", b.display, b.reading))
+        .collect::<Vec<_>>()
+        .join(" | ")
 }
 
 fn activate_split_preedit_blocks(

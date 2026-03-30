@@ -5,7 +5,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
-use std::path::PathBuf;
 
 /// llama.cpp の推論バックエンド
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -73,49 +72,8 @@ pub fn select_backend() -> BackendSelection {
         };
     }
 
-    // 保存済み設定の読み込み（PowerShell の detect-gpu.ps1 が生成）
-    if let Some(saved) = load_saved_config() {
-        tracing::info!("backend::detect: using saved backend={}", saved.backend);
-        return saved;
-    }
-
     // 実行時検出
     detect_at_runtime()
-}
-
-/// 保存済み設定を読み込む（%APPDATA%\rakukan\backend.json）
-fn load_saved_config() -> Option<BackendSelection> {
-    let config_path = config_dir()?.join("backend.json");
-    if !config_path.exists() {
-        return None;
-    }
-    let content = std::fs::read_to_string(&config_path).ok()?;
-    let config: serde_json::Value = serde_json::from_str(&content).ok()?;
-
-    let backend = match config["backend"].as_str()? {
-        "cuda" => Backend::Cuda,
-        "vulkan" => Backend::Vulkan,
-        _ => Backend::Cpu,
-    };
-
-    let gpus = config["detected_gpus"]
-        .as_array()
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .map(|name| GpuInfo {
-                    name: name.to_string(),
-                    vram_mb: None,
-                })
-                .collect()
-        })
-        .unwrap_or_default();
-
-    Some(BackendSelection {
-        backend,
-        reason: "保存済み設定から読み込み".to_string(),
-        detected_gpus: gpus,
-    })
 }
 
 /// Rust から直接 GPU を検出する（保存済み設定がない場合のフォールバック）
@@ -229,19 +187,6 @@ fn vulkan_available() -> bool {
     #[cfg(not(target_os = "windows"))]
     {
         which::which("vulkaninfo").is_ok()
-    }
-}
-
-fn config_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").ok()?;
-        Some(PathBuf::from(appdata).join("rakukan"))
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        let home = std::env::var("HOME").ok()?;
-        Some(PathBuf::from(home).join(".config").join("rakukan"))
     }
 }
 

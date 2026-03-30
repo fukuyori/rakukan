@@ -1,7 +1,7 @@
 # Rakukan 詳細設計書
 
-バージョン: v0.4.1  
-最終更新: 2026-03-29
+バージョン: v0.4.2  
+最終更新: 2026-03-30
 
 ---
 
@@ -189,7 +189,24 @@ Idle
 
 `SESSION_SELECTING` AtomicBool は `Selecting` と `SplitPreedit` 時に `true` になり、  
 `OnTestKeyDown` の判定（キーを IME が消費するか）に使用される。  
-これにより `SESSION_STATE` の Mutex を取らずにホットパスの判定が可能。
+これにより `SESSION_STATE` の Mutex を取らずにホットパスの判定が可能。  
+
+### 4.3.1 部分再変換の実装原則
+
+部分再変換・分節編集では、文章ごとの例外処理やリテラル文字列に依存した実装を入れない。  
+目標は「特定の語をうまく切ること」ではなく、「どの文章でも同じ操作感で伸長・縮小・再変換できること」である。
+
+- 分節境界の検出は `Vibrato` と engine 側の一般ロジックに委ねる
+- TSF 側で特定の助詞・単語・文字列をハードコードして切り分けない
+- `Right/Left`、`Shift+Right/Left`、`Space`、`Enter` の意味は文章に依らず固定する
+- 既存の分節を修正する処理では、未変更の左側を壊さないことを最優先にする
+- `surface + reading` 文字列から毎回再解釈するのではなく、文節列を正として扱う方向へ寄せる
+
+禁止事項:
+
+- 「`わさび` を含む時はこう切る」のような語彙依存の分岐
+- 「`と` `は` `が` ならこう扱う」のような文字依存の runtime ルール
+- 一時的なデバッグやテスト用のつもりで、特定文章向けの分節補正を本実装に残すこと
 
 ### 4.4 キー処理フロー（OnKeyDown）
 
@@ -390,7 +407,6 @@ LLM に渡す前文（`committed`）は 200 文字を超えたら文境界でト
 load_auto(dir, config_json)
   │
   ├─ config_json の gpu_backend キー
-  ├─ backend.json の backend キー  
   └─ デフォルト: cpu
   
   → rakukan_engine_{cuda|vulkan|cpu}.dll をロード
