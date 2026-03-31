@@ -45,7 +45,7 @@ pub const DISPLAY_ATTRIBUTE_CONVERTED: TF_DISPLAYATTRIBUTE = TF_DISPLAYATTRIBUTE
         Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 },
     },
     lsStyle: TF_LS_SOLID,
-    fBoldLine: windows::Win32::Foundation::TRUE,
+    fBoldLine: windows::Win32::Foundation::FALSE,
     crLine: TF_DA_COLOR {
         r#type: TF_CT_NONE,
         Anonymous: TF_DA_COLOR_0 { nIndex: 0i32 },

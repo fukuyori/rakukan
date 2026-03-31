@@ -47,6 +47,12 @@ pub fn register_server() -> Result<()> {
     category_register()?;
     tracing::info!("register_server: Category OK");
 
+    // IMM32 互換レイアウトとして登録（レガシーアプリ対応）
+    match install_layout_or_tip() {
+        Ok(()) => tracing::info!("register_server: InstallLayoutOrTip OK"),
+        Err(e) => tracing::warn!("register_server: InstallLayoutOrTip failed (non-fatal): {e}"),
+    }
+
     Ok(())
 }
 
@@ -130,6 +136,43 @@ pub fn category_register() -> Result<()> {
             catmgr
                 .RegisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE)
                 .map_err(|e| anyhow::anyhow!("RegisterCategory: {e}"))?;
+        }
+    }
+
+    Ok(())
+}
+
+// ─── IMM32 互換登録 ──────────────────────────────────────────────────────────
+
+/// input.dll の InstallLayoutOrTip を呼び出して IMM32 互換レイアウトとして登録する。
+/// これにより CUAS (Cicero Unaware Application Support) 経由で
+/// レガシーアプリ（ゲーム等）でも日本語入力が可能になる。
+fn install_layout_or_tip() -> Result<()> {
+    use windows::Win32::System::LibraryLoader::{GetProcAddress, LoadLibraryW};
+
+    // プロファイル文字列: "0x0411:{CLSID}{GUID_PROFILE}"
+    let clsid = GUID_TEXT_SERVICE.to_guid_string();
+    let profile_id = GUID_PROFILE.to_guid_string();
+    let profile_str = format!("0x0411:{}{}", clsid, profile_id);
+    let profile_wide: Vec<u16> = profile_str.encode_utf16().chain(Some(0)).collect();
+
+    unsafe {
+        let input_dll_name: Vec<u16> = "input.dll\0".encode_utf16().collect();
+        let hmod = LoadLibraryW(windows::core::PCWSTR(input_dll_name.as_ptr()))
+            .map_err(|e| anyhow::anyhow!("LoadLibrary input.dll: {e}"))?;
+
+        let proc_name = windows::core::PCSTR(b"InstallLayoutOrTip\0".as_ptr());
+        let proc = GetProcAddress(hmod, proc_name)
+            .ok_or_else(|| anyhow::anyhow!("GetProcAddress InstallLayoutOrTip not found"))?;
+
+        // InstallLayoutOrTip(LPCWSTR psz, DWORD dwFlags) -> BOOL
+        type InstallLayoutOrTipFn =
+            unsafe extern "system" fn(*const u16, u32) -> windows::Win32::Foundation::BOOL;
+        let install_fn: InstallLayoutOrTipFn = std::mem::transmute(proc);
+
+        let result = install_fn(profile_wide.as_ptr(), 0);
+        if !result.as_bool() {
+            return Err(anyhow::anyhow!("InstallLayoutOrTip returned FALSE"));
         }
     }
 

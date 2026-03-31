@@ -362,6 +362,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         }
         candidate_window::destroy();
         candidate_window::stop_live_timer();
+        crate::tsf::mode_indicator::destroy();
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
         }
@@ -544,6 +545,9 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
 
         tracing::trace!("OnKeyDown vk={vk:#04x} action={action:?}");
 
+        // モードインジケーターを非表示（キー入力があれば消す）
+        crate::tsf::mode_indicator::hide();
+
         // ── 英数モードガード（最終防衛線）─────────────────────────────────
         // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
         // アトミックなのでロック競合なし。
@@ -642,6 +646,33 @@ impl TextServiceFactory_Impl {
             .unwrap_or_default();
         let _ = tid;
         tray_ipc::publish(open, mode);
+    }
+
+    /// モード切替時にキャレット近くにインジケーターを表示する。
+    ///
+    /// mozc と同じアプローチで TSF の `GetSelection` → `GetTextExt` を使い
+    /// キャレット位置をリアルタイムに取得する。取得できない場合は表示しない。
+    fn show_mode_indicator(&self, mode_name: &str, ctx: ITfContext, tid: u32) {
+        use crate::tsf::edit_session::EditSession;
+        use crate::tsf::mode_indicator;
+
+        let mode_char: &'static str = match mode_name {
+            "Hiragana" => "あ",
+            "Katakana" => "ア",
+            _ => "A",
+        };
+
+        let ctx2 = ctx.clone();
+        let session = EditSession::new(move |ec| unsafe {
+            // セレクション範囲を取得してキャレット位置を特定
+            if let Some((x, y)) = get_caret_pos_from_context(&ctx2, ec) {
+                mode_indicator::show(mode_char, x, y);
+            }
+            Ok(())
+        });
+        unsafe {
+            let _ = ctx.RequestEditSession(tid, &session, TF_ES_READWRITE);
+        }
     }
 
     fn maybe_reload_runtime_config(&self) {
@@ -2835,6 +2866,7 @@ impl TextServiceFactory_Impl {
         diag::event(DiagEvent::ModeChange { from, to });
         self.notify_langbar_update();
         self.notify_tray_update(tid);
+        self.show_mode_indicator(to, ctx, tid);
         self.maybe_reload_runtime_config();
         Ok(true)
     }
@@ -2866,7 +2898,7 @@ impl TextServiceFactory_Impl {
                         sess.set_idle();
                     }
                     candidate_window::stop_live_timer();
-                    end_composition(ctx, tid, preedit)?;
+                    end_composition(ctx.clone(), tid, preedit)?;
                 }
             }
         }
@@ -2891,11 +2923,12 @@ impl TextServiceFactory_Impl {
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);
+        self.show_mode_indicator("Alphanumeric", ctx, tid);
         self.maybe_reload_runtime_config();
         Ok(true)
     }
 
-    fn on_ime_on(&self, _ctx: ITfContext, tid: u32) -> Result<bool> {
+    fn on_ime_on(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
         if let Ok(mut st) = crate::engine::state::ime_state_get() {
             let from = format!("{:?}", st.input_mode);
             st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
@@ -2917,6 +2950,7 @@ impl TextServiceFactory_Impl {
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);
+        self.show_mode_indicator("Hiragana", ctx, tid);
         self.maybe_reload_runtime_config();
         Ok(true)
     }
@@ -2935,7 +2969,7 @@ impl TextServiceFactory_Impl {
                 engine.commit(&t);
                 engine.reset_preedit();
                 drop(guard);
-                end_composition(ctx, tid, t)?;
+                end_composition(ctx.clone(), tid, t)?;
             } else {
                 drop(guard);
             }
@@ -2950,6 +2984,7 @@ impl TextServiceFactory_Impl {
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);
+        self.show_mode_indicator("Hiragana", ctx, tid);
         self.maybe_reload_runtime_config();
         Ok(true)
     }
@@ -2968,7 +3003,7 @@ impl TextServiceFactory_Impl {
                 engine.commit(&t);
                 engine.reset_preedit();
                 drop(guard);
-                end_composition(ctx, tid, t)?;
+                end_composition(ctx.clone(), tid, t)?;
             } else {
                 drop(guard);
             }
@@ -2983,6 +3018,7 @@ impl TextServiceFactory_Impl {
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);
+        self.show_mode_indicator("Katakana", ctx, tid);
         self.maybe_reload_runtime_config();
         Ok(true)
     }
@@ -4074,6 +4110,22 @@ fn action_name(a: &UserAction) -> &'static str {
 // ─── EditSession ヘルパー ─────────────────────────────────────────────────────
 // TF_ES_SYNC を使わない（TF_ES_READWRITE のみ）
 
+/// TSF コンテキストからキャレットのスクリーン座標 (x, y_bottom) を取得する。
+/// mozc の FillCharPosition と同じアプローチ: GetSelection → GetTextExt。
+/// 取得できない場合は None を返す（インジケーターは表示しない）。
+unsafe fn get_caret_pos_from_context(
+    ctx: &windows::Win32::UI::TextServices::ITfContext,
+    ec: u32,
+) -> Option<(i32, i32)> {
+    let range = get_cursor_range(ctx, ec)?;
+    let view = ctx.GetActiveView().ok()?;
+    let mut rect = windows::Win32::Foundation::RECT::default();
+    let mut clipped = windows::Win32::Foundation::BOOL(0);
+    view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
+    // rect はスクリーン座標。left = x, bottom = キャレット下端。
+    Some((rect.left, rect.bottom))
+}
+
 /// 現在のキャレット位置を表す長さ0の ITfRange を返す。
 /// GetSelection で現在選択範囲を取得し、終端アンカーに collapse する。
 /// 失敗時は None（呼び元が GetEnd にフォールバックする）。
@@ -4640,7 +4692,27 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
         Ok(())
     }
     fn GetIcon(&self) -> windows::core::Result<HICON> {
-        unsafe { language_bar::load_tray_icon() }
+        let open = self
+            .inner
+            .try_borrow()
+            .ok()
+            .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
+            .unwrap_or(true);
+        let mode_char = if !open {
+            "A"
+        } else {
+            use crate::engine::state::ime_state_get;
+            ime_state_get()
+                .ok()
+                .map(|s| match s.input_mode {
+                    crate::engine::input_mode::InputMode::Hiragana => "あ",
+                    crate::engine::input_mode::InputMode::Katakana => "ア",
+                    crate::engine::input_mode::InputMode::Alphanumeric => "A",
+                })
+                .unwrap_or("あ")
+        };
+        language_bar::create_mode_icon(mode_char)
+            .or_else(|_| unsafe { language_bar::load_tray_icon() })
     }
     fn GetText(&self) -> windows::core::Result<BSTR> {
         // トレイは1〜2文字しか表示できないためモード文字のみ返す
