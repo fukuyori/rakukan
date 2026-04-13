@@ -19,7 +19,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{PROTOCOL_VERSION, Request, Response, PIPE_BASE_NAME};
+use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response, PIPE_BASE_NAME};
 use rakukan_engine_abi::{SegmentBlock, SegmentCandidate};
 
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
@@ -278,6 +278,47 @@ impl RpcEngine {
     pub fn available_models_json(&self) -> String {
         self.call_string(Request::AvailableModelsJson)
             .unwrap_or_else(|_| "[]".into())
+    }
+
+    /// 1 キーストロークを 1 RPC round-trip で処理するバッチ API。
+    ///
+    /// 以下を一括実行し、結果をまとめて返す:
+    /// - `push_char` / `push_fullwidth_alpha` / `push_raw`（`kind` 次第）
+    /// - `preedit_display()`
+    /// - `hiragana_text()`
+    /// - `bg_status()`（`&'static str` 化した正規化後の値）
+    /// - `bg_start_n_cands` が `Some` かつ hiragana が非空なら `bg_start(n)`
+    ///
+    /// 返り値: `(preedit, hiragana, bg_status)`
+    pub fn input_char(
+        &self,
+        c: char,
+        kind: InputCharKind,
+        bg_start_n_cands: Option<usize>,
+    ) -> (String, String, &'static str) {
+        let req = Request::InputChar {
+            c: c as u32,
+            kind,
+            bg_start_n_cands: bg_start_n_cands.map(|n| n as u32),
+        };
+        match self.call(req) {
+            Ok(Response::InputCharResult {
+                preedit,
+                hiragana,
+                bg_status,
+            }) => {
+                let bg = match bg_status.as_str() {
+                    "idle" => "idle",
+                    "running" => "running",
+                    "done" => "done",
+                    "pending" => "pending",
+                    "error" => "error",
+                    _ => "unknown",
+                };
+                (preedit, hiragana, bg)
+            }
+            _ => (String::new(), String::new(), "unknown"),
+        }
     }
 
     pub fn learn(&self, reading: &str, surface: &str) {

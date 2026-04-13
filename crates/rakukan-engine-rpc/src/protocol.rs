@@ -10,7 +10,21 @@ use serde::{Deserialize, Serialize};
 pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 
 /// 現在のプロトコルバージョン。接続直後の Hello で交換する。
-pub const PROTOCOL_VERSION: u32 = 1;
+///
+/// - v1: 0.4.4 初版
+/// - v2: `InputChar` / `InputCharResult` バッチ RPC を追加（0.4.5）
+pub const PROTOCOL_VERSION: u32 = 2;
+
+/// `InputChar` バッチ RPC で指定する入力モード。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InputCharKind {
+    /// `push_char` と等価（ローマ字変換経由）
+    Char,
+    /// `push_fullwidth_alpha` と等価（A-Z を全角英字に）
+    FullwidthAlpha,
+    /// `push_raw` と等価（かなルールに登録された記号等を直接）
+    Raw,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
@@ -87,6 +101,21 @@ pub enum Request {
     // ─── ライフサイクル ────────────────────────────────────
     /// クライアント側が切断を宣言する。ホストは該当セッションを破棄する。
     Bye,
+
+    // ─── バッチ入力 (v2) ───────────────────────────────────
+    /// 1 キーストロークを 1 RPC で処理するバッチ API。
+    ///
+    /// ホスト側は以下を順に実行し、結果をまとめて `InputCharResult` で返す:
+    /// 1. `kind` に応じて `push_char` / `push_fullwidth_alpha` / `push_raw`
+    /// 2. `preedit_display()` を取得
+    /// 3. `hiragana_text()` を取得
+    /// 4. `bg_status()` を取得
+    /// 5. `bg_start_n_cands` が `Some` かつ hiragana が非空なら `bg_start(n)`
+    InputChar {
+        c: u32,
+        kind: InputCharKind,
+        bg_start_n_cands: Option<u32>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,4 +131,12 @@ pub enum Response {
     SegmentBlocks(Vec<SegmentBlock>),
     /// ホスト側で処理中に発生したエラー（DLL 未ロード、引数不正、内部 panic 等）。
     Error(String),
+
+    /// `Request::InputChar` の結果。
+    /// `bg_status` は DynEngine 側の `&'static str` を所有 String にしたもの。
+    InputCharResult {
+        preedit: String,
+        hiragana: String,
+        bg_status: String,
+    },
 }

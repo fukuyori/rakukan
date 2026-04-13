@@ -1,5 +1,147 @@
 # Changelog
 
+## [0.4.5] - 2026-04-13
+
+### Changed
+
+- **打鍵時の RPC を 1 往復にバッチ化**
+  - 0.4.4 までは 1 キーストロークあたり `push_char` / `preedit_display` /
+    `hiragana_text` / `bg_status` / `bg_start` 等で 8〜9 回の Named Pipe 往復が
+    発生していた
+  - 0.4.5 では `Request::InputChar { c, kind, bg_start_n_cands }` を新設し、
+    ホスト側で push → `preedit_display` → `hiragana_text` → `bg_status` →
+    条件付き `bg_start` までを 1 リクエストで処理
+  - レスポンスは `Response::InputCharResult { preedit, hiragana, bg_status }`
+  - `PROTOCOL_VERSION` を 2 に bump（古い `rakukan-engine-host.exe` との
+    組み合わせでは Hello で弾かれる。インストーラ再適用が必要）
+  - TSF の `on_input` 4 分岐（通常 / live_conv / split_preedit / selecting）を
+    すべて新 API に置換
+
+- **辞書・モデル ready 状態のラッチ化**
+  - `poll_dict_ready` / `poll_model_ready` は一度 true を返したら以降ずっと
+    true なので、`DICT_READY_LATCH` / `MODEL_READY_LATCH`（AtomicBool）を
+    `rakukan-tsf/src/engine/state.rs` に追加
+  - `poll_dict_ready_cached` / `poll_model_ready_cached` ヘルパ関数経由で呼び、
+    ready 以降は RPC をスキップ
+  - `engine_reload()` でラッチをリセット
+  - TSF の `on_input` / `on_convert` / `candidate_window::on_live_timer` の
+    該当箇所を cached 版に置換
+
+- **ライブ変換中に debug ログで毎打鍵 2 RPC が走っていた問題を解消**
+  - `tracing::debug!` の引数に `is_dict_ready()` と `dict_status()` を渡していた
+    ため、log_level=debug（デフォルト）の環境で毎打鍵 2 RPC が発生していた
+  - debug ログ自体を削除
+
+### Fixed
+
+- **ライブ変換中に pending ローマ字が表示されない問題**
+  - 「tat」と入力したとき、末尾の "t" が一瞬表示された後 BG タイマー発火で
+    消えてしまう問題を修正
+  - `on_input` の live_conv 分岐で `preedit_display` から pending を切り出し、
+    表示文字列に付加（セッションに保存する preview はひらがなのみ）
+  - BG タイマー（`candidate_window::on_live_timer`）の Phase 1A 直接 `SetText`
+    経路でも pending を末尾に付加するよう修正
+  - Phase 1B キュー消費側（`factory.rs`）では、キュー取り出し時の engine から
+    最新 pending を付け直す方式に統一（キューには pending 無しの preview を
+    格納することで二重付加を回避）
+
+### Added
+
+- **変換パイプライン再設計の設計書** [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md)
+  - ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計
+  - Mozc の `Segments` / `Segment` / `Candidate` モデルを参考にした新データモデル
+  - Phase A〜F の段階的移行計画
+  - 決定事項: `live_conv_beam_size` / `convert_beam_size` の config 追加、
+    Mozc コードは思想参考のみ・コピーなし、Shift+矢印の伸縮で merge/split 兼用、
+    Candidate 注釈は Phase F として独立追加、候補一覧 Tab 展開は Phase E
+  - 実装は 0.4.6 以降の Phase A から順次
+
+- **README に課題リスト / 設計書リンクを集約**
+  - `## 課題リスト` セクションを追加
+  - 主要設計書・進行中の主要課題（Phase A〜F）・独立した技術課題・過去のスナップ
+    ショットの 4 カテゴリで整理
+
+- **handoff.md の残タスクに CONVERTER_REDESIGN への紐付けを追加**
+  - `[Num-1]` / `Segment ベースの本格文節管理` / `数字・助数詞の構造対応` /
+    `長文・句読点混じりでの分節精度確認` に該当節のリンクを追記
+
+## [0.4.4] - 2026-04-13
+
+### Changed
+
+- **エンジンを別プロセス化（out-of-process 化）**
+  - `rakukan_engine_*.dll`（llama.cpp 同梱）を TSF DLL からロードせず、
+    専用バイナリ `rakukan-engine-host.exe` に集約
+  - TSF 側は新設クレート `rakukan-engine-rpc` 経由で Windows Named Pipe
+    (`\\.\pipe\rakukan-engine-<user-sid>`) + postcard フレーミングでエンジンを呼ぶ
+  - `RpcEngine` は `DynEngine` と同じメソッドシグネチャを露出するため、
+    TSF 側の既存コードは型 import 差し替えのみで追従
+  - ホストプロセスは TSF 側が必要に応じて `CreateProcessW`
+    （DETACHED + NO_WINDOW）で自動 spawn、最大 5 秒までリトライ接続
+  - `rakukan-tsf` クレートの `rakukan-engine-abi` への直接依存を削除
+
+- **Activate 時のエンジン DLL ロードを完全に除去**
+  - 0.4.3 までは `Activate` 中に engine DLL を bg スレッドでロードしていた
+  - 0.4.4 では **最初の実入力**（`engine_try_get_or_create()` が呼ばれる瞬間）
+    まで RPC 接続もホスト spawn も一切発生しない
+  - Zoom / Dropbox のように IME を使わないアプリでは `rakukan-engine-host.exe`
+    も起動しない
+
+- **Named Pipe に明示的な DACL を設定**
+  - SDDL `D:P(A;;GA;;;<current-user-sid>)(A;;GA;;;SY)` を動的に構築し
+    `CreateNamedPipeW` の lpSecurityAttributes に渡す
+  - 現在のログインユーザー + SYSTEM のみに GENERIC_ALL を許可
+  - 同一マシンの別ユーザーや別セッションからの接続を拒否
+
+- **`config.toml` の即時反映を out-of-process 対応**
+  - IME モード切替時の `engine_reload()` が新しい `Request::Reload { config_json }`
+    を送信するよう変更
+  - ホスト側は既存 DynEngine を drop → `DynEngine::load_auto` で新 config 再生成
+  - クライアント側は `config_json` を内部に保持し、パイプ切断からの再接続時にも
+    直近の設定で `Create` を再送する
+  - `n_gpu_layers` / `model_variant` の変更が IME モード切替だけで反映される
+    挙動を復活（0.4.4 の RPC 化直前に一時的に失われていた経路を修復）
+
+### Fixed
+
+- **Zoom / Dropbox / explorer 等での異常終了（`0xc0000005`）を根治**
+  - 0.4.3 まで `msvcp140.dll` のクロスロード起因で再現していた
+  - TSF プロセスに `rakukan_engine_*.dll` を一切持ち込まなくなったことで解消
+  - Zoom 実機で確認済み
+
+- **`rakukan-engine-cli` の既存ビルドエラーを修正**
+  - `EngineConfig` リテラル構築に `..Default::default()` を追加
+  - `n_gpu_layers` / `main_gpu` フィールドが欠けていたためビルドが通らなかった
+  - 今後 `EngineConfig` にフィールドが増えても CLI 側は自動追従する
+
+### Added
+
+- **新クレート `rakukan-engine-rpc`**
+  - `protocol.rs` / `codec.rs` / `pipe.rs` / `server.rs` / `client.rs`
+  - DynEngine の全 API を 1:1 で Request / Response にマップ
+  - `Hello { protocol_version }` によるハンドシェイク
+  - `OwnedSecurityDescriptor` で SID 取得 + SDDL パース + LocalFree を RAII 管理
+
+- **新バイナリ `rakukan-engine-host.exe`**
+  - `#![windows_subsystem = "windows"]` でコンソール非表示
+  - ログは `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
+  - インストーラ（`rakukan_installer.iss` / `install.ps1` / `build-installer.ps1`）
+    に配置エントリを追加
+
+## [0.4.3] - 2026-04-10
+
+### Added
+
+- **フローティングモードインジケータ** (`mode_indicator.rs`)
+  - キャレット近傍に `あ / ア / A` を短時間表示する補助ウィンドウ
+  - モード切替時に視認性を上げるためのもの
+
+### Changed
+
+- **言語バー関連のレイアウトとアイコン処理を整理** (`language_bar.rs`)
+- **トレイプロセスを簡素化** (`rakukan-tray/src/main.rs`)
+  - 共有メモリ + Event ベースのモード受信に特化
+
 ## [0.4.2] - 2026-03-31
 
 ### Changed

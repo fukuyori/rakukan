@@ -12,6 +12,7 @@ use super::input_mode::InputMode;
 // 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 pub use rakukan_engine_rpc::SegmentCandidate as EngineSegmentCandidate;
+pub use rakukan_engine_rpc::InputCharKind;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -63,6 +64,52 @@ pub static RAKUKAN_ENGINE: LazyLock<Mutex<EngineWrapper>> =
 /// バックグラウンドエンジン初期化が既に起動済みかどうかのフラグ。
 /// Activate ごとに重複スポーンしないために使う。
 static ENGINE_INIT_STARTED: AtomicBool = AtomicBool::new(false);
+
+/// 辞書ロード完了のラッチ。
+///
+/// `poll_dict_ready()` は一度 true を返したら以降ずっと true のため、
+/// 毎キーストロークごとに RPC を往復させる必要はない。
+/// ラッチが立っている間は RPC をスキップする。
+/// `engine_reload()` でリセットされる。
+static DICT_READY_LATCH: AtomicBool = AtomicBool::new(false);
+
+/// モデルロード完了のラッチ（`DICT_READY_LATCH` と同じ方針）。
+static MODEL_READY_LATCH: AtomicBool = AtomicBool::new(false);
+
+/// 辞書 ready 状態を取得。未 ready のうちだけ RPC で poll する。
+///
+/// ホットパス（`on_input` 等）から 1 キーストロークごとに呼ばれる前提。
+#[inline]
+pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
+    if DICT_READY_LATCH.load(AO::Acquire) {
+        return true;
+    }
+    let r = eng.poll_dict_ready();
+    if r {
+        DICT_READY_LATCH.store(true, AO::Release);
+    }
+    r
+}
+
+/// モデル ready 状態を取得（`poll_dict_ready_cached` と同じ方針）。
+#[inline]
+pub fn poll_model_ready_cached(eng: &DynEngine) -> bool {
+    if MODEL_READY_LATCH.load(AO::Acquire) {
+        return true;
+    }
+    let r = eng.poll_model_ready();
+    if r {
+        MODEL_READY_LATCH.store(true, AO::Release);
+    }
+    r
+}
+
+/// reload 時など、ready 状態を強制的に再評価させたいときに呼ぶ。
+#[inline]
+pub fn reset_ready_latches() {
+    DICT_READY_LATCH.store(false, AO::Release);
+    MODEL_READY_LATCH.store(false, AO::Release);
+}
 static LAST_GPU_MEMORY_LOG_MS: AtomicU64 = AtomicU64::new(0);
 const GPU_MEMORY_LOG_INTERVAL_MS: u64 = 30_000;
 
@@ -245,6 +292,8 @@ pub fn engine_force_recreate() {
 /// ホスト内で model / 辞書の bg ロードも連動して再起動されるため、
 /// TSF 側から明示的に `start_load_dict` を叩く必要はない。
 pub fn engine_reload() {
+    // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
+    reset_ready_latches();
     // バックグラウンドで reload（UIスレッドをブロックしない）
     std::thread::spawn(|| {
         let cfg = build_engine_config_json();

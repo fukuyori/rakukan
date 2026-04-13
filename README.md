@@ -1,4 +1,4 @@
-# rakukan v0.4.4
+# rakukan v0.4.5
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -20,7 +20,16 @@ Windows 向け日本語 IME。
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
 - **Vibrato 分節補助**: `system.dic` を同梱し、分節境界の初期推定に利用
 
-## 最近の 0.4.4 変更点
+## 最近の 0.4.5 変更点
+
+- **打鍵時の RPC を 1 往復に集約**: 0.4.4 までは 1 キーストロークあたり `push_char` / `preedit_display` / `hiragana_text` / `bg_status` / `bg_start` など 8〜9 回の Named Pipe 往復が発生していた。0.4.5 では新 RPC `Request::InputChar` を追加し、1 往復で push + 状態取得 + `bg_start` までを完了する形に変更（`PROTOCOL_VERSION` を 2 に bump）
+- **辞書・モデル ready 状態のラッチ化**: `poll_dict_ready` / `poll_model_ready` はいったん true を返したら以降変わらないため、`DICT_READY_LATCH` / `MODEL_READY_LATCH` を TSF 側にキャッシュし、ready 以降は RPC をスキップ
+- **ライブ変換中の pending ローマ字表示**: 「tat」と入力したときの末尾 "t" が消える問題を修正。`on_input` のライブ変換分岐・BG タイマー Phase 1A（`SetText`）・Phase 1B キュー消費の 3 経路を揃えて pending を維持するようにした
+- **変換パイプライン再設計の着手**: [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) としてライブ変換・文節再変換・境界伸縮・数値保護・用法辞書までの全面改修設計書を作成（実装は Phase A から順次）
+
+> 0.4.5 の打鍵レイテンシ改善により、インストーラ再適用が必要です（`rakukan-engine-host.exe` がプロトコル v2 に更新されるため、古い host.exe との組み合わせでは Hello で弾かれます）。
+
+## 0.4.4 変更点
 
 - **エンジンを別プロセス化**: `rakukan_engine_*.dll`（llama.cpp 同梱）は専用の
   `rakukan-engine-host.exe` でのみロードし、TSF DLL 側は Named Pipe + postcard で
@@ -98,6 +107,45 @@ cargo make reinstall
 ```powershell
 Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 ```
+
+## 課題リスト
+
+現在進行中の設計書・残タスクは以下の資料にまとめています。
+
+### 主要設計書
+
+- [DESIGN.md](DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
+- [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — **進行中**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A〜F）
+- [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
+- [VIBRATO_PHASE1.md](VIBRATO_PHASE1.md) — Vibrato 形態素解析器の導入メモ
+- [handoff.md](handoff.md) — v0.4.4 引き継ぎ資料 + 残タスクリスト
+
+### 進行中の主要課題
+
+**変換パイプライン再設計**（[CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md)）
+
+- [ ] **Phase A**: 新データモデル（`Segments` / `Segment` / `Candidate`）と engine 基盤、数値保護レイヤー
+- [ ] **Phase B**: ライブ変換を beam=1 (greedy) 化、`Segments` 保持
+- [ ] **Phase C**: `SplitPreedit` を新モデルに置換、文節ごとの候補管理
+- [ ] **Phase D**: 境界伸縮を engine の `resize_segment` に集約、文字列再分節の撤廃
+- [ ] **Phase E**: 部分確定・学習・Selecting 統合・候補一覧 Tab 展開
+- [ ] **Phase F**（独立）: Candidate 注釈（用法辞書） — Mozc `usage_dict.tsv` の取り込み
+
+**独立した技術課題**（[handoff.md §残タスク](handoff.md#残タスク優先度順)）
+
+- [ ] `rakukan-engine-host.exe` の idle 自死（長時間アイドル時のメモリ解放）
+- [ ] ホストプロセスのヘルスチェックとクラッシュカウント
+- [ ] Preedit / LiveConv / Selecting の display_attr 拡張
+- [ ] RPC レイテンシの実測（0.4.5 バッチ化後の計測）
+
+### 過去のスナップショット
+
+v0.2.0 の状態を記録した以下の資料は **過去のスナップショット** であり、現在進行中のタスクではありません。
+
+- [PHASE1_SUMMARY.md](PHASE1_SUMMARY.md) — v0.2.0 時点の Phase 1 要約
+- [PHASE2_PREP.md](PHASE2_PREP.md) — v0.2.0 先行の Phase 2 着手前メモ
+- [PHASE2_STATUS.md](PHASE2_STATUS.md) — v0.2.0 時点の Phase 2 状況
+- [WARNING_FIXES.md](WARNING_FIXES.md) — v0.2.0 に含まれる warning 修正メモ
 
 ## ライセンス
 

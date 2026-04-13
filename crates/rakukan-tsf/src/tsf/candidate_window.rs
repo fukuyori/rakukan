@@ -808,8 +808,8 @@ pub fn on_live_timer() {
                 Ok(mut g) => g
                     .as_mut()
                     .map(|e| {
-                        e.poll_dict_ready();
-                        e.poll_model_ready();
+                        let _ = crate::engine::state::poll_dict_ready_cached(e);
+                        let _ = crate::engine::state::poll_model_ready_cached(e);
                         let kanji_ready = e.is_kanji_ready();
                         let dict_ready = e.is_dict_ready();
                         tracing::info!(
@@ -844,7 +844,11 @@ pub fn on_live_timer() {
     LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
 
     // ── トップ候補を取得 ────────────────────────────────────────────────────
-    let (reading, preview) = {
+    // pending = 未確定ローマ字（例: "ta" 入力後の "た" に続く "t"）。
+    // BG 変換は hiragana 側だけで走っているので、preview には pending が
+    // 含まれない。Phase1A / Phase1B の両方で SetText に pending を付加して、
+    // 「tat」入力時の末尾 "t" が on_live_timer 発火で消えないようにする。
+    let (reading, pending, preview) = {
         let Ok(mut g) = engine_try_get() else {
             tracing::warn!("[Live] on_live_timer: engine busy");
             return;
@@ -854,17 +858,29 @@ pub fn on_live_timer() {
         if reading.is_empty() {
             return;
         }
+        let preedit_full = eng.preedit_display();
+        let pending = preedit_full
+            .get(reading.len()..)
+            .unwrap_or("")
+            .to_string();
         // bg_take_candidates: converter を回収してトップ候補を取得
         // 副作用: Space 押下後に bg_start が再実行される（許容）
         let preview = eng
             .bg_take_candidates(&reading)
             .and_then(|c| c.into_iter().next());
-        (reading, preview)
+        (reading, pending, preview)
     };
 
     let Some(preview) = preview else {
         tracing::debug!("[Live] on_live_timer: no candidates for {:?}", reading);
         return;
+    };
+
+    // 実際に composition に書き込む文字列（pending を末尾に付ける）
+    let display_shown = if pending.is_empty() {
+        preview.clone()
+    } else {
+        format!("{preview}{pending}")
     };
 
     tracing::info!(
@@ -883,7 +899,7 @@ pub fn on_live_timer() {
     if phase1a_possible {
         let ctx = ctx_opt.unwrap();
         let ctx_req = ctx.clone();
-        let preview_1a = preview.clone();
+        let preview_1a = display_shown.clone();
 
         let session = EditSession::new(move |ec| unsafe {
             tracing::info!("[Live] Phase1A: DoEditSession called! ec={}", ec);
@@ -955,7 +971,9 @@ pub fn on_live_timer() {
     }
 
     // ── Phase 1B フォールバック: キューに書き込む ────────────────────────────
-    // 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する
+    // 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
+    // Phase 1B 消費側 (factory.rs) はキュー取り出し時の engine から最新の
+    // pending ローマ字を付け直すので、ここでは pending なしの `preview` を渡す。
     if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
         *q = Some(preview.clone());
         LIVE_PREVIEW_READY.store(true, AO::Release);

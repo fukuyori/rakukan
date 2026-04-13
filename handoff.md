@@ -186,6 +186,10 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 
 ## 残タスク（優先度順）
 
+> 文節編集・変換パイプラインの大幅改修（Segment ベース化 / 数値保護 / ライブ変換高速化 / 用法辞書）は
+> [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) で設計済み。下記タスクのうち **→ CONVERTER_REDESIGN §X**
+> と記したものはその設計書でカバーされる。
+
 ### 優先度: 中
 
 - **[Engine-Host-1] idle 自死**
@@ -195,16 +199,20 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
   - ホストが短時間に連続クラッシュしたら TSF 側で諦めて fallback する
 - **[Live-2] display_attr 拡張**
   - Preedit / LiveConv / Selecting の見た目をさらに分ける
-- **[Num-1] 数字プレースホルダ応急処置**
+- **[Num-1] 数字プレースホルダ応急処置** → **CONVERTER_REDESIGN §5.2 数値保護レイヤー**
   - `200えん -> 2000円` 系の誤変換抑制
+  - 根本対応として Segments + 入力分割 + 後処理検証で解決する方針
 
 ### 優先度: 低
 
 - **[Perf-1] RPC レイテンシ計測**
   - 期待値は数十 μs / call。llama 推論（数十〜数百 ms）に対してはノイズ以下のはずだが実測しておきたい
-- **Segment ベースの本格文節管理**
-- **数字・助数詞の構造対応**
-- **長文・句読点混じりでの分節精度確認**
+  - 注: 0.4.5 のバッチ RPC 化（`Request::InputChar`）で 1 打鍵 8〜9 RPC → 1 RPC に短縮済み
+- **Segment ベースの本格文節管理** → **CONVERTER_REDESIGN 全体**
+  - `Segments` / `Segment` / `Candidate` 型の導入と `SessionState` の再編
+- **数字・助数詞の構造対応** → **CONVERTER_REDESIGN §5.1 文節構成 + §5.2 数値保護**
+  - 助数詞の結合は §5.1 の bunsetsu composition で対応、数字ランは §5.2 で独立文節化
+- **長文・句読点混じりでの分節精度確認** → **CONVERTER_REDESIGN §9 回帰テスト項目**
 
 ## 補足
 

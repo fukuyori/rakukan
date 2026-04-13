@@ -757,13 +757,22 @@ impl TextServiceFactory_Impl {
                         };
 
                         if apply {
-                            // engine borrow は reading 取得で終わり（NLL により drop(guard) 前に解放）
+                            // engine borrow は reading/pending 取得で終わり
+                            // preedit = hiragana + pending_romaji 構成なので、
+                            // BG 変換結果 `preview` に pending を付けて表示する
+                            // ことで「ta」→「た」→「t」押下時の "t" が消えないようにする。
                             let reading = engine.hiragana_text().to_string();
+                            let preedit_full = engine.preedit_display();
+                            let pending = preedit_full
+                                .get(reading.len()..)
+                                .unwrap_or("")
+                                .to_string();
                             if !reading.is_empty() {
                                 tracing::info!(
-                                    "[Live] Phase1B: applying preview={:?} reading={:?}",
+                                    "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
                                     preview,
-                                    reading
+                                    reading,
+                                    pending
                                 );
                                 if let Ok(mut sess) = session_get() {
                                     sess.set_live_conv(reading, preview.clone());
@@ -771,7 +780,12 @@ impl TextServiceFactory_Impl {
                                 // engine の borrow はここで終わり（以降 engine を使わない）
                                 drop(guard);
                                 let ctx2 = ctx.clone();
-                                update_composition(ctx2, tid, sink.clone(), preview)?;
+                                let display_shown = if pending.is_empty() {
+                                    preview
+                                } else {
+                                    format!("{preview}{pending}")
+                                };
+                                update_composition(ctx2, tid, sink.clone(), display_shown)?;
                                 // guard と engine を再取得
                                 guard = engine_try_get_or_create()?;
                             }
@@ -1047,28 +1061,35 @@ impl TextServiceFactory_Impl {
                     *q = None;
                 }
 
-                if c.is_ascii_uppercase() {
-                    engine.push_fullwidth_alpha(c);
+                let kind = if c.is_ascii_uppercase() {
+                    crate::engine::state::InputCharKind::FullwidthAlpha
                 } else {
-                    engine.push_char(c);
-                }
-                let new_reading = engine.hiragana_text().to_string();
+                    crate::engine::state::InputCharKind::Char
+                };
+                let n_cands = crate::engine::state::get_num_candidates();
+                let (preedit, new_reading, _bg) =
+                    engine.input_char(c, kind, Some(n_cands));
                 let suffix = new_reading
                     .strip_prefix(&reading)
                     .unwrap_or(new_reading.as_str())
                     .to_string();
-                let display = format!("{preview}{suffix}");
-                let n_cands = crate::engine::state::get_num_candidates();
-                sess.set_live_conv(new_reading.clone(), display.clone());
+                // preedit = hiragana + pending_romaji の構成なので、
+                // hiragana 長を超えた部分が未確定ローマ字。
+                // 表示にはこれを末尾に付けて見えるようにするが、
+                // session に保存する display はひらがなのみの版にする
+                // （次回 suffix 計算や BG preview 更新で汚染されないように）。
+                let pending = preedit.get(new_reading.len()..).unwrap_or("");
+                let display_hira = format!("{preview}{suffix}");
+                let display_shown = format!("{display_hira}{pending}");
+                sess.set_live_conv(new_reading.clone(), display_hira);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
-                    preedit_after: display.clone(),
+                    preedit_after: display_shown.clone(),
                 });
-                engine.bg_start(n_cands);
                 drop(sess);
                 drop(guard);
                 candidate_window::live_input_notify(&ctx, tid);
-                update_composition(ctx, tid, sink, display)?;
+                update_composition(ctx, tid, sink, display_shown)?;
                 return Ok(true);
             }
             if sess.is_split_preedit() {
@@ -1093,18 +1114,18 @@ impl TextServiceFactory_Impl {
                     Some(e) => e,
                     None => return Ok(true),
                 };
-                if c.is_ascii_uppercase() {
-                    engine2.push_fullwidth_alpha(c);
+                let kind = if c.is_ascii_uppercase() {
+                    crate::engine::state::InputCharKind::FullwidthAlpha
                 } else {
-                    engine2.push_char(c);
-                }
-                let preedit = engine2.preedit_display();
+                    crate::engine::state::InputCharKind::Char
+                };
                 let n_cands2 = crate::engine::state::get_num_candidates();
+                let (preedit, _hiragana, _bg) =
+                    engine2.input_char(c, kind, Some(n_cands2));
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
                 });
-                engine2.bg_start(n_cands2);
                 drop(guard2);
                 commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
                 return Ok(true);
@@ -1147,18 +1168,18 @@ impl TextServiceFactory_Impl {
                     Some(e) => e,
                     None => return Ok(true),
                 };
-                if c.is_ascii_uppercase() {
-                    engine2.push_fullwidth_alpha(c);
+                let kind = if c.is_ascii_uppercase() {
+                    crate::engine::state::InputCharKind::FullwidthAlpha
                 } else {
-                    engine2.push_char(c);
-                }
-                let preedit = engine2.preedit_display();
+                    crate::engine::state::InputCharKind::Char
+                };
                 let n_cands2 = crate::engine::state::get_num_candidates();
+                let (preedit, _hiragana, _bg) =
+                    engine2.input_char(c, kind, Some(n_cands2));
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
                 });
-                engine2.bg_start(n_cands2);
                 drop(guard2);
                 commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
                 return Ok(true);
@@ -1166,33 +1187,27 @@ impl TextServiceFactory_Impl {
         }
         // SESSION_SELECTING=true だったが is_selecting()=false の場合はここに来る
 
-        let dict_injected = engine.poll_dict_ready();
-        if dict_injected {
-            tracing::info!("on_input: dict store injected");
-        }
-        // 辞書状態の定期ログ（デバッグ用）
-        tracing::debug!(
-            "on_input: is_dict_ready={} dict_status={:?}",
-            engine.is_dict_ready(),
-            engine.dict_status()
-        );
-        engine.poll_model_ready();
-        if c.is_ascii_uppercase() {
-            engine.push_fullwidth_alpha(c);
-        } else {
-            engine.push_char(c);
-        }
-        let preedit = engine.preedit_display();
-        let hiragana = engine.hiragana_text();
+        // ラッチ付き ready ポーリング: ready 後は RPC スキップ。
+        let _ = crate::engine::state::poll_dict_ready_cached(engine);
+        let _ = crate::engine::state::poll_model_ready_cached(engine);
+
+        // バッチ RPC: push + preedit + hiragana + bg_status + 条件付き bg_start
+        // を 1 往復で処理する。0.4.5 で 1 打鍵 8〜9 RPC → 1 RPC に短縮。
         let n_cands = crate::engine::state::get_num_candidates();
+        let kind = if c.is_ascii_uppercase() {
+            crate::engine::state::InputCharKind::FullwidthAlpha
+        } else {
+            crate::engine::state::InputCharKind::Char
+        };
+        let (preedit, hiragana, bg_status) =
+            engine.input_char(c, kind, Some(n_cands));
         diag::event(DiagEvent::InputChar {
             ch: c,
             preedit_after: preedit.clone(),
         });
-        tracing::trace!("Input: hiragana={:?} bg={}", hiragana, engine.bg_status());
+        tracing::trace!("Input: hiragana={:?} bg={}", hiragana, bg_status);
 
         if !hiragana.is_empty() {
-            engine.bg_start(n_cands);
             drop(guard);
             // [Phase0] ライブ変換実験: コンテキストをキャッシュしてタイマーを起動
             candidate_window::live_input_notify(&ctx, tid);
@@ -1503,7 +1518,7 @@ impl TextServiceFactory_Impl {
                     if engine.bg_status() == "running" {
                         engine.bg_wait_ms(WAIT_MS);
                     }
-                    engine.poll_model_ready();
+                    let _ = crate::engine::state::poll_model_ready_cached(engine);
 
                     let bg_done = engine.bg_status() == "done";
                     tracing::debug!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
@@ -1717,8 +1732,8 @@ impl TextServiceFactory_Impl {
         // 新規変換
         let llm_limit = crate::engine::state::get_num_candidates();
         const DICT_LIMIT: usize = 20;
-        engine.poll_dict_ready();
-        engine.poll_model_ready();
+        let _ = crate::engine::state::poll_dict_ready_cached(engine);
+        let _ = crate::engine::state::poll_model_ready_cached(engine);
         // Done 状態の converter を先に回収する。
         // bg_take_candidates がキー不一致で None を返した場合、converter は Done に残ったまま
         // engine.kanji=None になる。is_kanji_ready() チェックより前に reclaim しないと
@@ -3079,8 +3094,8 @@ impl TextServiceFactory_Impl {
 
         let llm_limit = crate::engine::state::get_num_candidates();
         const DICT_LIMIT: usize = 20;
-        engine.poll_dict_ready();
-        engine.poll_model_ready();
+        let _ = crate::engine::state::poll_dict_ready_cached(engine);
+        let _ = crate::engine::state::poll_model_ready_cached(engine);
         let kanji_ready = engine.is_kanji_ready();
         if kanji_ready && engine.bg_status() == "idle" {
             engine.bg_start(llm_limit);

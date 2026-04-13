@@ -21,7 +21,7 @@ use rakukan_engine_abi::DynEngine;
 
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
 
 /// ホスト全体で共有される 1 つの DynEngine。
 pub type SharedEngine = Arc<Mutex<Option<DynEngine>>>;
@@ -255,6 +255,33 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         }
         LastError => Response::String(eng.last_error()),
         DictStatus => Response::String(eng.dict_status()),
+
+        InputChar {
+            c,
+            kind,
+            bg_start_n_cands,
+        } => {
+            if let Some(ch) = char::from_u32(c) {
+                match kind {
+                    InputCharKind::Char => eng.push_char(ch),
+                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(ch),
+                    InputCharKind::Raw => eng.push_raw(ch),
+                }
+            }
+            let preedit = eng.preedit_display();
+            let hiragana = eng.hiragana_text();
+            let bg_status = eng.bg_status().to_string();
+            if let Some(n) = bg_start_n_cands {
+                if !hiragana.is_empty() {
+                    eng.bg_start(n as usize);
+                }
+            }
+            Response::InputCharResult {
+                preedit,
+                hiragana,
+                bg_status,
+            }
+        }
     }
 }
 
