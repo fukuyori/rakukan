@@ -210,9 +210,11 @@ $profileDir = if ($Profile -eq "release") { "release" } else { "debug" }
 if ($Profile -eq "release") {
     Invoke-CargoBuild -Package "rakukan-tsf"          -Profile "release"
     Invoke-CargoBuild -Package "rakukan-tray"         -Profile "release"
+    Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "release"
     Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "release"
     $srcDll     = Join-Path $buildDir "release\rakukan_tsf.dll"
     $srcTray    = Join-Path $buildDir "release\rakukan-tray.exe"
+    $srcHost    = Join-Path $buildDir "release\rakukan-engine-host.exe"
     $srcBuilder = Join-Path $buildDir "release\rakukan-dict-builder.exe"
     $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
         $p = Join-Path $buildDir "release\rakukan_engine_$_.dll"
@@ -221,9 +223,11 @@ if ($Profile -eq "release") {
 } else {
     Invoke-CargoBuild -Package "rakukan-tsf"          -Profile "debug"
     Invoke-CargoBuild -Package "rakukan-tray"         -Profile "debug"
+    Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "debug"
     Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "debug"
     $srcDll     = Join-Path $buildDir "debug\rakukan_tsf.dll"
     $srcTray    = Join-Path $buildDir "debug\rakukan-tray.exe"
+    $srcHost    = Join-Path $buildDir "debug\rakukan-engine-host.exe"
     $srcBuilder = Join-Path $buildDir "debug\rakukan-dict-builder.exe"
     $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
         $p = Join-Path $buildDir "debug\rakukan_engine_$_.dll"
@@ -305,6 +309,21 @@ if (Test-Path -LiteralPath $srcTray) {
         Move-Item -LiteralPath $tmpTray -Destination $trayExe -Force
     }
     Write-Host "  -> $trayExe"
+}
+
+# rakukan-engine-host.exe をインストール（out-of-process エンジンホスト）
+if (Test-Path -LiteralPath $srcHost) {
+    $hostExe = Join-Path $installDir "rakukan-engine-host.exe"
+    Stop-ProcSilent "rakukan-engine-host"
+    Start-Sleep -Milliseconds 300
+    try {
+        Copy-Item -LiteralPath $srcHost -Destination $hostExe -Force
+    } catch {
+        $tmpHost = "$hostExe.new"
+        Copy-Item -LiteralPath $srcHost -Destination $tmpHost -Force
+        Move-Item -LiteralPath $tmpHost -Destination $hostExe -Force
+    }
+    Write-Host "  -> $hostExe"
 }
 
 # Copy rakukan-dict-builder.exe to install dir

@@ -6,7 +6,12 @@
 //! - 非ホットパス（Activate, BG スレッド): `lock()` を使用可。
 
 use super::input_mode::InputMode;
-use rakukan_engine_abi::{DynEngine, SegmentCandidate as EngineSegmentCandidate, install_dir};
+// RpcEngine は DynEngine と同じメソッドシグネチャを露出するので、
+// 既存コードの大部分が触らないよう `DynEngine` の名前で re-export する。
+// 実体は `rakukan-engine-rpc` を通じて `rakukan-engine-host.exe` へ Named Pipe で
+// 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
+pub use rakukan_engine_rpc::RpcEngine as DynEngine;
+pub use rakukan_engine_rpc::SegmentCandidate as EngineSegmentCandidate;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -188,13 +193,34 @@ pub fn engine_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrappe
 }
 
 /// ホットパス用: エンジンを取得するだけ（DLL ロードしない）。
-/// DLL ロードは engine_start_bg_init() が担当する。
+/// ただしエンジンが未ロードなら、ここで初めて bg init を「1 回だけ」スポーンする。
+///
+/// これは Zoom / Dropbox / explorer 等のホストプロセスで
+/// **実際に入力が行われるまで engine DLL を一切ロードしない** ための仕掛け。
+/// Activate の時点ではエンジン DLL に触れないので、IME を使わないアプリで
+/// `rakukan_engine_*.dll` と `msvcp140.dll` のクロスロードによる AV を避けられる。
+///
+/// 初回呼び出し時は bg init がまだ完了していないため Err を返す。
+/// ホットパス側は既に Err を握りつぶして動くようになっているので支障はない。
 pub fn engine_try_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
-    engine_try_get()
+    // まず普通に try_lock。ここでエンジンが既に存在しロックも取れれば即返せる。
+    if let Ok(g) = RAKUKAN_ENGINE.try_lock() {
+        if g.0.is_some() {
+            return Ok(g);
+        }
+        // エンジンがまだ無い: ロックを離してから bg init をスポーン
+        drop(g);
+        engine_start_bg_init();
+        return Err(anyhow::anyhow!("engine not ready: bg init triggered"));
+    }
+    // ロック取れず: 誰かが作業中。busy で返す（ホットパスはこれを無視する）。
+    Err(anyhow::anyhow!("engine busy"))
 }
 
 /// エンジンを強制的に破棄し、次回アクセス時に再生成されるようにする。
-/// config.toml 変更後や DLL 入れ替え後に使用する。
+/// 現状は `engine_reload()` が RPC Reload を使うため呼ばれない。
+/// 診断 / 緊急回避用に残す。
+#[allow(dead_code)]
 pub fn engine_force_recreate() {
     match RAKUKAN_ENGINE.lock() {
         Ok(mut g) => {
@@ -208,44 +234,49 @@ pub fn engine_force_recreate() {
     }
 }
 
-/// トレイから「エンジン再起動」が要求されたとき呼ぶ。
-/// エンジンを破棄した後、バックグラウンドで再生成を試みる。
+/// トレイから「エンジン再起動」が要求されたとき、または config.toml 変更後の
+/// IME モード切替で呼ばれる。
+///
+/// Phase A（out-of-process 化）以降は、TSF 側のハンドル (RpcEngine) を捨てずに
+/// ホスト側の DynEngine だけを `Request::Reload` で作り直す。これにより
+/// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** が
+/// 新しい config_json で反映される。
+///
+/// ホスト内で model / 辞書の bg ロードも連動して再起動されるため、
+/// TSF 側から明示的に `start_load_dict` を叩く必要はない。
 pub fn engine_reload() {
-    engine_force_recreate();
-    // 次回 Activate で engine_start_bg_init が再度スポーンできるようフラグをリセット
-    ENGINE_INIT_STARTED.store(false, AO::Release);
-    // バックグラウンドで再生成（UIスレッドをブロックしない）
+    // バックグラウンドで reload（UIスレッドをブロックしない）
     std::thread::spawn(|| {
-        match RAKUKAN_ENGINE.lock() {
-            Ok(mut g) => {
-                if g.0.is_none() {
-                    match create_engine() {
-                        Ok(e) => {
-                            if !e.is_dict_ready() {
-                                // ガード解放前に辞書ロードを起動する必要があるため
-                                // drop して再取得
-                                g.0 = Some(e);
-                                drop(g);
-                                if let Ok(mut g2) = RAKUKAN_ENGINE.lock() {
-                                    if let Some(eng) = g2.0.as_mut() {
-                                        eng.start_load_dict();
-                                        if !eng.is_kanji_ready() {
-                                            eng.start_load_model();
-                                        }
-                                    }
-                                }
-                            } else {
-                                g.0 = Some(e);
-                            }
-                            tracing::info!("engine_reload: engine recreated");
-                        }
-                        Err(e) => {
-                            tracing::error!("engine_reload: create_engine failed: {e}");
-                        }
-                    }
-                }
+        let cfg = build_engine_config_json();
+
+        // 既存ハンドルがあれば Reload を、無ければ connect_or_spawn を使う
+        let mut guard = match RAKUKAN_ENGINE.lock() {
+            Ok(g) => g,
+            Err(p) => {
+                tracing::warn!("engine_reload: mutex poisoned, recovering");
+                p.into_inner()
             }
-            Err(_) => tracing::error!("engine_reload: mutex poisoned"),
+        };
+        match guard.0.as_mut() {
+            Some(eng) => match eng.reload(Some(cfg)) {
+                Ok(()) => {
+                    tracing::info!("engine_reload: host engine reloaded via RPC");
+                }
+                Err(e) => {
+                    tracing::error!("engine_reload: RPC reload failed: {e}");
+                    // RPC reload に失敗した場合はハンドルを捨てて次回アクセスで
+                    // 再接続させる。ホストが死んでいる可能性に備える。
+                    guard.0 = None;
+                    ENGINE_INIT_STARTED.store(false, AO::Release);
+                }
+            },
+            None => {
+                // ハンドル未作成 = まだ一度も使われていない or 前回落ちた状態。
+                // 通常の初回ロードパスに合流させる。
+                drop(guard);
+                ENGINE_INIT_STARTED.store(false, AO::Release);
+                engine_start_bg_init();
+            }
         }
     });
 }
@@ -288,25 +319,16 @@ pub fn start_reload_watcher() {
         .ok();
 }
 
-/// バックエンド DLL をロードしてエンジンを生成する。
+/// エンジン（= rakukan-engine-host への RPC クライアント）を生成する。
+///
+/// TSF プロセス内では engine DLL を一切ロードしない。代わりに
+/// `rakukan-engine-host.exe` に Named Pipe で接続する。ホストが動いていなければ
+/// `RpcEngine::connect_or_spawn` が `CreateProcessW` で detached 起動する。
 fn create_engine() -> anyhow::Result<DynEngine> {
-    let dir = install_dir().ok_or_else(|| anyhow::anyhow!("install_dir not found"))?;
-    tracing::debug!("create_engine: install_dir={}", dir.display());
-
-    // engine DLL の存在を事前確認してわかりやすいエラーを出す
-    for backend in &["cpu", "vulkan", "cuda"] {
-        let p = dir.join(format!("rakukan_engine_{backend}.dll"));
-        tracing::debug!(
-            "  {}: {}",
-            backend,
-            if p.exists() { "found" } else { "not found" }
-        );
-    }
-
     let cfg = build_engine_config_json();
-    let engine = DynEngine::load_auto(&dir, Some(&cfg))
-        .map_err(|e| anyhow::anyhow!("DLL load failed (dir={}): {e}", dir.display()))?;
-    tracing::info!("engine created: backend={}", engine.backend_label());
+    let engine = rakukan_engine_rpc::RpcEngine::connect_or_spawn(Some(cfg))
+        .map_err(|e| anyhow::anyhow!("engine RPC connect failed: {e}"))?;
+    tracing::info!("engine connected via RPC: backend={}", engine.backend_label());
     maybe_log_gpu_memory(&engine);
     Ok(engine)
 }

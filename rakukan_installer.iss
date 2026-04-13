@@ -18,7 +18,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.4.2"
+#define MyAppVersion   "0.4.4"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 
@@ -91,6 +91,11 @@ Source: "dist\rakukan_engine_cpu.dll";    DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\rakukan_engine_vulkan.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 
+; ----- Engine Host (out-of-process) -----
+; TSF DLL からは engine DLL をロードせず、このホストプロセスへ Named Pipe で RPC する。
+; これにより Zoom / Dropbox 等のホストアプリに llama.cpp を持ち込まない。
+Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion
+
 ; ----- 辞書 -----
 Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
 Source: "dist\vibrato\system.dic"; DestDir: "{app}\dict\vibrato"; Flags: ignoreversion skipifsourcedoesntexist
@@ -155,6 +160,8 @@ Type: files;          Name: "{app}\rakukan_tsf.dll"
 Type: files;          Name: "{app}\rakukan_engine_cpu.dll"
 Type: files;          Name: "{app}\rakukan_engine_vulkan.dll"
 Type: files;          Name: "{app}\rakukan_engine_cuda.dll"
+Type: files;          Name: "{app}\rakukan-engine-host.exe"
+Type: files;          Name: "{app}\rakukan-engine-host.log"
 Type: filesandordirs; Name: "{app}\dict"
 ; config.toml・models は残す（ユーザーデータ）
 

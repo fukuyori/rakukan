@@ -1,0 +1,179 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Rakukan Dev <dev@example.com>
+Date: Mon, 23 Mar 2026 12:00:00 +0900
+Subject: [PATCH] add segment-based LLM conversion engine
+
+---
+ crates/rakukan-engine/src/segment_llm.rs | 210 ++++++++++++++++++++++++
+ 1 file changed, 210 insertions(+)
+ create mode 100644 crates/rakukan-engine/src/segment_llm.rs
+
+diff --git a/crates/rakukan-engine/src/segment_llm.rs b/crates/rakukan-engine/src/segment_llm.rs
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/crates/rakukan-engine/src/segment_llm.rs
+@@ -0,0 +1,210 @@
++use std::collections::HashMap;
++
++#[derive(Debug, Clone)]
++pub enum SegmentKind {
++    Kana,
++    Number,
++}
++
++#[derive(Debug, Clone)]
++pub struct Segment {
++    pub kind: SegmentKind,
++    pub reading: String,
++    pub surface: String,
++}
++
++pub fn tokenize(input: &str) -> Vec<Segment> {
++    let mut result = Vec::new();
++    let mut buf = String::new();
++    let mut is_number = None;
++
++    for ch in input.chars() {
++        let digit = ch.is_ascii_digit();
++
++        if is_number == Some(digit) {
++            buf.push(ch);
++        } else {
++            if !buf.is_empty() {
++                push_segment(&mut result, &buf, is_number.unwrap());
++                buf.clear();
++            }
++            buf.push(ch);
++            is_number = Some(digit);
++        }
++    }
++
++    if !buf.is_empty() {
++        push_segment(&mut result, &buf, is_number.unwrap_or(false));
++    }
++
++    result
++}
++
++fn push_segment(out: &mut Vec<Segment>, text: &str, is_number: bool) {
++    if is_number {
++        out.push(Segment {
++            kind: SegmentKind::Number,
++            reading: text.to_string(),
++            surface: text.to_string(),
++        });
++    } else {
++        out.push(Segment {
++            kind: SegmentKind::Kana,
++            reading: text.to_string(),
++            surface: text.to_string(),
++        });
++    }
++}
++
++fn apply_counter(number: &str, kana: &str) -> Option<String> {
++    match kana {
++        "えん" => Some(format!("{}円", number)),
++        "にん" => Some(format!("{}人", number)),
++        "がつ" => Some(format!("{}月", number)),
++        "ねん" => Some(format!("{}年", number)),
++        _ => None,
++    }
++}
++
++pub fn merge_segments(segments: Vec<(SegmentKind, String)>) -> String {
++    let mut result = String::new();
++    let mut i = 0;
++
++    while i < segments.len() {
++        let (kind, text) = &segments[i];
++
++        if let SegmentKind::Number = kind {
++            if i + 1 < segments.len() {
++                let (next_kind, next_text) = &segments[i + 1];
++
++                if let SegmentKind::Kana = next_kind {
++                    if let Some(m) = apply_counter(text, next_text) {
++                        result.push_str(&m);
++                        i += 2;
++                        continue;
++                    }
++                }
++            }
++        }
++
++        result.push_str(text);
++        i += 1;
++    }
++
++    result
++}
++
++fn mask_numbers(input: &str) -> (String, Vec<String>) {
++    let mut result = String::new();
++    let mut nums = Vec::new();
++    let mut buf = String::new();
++
++    for ch in input.chars() {
++        if ch.is_ascii_digit() {
++            buf.push(ch);
++        } else {
++            if !buf.is_empty() {
++                let token = format!("__NUM{}__", nums.len());
++                nums.push(buf.clone());
++                result.push_str(&token);
++                buf.clear();
++            }
++            result.push(ch);
++        }
++    }
++
++    if !buf.is_empty() {
++        let token = format!("__NUM{}__", nums.len());
++        nums.push(buf.clone());
++        result.push_str(&token);
++    }
++
++    (result, nums)
++}
++
++fn restore_numbers(input: String, nums: Vec<String>) -> String {
++    let mut result = input;
++    for (i, num) in nums.iter().enumerate() {
++        result = result.replace(&format!("__NUM{}__", i), num);
++    }
++    result
++}
++
++fn mock_llm(input: &str) -> String {
++    let mut map = HashMap::new();
++    map.insert("とうきょう", "東京");
++    map.insert("にほんご", "日本語");
++    map.insert("はなす", "話す");
++    map.insert("いった", "行った");
++
++    map.get(input).unwrap_or(&input).to_string()
++}
++
++pub fn convert(input: &str) -> String {
++    let segments = tokenize(input);
++
++    let mut surfaces = Vec::new();
++
++    for seg in segments {
++        match seg.kind {
++            SegmentKind::Kana => {
++                let (masked, nums) = mask_numbers(&seg.reading);
++                let conv = mock_llm(&masked);
++                let restored = restore_numbers(conv, nums);
++                surfaces.push((seg.kind, restored));
++            }
++            _ => surfaces.push((seg.kind, seg.surface)),
++        }
++    }
++
++    merge_segments(surfaces)
++}
+--
+2.43.0

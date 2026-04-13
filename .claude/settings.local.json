@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git pull:*)",
+      "Bash(nvidia-smi)",
+      "Bash(wmic path:*)",
+      "Bash(nvidia-smi --query-compute-apps=pid,name,used_memory --format=csv)",
+      "Bash(tasklist)",
+      "Bash(xargs grep:*)",
+      "Bash(powershell -Command \"Get-ItemProperty -Path ''HKCU:\\\\Control Panel\\\\Input Method\\\\Hot Keys\\\\*'' -ErrorAction SilentlyContinue | Format-List\")",
+      "Bash(grep -E \"\\\\.\\(h|cc\\)$\")",
+      "Bash(grep -n \"SegmentWidthExpand\\\\|SegmentWidthShrink\" /c/Users/n_fuk/Dropbox/source/cpp/mozc/src/engine/*.h /c/Users/n_fuk/Dropbox/source/cpp/mozc/src/engine/*.cc)",
+      "Bash(find /c/Users/n_fuk/Dropbox/source/cpp/mozc -maxdepth 3 -name README* -o -name ARCHITECTURE*)",
+      "Bash(curl -s https://raw.githubusercontent.com/google/mozc/master/src/renderer/win32/indicator_window.cc)"
+    ]
+  }
+}

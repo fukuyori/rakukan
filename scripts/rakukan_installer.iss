@@ -18,7 +18,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.4.2"
+#define MyAppVersion   "0.4.4"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 
@@ -91,6 +91,10 @@ Source: "dist\rakukan.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\rakukan_engine_cpu.dll";    DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\rakukan_engine_vulkan.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
 Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+
+; ----- Engine Host (out-of-process) -----
+; TSF DLL からは engine DLL をロードせず、このホストプロセスへ Named Pipe で RPC する。
+Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ----- 辞書 -----
 Source: "dist\rakukan.dict"; DestDir: "{code:GetRoamingConfigDir}\dict"; Flags: ignoreversion

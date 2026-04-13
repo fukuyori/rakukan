@@ -64,6 +64,7 @@ fn main() -> Result<()> {
         model_variant: args.model.clone(),
         num_candidates: args.num_candidates,
         n_threads: args.threads,
+        ..EngineConfig::default()
     };
 
     eprintln!("rakukan エンジン CLI  ─  v0.3.0");

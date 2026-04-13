@@ -12,7 +12,7 @@
 # =============================================================================
 
 param(
-    [string]$Version = "0.4.2",
+    [string]$Version = "0.4.4",
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
     [string]$BuildDir = "C:\rb\release",
     [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"
@@ -69,6 +69,15 @@ foreach ($name in @("rakukan_engine_cpu.dll", "rakukan_engine_vulkan.dll", "raku
         Copy-Item $src "$distDir\$name" -Force
         Write-Host "  -> $name"
     }
+}
+
+# Engine Host (out-of-process RPC server)
+$engineHost = Join-Path $InstallDir "rakukan-engine-host.exe"
+if (Test-Path $engineHost) {
+    Copy-Item $engineHost "$distDir\rakukan-engine-host.exe" -Force
+    Write-Host "  -> rakukan-engine-host.exe"
+} else {
+    Write-Warning "rakukan-engine-host.exe が見つかりません ($engineHost) — cargo make install が古い可能性があります"
 }
 
 # 辞書

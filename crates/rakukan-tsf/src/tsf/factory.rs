@@ -173,12 +173,13 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             inner.keymap = Keymap::load();
         }
 
-        // エンジン非同期初期化
-        // DLL ロードは重い（CUDA 初期化で数秒かかる）ため、バックグラウンドスレッドで行う。
-        // UIスレッドをブロックしないことでアプリのハングを防ぐ。
-        // エンジン準備完了後に langbar_update_take() が true になり、
-        // 次回 OnKeyDown で言語バーが更新される。
-        crate::engine::state::engine_start_bg_init();
+        // エンジン DLL は Activate では一切ロードしない。
+        // Zoom / Dropbox 等の「IME を実際には使わないアプリ」では
+        // rakukan_engine_*.dll（llama.cpp 同梱・重量級）を対象プロセスに
+        // 持ち込むだけでクラッシュを誘発する事例があるため（msvcp140.dll の
+        // クロスロード AV）、初回の実入力まで DLL ロードを完全に遅延する。
+        //
+        // 初回入力時に engine_try_get_or_create() が自動的に bg init を起動する。
 
         // KeyEventSink 登録
         unsafe {
@@ -3347,7 +3348,7 @@ impl TextServiceFactory_Impl {
         ctx: ITfContext,
         tid: u32,
         sink: ITfCompositionSink,
-        engine: &mut rakukan_engine_abi::DynEngine,
+        engine: &mut crate::engine::state::DynEngine,
     ) -> Result<bool> {
         let sess = session_get()?;
         let Some(mut conversion) = sess.split_conversion_clone() else {
@@ -3371,7 +3372,7 @@ impl TextServiceFactory_Impl {
         ctx: ITfContext,
         tid: u32,
         sink: ITfCompositionSink,
-        engine: &mut rakukan_engine_abi::DynEngine,
+        engine: &mut crate::engine::state::DynEngine,
     ) -> Result<bool> {
         let sess = session_get()?;
         let Some(mut conversion) = sess.split_conversion_clone() else {
@@ -3510,7 +3511,7 @@ fn apply_selecting_candidate_to_split_preedit(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    engine: &mut rakukan_engine_abi::DynEngine,
+    engine: &mut crate::engine::state::DynEngine,
     selected_text: String,
     reading: String,
     prefix_blocks: Vec<SplitBlock>,
@@ -3568,8 +3569,8 @@ fn apply_structured_candidate_to_split_preedit(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    engine: &mut rakukan_engine_abi::DynEngine,
-    candidate: rakukan_engine_abi::SegmentCandidate,
+    engine: &mut crate::engine::state::DynEngine,
+    candidate: crate::engine::state::EngineSegmentCandidate,
     prefix_blocks: Vec<SplitBlock>,
     suffix_blocks: Vec<SplitBlock>,
 ) -> Result<bool> {
@@ -3623,7 +3624,7 @@ fn apply_structured_candidate_to_split_preedit(
 }
 
 fn reconvert_suffix_blocks(
-    engine: &mut rakukan_engine_abi::DynEngine,
+    engine: &mut crate::engine::state::DynEngine,
     suffix_blocks: &[SplitBlock],
 ) -> Vec<SplitBlock> {
     if suffix_blocks.is_empty() {
@@ -3677,13 +3678,13 @@ fn reconvert_suffix_blocks(
 }
 
 fn build_structured_candidates(
-    engine: &rakukan_engine_abi::DynEngine,
+    engine: &crate::engine::state::DynEngine,
     reading: &str,
     candidates: &[String],
-) -> Vec<rakukan_engine_abi::SegmentCandidate> {
+) -> Vec<crate::engine::state::EngineSegmentCandidate> {
     candidates
         .iter()
-        .map(|surface| rakukan_engine_abi::SegmentCandidate {
+        .map(|surface| crate::engine::state::EngineSegmentCandidate {
             surface: surface.clone(),
             segments: engine.segment_candidate(surface, reading),
         })
@@ -3719,7 +3720,7 @@ fn apply_split_conversion_state(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    engine: &mut rakukan_engine_abi::DynEngine,
+    engine: &mut crate::engine::state::DynEngine,
     conversion: crate::engine::state::ConversionState,
 ) -> Result<bool> {
     tracing::debug!(
@@ -3743,8 +3744,8 @@ fn apply_structured_candidate_to_split_conversion(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    engine: &mut rakukan_engine_abi::DynEngine,
-    candidate: rakukan_engine_abi::SegmentCandidate,
+    engine: &mut crate::engine::state::DynEngine,
+    candidate: crate::engine::state::EngineSegmentCandidate,
 ) -> Result<bool> {
     let mut conversion = {
         let sess = session_get()?;
@@ -3824,7 +3825,7 @@ fn is_all_hiragana_or_katakana(text: &str) -> bool {
 }
 
 fn segment_target_blocks(
-    engine: &rakukan_engine_abi::DynEngine,
+    engine: &crate::engine::state::DynEngine,
     reading: &str,
     surface: &str,
 ) -> Vec<SplitBlock> {
@@ -3853,7 +3854,7 @@ fn segment_target_blocks(
 }
 
 fn rebuild_split_blocks_from_selection(
-    engine: &rakukan_engine_abi::DynEngine,
+    engine: &crate::engine::state::DynEngine,
     reading: &str,
     surface: &str,
     prefix_blocks: &[SplitBlock],
@@ -3875,7 +3876,7 @@ fn rebuild_split_blocks_from_selection(
 }
 
 fn build_split_blocks_from_surface(
-    engine: &rakukan_engine_abi::DynEngine,
+    engine: &crate::engine::state::DynEngine,
     reading: &str,
     surface: &str,
     outer_remainder: &str,
@@ -3977,7 +3978,7 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
 }
 
 fn engine_convert_sync_multi(
-    engine: &mut rakukan_engine_abi::DynEngine,
+    engine: &mut crate::engine::state::DynEngine,
     llm_limit: usize,
     dict_limit: usize,
     preedit: &str,
@@ -3997,7 +3998,7 @@ fn engine_convert_sync_multi(
 }
 
 fn merge_segment_candidates(
-    engine: &rakukan_engine_abi::DynEngine,
+    engine: &crate::engine::state::DynEngine,
     llm_cands: Vec<String>,
     dict_limit: usize,
 ) -> Vec<String> {
@@ -4014,7 +4015,7 @@ fn merge_segment_candidates(
 }
 
 fn engine_convert_sync_segment(
-    engine: &mut rakukan_engine_abi::DynEngine,
+    engine: &mut crate::engine::state::DynEngine,
     llm_limit: usize,
     dict_limit: usize,
     preedit: &str,

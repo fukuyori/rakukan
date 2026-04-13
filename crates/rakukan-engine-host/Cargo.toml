@@ -1,0 +1,18 @@
+[package]
+name = "rakukan-engine-host"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "rakukan engine host process (loads rakukan_engine_*.dll and serves RPC)"
+
+[[bin]]
+name = "rakukan-engine-host"
+path = "src/main.rs"
+
+[dependencies]
+rakukan-engine-abi = { path = "../rakukan-engine-abi" }
+rakukan-engine-rpc = { path = "../rakukan-engine-rpc" }
+anyhow   = { workspace = true }
+tracing  = { workspace = true }
+tracing-subscriber = { workspace = true }

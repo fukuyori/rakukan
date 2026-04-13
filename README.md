@@ -1,4 +1,4 @@
-# rakukan v0.4.2
+# rakukan v0.4.4
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -20,12 +20,17 @@ Windows 向け日本語 IME。
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
 - **Vibrato 分節補助**: `system.dic` を同梱し、分節境界の初期推定に利用
 
-## 最近の 0.4.2 変更点
+## 最近の 0.4.4 変更点
 
-- `F6` 後の `Enter` で再変換される問題を修正
-- 変換後に続けて次文を入力したとき、前文を先に確定するよう改善
-- `F9` / `F10` で英字化したときに末尾子音が落ちるケースを修正
-- GPU 使用時、`debug` ログに低頻度で GPU メモリ使用量を出すよう追加
+- **エンジンを別プロセス化**: `rakukan_engine_*.dll`（llama.cpp 同梱）は専用の
+  `rakukan-engine-host.exe` でのみロードし、TSF DLL 側は Named Pipe + postcard で
+  RPC するクライアントになりました。これにより Zoom / Dropbox などで発生していた
+  `msvcp140.dll` クロスロード起因のクラッシュを根本解決しています。
+- Activate 時には engine DLL に一切触れず、最初の入力まで完全に遅延ロード
+- IME モード切替時の `config.toml` 自動再反映を out-of-process でも動くように修正
+  （`Request::Reload` でホスト側 DynEngine を新 config で作り直す）
+- Named Pipe には明示的な DACL を設定（現在ログインユーザー + SYSTEM のみ）
+- `rakukan-engine-cli` の既存ビルドエラーを修正
 
 ## インストール
 
@@ -43,7 +48,10 @@ cargo make reinstall
 
 インストール先: `%LOCALAPPDATA%\rakukan\`  
 設定: `%APPDATA%\rakukan\config.toml`  
-ログ: `%LOCALAPPDATA%\rakukan\rakukan.log`
+ログ:
+
+- TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
+- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
 
 > `cargo make build-tsf` はビルドのみです。実機確認には `cargo make reinstall` を使ってください。
 
@@ -56,7 +64,9 @@ cargo make reinstall
 - `n_gpu_layers = 0` は CPU のみ
 - 未指定は全レイヤー GPU オフロード
 
-`Zoom` や `Dropbox` など他の GPU 使用アプリと競合する場合は、`gpu_backend = "cuda"` のままでも `n_gpu_layers` を 8 や 4 に下げると安定することがあります。
+`n_gpu_layers` と `model_variant` は config.toml を編集したあと IME モードを切り替えるだけで即時反映されます（`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます）。
+
+> v0.4.4 より、Zoom / Dropbox 等の他アプリが異常終了する問題は別プロセス化で解消済みです。`n_gpu_layers` を下げる回避策は不要になりました。
 
 ## キー操作
 
