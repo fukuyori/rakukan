@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.2] - 2026-04-16
+
+### Changed
+
+- Phase1A の冗長ログ削除 — `on_live_timer` の Phase1A ブロックから `tracing::info!` のログ出力を削除（動作は維持）
+- OnSetFocus の早期 return — `prev_dm == next_dm` で即 return（TSF 通知ストーム対策）
+- OnSetFocus の `next_dm == 0` 処理改善 — モード変更はしないが、前の DM のモードは保存する（アプリ切替でモードが失われる問題の修正）
+- 候補ウィンドウのフォーカス変化時自動閉じ — OnSetFocus で別コンテキストに移る場合のみ `hide()` / `stop_live_timer()` を実行
+
 ## [0.5.1] - 2026-04-16
 
 ### Added

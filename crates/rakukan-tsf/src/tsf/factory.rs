@@ -4065,6 +4065,22 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         let next_ptr = pdimfocus.map(dm_id).unwrap_or(0);
         let prev_ptr = pdimprevfocus.map(dm_id).unwrap_or(0);
 
+        // 同一 DM へのフォーカス通知は無視（TSF 通知ストーム対策）
+        if prev_ptr == next_ptr {
+            return Ok(());
+        }
+
+        // フォーカス先が null（DM なし）の場合はモード保存だけ行い、
+        // モード変更はせず候補ウィンドウだけ閉じる
+        if next_ptr == 0 {
+            // prev_dm のモードを保存（アプリ切替で 0 経由する場合に失われないように）
+            let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
+            doc_mode_on_focus_change(prev_ptr, 0, hwnd_val);
+            candidate_window::hide();
+            candidate_window::stop_live_timer();
+            return Ok(());
+        }
+
         // フォーカス先ウィンドウの HWND を取得（ターミナル判定用）
         let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
 
@@ -4072,7 +4088,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             "OnSetFocus: prev_dm={prev_ptr:#x} next_dm={next_ptr:#x} hwnd={hwnd_val:#x}"
         );
 
-        // フォーカス変化時に候補ウィンドウを閉じる
+        // 別コンテキストへの移動 → 候補ウィンドウを閉じる
         candidate_window::hide();
         candidate_window::stop_live_timer();
 

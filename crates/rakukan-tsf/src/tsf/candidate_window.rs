@@ -72,7 +72,7 @@ thread_local! {
     static TL_CAND: RefCell<CandData> = RefCell::new(CandData::default());
 
     // ─── [Live] ライブ変換用: 最後の ITfContext と client_id ───────────────────────
-    // on_input から保存し、on_live_timer から RequestEditSession を呼ぶ実験に使う。
+    // on_input から保存し、on_live_timer から RequestEditSession を呼ぶために使う。
     // thread_local なので Send 不要（常に同一 TSF スレッドからアクセス）。
     static TL_LIVE_CTX: RefCell<Option<windows::Win32::UI::TextServices::ITfContext>>
         = RefCell::new(None);
@@ -671,7 +671,7 @@ pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid
     // 新規入力サイクル開始 → 初回発火フラグをリセット
     LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
 
-    // ITfContext を thread_local にキャッシュ
+    // ITfContext を thread_local にキャッシュ（on_live_timer の Phase1A で使用）
     TL_LIVE_CTX.with(|c| {
         *c.borrow_mut() = Some(ctx.clone());
     });
@@ -843,10 +843,6 @@ pub fn on_live_timer() {
     LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
 
     // ── トップ候補を取得 ────────────────────────────────────────────────────
-    // pending = 未確定ローマ字（例: "ta" 入力後の "た" に続く "t"）。
-    // BG 変換は hiragana 側だけで走っているので、preview には pending が
-    // 含まれない。Phase1A / Phase1B の両方で SetText に pending を付加して、
-    // 「tat」入力時の末尾 "t" が on_live_timer 発火で消えないようにする。
     let (reading, pending, preview) = {
         let Ok(mut g) = engine_try_get() else {
             tracing::warn!("[Live] on_live_timer: engine busy");
@@ -873,7 +869,6 @@ pub fn on_live_timer() {
         return;
     };
 
-    // 実際に composition に書き込む文字列（pending を末尾に付ける）
     let display_shown = if pending.is_empty() {
         preview.clone()
     } else {
@@ -886,7 +881,7 @@ pub fn on_live_timer() {
         preview
     );
 
-    // ── Phase 1A 試行: WM_TIMER から RequestEditSession を呼べるか ──────────
+    // ── Phase 1A: RequestEditSession で直接 composition を更新 ───────────
     let ctx_opt = TL_LIVE_CTX.with(|c| c.borrow().clone());
     let tid = TL_LIVE_TID.with(|c| c.get());
 
@@ -899,8 +894,6 @@ pub fn on_live_timer() {
         let preview_1a = display_shown.clone();
 
         let session = EditSession::new(move |ec| unsafe {
-            tracing::info!("[Live] Phase1A: DoEditSession called! ec={}", ec);
-
             use windows::Win32::Foundation::E_FAIL;
             use windows::Win32::UI::TextServices::{
                 TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
@@ -916,7 +909,6 @@ pub fn on_live_timer() {
                 .SetText(ec, 0, &text_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
 
-            // display attribute（入力中アンダーライン）を設定
             let atom = crate::tsf::display_attr::atom_input();
             if atom != 0 {
                 if let Ok(prop) =
@@ -928,7 +920,6 @@ pub fn on_live_timer() {
                 }
             }
 
-            // カーソルを末尾に移動（これがないと先頭に移る）
             if let Ok(cursor) = range.Clone() {
                 let _ = cursor.Collapse(ec, TF_ANCHOR_END);
                 let sel = TF_SELECTION {
@@ -940,36 +931,27 @@ pub fn on_live_timer() {
                 };
                 let _ = ctx.SetSelection(ec, &[sel]);
             }
-
-            tracing::info!("[Live] Phase1A: SUCCESS preview={:?}", preview_1a);
             Ok(())
         });
 
         let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
 
         match result {
-            Ok(_hresult) => {
-                tracing::info!("[Live] Phase1A: RequestEditSession Ok → direct update");
+            Ok(_) => {
                 if let Ok(mut sess) = crate::engine::state::session_get() {
                     sess.set_live_conv(reading.clone(), preview.clone());
                 }
                 stop_live_timer();
-                return; // Phase 1A 成功: Phase 1B 不要
+                return;
             }
-            Err(e) => {
-                tracing::warn!(
-                    "[Live] Phase1A: RequestEditSession Err({e}) \
-                    → fallback to Phase1B queue"
-                );
-                // Phase 1B フォールバックへ続行
+            Err(_) => {
+                // Phase 1A 失敗 → Phase 1B フォールバック
             }
         }
     }
 
     // ── Phase 1B フォールバック: キューに書き込む ────────────────────────────
     // 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
-    // Phase 1B 消費側 (factory.rs) はキュー取り出し時の engine から最新の
-    // pending ローマ字を付け直すので、ここでは pending なしの `preview` を渡す。
     if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
         *q = Some(preview.clone());
         LIVE_PREVIEW_READY.store(true, AO::Release);

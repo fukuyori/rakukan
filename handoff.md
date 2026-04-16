@@ -1,10 +1,10 @@
-# Rakukan 引き継ぎ資料 (v0.5.1)
+# Rakukan 引き継ぎ資料 (v0.5.2)
 
 更新日: 2026-04-16
 
 ## 現在の状態
 
-- **バージョン:** v0.5.1
+- **バージョン:** v0.5.2
 - **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
