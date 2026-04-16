@@ -822,8 +822,7 @@ pub fn on_live_timer() {
                             // モデルロード完了後、次の on_input で live_input_notify が再起動する
                             return false;
                         }
-                        let n = crate::engine::state::get_num_candidates();
-                        e.bg_start(n)
+                        e.bg_start(crate::engine::state::get_live_conv_beam_size())
                     })
                     .unwrap_or(false),
                 Err(_) => false,
@@ -863,8 +862,6 @@ pub fn on_live_timer() {
             .get(reading.len()..)
             .unwrap_or("")
             .to_string();
-        // bg_take_candidates: converter を回収してトップ候補を取得
-        // 副作用: Space 押下後に bg_start が再実行される（許容）
         let preview = eng
             .bg_take_candidates(&reading)
             .and_then(|c| c.into_iter().next());
@@ -953,7 +950,6 @@ pub fn on_live_timer() {
         match result {
             Ok(_hresult) => {
                 tracing::info!("[Live] Phase1A: RequestEditSession Ok → direct update");
-                // session_get() は DoEditSession の外（TSFロック解放後）で呼ぶ
                 if let Ok(mut sess) = crate::engine::state::session_get() {
                     sess.set_live_conv(reading.clone(), preview.clone());
                 }

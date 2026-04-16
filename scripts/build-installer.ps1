@@ -12,7 +12,7 @@
 # =============================================================================
 
 param(
-    [string]$Version = "0.5.0",
+    [string]$Version = "0.5.1",
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
     [string]$BuildDir = "C:\rb\release",
     [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"
@@ -87,15 +87,6 @@ if (Test-Path $dict) {
     Write-Host "  -> rakukan.dict"
 } else {
     Write-Warning "rakukan.dict が見つかりません ($dict)"
-}
-
-$vibratoDict = Join-Path $PSScriptRoot "..\assets\vibrato\system.dic"
-if (Test-Path $vibratoDict) {
-    New-Item -ItemType Directory -Force -Path "$distDir\vibrato" | Out-Null
-    Copy-Item $vibratoDict "$distDir\vibrato\system.dic" -Force
-    Write-Host "  -> vibrato\\system.dic"
-} else {
-    Write-Warning "Vibrato system.dic が見つかりません ($vibratoDict)"
 }
 
 # ライセンス・帰属表示

@@ -1,32 +1,48 @@
 # Changelog
 
-## [0.5.0] - 2026-04-16
+## [0.5.1] - 2026-04-16
 
 ### Added
 
 - **数値保護レイヤー** (`digits.rs`)
   - reading を数字ラン / 非数字ランに分割し、LLM には非数字部分だけを渡す
   - `convert_with_digit_protection` で既存の `convert` パスを置換
-    （`RakunEngine::convert` と `conv_cache` ワーカーの両経路）
   - `verify_digits_preserved` による出力検証（桁一致しない候補を除外）
   - 数字のみの変換では半角・全角の両方を候補として提示
-  - 数字文節に `"半角"` / `"全角"` の注釈を付与
 
-- **Segments データモデル** (`segments.rs`, engine-abi)
-  - `Segments` / `Segment` / `Candidate` / `CandidateSource` 型を追加
-  - `convert_to_segments` API を engine → FFI → RPC 経由で公開
-  - `segment_with_digit_protection` で数字ランを `fixed: true` の独立文節に
-  - engine ABI を v5 に bump
+- **アルファベット保護**
+  - アルファベットランも数字と同様に半角・全角の両方を候補として提示
 
 - **数字入力の半角/全角設定**
-  - `EngineConfig` に `digit_width` フィールドを追加
   - `config.toml` の `[input] digit_width = "halfwidth" | "fullwidth"` で制御
   - デフォルトを半角に変更
 
-- **RPC プロトコル v3**
-  - `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` Request を追加
-  - `Response::SegmentsModel` を追加
-  - `ResizeSegment` / `SegmentCandidatesFor` は定義のみ（Phase D/E で実装予定）
+- **範囲指定変換 (RangeSelect)**
+  - `Shift+Right/Left` で全文をひらがなに戻し、先頭から変換範囲を指定
+  - `Space` で選択範囲を LLM 変換、`Enter` で確定、残りで LiveConv 再開
+  - 先頭から順に確定していく方式で、分節アライメント問題が発生しない
+  - Preedit / LiveConv / Selecting いずれの状態からも Shift+矢印で開始可能
+
+- **ライブ変換 beam_size 設定**
+  - `config.toml` の `[live_conversion] beam_size = 3` で制御（デフォルト: 3）
+
+### Changed
+
+- **engine ABI v7** に bump
+- フォーカス変化時に候補ウィンドウを自動で閉じるようにした
+- Space 押下時の文節分割を廃止、全文候補選択 (Selecting) のみに簡略化
+- Selecting 確定後に remainder がある場合、旧 SplitPreedit ではなく LiveConv を再開
+
+### Removed
+
+- **vibrato 完全削除** — 形態素解析器 vibrato とその辞書 (`assets/vibrato/`)、
+  `rakukan-vibrato-builder` クレート、`segmenter.rs` モジュールを全て削除。
+  reading/surface のアライメント問題を根本解決
+- **SplitPreedit 完全削除** — `SessionState::SplitPreedit`、`ConversionState`、
+  `SplitBlock`、関連メソッド・ヘルパ関数を全て削除。RangeSelect に置換
+- **convert_to_segments / segment_with_digit_protection** — 分節不要のため削除
+- **SegmentBlock / SegmentCandidate** — engine-abi から削除
+- RPC の旧 Request/Response バリアントを予約化（postcard 互換維持）
 
 ## [0.4.5] - 2026-04-13
 

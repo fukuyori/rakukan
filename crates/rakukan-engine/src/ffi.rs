@@ -11,7 +11,7 @@
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 
-pub const ENGINE_ABI_VERSION: u32 = 5;
+pub const ENGINE_ABI_VERSION: u32 = 7;
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -214,25 +214,6 @@ pub extern "C" fn engine_bg_take_candidates(
     }
 }
 
-/// key が一致する BG 変換結果を構造化候補として取得する。
-/// 戻り値: JSON `[{"surface":"変換","segments":[...]}]` または null
-/// `engine_free_string` で解放すること。
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_bg_take_segmented_candidates(
-    handle: *mut c_void,
-    key: *const c_char,
-) -> *mut c_char {
-    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    let key_str = unsafe { from_cstr(key) };
-    match engine.bg_take_segmented_candidates(key_str) {
-        Some(cands) => {
-            let json = serde_json::to_string(&cands).unwrap_or_else(|_| "[]".into());
-            unsafe { to_cstr(json) }
-        }
-        None => std::ptr::null_mut(),
-    }
-}
-
 /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_bg_reclaim(handle: *mut c_void) {
@@ -309,23 +290,6 @@ pub extern "C" fn engine_convert_sync(handle: *mut c_void) -> *mut c_char {
     }
 }
 
-/// 現在のひらがなを同期変換し、構造化候補を返す。
-/// 戻り値: JSON `[{"surface":"変換","segments":[...]}]` または null
-/// `engine_free_string` で解放すること。
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_convert_sync_segmented(handle: *mut c_void) -> *mut c_char {
-    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
-    match engine.convert_default() {
-        Ok(cands) if !cands.is_empty() => {
-            let reading = engine.hiragana_text().to_string();
-            let segmented = engine.segment_candidates(&reading, &cands);
-            let json = serde_json::to_string(&segmented).unwrap_or_else(|_| "[]".into());
-            unsafe { to_cstr(json) }
-        }
-        _ => std::ptr::null_mut(),
-    }
-}
-
 /// dict + LLM 候補をマージして返す。
 /// `llm_json`: JSON 配列文字列（LLM 候補）
 /// 戻り値: JSON `["候補1","候補2",...]`
@@ -351,65 +315,6 @@ pub extern "C" fn engine_merge_candidates(
     let merged = engine.merge_candidates(llm_cands, limit as usize);
     let json = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into());
     unsafe { to_cstr(json) }
-}
-
-/// surface を分節して JSON 配列で返す。
-/// 戻り値: JSON `["変換","が"]`
-/// `engine_free_string` で解放すること。
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_segment_surface(
-    handle: *mut c_void,
-    surface: *const c_char,
-) -> *mut c_char {
-    let engine = unsafe { &*(handle as *const RakunEngine) };
-    let surface = unsafe { from_cstr(surface) };
-    let segments = engine.segment_surface(surface);
-    let json = serde_json::to_string(&segments).unwrap_or_else(|_| "[]".into());
-    unsafe { to_cstr(json) }
-}
-
-/// surface と reading を対応付きで分節して JSON 配列で返す。
-/// 戻り値: JSON `[{"surface":"変換","reading":"へんかん"}]`
-/// `engine_free_string` で解放すること。
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_segment_candidate(
-    handle: *mut c_void,
-    surface: *const c_char,
-    reading: *const c_char,
-) -> *mut c_char {
-    let engine = unsafe { &*(handle as *const RakunEngine) };
-    let surface = unsafe { from_cstr(surface) };
-    let reading = unsafe { from_cstr(reading) };
-    let segments = engine.segment_candidate(surface, reading);
-    let json = serde_json::to_string(&segments).unwrap_or_else(|_| "[]".into());
-    unsafe { to_cstr(json) }
-}
-
-// ─── Segments モデル (v5) ─────────────────────────────────────────────────────
-
-/// reading + context + num_candidates から Segments を生成する。
-/// 戻り値: JSON 文字列 (Segments の serde 表現) または null（エラー）
-/// `engine_free_string` で解放すること。
-#[unsafe(no_mangle)]
-pub extern "C" fn engine_convert_to_segments(
-    handle: *mut c_void,
-    reading: *const c_char,
-    context: *const c_char,
-    num_candidates: u32,
-) -> *mut c_char {
-    let engine = unsafe { &*(handle as *const RakunEngine) };
-    let reading = unsafe { from_cstr(reading) };
-    let context = unsafe { from_cstr(context) };
-    match engine.convert_to_segments(reading, context, num_candidates as usize) {
-        Ok(segments) => {
-            let json = serde_json::to_string(&segments).unwrap_or_else(|_| "null".into());
-            unsafe { to_cstr(json) }
-        }
-        Err(e) => {
-            tracing::warn!("convert_to_segments error: {e}");
-            std::ptr::null_mut()
-        }
-    }
 }
 
 // ─── 初期化（非同期）──────────────────────────────────────────────────────────

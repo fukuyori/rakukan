@@ -18,7 +18,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.5.0"
+#define MyAppVersion   "0.5.1"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 
@@ -98,7 +98,6 @@ Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ----- 辞書 -----
 Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
-Source: "dist\vibrato\system.dic"; DestDir: "{app}\dict\vibrato"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; ----- デフォルト設定ファイル (既存は上書きしない) -----
 ; config.toml は %APPDATA%\rakukan\ に配置する（rakukan が読む場所）

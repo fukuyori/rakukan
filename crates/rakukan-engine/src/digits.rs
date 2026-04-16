@@ -1,23 +1,29 @@
-//! 数値保護レイヤー
+//! リテラル保護レイヤー
 //!
-//! reading を「数字ラン」と「非数字ラン」に分割し、LLM には非数字部分だけを渡す。
-//! LLM 出力後に元の数字ランを再挿入することで、LLM が数字を改変する問題を防ぐ。
+//! reading を「数字ラン」「アルファベットラン」「かなラン」に分割し、
+//! LLM にはかな部分だけを渡す。数字・アルファベットは原文を保持し、
+//! 半角・全角の両方を候補として提示する。
 
 use crate::kanji::KanaKanjiConverter;
-use crate::segmenter;
-use crate::segments::{Candidate, CandidateSource, Segment};
+#[cfg(test)]
+use crate::segments::{Candidate, CandidateSource};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
     Digit(String),
+    Alpha(String),
     Kana(String),
 }
 
 impl Run {
     pub fn text(&self) -> &str {
         match self {
-            Run::Digit(s) | Run::Kana(s) => s,
+            Run::Digit(s) | Run::Alpha(s) | Run::Kana(s) => s,
         }
+    }
+
+    pub fn is_literal(&self) -> bool {
+        matches!(self, Run::Digit(_) | Run::Alpha(_))
     }
 
     pub fn is_digit(&self) -> bool {
@@ -25,8 +31,24 @@ impl Run {
     }
 }
 
-fn is_digit_char(c: char) -> bool {
-    c.is_ascii_digit() || ('０'..='９').contains(&c)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CharKind {
+    Digit,
+    Alpha,
+    Kana,
+}
+
+fn classify_char(c: char) -> CharKind {
+    if c.is_ascii_digit() || ('０'..='９').contains(&c) {
+        CharKind::Digit
+    } else if c.is_ascii_alphabetic()
+        || ('Ａ'..='Ｚ').contains(&c)
+        || ('ａ'..='ｚ').contains(&c)
+    {
+        CharKind::Alpha
+    } else {
+        CharKind::Kana
+    }
 }
 
 fn to_halfwidth_digits(s: &str) -> String {
@@ -63,6 +85,7 @@ fn digit_candidates(s: &str) -> Vec<String> {
     }
 }
 
+#[cfg(test)]
 fn digit_candidate_structs(s: &str) -> Vec<Candidate> {
     let half = to_halfwidth_digits(s);
     let full = to_fullwidth_digits(s);
@@ -88,37 +111,118 @@ fn digit_candidate_structs(s: &str) -> Vec<Candidate> {
     }
 }
 
+fn to_halfwidth_alpha(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if ('Ａ'..='Ｚ').contains(&c) {
+                char::from_u32(c as u32 - 'Ａ' as u32 + 'A' as u32).unwrap_or(c)
+            } else if ('ａ'..='ｚ').contains(&c) {
+                char::from_u32(c as u32 - 'ａ' as u32 + 'a' as u32).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn to_fullwidth_alpha(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_uppercase() {
+                char::from_u32(c as u32 - 'A' as u32 + 'Ａ' as u32).unwrap_or(c)
+            } else if c.is_ascii_lowercase() {
+                char::from_u32(c as u32 - 'a' as u32 + 'ａ' as u32).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn alpha_candidates(s: &str) -> Vec<String> {
+    let half = to_halfwidth_alpha(s);
+    let full = to_fullwidth_alpha(s);
+    if half == full {
+        vec![half]
+    } else {
+        vec![half, full]
+    }
+}
+
+#[cfg(test)]
+fn alpha_candidate_structs(s: &str) -> Vec<Candidate> {
+    let half = to_halfwidth_alpha(s);
+    let full = to_fullwidth_alpha(s);
+    if half == full {
+        vec![Candidate {
+            surface: half,
+            source: CandidateSource::Literal,
+            annotation: None,
+        }]
+    } else {
+        vec![
+            Candidate {
+                surface: half,
+                source: CandidateSource::Literal,
+                annotation: Some("半角".into()),
+            },
+            Candidate {
+                surface: full,
+                source: CandidateSource::Literal,
+                annotation: Some("全角".into()),
+            },
+        ]
+    }
+}
+
+fn literal_candidates(run: &Run) -> Vec<String> {
+    match run {
+        Run::Digit(s) => digit_candidates(s),
+        Run::Alpha(s) => alpha_candidates(s),
+        Run::Kana(_) => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+fn literal_candidate_structs(run: &Run) -> Vec<Candidate> {
+    match run {
+        Run::Digit(s) => digit_candidate_structs(s),
+        Run::Alpha(s) => alpha_candidate_structs(s),
+        Run::Kana(_) => unreachable!(),
+    }
+}
+
 pub fn split_by_digits(reading: &str) -> Vec<Run> {
     let mut runs = Vec::new();
     let mut current = String::new();
-    let mut in_digit = false;
+    let mut current_kind = CharKind::Kana;
 
     for c in reading.chars() {
-        let c_is_digit = is_digit_char(c);
+        let kind = classify_char(c);
         if current.is_empty() {
-            in_digit = c_is_digit;
+            current_kind = kind;
             current.push(c);
-        } else if c_is_digit == in_digit {
+        } else if kind == current_kind {
             current.push(c);
         } else {
-            let run = if in_digit {
-                Run::Digit(std::mem::take(&mut current))
-            } else {
-                Run::Kana(std::mem::take(&mut current))
-            };
-            runs.push(run);
-            in_digit = c_is_digit;
+            let text = std::mem::take(&mut current);
+            runs.push(make_run(current_kind, text));
+            current_kind = kind;
             current.push(c);
         }
     }
     if !current.is_empty() {
-        runs.push(if in_digit {
-            Run::Digit(current)
-        } else {
-            Run::Kana(current)
-        });
+        runs.push(make_run(current_kind, current));
     }
     runs
+}
+
+fn make_run(kind: CharKind, text: String) -> Run {
+    match kind {
+        CharKind::Digit => Run::Digit(text),
+        CharKind::Alpha => Run::Alpha(text),
+        CharKind::Kana => Run::Kana(text),
+    }
 }
 
 fn extract_digits(s: &str) -> String {
@@ -142,11 +246,13 @@ pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
 fn build_local_context(runs: &[Run], kana_index: usize, global_context: &str) -> String {
     let mut ctx = String::from(global_context);
     if kana_index > 0 {
-        if let Some(Run::Digit(d)) = runs.get(kana_index - 1) {
-            if !ctx.is_empty() {
-                ctx.push_str("…");
+        if let Some(run) = runs.get(kana_index - 1) {
+            if run.is_literal() {
+                if !ctx.is_empty() {
+                    ctx.push_str("…");
+                }
+                ctx.push_str(run.text());
             }
-            ctx.push_str(d);
         }
     }
     ctx
@@ -160,26 +266,50 @@ pub fn convert_with_digit_protection(
 ) -> crate::kanji::error::Result<Vec<String>> {
     let runs = split_by_digits(reading);
 
-    if runs.iter().all(|r| !r.is_digit()) {
+    if runs.iter().all(|r| !r.is_literal()) {
         return converter.convert(reading, context, num_candidates);
     }
 
-    if runs.iter().all(|r| r.is_digit()) {
-        let digit_str: String = runs.iter().map(|r| r.text()).collect();
-        return Ok(digit_candidates(&digit_str));
+    if runs.iter().all(|r| r.is_literal()) {
+        let literal_str: String = runs.iter().map(|r| r.text()).collect();
+        if runs.iter().all(|r| r.is_digit()) {
+            return Ok(digit_candidates(&literal_str));
+        }
+        if runs.iter().all(|r| matches!(r, Run::Alpha(_))) {
+            return Ok(alpha_candidates(&literal_str));
+        }
+        // 数字+アルファベット混在のリテラルのみ
+        let half: String = runs
+            .iter()
+            .map(|r| match r {
+                Run::Digit(s) => to_halfwidth_digits(s),
+                Run::Alpha(s) => to_halfwidth_alpha(s),
+                Run::Kana(s) => s.clone(),
+            })
+            .collect();
+        let full: String = runs
+            .iter()
+            .map(|r| match r {
+                Run::Digit(s) => to_fullwidth_digits(s),
+                Run::Alpha(s) => to_fullwidth_alpha(s),
+                Run::Kana(s) => s.clone(),
+            })
+            .collect();
+        return if half == full {
+            Ok(vec![half])
+        } else {
+            Ok(vec![half, full])
+        };
     }
 
     let mut run_candidates: Vec<Vec<String>> = Vec::with_capacity(runs.len());
     for (i, run) in runs.iter().enumerate() {
-        match run {
-            Run::Digit(s) => {
-                run_candidates.push(digit_candidates(s));
-            }
-            Run::Kana(s) => {
-                let local_context = build_local_context(&runs, i, context);
-                let cands = converter.convert(s, &local_context, num_candidates)?;
-                run_candidates.push(cands);
-            }
+        if run.is_literal() {
+            run_candidates.push(literal_candidates(run));
+        } else if let Run::Kana(s) = run {
+            let local_context = build_local_context(&runs, i, context);
+            let cands = converter.convert(s, &local_context, num_candidates)?;
+            run_candidates.push(cands);
         }
     }
 
@@ -195,86 +325,6 @@ pub fn convert_with_digit_protection(
     } else {
         Ok(verified)
     }
-}
-
-pub fn segment_with_digit_protection(reading: &str, surface: &str) -> Vec<Segment> {
-    let reading_runs = split_by_digits(reading);
-
-    if reading_runs.iter().all(|r| !r.is_digit()) {
-        let blocks = segmenter::segment_candidate(surface, reading);
-        return blocks
-            .into_iter()
-            .map(|b| Segment {
-                reading: b.reading,
-                candidates: vec![Candidate {
-                    surface: b.surface,
-                    source: CandidateSource::Llm,
-                    annotation: None,
-                }],
-                selected: 0,
-                fixed: false,
-            })
-            .collect();
-    }
-
-    let surface_runs = split_by_digits(surface);
-
-    if reading_runs.len() != surface_runs.len() {
-        let blocks = segmenter::segment_candidate(surface, reading);
-        return blocks
-            .into_iter()
-            .map(|b| {
-                let is_digit = split_by_digits(&b.reading)
-                    .iter()
-                    .all(|r| r.is_digit());
-                Segment {
-                    reading: b.reading,
-                    candidates: vec![Candidate {
-                        surface: b.surface,
-                        source: if is_digit {
-                            CandidateSource::Digit
-                        } else {
-                            CandidateSource::Llm
-                        },
-                        annotation: None,
-                    }],
-                    selected: 0,
-                    fixed: is_digit,
-                }
-            })
-            .collect();
-    }
-
-    let mut segments = Vec::new();
-    for (r_run, s_run) in reading_runs.iter().zip(surface_runs.iter()) {
-        match r_run {
-            Run::Digit(d) => {
-                segments.push(Segment {
-                    reading: d.clone(),
-                    candidates: digit_candidate_structs(d),
-                    selected: 0,
-                    fixed: true,
-                });
-            }
-            Run::Kana(k) => {
-                let sub_blocks =
-                    segmenter::segment_candidate(s_run.text(), k);
-                for b in sub_blocks {
-                    segments.push(Segment {
-                        reading: b.reading,
-                        candidates: vec![Candidate {
-                            surface: b.surface,
-                            source: CandidateSource::Llm,
-                            annotation: None,
-                        }],
-                        selected: 0,
-                        fixed: false,
-                    });
-                }
-            }
-        }
-    }
-    segments
 }
 
 fn combine_runs(run_candidates: &[Vec<String>], limit: usize) -> Vec<String> {
@@ -369,6 +419,40 @@ mod tests {
     }
 
     #[test]
+    fn split_alpha_only() {
+        let runs = split_by_digits("ＰＣ");
+        assert_eq!(runs, vec![Run::Alpha("ＰＣ".into())]);
+    }
+
+    #[test]
+    fn split_alpha_ascii() {
+        let runs = split_by_digits("USB");
+        assert_eq!(runs, vec![Run::Alpha("USB".into())]);
+    }
+
+    #[test]
+    fn split_alpha_with_kana() {
+        let runs = split_by_digits("ＰＣをかう");
+        assert_eq!(
+            runs,
+            vec![Run::Alpha("ＰＣ".into()), Run::Kana("をかう".into()),]
+        );
+    }
+
+    #[test]
+    fn split_digit_alpha_kana() {
+        let runs = split_by_digits("3Dぷりんたー");
+        assert_eq!(
+            runs,
+            vec![
+                Run::Digit("3".into()),
+                Run::Alpha("D".into()),
+                Run::Kana("ぷりんたー".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn verify_preserved_ok() {
         assert!(verify_digits_preserved("２０２４ねん", "２０２４年"));
         assert!(verify_digits_preserved("２０２４ねん", "2024年"));
@@ -438,6 +522,34 @@ mod tests {
         assert_eq!(cands[0].annotation.as_deref(), Some("半角"));
         assert_eq!(cands[1].surface, "１００");
         assert_eq!(cands[1].annotation.as_deref(), Some("全角"));
+    }
+
+    #[test]
+    fn alpha_candidates_halfwidth() {
+        let cands = alpha_candidates("PC");
+        assert_eq!(cands, vec!["PC", "ＰＣ"]);
+    }
+
+    #[test]
+    fn alpha_candidates_fullwidth() {
+        let cands = alpha_candidates("ＰＣ");
+        assert_eq!(cands, vec!["PC", "ＰＣ"]);
+    }
+
+    #[test]
+    fn alpha_candidate_structs_has_annotations() {
+        let cands = alpha_candidate_structs("USB");
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].surface, "USB");
+        assert_eq!(cands[0].annotation.as_deref(), Some("半角"));
+        assert_eq!(cands[1].surface, "ＵＳＢ");
+        assert_eq!(cands[1].annotation.as_deref(), Some("全角"));
+    }
+
+    #[test]
+    fn alpha_lowercase() {
+        let cands = alpha_candidates("abc");
+        assert_eq!(cands, vec!["abc", "ａｂｃ"]);
     }
 
     #[test]

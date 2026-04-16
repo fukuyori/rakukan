@@ -17,19 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 5;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SegmentBlock {
-    pub surface: String,
-    pub reading: String,
-}
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct SegmentCandidate {
-    pub surface: String,
-    pub segments: Vec<SegmentBlock>,
-}
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 7;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
 
@@ -64,6 +52,33 @@ pub struct Segments {
     pub focused: usize,
 }
 
+impl Segments {
+    pub fn compose_surface(&self) -> String {
+        self.segments
+            .iter()
+            .map(|s| {
+                s.candidates
+                    .get(s.selected)
+                    .map(|c| c.surface.as_str())
+                    .unwrap_or("")
+            })
+            .collect()
+    }
+
+    pub fn compose_reading(&self) -> String {
+        self.segments.iter().map(|s| s.reading.as_str()).collect()
+    }
+
+    pub fn empty() -> Self {
+        Segments {
+            segments: vec![],
+            history_size: 0,
+            focused: 0,
+        }
+    }
+
+}
+
 // ─── EngineVTable ──────────────────────────────────────────────────────────────
 // DLL からロードした関数ポインタのコレクション
 
@@ -92,7 +107,6 @@ struct EngineVTable {
     bg_start: unsafe extern "C" fn(*mut c_void, u32) -> bool,
     bg_status: unsafe extern "C" fn(*mut c_void) -> *const c_char,
     bg_take_candidates: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
-    bg_take_segmented_candidates: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
     bg_reclaim: unsafe extern "C" fn(*mut c_void),
     bg_wait_ms: unsafe extern "C" fn(*mut c_void, u64) -> u8,
 
@@ -105,11 +119,7 @@ struct EngineVTable {
 
     // 変換（同期）
     convert_sync: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
-    convert_sync_segmented: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
     merge_candidates: unsafe extern "C" fn(*mut c_void, *const c_char, u32) -> *mut c_char,
-    segment_surface: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
-    segment_candidate:
-        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char) -> *mut c_char,
 
     // 非同期初期化
     start_load_model: unsafe extern "C" fn(*mut c_void),
@@ -133,10 +143,6 @@ struct EngineVTable {
     // 診断
     last_error: unsafe extern "C" fn() -> *mut c_char,
     dict_status: unsafe extern "C" fn() -> *mut c_char,
-
-    // Segments モデル (ABI v5)
-    convert_to_segments:
-        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32) -> *mut c_char,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -194,7 +200,6 @@ impl EngineVTable {
             bg_start: load_sym!(lib, b"engine_bg_start\0"),
             bg_status: load_sym!(lib, b"engine_bg_status\0"),
             bg_take_candidates: load_sym!(lib, b"engine_bg_take_candidates\0"),
-            bg_take_segmented_candidates: load_sym!(lib, b"engine_bg_take_segmented_candidates\0"),
             bg_reclaim: load_sym!(lib, b"engine_bg_reclaim\0"),
             bg_wait_ms: load_sym!(lib, b"engine_bg_wait_ms\0"),
             commit: load_sym!(lib, b"engine_commit\0"),
@@ -203,10 +208,7 @@ impl EngineVTable {
             force_preedit: load_sym!(lib, b"engine_force_preedit\0"),
             reset_all: load_sym!(lib, b"engine_reset_all\0"),
             convert_sync: load_sym!(lib, b"engine_convert_sync\0"),
-            convert_sync_segmented: load_sym!(lib, b"engine_convert_sync_segmented\0"),
             merge_candidates: load_sym!(lib, b"engine_merge_candidates\0"),
-            segment_surface: load_sym!(lib, b"engine_segment_surface\0"),
-            segment_candidate: load_sym!(lib, b"engine_segment_candidate\0"),
             start_load_model: load_sym!(lib, b"engine_start_load_model\0"),
             poll_model_ready: load_sym!(lib, b"engine_poll_model_ready\0"),
             start_load_dict: load_sym!(lib, b"engine_start_load_dict\0"),
@@ -220,7 +222,6 @@ impl EngineVTable {
             learn: load_sym!(lib, b"engine_learn\0"),
             last_error: load_sym!(lib, b"engine_last_error\0"),
             dict_status: load_sym!(lib, b"engine_dict_status\0"),
-            convert_to_segments: load_sym!(lib, b"engine_convert_to_segments\0"),
         })
     }
 }
@@ -404,15 +405,6 @@ impl DynEngine {
         }
     }
 
-    pub fn bg_take_segmented_candidates(&mut self, key: &str) -> Option<Vec<SegmentCandidate>> {
-        let ckey = Self::to_cstring(key);
-        unsafe {
-            let ptr = (self.vtable.bg_take_segmented_candidates)(self.handle, ckey.as_ptr());
-            let json = self.take_cstr(ptr)?;
-            serde_json::from_str(&json).ok()
-        }
-    }
-
     /// Done 状態の converter を engine に戻す
     pub fn bg_reclaim(&mut self) {
         unsafe {
@@ -472,16 +464,6 @@ impl DynEngine {
         }
     }
 
-    pub fn convert_sync_segmented(&mut self) -> Vec<SegmentCandidate> {
-        unsafe {
-            let ptr = (self.vtable.convert_sync_segmented)(self.handle);
-            match self.take_cstr(ptr) {
-                Some(json) => serde_json::from_str(&json).unwrap_or_default(),
-                None => vec![],
-            }
-        }
-    }
-
     pub fn merge_candidates(&self, llm_cands: Vec<String>, limit: usize) -> Vec<String> {
         let json = serde_json::to_string(&llm_cands).unwrap_or_else(|_| "[]".into());
         let cjson = Self::to_cstring(&json);
@@ -489,30 +471,6 @@ impl DynEngine {
             let ptr = (self.vtable.merge_candidates)(self.handle, cjson.as_ptr(), limit as u32);
             match self.take_cstr(ptr) {
                 Some(s) => serde_json::from_str(&s).unwrap_or_default(),
-                None => vec![],
-            }
-        }
-    }
-
-    pub fn segment_surface(&self, surface: &str) -> Vec<String> {
-        let csurface = Self::to_cstring(surface);
-        unsafe {
-            let ptr = (self.vtable.segment_surface)(self.handle, csurface.as_ptr());
-            match self.take_cstr(ptr) {
-                Some(json) => serde_json::from_str(&json).unwrap_or_default(),
-                None => vec![],
-            }
-        }
-    }
-
-    pub fn segment_candidate(&self, surface: &str, reading: &str) -> Vec<SegmentBlock> {
-        let csurface = Self::to_cstring(surface);
-        let creading = Self::to_cstring(reading);
-        unsafe {
-            let ptr =
-                (self.vtable.segment_candidate)(self.handle, csurface.as_ptr(), creading.as_ptr());
-            match self.take_cstr(ptr) {
-                Some(json) => serde_json::from_str(&json).unwrap_or_default(),
                 None => vec![],
             }
         }
@@ -571,26 +529,6 @@ impl DynEngine {
         unsafe {
             let ptr = (self.vtable.available_models_json)();
             self.take_cstr(ptr).unwrap_or_else(|| "[]".into())
-        }
-    }
-
-    pub fn convert_to_segments(
-        &self,
-        reading: &str,
-        context: &str,
-        num_candidates: usize,
-    ) -> Option<Segments> {
-        let creading = Self::to_cstring(reading);
-        let ccontext = Self::to_cstring(context);
-        unsafe {
-            let ptr = (self.vtable.convert_to_segments)(
-                self.handle,
-                creading.as_ptr(),
-                ccontext.as_ptr(),
-                num_candidates as u32,
-            );
-            let json = self.take_cstr(ptr)?;
-            serde_json::from_str(&json).ok()
         }
     }
 

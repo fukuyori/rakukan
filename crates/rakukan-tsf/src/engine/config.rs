@@ -160,6 +160,10 @@ fn default_prefer_dictionary_first() -> bool {
     true
 }
 
+fn default_live_conv_beam_size() -> usize {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveConversionConfig {
     #[serde(default)]
@@ -170,6 +174,9 @@ pub struct LiveConversionConfig {
     pub use_llm: bool,
     #[serde(default = "default_prefer_dictionary_first")]
     pub prefer_dictionary_first: bool,
+    /// ライブ変換の候補数（beam 幅）。1 = greedy（高速）、3 = beam（高品質、デフォルト）
+    #[serde(default = "default_live_conv_beam_size")]
+    pub beam_size: usize,
 }
 
 impl Default for LiveConversionConfig {
@@ -179,6 +186,7 @@ impl Default for LiveConversionConfig {
             debounce_ms: 80,
             use_llm: false,
             prefer_dictionary_first: true,
+            beam_size: 3,
         }
     }
 }
@@ -369,6 +377,8 @@ enabled = false
 debounce_ms = 80
 use_llm = false
 prefer_dictionary_first = true
+# ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
+beam_size = 3
 
 [diagnostics]
 dump_active_config = true

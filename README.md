@@ -1,4 +1,4 @@
-# rakukan v0.5.0
+# rakukan v0.5.1
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -13,21 +13,22 @@ Windows 向け日本語 IME。
 ## 主な機能
 
 - **ライブ変換**: ひらがな入力後、短い停止でトップ候補を自動表示
-- **分節編集**: `Space` 後に文節単位で再変換し、`Left/Right` で移動、`Shift+Left/Right` で範囲調整
+- **範囲指定変換**: `Shift+Right/Left` で先頭から変換範囲を指定 → `Space` で変換 → `Enter` で確定、残りで LiveConv 再開
+- **数値保護**: LLM が数字を改変しない（`2024ねん → 2024年`）。数字・アルファベットは半角/全角の両方を候補として提示
 - **LLM + 辞書変換**: jinen モデルと Mozc 系辞書を併用
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
-- **Vibrato 分節補助**: `system.dic` を同梱し、分節境界の初期推定に利用
 
 ## 0.5.0 変更点
 
-- **数値保護レイヤー（CONVERTER_REDESIGN Phase A）**: LLM が数字を改変する問題（`2024ねん → 2025年`）を根本解決。reading を数字ラン / 非数字ランに分割し、LLM には非数字部分だけを渡す。数字のみの変換では半角・全角の両方を候補として提示
-- **Segments データモデル導入**: Mozc の `Segments` / `Segment` / `Candidate` を参考にした新型を engine-abi / engine に追加。`convert_to_segments` API を FFI / RPC 経由で公開（Phase B 以降のライブ変換 Segments 化の基盤）
-- **数字入力の半角/全角設定**: `config.toml` の `[input] digit_width = "halfwidth"` で数字の入力幅を選択可能に（デフォルト: 半角）
-- **RPC プロトコル v3**: `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` を追加、engine ABI v5 に bump
+- **数値保護レイヤー**: LLM が数字を改変する問題を根本解決。reading を数字ラン / 非数字ランに分割し、LLM には非数字部分だけを渡す
+- **アルファベット保護**: 半角/全角の両方を候補として提示
+- **範囲指定変換 (RangeSelect)**: `Shift+矢印` で先頭から変換範囲を指定する新しい部分変換方式。分節アライメント問題が発生しない
+- **数字入力の半角/全角設定**: `config.toml` の `[input] digit_width = "halfwidth"` で制御（デフォルト: 半角）
+- **vibrato / SplitPreedit の完全削除**: 形態素解析ベースの分節分割を廃止し、reading 文字位置ベースの範囲指定に置換
 
-> 0.5.0 では `PROTOCOL_VERSION` が 3、engine ABI が 5 に更新されています。`cargo make reinstall` で host.exe と engine DLL を同時に更新してください。
+> 0.5.0 では engine ABI が v7 に更新されています。`cargo make build-engine && cargo make reinstall` で全コンポーネントを更新してください。
 
 ## 0.4.4 変更点
 

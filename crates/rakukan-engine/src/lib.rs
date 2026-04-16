@@ -26,7 +26,6 @@ pub mod conv_cache;
 pub mod dict;
 pub mod digits;
 pub mod ffi;
-pub mod segmenter;
 pub mod segments;
 pub use backend::{BackendSelection, GpuInfo, select_backend};
 // Backend は kanji::Backend と名前が被るため、rakukan の Backend は別名でエクスポート
@@ -129,6 +128,8 @@ pub struct EngineConfig {
     pub main_gpu: i32,
     /// 数字の入力幅: "fullwidth" = 全角 (０１２), "halfwidth" = 半角 (012)
     pub digit_width: DigitWidth,
+    /// ライブ変換時の候補数（beam 幅に影響）。1 = greedy（高速）、3 = beam（高品質）
+    pub live_conv_beam_size: usize,
 }
 
 impl Default for EngineConfig {
@@ -140,6 +141,7 @@ impl Default for EngineConfig {
             n_gpu_layers: 0u32,
             main_gpu: 0,
             digit_width: DigitWidth::default(),
+            live_conv_beam_size: 3,
         }
     }
 }
@@ -371,62 +373,6 @@ impl RakunEngine {
 
     pub fn convert_default(&self) -> Result<Vec<String>, EngineError> {
         self.convert(self.config.num_candidates)
-    }
-
-    pub fn segment_surface(&self, surface: &str) -> Vec<String> {
-        if surface.is_empty() {
-            return Vec::new();
-        }
-        segmenter::segment_surface(surface)
-    }
-
-    pub fn segment_candidate(&self, surface: &str, reading: &str) -> Vec<segmenter::SegmentBlock> {
-        if surface.is_empty() {
-            return Vec::new();
-        }
-        segmenter::segment_candidate(surface, reading)
-    }
-
-    pub fn segment_candidates(
-        &self,
-        reading: &str,
-        candidates: &[String],
-    ) -> Vec<segmenter::SegmentCandidate> {
-        if candidates.is_empty() {
-            return Vec::new();
-        }
-        segmenter::segment_candidates(reading, candidates)
-    }
-
-    pub fn convert_to_segments(
-        &self,
-        reading: &str,
-        context: &str,
-        num_candidates: usize,
-    ) -> Result<Segments, EngineError> {
-        if reading.is_empty() {
-            return Ok(Segments {
-                segments: vec![],
-                history_size: 0,
-                focused: 0,
-            });
-        }
-        let kanji = self
-            .kanji
-            .as_ref()
-            .ok_or(EngineError::ModelNotInitialized)?;
-
-        let candidates = digits::convert_with_digit_protection(kanji, reading, context, num_candidates)
-            .map_err(|e| EngineError::ConversionFailed(e.to_string()))?;
-
-        let top_surface = candidates.first().map(|s| s.as_str()).unwrap_or(reading);
-
-        let segs = digits::segment_with_digit_protection(reading, top_surface);
-        Ok(Segments {
-            segments: segs,
-            history_size: 0,
-            focused: 0,
-        })
     }
 
     pub fn commit(&mut self, text: &str) {
@@ -664,14 +610,6 @@ impl RakunEngine {
         let (conv, cands) = conv_cache::take_ready(key)?;
         self.kanji = Some(conv);
         Some(cands)
-    }
-
-    pub fn bg_take_segmented_candidates(
-        &mut self,
-        key: &str,
-    ) -> Option<Vec<segmenter::SegmentCandidate>> {
-        let cands = self.bg_take_candidates(key)?;
-        Some(self.segment_candidates(key, &cands))
     }
 
     /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）

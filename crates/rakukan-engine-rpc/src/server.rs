@@ -190,10 +190,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             Some(v) => Response::Strings(v),
             None => Response::Strings(vec![]),
         },
-        BgTakeSegmentedCandidates { key } => match eng.bg_take_segmented_candidates(&key) {
-            Some(v) => Response::Segments(v),
-            None => Response::Segments(vec![]),
-        },
+        #[allow(deprecated)]
+        _ReservedBgTakeSegmentedCandidates { .. } => {
+            Response::Error("removed".into())
+        }
         BgReclaim => {
             eng.bg_reclaim();
             Response::Unit
@@ -222,23 +222,26 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         }
 
         ConvertSync => Response::Strings(eng.convert_sync()),
-        ConvertSyncSegmented => Response::Segments(eng.convert_sync_segmented()),
+        #[allow(deprecated)]
+        _ReservedConvertSyncSegmented => {
+            Response::Error("removed".into())
+        }
         MergeCandidates { llm_cands, limit } => {
             Response::Strings(eng.merge_candidates(llm_cands, limit as usize))
         }
-        SegmentSurface { surface } => Response::Strings(eng.segment_surface(&surface)),
-        SegmentCandidate { surface, reading } => {
-            Response::SegmentBlocks(eng.segment_candidate(&surface, &reading))
+        #[allow(deprecated)]
+        _ReservedSegmentSurface { .. } => {
+            Response::Error("removed".into())
+        }
+        #[allow(deprecated)]
+        _ReservedSegmentCandidate { .. } => {
+            Response::Error("removed".into())
         }
 
-        ConvertToSegments {
-            reading,
-            context,
-            num_candidates,
-        } => match eng.convert_to_segments(&reading, &context, num_candidates as usize) {
-            Some(segs) => Response::SegmentsModel(segs),
-            None => Response::Error("convert_to_segments failed".into()),
-        },
+        #[allow(deprecated)]
+        _ReservedConvertToSegments { .. } => {
+            Response::Error("ConvertToSegments has been removed in ABI v6".into())
+        }
         ResizeSegment { .. } => {
             Response::Error("resize_segment not yet implemented".into())
         }

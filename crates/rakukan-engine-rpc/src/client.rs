@@ -20,8 +20,6 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response, PIPE_BASE_NAME};
-use rakukan_engine_abi::{Segments, SegmentBlock, SegmentCandidate};
-
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
 
@@ -109,30 +107,6 @@ impl RpcEngine {
         }
     }
 
-    fn call_segments(&self, req: Request) -> Result<Vec<SegmentCandidate>> {
-        match self.call(req)? {
-            Response::Segments(v) => Ok(v),
-            Response::Error(e) => bail!("rpc error: {e}"),
-            other => bail!("unexpected response: {:?}", other),
-        }
-    }
-
-    fn call_segment_blocks(&self, req: Request) -> Result<Vec<SegmentBlock>> {
-        match self.call(req)? {
-            Response::SegmentBlocks(v) => Ok(v),
-            Response::Error(e) => bail!("rpc error: {e}"),
-            other => bail!("unexpected response: {:?}", other),
-        }
-    }
-
-    fn call_segments_model(&self, req: Request) -> Result<Segments> {
-        match self.call(req)? {
-            Response::SegmentsModel(s) => Ok(s),
-            Response::Error(e) => bail!("rpc error: {e}"),
-            other => bail!("unexpected response: {:?}", other),
-        }
-    }
-
     // ── DynEngine 互換 API ──────────────────────────────────────────────
 
     pub fn push_char(&self, c: char) {
@@ -194,12 +168,6 @@ impl RpcEngine {
             _ => None,
         }
     }
-    pub fn bg_take_segmented_candidates(&self, key: &str) -> Option<Vec<SegmentCandidate>> {
-        match self.call_segments(Request::BgTakeSegmentedCandidates { key: key.into() }) {
-            Ok(v) if !v.is_empty() => Some(v),
-            _ => None,
-        }
-    }
     pub fn bg_reclaim(&self) {
         let _ = self.call_unit(Request::BgReclaim);
     }
@@ -226,9 +194,6 @@ impl RpcEngine {
     pub fn convert_sync(&self) -> Vec<String> {
         self.call_strings(Request::ConvertSync).unwrap_or_default()
     }
-    pub fn convert_sync_segmented(&self) -> Vec<SegmentCandidate> {
-        self.call_segments(Request::ConvertSyncSegmented).unwrap_or_default()
-    }
     pub fn merge_candidates(&self, llm_cands: Vec<String>, limit: usize) -> Vec<String> {
         self.call_strings(Request::MergeCandidates {
             llm_cands,
@@ -236,32 +201,6 @@ impl RpcEngine {
         })
         .unwrap_or_default()
     }
-    pub fn segment_surface(&self, surface: &str) -> Vec<String> {
-        self.call_strings(Request::SegmentSurface { surface: surface.into() })
-            .unwrap_or_default()
-    }
-    pub fn convert_to_segments(
-        &self,
-        reading: &str,
-        context: &str,
-        num_candidates: usize,
-    ) -> Option<Segments> {
-        self.call_segments_model(Request::ConvertToSegments {
-            reading: reading.into(),
-            context: context.into(),
-            num_candidates: num_candidates as u32,
-        })
-        .ok()
-    }
-
-    pub fn segment_candidate(&self, surface: &str, reading: &str) -> Vec<SegmentBlock> {
-        self.call_segment_blocks(Request::SegmentCandidate {
-            surface: surface.into(),
-            reading: reading.into(),
-        })
-        .unwrap_or_default()
-    }
-
     pub fn start_load_model(&self) {
         let _ = self.call_unit(Request::StartLoadModel);
     }

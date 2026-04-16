@@ -3,7 +3,7 @@
 //! DynEngine の全メソッドを 1 対 1 で Request バリアントにマッピングする。
 //! 後方互換のため、既存バリアントの順序変更や削除はせず、追加のみで拡張する（postcard の enum は順序依存）。
 
-use rakukan_engine_abi::{Segments as SegmentsModel, SegmentBlock, SegmentCandidate};
+use rakukan_engine_abi::Segments as SegmentsModel;
 use serde::{Deserialize, Serialize};
 
 /// Named Pipe 名のベース。実際のパイプ名は `format!("\\\\.\\pipe\\{PIPE_BASE_NAME}-{user}")` で構成する。
@@ -60,7 +60,8 @@ pub enum Request {
     BgStart { n_cands: u32 },
     BgStatus,
     BgTakeCandidates { key: String },
-    BgTakeSegmentedCandidates { key: String },
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedBgTakeSegmentedCandidates { key: String },
     BgReclaim,
     BgWaitMs { timeout_ms: u64 },
 
@@ -73,10 +74,13 @@ pub enum Request {
 
     // ─── 同期変換 ─────────────────────────────────────────
     ConvertSync,
-    ConvertSyncSegmented,
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedConvertSyncSegmented,
     MergeCandidates { llm_cands: Vec<String>, limit: u32 },
-    SegmentSurface { surface: String },
-    SegmentCandidate { surface: String, reading: String },
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedSegmentSurface { surface: String },
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedSegmentCandidate { surface: String, reading: String },
 
     // ─── 非同期初期化 ─────────────────────────────────────
     StartLoadModel,
@@ -104,7 +108,9 @@ pub enum Request {
     Bye,
 
     // ─── Segments モデル (v3) ───────────────────────────────
-    ConvertToSegments {
+    /// Reserved: was ConvertToSegments. Kept for postcard enum ordinal compatibility.
+    #[deprecated = "removed in ABI v6; do not use"]
+    _ReservedConvertToSegments {
         reading: String,
         context: String,
         num_candidates: u32,
@@ -146,8 +152,10 @@ pub enum Response {
     I32(i32),
     String(String),
     Strings(Vec<String>),
-    Segments(Vec<SegmentCandidate>),
-    SegmentBlocks(Vec<SegmentBlock>),
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedSegments(Vec<u8>),
+    #[deprecated = "removed in ABI v7; do not use"]
+    _ReservedSegmentBlocks(Vec<u8>),
     SegmentsModel(SegmentsModel),
     /// ホスト側で処理中に発生したエラー（DLL 未ロード、引数不正、内部 panic 等）。
     Error(String),
