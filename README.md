@@ -1,4 +1,4 @@
-# rakukan v0.4.5
+# rakukan v0.5.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -20,14 +20,14 @@ Windows 向け日本語 IME。
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
 - **Vibrato 分節補助**: `system.dic` を同梱し、分節境界の初期推定に利用
 
-## 最近の 0.4.5 変更点
+## 0.5.0 変更点
 
-- **打鍵時の RPC を 1 往復に集約**: 0.4.4 までは 1 キーストロークあたり `push_char` / `preedit_display` / `hiragana_text` / `bg_status` / `bg_start` など 8〜9 回の Named Pipe 往復が発生していた。0.4.5 では新 RPC `Request::InputChar` を追加し、1 往復で push + 状態取得 + `bg_start` までを完了する形に変更（`PROTOCOL_VERSION` を 2 に bump）
-- **辞書・モデル ready 状態のラッチ化**: `poll_dict_ready` / `poll_model_ready` はいったん true を返したら以降変わらないため、`DICT_READY_LATCH` / `MODEL_READY_LATCH` を TSF 側にキャッシュし、ready 以降は RPC をスキップ
-- **ライブ変換中の pending ローマ字表示**: 「tat」と入力したときの末尾 "t" が消える問題を修正。`on_input` のライブ変換分岐・BG タイマー Phase 1A（`SetText`）・Phase 1B キュー消費の 3 経路を揃えて pending を維持するようにした
-- **変換パイプライン再設計の着手**: [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) としてライブ変換・文節再変換・境界伸縮・数値保護・用法辞書までの全面改修設計書を作成（実装は Phase A から順次）
+- **数値保護レイヤー（CONVERTER_REDESIGN Phase A）**: LLM が数字を改変する問題（`2024ねん → 2025年`）を根本解決。reading を数字ラン / 非数字ランに分割し、LLM には非数字部分だけを渡す。数字のみの変換では半角・全角の両方を候補として提示
+- **Segments データモデル導入**: Mozc の `Segments` / `Segment` / `Candidate` を参考にした新型を engine-abi / engine に追加。`convert_to_segments` API を FFI / RPC 経由で公開（Phase B 以降のライブ変換 Segments 化の基盤）
+- **数字入力の半角/全角設定**: `config.toml` の `[input] digit_width = "halfwidth"` で数字の入力幅を選択可能に（デフォルト: 半角）
+- **RPC プロトコル v3**: `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` を追加、engine ABI v5 に bump
 
-> 0.4.5 の打鍵レイテンシ改善により、インストーラ再適用が必要です（`rakukan-engine-host.exe` がプロトコル v2 に更新されるため、古い host.exe との組み合わせでは Hello で弾かれます）。
+> 0.5.0 では `PROTOCOL_VERSION` が 3、engine ABI が 5 に更新されています。`cargo make reinstall` で host.exe と engine DLL を同時に更新してください。
 
 ## 0.4.4 変更点
 

@@ -3,7 +3,7 @@
 //! DynEngine の全メソッドを 1 対 1 で Request バリアントにマッピングする。
 //! 後方互換のため、既存バリアントの順序変更や削除はせず、追加のみで拡張する（postcard の enum は順序依存）。
 
-use rakukan_engine_abi::{SegmentBlock, SegmentCandidate};
+use rakukan_engine_abi::{Segments as SegmentsModel, SegmentBlock, SegmentCandidate};
 use serde::{Deserialize, Serialize};
 
 /// Named Pipe 名のベース。実際のパイプ名は `format!("\\\\.\\pipe\\{PIPE_BASE_NAME}-{user}")` で構成する。
@@ -13,7 +13,8 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 ///
 /// - v1: 0.4.4 初版
 /// - v2: `InputChar` / `InputCharResult` バッチ RPC を追加（0.4.5）
-pub const PROTOCOL_VERSION: u32 = 2;
+/// - v3: `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` を追加（Phase A）
+pub const PROTOCOL_VERSION: u32 = 3;
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -102,6 +103,24 @@ pub enum Request {
     /// クライアント側が切断を宣言する。ホストは該当セッションを破棄する。
     Bye,
 
+    // ─── Segments モデル (v3) ───────────────────────────────
+    ConvertToSegments {
+        reading: String,
+        context: String,
+        num_candidates: u32,
+    },
+    ResizeSegment {
+        segments_json: String,
+        index: u32,
+        offset: i32,
+        num_candidates: u32,
+    },
+    SegmentCandidatesFor {
+        reading: String,
+        context: String,
+        num_candidates: u32,
+    },
+
     // ─── バッチ入力 (v2) ───────────────────────────────────
     /// 1 キーストロークを 1 RPC で処理するバッチ API。
     ///
@@ -129,6 +148,7 @@ pub enum Response {
     Strings(Vec<String>),
     Segments(Vec<SegmentCandidate>),
     SegmentBlocks(Vec<SegmentBlock>),
+    SegmentsModel(SegmentsModel),
     /// ホスト側で処理中に発生したエラー（DLL 未ロード、引数不正、内部 panic 等）。
     Error(String),
 

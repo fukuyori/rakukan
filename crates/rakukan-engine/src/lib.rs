@@ -24,11 +24,15 @@ pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter};
 pub mod backend;
 pub mod conv_cache;
 pub mod dict;
+pub mod digits;
 pub mod ffi;
 pub mod segmenter;
+pub mod segments;
 pub use backend::{BackendSelection, GpuInfo, select_backend};
 // Backend は kanji::Backend と名前が被るため、rakukan の Backend は別名でエクスポート
 pub use backend::Backend as RakunBackend;
+
+pub use segments::{Candidate, CandidateSource, Segment, Segments};
 
 pub use rakukan_dict::mozc_dict::MozcDict;
 pub use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
@@ -100,6 +104,19 @@ pub enum EngineError {
     ModelNotInitialized,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigitWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for DigitWidth {
+    fn default() -> Self {
+        DigitWidth::Halfwidth
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EngineConfig {
@@ -110,6 +127,8 @@ pub struct EngineConfig {
     pub n_gpu_layers: u32,
     /// 使用する GPU インデックス (0 = 最初の GPU, -1 = 自動)
     pub main_gpu: i32,
+    /// 数字の入力幅: "fullwidth" = 全角 (０１２), "halfwidth" = 半角 (012)
+    pub digit_width: DigitWidth,
 }
 
 impl Default for EngineConfig {
@@ -120,6 +139,7 @@ impl Default for EngineConfig {
             n_threads: 0,
             n_gpu_layers: 0u32,
             main_gpu: 0,
+            digit_width: DigitWidth::default(),
         }
     }
 }
@@ -211,12 +231,17 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
-        // 数字 0–9 → 全角数字 ０–９（pending_romaji がない場合のみ）
+        // 数字 0–9（pending_romaji がない場合のみ）
         if self.pending_romaji_buf.is_empty() && c.is_ascii_digit() {
-            let fw = char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c);
-            self.hiragana_buf.push(fw);
+            let out = match self.config.digit_width {
+                DigitWidth::Fullwidth => {
+                    char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c)
+                }
+                DigitWidth::Halfwidth => c,
+            };
+            self.hiragana_buf.push(out);
             self.romaji_input_log.push(c.to_string());
-            debug!("engine::push: digit {:?} → {:?}", c, fw);
+            debug!("engine::push: digit {:?} → {:?}", c, out);
             return self.current_preedit();
         }
 
@@ -335,9 +360,13 @@ impl RakunEngine {
             .kanji
             .as_ref()
             .ok_or(EngineError::ModelNotInitialized)?;
-        kanji
-            .convert(&self.hiragana_buf, &self.committed, num_candidates)
-            .map_err(|e| EngineError::ConversionFailed(e.to_string()))
+        digits::convert_with_digit_protection(
+            kanji,
+            &self.hiragana_buf,
+            &self.committed,
+            num_candidates,
+        )
+        .map_err(|e| EngineError::ConversionFailed(e.to_string()))
     }
 
     pub fn convert_default(&self) -> Result<Vec<String>, EngineError> {
@@ -367,6 +396,37 @@ impl RakunEngine {
             return Vec::new();
         }
         segmenter::segment_candidates(reading, candidates)
+    }
+
+    pub fn convert_to_segments(
+        &self,
+        reading: &str,
+        context: &str,
+        num_candidates: usize,
+    ) -> Result<Segments, EngineError> {
+        if reading.is_empty() {
+            return Ok(Segments {
+                segments: vec![],
+                history_size: 0,
+                focused: 0,
+            });
+        }
+        let kanji = self
+            .kanji
+            .as_ref()
+            .ok_or(EngineError::ModelNotInitialized)?;
+
+        let candidates = digits::convert_with_digit_protection(kanji, reading, context, num_candidates)
+            .map_err(|e| EngineError::ConversionFailed(e.to_string()))?;
+
+        let top_surface = candidates.first().map(|s| s.as_str()).unwrap_or(reading);
+
+        let segs = digits::segment_with_digit_protection(reading, top_surface);
+        Ok(Segments {
+            segments: segs,
+            history_size: 0,
+            focused: 0,
+        })
     }
 
     pub fn commit(&mut self, text: &str) {
@@ -796,5 +856,53 @@ mod symbol_input_tests {
         assert!(push("", '@').ends_with('＠'));
         assert!(push("", '(').ends_with('（'));
         assert!(push("", ')').ends_with('）'));
+    }
+}
+
+#[cfg(test)]
+mod digit_width_tests {
+    use super::{DigitWidth, EngineConfig, RakunEngine};
+
+    fn push_digit(width: DigitWidth, c: char) -> String {
+        let config = EngineConfig {
+            digit_width: width,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_char(c);
+        e.hiragana_text().to_string()
+    }
+
+    #[test]
+    fn halfwidth_keeps_ascii() {
+        assert_eq!(push_digit(DigitWidth::Halfwidth, '0'), "0");
+        assert_eq!(push_digit(DigitWidth::Halfwidth, '5'), "5");
+        assert_eq!(push_digit(DigitWidth::Halfwidth, '9'), "9");
+    }
+
+    #[test]
+    fn fullwidth_converts() {
+        assert_eq!(push_digit(DigitWidth::Fullwidth, '0'), "０");
+        assert_eq!(push_digit(DigitWidth::Fullwidth, '5'), "５");
+        assert_eq!(push_digit(DigitWidth::Fullwidth, '9'), "９");
+    }
+
+    #[test]
+    fn halfwidth_sequence() {
+        let config = EngineConfig {
+            digit_width: DigitWidth::Halfwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        for c in "2024".chars() {
+            e.push_char(c);
+        }
+        assert_eq!(e.hiragana_text(), "2024");
+    }
+
+    #[test]
+    fn default_is_halfwidth() {
+        assert_eq!(DigitWidth::default(), DigitWidth::Halfwidth);
+        assert_eq!(push_digit(DigitWidth::default(), '3'), "3");
     }
 }

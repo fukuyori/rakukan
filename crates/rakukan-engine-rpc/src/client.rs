@@ -20,7 +20,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response, PIPE_BASE_NAME};
-use rakukan_engine_abi::{SegmentBlock, SegmentCandidate};
+use rakukan_engine_abi::{Segments, SegmentBlock, SegmentCandidate};
 
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
@@ -120,6 +120,14 @@ impl RpcEngine {
     fn call_segment_blocks(&self, req: Request) -> Result<Vec<SegmentBlock>> {
         match self.call(req)? {
             Response::SegmentBlocks(v) => Ok(v),
+            Response::Error(e) => bail!("rpc error: {e}"),
+            other => bail!("unexpected response: {:?}", other),
+        }
+    }
+
+    fn call_segments_model(&self, req: Request) -> Result<Segments> {
+        match self.call(req)? {
+            Response::SegmentsModel(s) => Ok(s),
             Response::Error(e) => bail!("rpc error: {e}"),
             other => bail!("unexpected response: {:?}", other),
         }
@@ -232,6 +240,20 @@ impl RpcEngine {
         self.call_strings(Request::SegmentSurface { surface: surface.into() })
             .unwrap_or_default()
     }
+    pub fn convert_to_segments(
+        &self,
+        reading: &str,
+        context: &str,
+        num_candidates: usize,
+    ) -> Option<Segments> {
+        self.call_segments_model(Request::ConvertToSegments {
+            reading: reading.into(),
+            context: context.into(),
+            num_candidates: num_candidates as u32,
+        })
+        .ok()
+    }
+
     pub fn segment_candidate(&self, surface: &str, reading: &str) -> Vec<SegmentBlock> {
         self.call_segment_blocks(Request::SegmentCandidate {
             surface: surface.into(),

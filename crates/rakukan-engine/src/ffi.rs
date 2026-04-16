@@ -11,7 +11,7 @@
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 
-pub const ENGINE_ABI_VERSION: u32 = 4;
+pub const ENGINE_ABI_VERSION: u32 = 5;
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -383,6 +383,33 @@ pub extern "C" fn engine_segment_candidate(
     let segments = engine.segment_candidate(surface, reading);
     let json = serde_json::to_string(&segments).unwrap_or_else(|_| "[]".into());
     unsafe { to_cstr(json) }
+}
+
+// ─── Segments モデル (v5) ─────────────────────────────────────────────────────
+
+/// reading + context + num_candidates から Segments を生成する。
+/// 戻り値: JSON 文字列 (Segments の serde 表現) または null（エラー）
+/// `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_convert_to_segments(
+    handle: *mut c_void,
+    reading: *const c_char,
+    context: *const c_char,
+    num_candidates: u32,
+) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    let reading = unsafe { from_cstr(reading) };
+    let context = unsafe { from_cstr(context) };
+    match engine.convert_to_segments(reading, context, num_candidates as usize) {
+        Ok(segments) => {
+            let json = serde_json::to_string(&segments).unwrap_or_else(|_| "null".into());
+            unsafe { to_cstr(json) }
+        }
+        Err(e) => {
+            tracing::warn!("convert_to_segments error: {e}");
+            std::ptr::null_mut()
+        }
+    }
 }
 
 // ─── 初期化（非同期）──────────────────────────────────────────────────────────

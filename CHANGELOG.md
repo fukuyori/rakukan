@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.5.0] - 2026-04-16
+
+### Added
+
+- **数値保護レイヤー** (`digits.rs`)
+  - reading を数字ラン / 非数字ランに分割し、LLM には非数字部分だけを渡す
+  - `convert_with_digit_protection` で既存の `convert` パスを置換
+    （`RakunEngine::convert` と `conv_cache` ワーカーの両経路）
+  - `verify_digits_preserved` による出力検証（桁一致しない候補を除外）
+  - 数字のみの変換では半角・全角の両方を候補として提示
+  - 数字文節に `"半角"` / `"全角"` の注釈を付与
+
+- **Segments データモデル** (`segments.rs`, engine-abi)
+  - `Segments` / `Segment` / `Candidate` / `CandidateSource` 型を追加
+  - `convert_to_segments` API を engine → FFI → RPC 経由で公開
+  - `segment_with_digit_protection` で数字ランを `fixed: true` の独立文節に
+  - engine ABI を v5 に bump
+
+- **数字入力の半角/全角設定**
+  - `EngineConfig` に `digit_width` フィールドを追加
+  - `config.toml` の `[input] digit_width = "halfwidth" | "fullwidth"` で制御
+  - デフォルトを半角に変更
+
+- **RPC プロトコル v3**
+  - `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` Request を追加
+  - `Response::SegmentsModel` を追加
+  - `ResizeSegment` / `SegmentCandidatesFor` は定義のみ（Phase D/E で実装予定）
+
 ## [0.4.5] - 2026-04-13
 
 ### Changed

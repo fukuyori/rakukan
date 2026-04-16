@@ -120,12 +120,27 @@ fn default_remember_last_kana_mode() -> bool {
     true
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigitWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for DigitWidth {
+    fn default() -> Self {
+        DigitWidth::Halfwidth
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "default_input_mode")]
     pub default_mode: DefaultInputMode,
     #[serde(default = "default_remember_last_kana_mode")]
     pub remember_last_kana_mode: bool,
+    #[serde(default)]
+    pub digit_width: DigitWidth,
 }
 
 impl Default for InputConfig {
@@ -133,6 +148,7 @@ impl Default for InputConfig {
         Self {
             default_mode: default_input_mode(),
             remember_last_kana_mode: true,
+            digit_width: DigitWidth::default(),
         }
     }
 }
@@ -345,6 +361,8 @@ reload_on_mode_switch = true
 [input]
 default_mode = "alphanumeric"
 remember_last_kana_mode = true
+# 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
+digit_width = "halfwidth"
 
 [live_conversion]
 enabled = false

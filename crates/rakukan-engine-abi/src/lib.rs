@@ -17,7 +17,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 4;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 5;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SegmentBlock {
@@ -29,6 +29,39 @@ pub struct SegmentBlock {
 pub struct SegmentCandidate {
     pub surface: String,
     pub segments: Vec<SegmentBlock>,
+}
+
+// ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
+
+#[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub enum CandidateSource {
+    Llm,
+    Dict,
+    History,
+    Digit,
+    Literal,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Candidate {
+    pub surface: String,
+    pub source: CandidateSource,
+    pub annotation: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Segment {
+    pub reading: String,
+    pub candidates: Vec<Candidate>,
+    pub selected: usize,
+    pub fixed: bool,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct Segments {
+    pub segments: Vec<Segment>,
+    pub history_size: usize,
+    pub focused: usize,
 }
 
 // ─── EngineVTable ──────────────────────────────────────────────────────────────
@@ -100,6 +133,10 @@ struct EngineVTable {
     // 診断
     last_error: unsafe extern "C" fn() -> *mut c_char,
     dict_status: unsafe extern "C" fn() -> *mut c_char,
+
+    // Segments モデル (ABI v5)
+    convert_to_segments:
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32) -> *mut c_char,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -183,6 +220,7 @@ impl EngineVTable {
             learn: load_sym!(lib, b"engine_learn\0"),
             last_error: load_sym!(lib, b"engine_last_error\0"),
             dict_status: load_sym!(lib, b"engine_dict_status\0"),
+            convert_to_segments: load_sym!(lib, b"engine_convert_to_segments\0"),
         })
     }
 }
@@ -533,6 +571,26 @@ impl DynEngine {
         unsafe {
             let ptr = (self.vtable.available_models_json)();
             self.take_cstr(ptr).unwrap_or_else(|| "[]".into())
+        }
+    }
+
+    pub fn convert_to_segments(
+        &self,
+        reading: &str,
+        context: &str,
+        num_candidates: usize,
+    ) -> Option<Segments> {
+        let creading = Self::to_cstring(reading);
+        let ccontext = Self::to_cstring(context);
+        unsafe {
+            let ptr = (self.vtable.convert_to_segments)(
+                self.handle,
+                creading.as_ptr(),
+                ccontext.as_ptr(),
+                num_candidates as u32,
+            );
+            let json = self.take_cstr(ptr)?;
+            serde_json::from_str(&json).ok()
         }
     }
 

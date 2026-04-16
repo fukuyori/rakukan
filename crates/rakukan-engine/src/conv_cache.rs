@@ -127,7 +127,7 @@ fn worker_loop(cache: Arc<Cache>) {
         let t = std::time::Instant::now();
         let (converter, candidates) =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                converter.convert(&key, &committed, n)
+                crate::digits::convert_with_digit_protection(&converter, &key, &committed, n)
             })) {
                 Ok(Ok(cands)) => {
                     tracing::trace!(

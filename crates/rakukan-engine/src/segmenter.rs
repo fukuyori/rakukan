@@ -11,7 +11,7 @@ use rakukan_dict::dict_dir;
 
 const VIBRATO_DICT_ENV: &str = "RAKUKAN_VIBRATO_DIC";
 
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SegmentBlock {
     pub surface: String,
     pub reading: String,

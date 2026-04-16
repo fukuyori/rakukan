@@ -1,11 +1,11 @@
-# Rakukan 引き継ぎ資料 (v0.4.4)
+# Rakukan 引き継ぎ資料 (v0.5.0)
 
-更新日: 2026-04-13
+更新日: 2026-04-16
 
 ## 現在の状態
 
-- **バージョン:** v0.4.4
-- **位置づけ:** エンジンを別プロセス化（out-of-process）して Zoom / Dropbox クラッシュ問題を根治
+- **バージョン:** v0.5.0
+- **位置づけ:** CONVERTER_REDESIGN Phase A 完了（数値保護 + Segments 型基盤 + 数字半角/全角設定）
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`
@@ -199,19 +199,17 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
   - ホストが短時間に連続クラッシュしたら TSF 側で諦めて fallback する
 - **[Live-2] display_attr 拡張**
   - Preedit / LiveConv / Selecting の見た目をさらに分ける
-- **[Num-1] 数字プレースホルダ応急処置** → **CONVERTER_REDESIGN §5.2 数値保護レイヤー**
-  - `200えん -> 2000円` 系の誤変換抑制
-  - 根本対応として Segments + 入力分割 + 後処理検証で解決する方針
+- ~~**[Num-1] 数字プレースホルダ応急処置**~~ → **v0.5.0 で解決済み**（`digits.rs` 数値保護レイヤー）
 
 ### 優先度: 低
 
 - **[Perf-1] RPC レイテンシ計測**
   - 期待値は数十 μs / call。llama 推論（数十〜数百 ms）に対してはノイズ以下のはずだが実測しておきたい
   - 注: 0.4.5 のバッチ RPC 化（`Request::InputChar`）で 1 打鍵 8〜9 RPC → 1 RPC に短縮済み
-- **Segment ベースの本格文節管理** → **CONVERTER_REDESIGN 全体**
-  - `Segments` / `Segment` / `Candidate` 型の導入と `SessionState` の再編
-- **数字・助数詞の構造対応** → **CONVERTER_REDESIGN §5.1 文節構成 + §5.2 数値保護**
-  - 助数詞の結合は §5.1 の bunsetsu composition で対応、数字ランは §5.2 で独立文節化
+- **Segment ベースの本格文節管理** → **CONVERTER_REDESIGN Phase B〜E**
+  - `Segments` / `Segment` / `Candidate` 型は v0.5.0 で導入済み。`SessionState` の再編は Phase B 以降
+- **数字・助数詞の構造対応** → **CONVERTER_REDESIGN §5.1 文節構成（Phase C）**
+  - 数値保護（§5.2）は v0.5.0 で解決済み。助数詞結合は Phase C の bunsetsu composition で対応
 - **長文・句読点混じりでの分節精度確認** → **CONVERTER_REDESIGN §9 回帰テスト項目**
 
 ## 補足

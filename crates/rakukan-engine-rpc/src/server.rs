@@ -231,6 +231,21 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             Response::SegmentBlocks(eng.segment_candidate(&surface, &reading))
         }
 
+        ConvertToSegments {
+            reading,
+            context,
+            num_candidates,
+        } => match eng.convert_to_segments(&reading, &context, num_candidates as usize) {
+            Some(segs) => Response::SegmentsModel(segs),
+            None => Response::Error("convert_to_segments failed".into()),
+        },
+        ResizeSegment { .. } => {
+            Response::Error("resize_segment not yet implemented".into())
+        }
+        SegmentCandidatesFor { .. } => {
+            Response::Error("segment_candidates_for not yet implemented".into())
+        }
+
         StartLoadModel => {
             eng.start_load_model();
             Response::Unit

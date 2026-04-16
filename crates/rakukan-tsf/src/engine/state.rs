@@ -389,16 +389,20 @@ fn build_engine_config_json() -> String {
     let main_gpu = cfg.general.main_gpu;
     let n_gpu_layers = cfg.general.n_gpu_layers.unwrap_or(u32::MAX);
     let model_variant = cfg.general.model_variant.clone();
+    let digit_width = match cfg.input.digit_width {
+        super::config::DigitWidth::Fullwidth => "fullwidth",
+        super::config::DigitWidth::Halfwidth => "halfwidth",
+    };
 
     tracing::info!(
-        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?}"
+        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width}"
     );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
         None => String::new(),
     };
     format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0{mv_json}}}"#
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}"{mv_json}}}"#
     )
 }
 
