@@ -34,6 +34,7 @@ use anyhow::Result;
 use windows::{
     Win32::{
         Foundation::{BOOL, E_FAIL, E_INVALIDARG, FALSE, LPARAM, POINT, RECT, TRUE, WPARAM},
+        Graphics::Gdi::HBITMAP,
         System::{
             Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IClassFactory, IClassFactory_Impl},
             Ole::CONNECT_E_CANNOTCONNECT,
@@ -49,9 +50,12 @@ use windows::{
                 ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink, ITfMenu,
                 ITfSource, ITfSource_Impl, ITfTextInputProcessor, ITfTextInputProcessor_Impl,
                 ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
-                TF_LANGBARITEMINFO, TfLBIClick,
+                TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
             },
-            WindowsAndMessaging::{GetForegroundWindow, HICON},
+            WindowsAndMessaging::{
+                AppendMenuW, CreatePopupMenu, DestroyMenu, GetForegroundWindow, HICON,
+                MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+            },
         },
     },
     core::{BSTR, GUID, IUnknown, Interface, implement},
@@ -62,9 +66,9 @@ use crate::{
     engine::{
         keymap::Keymap,
         state::{
-            SessionState, caret_rect_get, caret_rect_set, composition_clone,
-            composition_set, composition_take, doc_mode_on_focus_change, doc_mode_remove,
-            engine_get, engine_try_get_or_create, session_get, session_is_selecting_fast,
+            SessionState, caret_rect_get, caret_rect_set, composition_clone, composition_set,
+            composition_take, doc_mode_on_focus_change, doc_mode_remove, engine_get,
+            engine_try_get_or_create, session_get, session_is_selecting_fast,
         },
         text_util,
         user_action::UserAction,
@@ -73,10 +77,186 @@ use crate::{
     tsf::{
         candidate_window, display_attr,
         edit_session::EditSession,
-        language_bar::{self, LANGBAR_SINK_COOKIE, get_open_close, toggle_open_close},
-        tray_ipc,
+        language_bar::{self, LANGBAR_SINK_COOKIE, get_open_close},
+        settings_launcher, tray_ipc,
     },
 };
+
+const ID_MENU_MODE_HIRAGANA: u32 = 1;
+const ID_MENU_MODE_KATAKANA: u32 = 2;
+const ID_MENU_MODE_ALPHANUMERIC: u32 = 3;
+const ID_MENU_SETTINGS: u32 = 10;
+const ID_MENU_ENGINE_RELOAD: u32 = 11;
+
+fn current_langbar_mode(open: bool) -> crate::engine::input_mode::InputMode {
+    if !open {
+        crate::engine::input_mode::InputMode::Alphanumeric
+    } else {
+        crate::engine::state::ime_state_get()
+            .ok()
+            .map(|state| state.input_mode)
+            .unwrap_or(crate::engine::input_mode::InputMode::Hiragana)
+    }
+}
+
+fn apply_langbar_mode(
+    factory: &TextServiceFactory_Impl,
+    new_mode: crate::engine::input_mode::InputMode,
+) {
+    let (tm, tid) = factory
+        .inner
+        .try_borrow()
+        .ok()
+        .and_then(|inner| inner.thread_mgr.clone().map(|tm| (tm, inner.client_id)))
+        .unzip();
+
+    if let (Some(tm), Some(tid)) = (tm, tid) {
+        unsafe {
+            let _ = language_bar::set_open_close(
+                &tm,
+                tid,
+                new_mode != crate::engine::input_mode::InputMode::Alphanumeric,
+            );
+        }
+    }
+
+    if let Ok(mut state) = crate::engine::state::ime_state_get() {
+        let from = format!("{:?}", state.input_mode);
+        state.set_mode(new_mode);
+        tracing::info!("langbar menu: input mode {} -> {:?}", from, new_mode);
+        diag::event(DiagEvent::ModeChange {
+            from,
+            to: match new_mode {
+                crate::engine::input_mode::InputMode::Hiragana => "Hiragana",
+                crate::engine::input_mode::InputMode::Katakana => "Katakana",
+                crate::engine::input_mode::InputMode::Alphanumeric => "Alphanumeric",
+            },
+        });
+    }
+
+    factory.notify_langbar_update();
+    factory.notify_tray_update(tid.unwrap_or_default());
+    factory.maybe_reload_runtime_config();
+}
+
+fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
+    match id {
+        ID_MENU_MODE_HIRAGANA => {
+            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Hiragana);
+        }
+        ID_MENU_MODE_KATAKANA => {
+            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Katakana);
+        }
+        ID_MENU_MODE_ALPHANUMERIC => {
+            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Alphanumeric);
+        }
+        ID_MENU_SETTINGS => {
+            settings_launcher::launch_settings_app();
+        }
+        ID_MENU_ENGINE_RELOAD => {
+            crate::engine::config::init_config_manager();
+            crate::engine::state::engine_reload();
+        }
+        _ => {}
+    }
+}
+
+fn show_langbar_popup_menu(
+    factory: &TextServiceFactory_Impl,
+    pt: &POINT,
+) -> windows::core::Result<()> {
+    let open = factory
+        .inner
+        .try_borrow()
+        .ok()
+        .and_then(|inner| inner.thread_mgr.clone().map(|tm| get_open_close(&tm)))
+        .unwrap_or(true);
+    let current_mode = current_langbar_mode(open);
+
+    unsafe {
+        use windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS;
+
+        let menu = CreatePopupMenu()?;
+        let hiragana = to_wide_menu_text("ひらがな");
+        let katakana = to_wide_menu_text("カタカナ");
+        let alnum = to_wide_menu_text("英数");
+        let settings = to_wide_menu_text("設定...");
+        let reload = to_wide_menu_text("エンジン再起動");
+
+        let _ = AppendMenuW(
+            menu,
+            MENU_ITEM_FLAGS(
+                if current_mode == crate::engine::input_mode::InputMode::Hiragana {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+            ),
+            ID_MENU_MODE_HIRAGANA as usize,
+            windows::core::PCWSTR(hiragana.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MENU_ITEM_FLAGS(
+                if current_mode == crate::engine::input_mode::InputMode::Katakana {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+            ),
+            ID_MENU_MODE_KATAKANA as usize,
+            windows::core::PCWSTR(katakana.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MENU_ITEM_FLAGS(
+                if current_mode == crate::engine::input_mode::InputMode::Alphanumeric {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+            ),
+            ID_MENU_MODE_ALPHANUMERIC as usize,
+            windows::core::PCWSTR(alnum.as_ptr()),
+        );
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
+        let _ = AppendMenuW(
+            menu,
+            MENU_ITEM_FLAGS(0),
+            ID_MENU_SETTINGS as usize,
+            windows::core::PCWSTR(settings.as_ptr()),
+        );
+        let _ = AppendMenuW(
+            menu,
+            MENU_ITEM_FLAGS(0),
+            ID_MENU_ENGINE_RELOAD as usize,
+            windows::core::PCWSTR(reload.as_ptr()),
+        );
+
+        let cmd = TrackPopupMenu(
+            menu,
+            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            pt.x,
+            pt.y,
+            0,
+            GetForegroundWindow(),
+            None,
+        );
+        let _ = DestroyMenu(menu);
+
+        if cmd.0 != 0 {
+            handle_langbar_menu_command(factory, cmd.0 as u32);
+        }
+    }
+
+    Ok(())
+}
+
+fn to_wide_menu_text(text: &str) -> Vec<u16> {
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    wide
+}
 
 // ─── TextServiceState ─────────────────────────────────────────────────────────
 
@@ -418,7 +598,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         wparam: WPARAM,
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
-        let vk = wparam.0 as u16;
+        let vk = normalize_key_event_vk(wparam.0 as u16);
         let action = match self
             .inner
             .try_borrow()
@@ -488,7 +668,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             self.notify_langbar_update();
         }
         let _t = diag::span("OnKeyDown");
-        let vk = wparam.0 as u16;
+        let vk = normalize_key_event_vk(wparam.0 as u16);
 
         tracing::trace!("OnKeyDown vk={:#04x}", vk);
 
@@ -614,6 +794,20 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     }
 }
 
+fn normalize_key_event_vk(vk: u16) -> u16 {
+    use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+
+    let ctrl = unsafe { GetKeyState(0x11) as u16 & 0x8000 != 0 };
+    let shift = unsafe { GetKeyState(0x10) as u16 & 0x8000 != 0 };
+    let alt = unsafe { GetKeyState(0x12) as u16 & 0x8000 != 0 };
+    let space_down = unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 };
+
+    if vk == 0x27 && ctrl && alt && !shift && space_down {
+        return 0x20;
+    }
+    vk
+}
+
 // ─── handle_action ───────────────────────────────────────────────────────────
 
 impl TextServiceFactory_Impl {
@@ -723,7 +917,11 @@ impl TextServiceFactory_Impl {
                     SessionState::LiveConv { reading, preview } => {
                         format!("LiveConv(r={:?} p={:?})", reading, preview)
                     }
-                    SessionState::RangeSelect { full_reading, select_end, .. } => {
+                    SessionState::RangeSelect {
+                        full_reading,
+                        select_end,
+                        ..
+                    } => {
                         format!("RangeSelect(r={:?} end={})", full_reading, select_end)
                     }
                 }
@@ -762,10 +960,8 @@ impl TextServiceFactory_Impl {
                             // ことで「ta」→「た」→「t」押下時の "t" が消えないようにする。
                             let reading = engine.hiragana_text().to_string();
                             let preedit_full = engine.preedit_display();
-                            let pending = preedit_full
-                                .get(reading.len()..)
-                                .unwrap_or("")
-                                .to_string();
+                            let pending =
+                                preedit_full.get(reading.len()..).unwrap_or("").to_string();
                             if !reading.is_empty() {
                                 tracing::info!(
                                     "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
@@ -1066,8 +1262,7 @@ impl TextServiceFactory_Impl {
                     crate::engine::state::InputCharKind::Char
                 };
                 let live_beam = crate::engine::state::get_live_conv_beam_size();
-                let (preedit, new_reading, _bg) =
-                    engine.input_char(c, kind, Some(live_beam));
+                let (preedit, new_reading, _bg) = engine.input_char(c, kind, Some(live_beam));
                 let suffix = new_reading
                     .strip_prefix(&reading)
                     .unwrap_or(new_reading.as_str())
@@ -1144,8 +1339,7 @@ impl TextServiceFactory_Impl {
                     crate::engine::state::InputCharKind::Char
                 };
                 let n_cands2 = crate::engine::state::get_num_candidates();
-                let (preedit, _hiragana, _bg) =
-                    engine2.input_char(c, kind, Some(n_cands2));
+                let (preedit, _hiragana, _bg) = engine2.input_char(c, kind, Some(n_cands2));
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
@@ -1169,8 +1363,7 @@ impl TextServiceFactory_Impl {
         } else {
             crate::engine::state::InputCharKind::Char
         };
-        let (preedit, hiragana, bg_status) =
-            engine.input_char(c, kind, Some(n_cands));
+        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, Some(n_cands));
         diag::event(DiagEvent::InputChar {
             ch: c,
             preedit_after: preedit.clone(),
@@ -1410,7 +1603,11 @@ impl TextServiceFactory_Impl {
                 let sync_cands: Vec<String> = if kanji_ready {
                     let llm_cands = engine.convert_sync();
                     let merged = engine.merge_candidates(llm_cands, 32);
-                    if merged.is_empty() { vec![target.clone()] } else { merged }
+                    if merged.is_empty() {
+                        vec![target.clone()]
+                    } else {
+                        merged
+                    }
                 } else {
                     vec![target.clone()]
                 };
@@ -2242,7 +2439,12 @@ impl TextServiceFactory_Impl {
             }
             // RangeSelect → Backspace → LiveConv に戻る
             if sess.is_range_select() {
-                if let SessionState::RangeSelect { full_reading, original_preview, .. } = &*sess {
+                if let SessionState::RangeSelect {
+                    full_reading,
+                    original_preview,
+                    ..
+                } = &*sess
+                {
                     let reading = full_reading.clone();
                     let preview = original_preview.clone();
                     sess.set_live_conv(reading, preview.clone());
@@ -2319,7 +2521,12 @@ impl TextServiceFactory_Impl {
             }
             // RangeSelect → ESC → LiveConv に戻る（元の preview を復元）
             if sess.is_range_select() {
-                if let SessionState::RangeSelect { full_reading, original_preview, .. } = &*sess {
+                if let SessionState::RangeSelect {
+                    full_reading,
+                    original_preview,
+                    ..
+                } = &*sess
+                {
                     let reading = full_reading.clone();
                     let preview = original_preview.clone();
                     sess.set_live_conv(reading, preview.clone());
@@ -2578,7 +2785,8 @@ impl TextServiceFactory_Impl {
         let page_cands = sess.page_candidates();
         let page_sel = sess.page_selected();
         let page_info = sess.page_info();
-        let text = sess.current_candidate()
+        let text = sess
+            .current_candidate()
             .or_else(|| sess.original_preedit())
             .unwrap_or("")
             .to_string();
@@ -2621,7 +2829,8 @@ impl TextServiceFactory_Impl {
         let page_cands = sess.page_candidates();
         let page_sel = sess.page_selected();
         let page_info = sess.page_info();
-        let text = sess.current_candidate()
+        let text = sess
+            .current_candidate()
             .or_else(|| sess.original_preedit())
             .unwrap_or("")
             .to_string();
@@ -3115,7 +3324,14 @@ impl TextServiceFactory_Impl {
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
             return Ok(true);
         }
 
@@ -3127,7 +3343,14 @@ impl TextServiceFactory_Impl {
             let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
             drop(sess);
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
             return Ok(true);
         }
 
@@ -3146,7 +3369,14 @@ impl TextServiceFactory_Impl {
             engine.bg_reclaim();
             engine.force_preedit(reading);
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
             return Ok(true);
         }
 
@@ -3161,7 +3391,14 @@ impl TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 engine.bg_reclaim();
                 drop(guard);
-                update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    selected,
+                    unselected,
+                )?;
                 return Ok(true);
             }
         }
@@ -3215,7 +3452,14 @@ impl TextServiceFactory_Impl {
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
             return Ok(true);
         }
 
@@ -3227,7 +3471,14 @@ impl TextServiceFactory_Impl {
             let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
             drop(sess);
             drop(guard);
-            update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
             return Ok(true);
         }
 
@@ -3243,7 +3494,14 @@ impl TextServiceFactory_Impl {
                 engine.bg_reclaim();
                 engine.force_preedit(reading);
                 drop(guard);
-                update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    selected,
+                    unselected,
+                )?;
                 return Ok(true);
             }
         }
@@ -3258,14 +3516,20 @@ impl TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 engine.bg_reclaim();
                 drop(guard);
-                update_composition_candidate_parts(ctx, tid, sink, String::new(), selected, unselected)?;
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    selected,
+                    unselected,
+                )?;
                 return Ok(true);
             }
         }
 
         Ok(!engine.preedit_is_empty())
     }
-
 }
 
 // ─── 変換ヘルパー ─────────────────────────────────────────────────────────────
@@ -3919,62 +4183,94 @@ impl ITfLangBarItem_Impl for TextServiceFactory_Impl {
 }
 
 impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
-    fn OnClick(&self, _: TfLBIClick, _: &POINT, _: *const RECT) -> windows::core::Result<()> {
-        let (tm, tid) = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|i| i.thread_mgr.clone().map(|tm| (tm, i.client_id)))
-            .unzip();
-        if let (Some(tm), Some(tid)) = (tm, tid) {
-            unsafe {
-                let _ = toggle_open_close(&tm, tid);
-            }
+    fn OnClick(&self, _: TfLBIClick, pt: &POINT, _: *const RECT) -> windows::core::Result<()> {
+        show_langbar_popup_menu(self, pt)
+    }
+    fn InitMenu(&self, menu: Option<&ITfMenu>) -> windows::core::Result<()> {
+        let Some(menu) = menu else {
+            return Ok(());
+        };
 
-            // OPENCLOSE を変えた後、IME_STATE.input_mode と同期する。
-            // 同期しないと OnTestKeyDown/GetText が古い状態で動作し続ける。
-            let now_open = get_open_close(&tm);
-            if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                use crate::engine::input_mode::InputMode;
-                let new_mode = if now_open {
-                    InputMode::Hiragana
-                } else {
-                    InputMode::Alphanumeric
-                };
-                let from = format!("{:?}", st.input_mode);
-                st.set_mode(new_mode);
-                tracing::info!(
-                    "OnClick: OPENCLOSE={} input mode: {} → {:?}",
-                    now_open as u8,
-                    from,
-                    st.input_mode
-                );
-                diag::event(DiagEvent::ModeChange {
-                    from,
-                    to: if now_open { "Hiragana" } else { "Alphanumeric" },
-                });
-            }
-        }
-        self.notify_langbar_update();
-
-        // open/close 変更をトレイへ通知
         let open = self
             .inner
             .try_borrow()
             .ok()
-            .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
+            .and_then(|inner| inner.thread_mgr.clone().map(|tm| get_open_close(&tm)))
             .unwrap_or(true);
-        let mode = crate::engine::state::ime_state_get()
-            .ok()
-            .map(|s| s.input_mode)
-            .unwrap_or_default();
-        tray_ipc::publish(open, mode);
+        let current_mode = current_langbar_mode(open);
+
+        unsafe {
+            let hiragana = "ひらがな".encode_utf16().collect::<Vec<_>>();
+            let katakana = "カタカナ".encode_utf16().collect::<Vec<_>>();
+            let alnum = "英数".encode_utf16().collect::<Vec<_>>();
+            let settings = "設定...".encode_utf16().collect::<Vec<_>>();
+            let reload = "エンジン再起動".encode_utf16().collect::<Vec<_>>();
+
+            let _ = menu.AddMenuItem(
+                ID_MENU_MODE_HIRAGANA,
+                if current_mode == crate::engine::input_mode::InputMode::Hiragana {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &hiragana,
+                std::ptr::null_mut(),
+            );
+            let _ = menu.AddMenuItem(
+                ID_MENU_MODE_KATAKANA,
+                if current_mode == crate::engine::input_mode::InputMode::Katakana {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &katakana,
+                std::ptr::null_mut(),
+            );
+            let _ = menu.AddMenuItem(
+                ID_MENU_MODE_ALPHANUMERIC,
+                if current_mode == crate::engine::input_mode::InputMode::Alphanumeric {
+                    TF_LBMENUF_RADIOCHECKED
+                } else {
+                    0
+                },
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &alnum,
+                std::ptr::null_mut(),
+            );
+            let _ = menu.AddMenuItem(
+                0,
+                TF_LBMENUF_SEPARATOR,
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &[],
+                std::ptr::null_mut(),
+            );
+            let _ = menu.AddMenuItem(
+                ID_MENU_SETTINGS,
+                0,
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &settings,
+                std::ptr::null_mut(),
+            );
+            let _ = menu.AddMenuItem(
+                ID_MENU_ENGINE_RELOAD,
+                0,
+                HBITMAP::default(),
+                HBITMAP::default(),
+                &reload,
+                std::ptr::null_mut(),
+            );
+        }
         Ok(())
     }
-    fn InitMenu(&self, _: Option<&ITfMenu>) -> windows::core::Result<()> {
-        Ok(())
-    }
-    fn OnMenuSelect(&self, _: u32) -> windows::core::Result<()> {
+    fn OnMenuSelect(&self, id: u32) -> windows::core::Result<()> {
+        handle_langbar_menu_command(self, id);
         Ok(())
     }
     fn GetIcon(&self) -> windows::core::Result<HICON> {

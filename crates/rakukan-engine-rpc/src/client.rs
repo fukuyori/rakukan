@@ -12,16 +12,27 @@
 //! 保持するので並列実行はされない（DynEngine でも同じ前提）。
 
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 
 use crate::codec::{read_frame, write_frame};
-use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response, PIPE_BASE_NAME};
+use crate::pipe::{pipe_name_for_current_user, PipeStream};
+use crate::protocol::{InputCharKind, Request, Response, PIPE_BASE_NAME, PROTOCOL_VERSION};
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
+
+/// ホスト起動が短時間に連続失敗した場合、TSF ホスト（Explorer など）からの
+/// 再 spawn を一時停止して不安定化を防ぐ。
+const HOST_FAILURE_THRESHOLD: u32 = 3;
+const HOST_FAILURE_WINDOW_MS: u64 = 15_000;
+const HOST_FAILURE_COOLDOWN_MS: u64 = 30_000;
+const CONNECT_WHILE_BLOCKED_MS: u64 = 500;
+
+static HOST_FAILURE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
+static HOST_SPAWN_GUARD: LazyLock<Mutex<HostSpawnGuard>> =
+    LazyLock::new(|| Mutex::new(HostSpawnGuard::default()));
 
 pub struct RpcEngine {
     inner: Mutex<Connection>,
@@ -34,6 +45,54 @@ struct Connection {
     /// Create を送り直す必要がある。そのときに使う。
     /// `reload()` を呼ぶと新しい config で上書きされる。
     config_json: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct HostSpawnGuard {
+    window_start_ms: Option<u64>,
+    failure_count: u32,
+    blocked_until_ms: Option<u64>,
+}
+
+impl HostSpawnGuard {
+    fn reset(&mut self) {
+        self.window_start_ms = None;
+        self.failure_count = 0;
+        self.blocked_until_ms = None;
+    }
+
+    fn can_spawn(&mut self, now_ms: u64) -> Result<()> {
+        if let Some(until_ms) = self.blocked_until_ms {
+            if now_ms < until_ms {
+                let remaining_ms = until_ms.saturating_sub(now_ms);
+                bail!(
+                    "host spawn temporarily disabled for {}ms after repeated startup failures",
+                    remaining_ms
+                );
+            }
+            self.blocked_until_ms = None;
+        }
+        Ok(())
+    }
+
+    fn record_failure(&mut self, now_ms: u64) {
+        let reset_window = self
+            .window_start_ms
+            .map(|start| now_ms.saturating_sub(start) > HOST_FAILURE_WINDOW_MS)
+            .unwrap_or(true);
+        if reset_window {
+            self.window_start_ms = Some(now_ms);
+            self.failure_count = 1;
+        } else {
+            self.failure_count = self.failure_count.saturating_add(1);
+        }
+
+        if self.failure_count >= HOST_FAILURE_THRESHOLD {
+            self.window_start_ms = None;
+            self.failure_count = 0;
+            self.blocked_until_ms = Some(now_ms.saturating_add(HOST_FAILURE_COOLDOWN_MS));
+        }
+    }
 }
 
 impl RpcEngine {
@@ -126,7 +185,8 @@ impl RpcEngine {
     }
 
     pub fn preedit_display(&self) -> String {
-        self.call_string(Request::PreeditDisplay).unwrap_or_default()
+        self.call_string(Request::PreeditDisplay)
+            .unwrap_or_default()
     }
     pub fn preedit_is_empty(&self) -> bool {
         self.call_bool(Request::PreeditIsEmpty).unwrap_or(true)
@@ -146,8 +206,10 @@ impl RpcEngine {
     }
 
     pub fn bg_start(&self, n_cands: usize) -> bool {
-        self.call_bool(Request::BgStart { n_cands: n_cands as u32 })
-            .unwrap_or(false)
+        self.call_bool(Request::BgStart {
+            n_cands: n_cands as u32,
+        })
+        .unwrap_or(false)
     }
     /// `DynEngine::bg_status` との互換のため `&'static str` を返す。
     /// エンジンが返しうる状態は有限なので既知値に正規化し、それ以外は "unknown"。
@@ -172,7 +234,8 @@ impl RpcEngine {
         let _ = self.call_unit(Request::BgReclaim);
     }
     pub fn bg_wait_ms(&self, timeout_ms: u64) -> bool {
-        self.call_bool(Request::BgWaitMs { timeout_ms }).unwrap_or(false)
+        self.call_bool(Request::BgWaitMs { timeout_ms })
+            .unwrap_or(false)
     }
 
     pub fn commit(&self, text: &str) {
@@ -341,57 +404,134 @@ impl Connection {
             Ok(s) => {
                 self.stream = Some(s);
             }
-            Err(_) => {
-                // 2. 失敗: ホストを spawn してから再接続
-                if let Err(e) = spawn_host() {
-                    tracing::warn!("spawn_host failed: {e}");
+            Err(initial_err) => {
+                // 2. 失敗: 既存ホストへ短時間だけ再接続を試み、それでも駄目なら spawn。
+                // 短時間に連続失敗している間は spawn を一時停止し、Explorer などの
+                // TSF ホストから外部プロセス起動を連打しない。
+                match host_spawn_guard_can_spawn() {
+                    Ok(()) => {
+                        if let Err(e) = spawn_host() {
+                            tracing::warn!("spawn_host failed: {e}");
+                        }
+                        let s = PipeStream::connect_client(&pipe_name, Duration::from_secs(5))
+                            .with_context(|| format!("connect after spawn to {pipe_name}"))?;
+                        self.stream = Some(s);
+                    }
+                    Err(blocked_err) => {
+                        tracing::warn!(
+                            "host spawn suppressed after repeated failures: {blocked_err}"
+                        );
+                        let s = PipeStream::connect_client(
+                            &pipe_name,
+                            Duration::from_millis(CONNECT_WHILE_BLOCKED_MS),
+                        )
+                        .with_context(|| {
+                            format!(
+                                "connect while spawn suppressed to {pipe_name} (initial error: {initial_err})"
+                            )
+                        })?;
+                        self.stream = Some(s);
+                    }
                 }
-                let s = PipeStream::connect_client(&pipe_name, Duration::from_secs(5))
-                    .with_context(|| format!("connect after spawn to {pipe_name}"))?;
-                self.stream = Some(s);
             }
         }
 
-        // 3. Hello 交換
-        let s = self.stream.as_mut().expect("connected");
-        write_frame(
-            s,
-            &Request::Hello {
-                protocol_version: PROTOCOL_VERSION,
-            },
-        )?;
-        match read_frame::<_, Response>(s)? {
-            Response::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
-            Response::Hello { protocol_version } => {
-                bail!("protocol version mismatch: server={protocol_version}")
+        let result = (|| -> Result<()> {
+            // 3. Hello 交換
+            let s = self.stream.as_mut().expect("connected");
+            write_frame(
+                s,
+                &Request::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            )?;
+            match read_frame::<_, Response>(s)? {
+                Response::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
+                Response::Hello { protocol_version } => {
+                    bail!("protocol version mismatch: server={protocol_version}")
+                }
+                Response::Error(e) => bail!("hello error: {e}"),
+                other => bail!("unexpected hello response: {:?}", other),
             }
-            Response::Error(e) => bail!("hello error: {e}"),
-            other => bail!("unexpected hello response: {:?}", other),
-        }
 
-        // 4. Create（保存済み config_json を使う）
-        write_frame(
-            s,
-            &Request::Create {
-                config_json: self.config_json.clone(),
-            },
-        )?;
-        match read_frame::<_, Response>(s)? {
-            Response::Unit => Ok(()),
-            Response::Error(e) => bail!("create error: {e}"),
-            other => bail!("unexpected create response: {:?}", other),
+            // 4. Create（保存済み config_json を使う）
+            write_frame(
+                s,
+                &Request::Create {
+                    config_json: self.config_json.clone(),
+                },
+            )?;
+            match read_frame::<_, Response>(s)? {
+                Response::Unit => Ok(()),
+                Response::Error(e) => bail!("create error: {e}"),
+                other => bail!("unexpected create response: {:?}", other),
+            }
+        })();
+
+        match result {
+            Ok(()) => {
+                host_spawn_guard_record_success();
+                Ok(())
+            }
+            Err(e) => {
+                self.stream = None;
+                host_spawn_guard_record_failure();
+                Err(e)
+            }
         }
     }
 }
 
 /// `rakukan-engine-host.exe` を install_dir から detached で起動する。
 fn spawn_host() -> Result<()> {
-    let install = rakukan_engine_abi::install_dir().ok_or_else(|| anyhow!("install_dir not found"))?;
+    let install =
+        rakukan_engine_abi::install_dir().ok_or_else(|| anyhow!("install_dir not found"))?;
     let exe = install.join(HOST_EXE_NAME);
     if !exe.exists() {
         bail!("host exe not found: {}", exe.display());
     }
     spawn_detached(&exe)
+}
+
+fn host_spawn_guard_can_spawn() -> Result<()> {
+    let now_ms = monotonic_now_ms();
+    with_host_spawn_guard(|guard| guard.can_spawn(now_ms))
+}
+
+fn host_spawn_guard_record_failure() {
+    let now_ms = monotonic_now_ms();
+    with_host_spawn_guard(|guard| {
+        guard.record_failure(now_ms);
+        tracing::warn!(
+            "recorded host startup failure: count={} blocked_until={:?}",
+            guard.failure_count,
+            guard.blocked_until_ms
+        );
+    });
+}
+
+fn host_spawn_guard_record_success() {
+    with_host_spawn_guard(|guard| {
+        if guard.failure_count != 0 || guard.blocked_until_ms.is_some() {
+            tracing::info!("host connection recovered; clearing startup failure guard");
+        }
+        guard.reset();
+    });
+}
+
+fn monotonic_now_ms() -> u64 {
+    HOST_FAILURE_CLOCK.elapsed().as_millis() as u64
+}
+
+fn with_host_spawn_guard<T>(f: impl FnOnce(&mut HostSpawnGuard) -> T) -> T {
+    match HOST_SPAWN_GUARD.lock() {
+        Ok(mut guard) => f(&mut guard),
+        Err(poisoned) => {
+            tracing::warn!("host spawn guard mutex poisoned, recovering");
+            let mut guard = poisoned.into_inner();
+            f(&mut guard)
+        }
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -413,4 +553,49 @@ fn spawn_detached(_exe: &PathBuf) -> Result<()> {
 
 // 未使用 import 警告回避
 #[allow(dead_code)]
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn host_spawn_guard_blocks_after_repeated_failures() {
+        let mut guard = HostSpawnGuard::default();
+
+        assert!(guard.can_spawn(0).is_ok());
+        guard.record_failure(100);
+        assert!(guard.can_spawn(101).is_ok());
+        guard.record_failure(200);
+        assert!(guard.can_spawn(201).is_ok());
+        guard.record_failure(300);
+
+        let blocked = guard.can_spawn(301).unwrap_err().to_string();
+        assert!(blocked.contains("temporarily disabled"));
+        assert!(guard.can_spawn(300 + HOST_FAILURE_COOLDOWN_MS).is_ok());
+    }
+
+    #[test]
+    fn host_spawn_guard_resets_after_window_expires() {
+        let mut guard = HostSpawnGuard::default();
+
+        guard.record_failure(100);
+        guard.record_failure(100 + HOST_FAILURE_WINDOW_MS + 1);
+        assert_eq!(guard.failure_count, 1);
+        assert!(guard.blocked_until_ms.is_none());
+    }
+
+    #[test]
+    fn host_spawn_guard_success_clears_block() {
+        let mut guard = HostSpawnGuard::default();
+
+        guard.record_failure(100);
+        guard.record_failure(200);
+        guard.record_failure(300);
+        assert!(guard.can_spawn(301).is_err());
+
+        guard.reset();
+        assert!(guard.can_spawn(302).is_ok());
+        assert_eq!(guard.failure_count, 0);
+        assert!(guard.blocked_until_ms.is_none());
+    }
+}
 const _: &str = PIPE_BASE_NAME;

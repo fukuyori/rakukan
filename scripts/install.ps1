@@ -107,6 +107,8 @@ $buildDir   = "C:\rb"  # Short path to avoid Windows MAX_PATH (260) overflow in 
 $installDir = Join-Path $local "rakukan"
 $regFile    = Join-Path $installDir "registered.txt"
 $trayExe    = Join-Path $installDir "rakukan-tray.exe"
+$settingsDir = Join-Path $installDir "settings-ui"
+$settingsExe = Join-Path $settingsDir "rakukan-settings.exe"
 
 # --- 0/4 Backend (best-effort; never fail install) ---
 $configToml = $null
@@ -212,10 +214,13 @@ if ($Profile -eq "release") {
     Invoke-CargoBuild -Package "rakukan-tray"         -Profile "release"
     Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "release"
     Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "release"
+    & "$PSScriptRoot\build-settings-winui.ps1" -Configuration "Release"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $srcDll     = Join-Path $buildDir "release\rakukan_tsf.dll"
     $srcTray    = Join-Path $buildDir "release\rakukan-tray.exe"
     $srcHost    = Join-Path $buildDir "release\rakukan-engine-host.exe"
     $srcBuilder = Join-Path $buildDir "release\rakukan-dict-builder.exe"
+    $srcSettingsDir = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64"
     $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
         $p = Join-Path $buildDir "release\rakukan_engine_$_.dll"
         if (Test-Path $p) { $p } else { $null }
@@ -225,10 +230,13 @@ if ($Profile -eq "release") {
     Invoke-CargoBuild -Package "rakukan-tray"         -Profile "debug"
     Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "debug"
     Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "debug"
+    & "$PSScriptRoot\build-settings-winui.ps1" -Configuration "Debug"
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     $srcDll     = Join-Path $buildDir "debug\rakukan_tsf.dll"
     $srcTray    = Join-Path $buildDir "debug\rakukan-tray.exe"
     $srcHost    = Join-Path $buildDir "debug\rakukan-engine-host.exe"
     $srcBuilder = Join-Path $buildDir "debug\rakukan-dict-builder.exe"
+    $srcSettingsDir = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\Debug\net8.0-windows10.0.19041.0\win-x64"
     $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
         $p = Join-Path $buildDir "debug\rakukan_engine_$_.dll"
         if (Test-Path $p) { $p } else { $null }
@@ -309,6 +317,15 @@ if (Test-Path -LiteralPath $srcTray) {
         Move-Item -LiteralPath $tmpTray -Destination $trayExe -Force
     }
     Write-Host "  -> $trayExe"
+}
+
+if (Test-Path -LiteralPath $srcSettingsDir) {
+    Stop-ProcSilent "rakukan-settings"
+    Start-Sleep -Milliseconds 300
+    Remove-Item -LiteralPath $settingsDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+    Copy-Item -Path (Join-Path $srcSettingsDir "*") -Destination $settingsDir -Recurse -Force
+    Write-Host "  -> $settingsDir"
 }
 
 # rakukan-engine-host.exe をインストール（out-of-process エンジンホスト）

@@ -16,18 +16,17 @@ use windows::{
     Win32::{
         Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint,
-            FillRect, GetMonitorInfoW, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-            MonitorFromPoint, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TextOutW,
-            BACKGROUND_MODE,
+            BACKGROUND_MODE, BeginPaint, ClientToScreen, CreateFontW, CreateSolidBrush,
+            DeleteObject, EndPaint, FillRect, GetMonitorInfoW, HDC, InvalidateRect,
+            MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SelectObject,
+            SetBkMode, SetTextColor, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow,
-            GetGUIThreadInfo, GUITHREADINFO, HMENU, HWND_TOPMOST, KillTimer, RegisterClassW,
-            SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOSIZE, SetTimer, SetWindowPos,
-            ShowWindow, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE,
-            WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+            CreateWindowExW, DefWindowProcW, DestroyWindow, GUITHREADINFO, GetGUIThreadInfo, HMENU,
+            HWND_TOPMOST, KillTimer, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+            SWP_NOSIZE, SetTimer, SetWindowPos, ShowWindow, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
+            WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
         },
     },
     core::PCWSTR,
@@ -63,8 +62,18 @@ static VISIBLE: AtomicBool = AtomicBool::new(false);
 // ─── ウィンドウクラス ─────────────────────────────────────────────────────────
 
 static CLASS_NAME_UTF16: &[u16] = &[
-    b'R' as u16, b'a' as u16, b'k' as u16, b'u' as u16, b'k' as u16, b'a' as u16, b'n' as u16,
-    b'M' as u16, b'o' as u16, b'd' as u16, b'e' as u16, 0,
+    b'R' as u16,
+    b'a' as u16,
+    b'k' as u16,
+    b'u' as u16,
+    b'k' as u16,
+    b'a' as u16,
+    b'n' as u16,
+    b'M' as u16,
+    b'o' as u16,
+    b'd' as u16,
+    b'e' as u16,
+    0,
 ];
 
 static CLASS_REGISTERED: AtomicBool = AtomicBool::new(false);
@@ -83,12 +92,7 @@ unsafe fn ensure_class_registered() {
     RegisterClassW(&wc);
 }
 
-unsafe extern "system" fn wndproc(
-    hwnd: HWND,
-    msg: u32,
-    wparam: WPARAM,
-    lparam: LPARAM,
-) -> LRESULT {
+unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
@@ -134,7 +138,19 @@ unsafe fn draw(hdc: HDC) {
 
     let face: Vec<u16> = "Yu Gothic UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        FONT_HEIGHT, 0, 0, 0, 700, 0, 0, 0, 1, 0, 0, 0, 0,
+        FONT_HEIGHT,
+        0,
+        0,
+        0,
+        700,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
         PCWSTR(face.as_ptr()),
     );
     let old_font = SelectObject(hdc, font);
@@ -298,10 +314,7 @@ fn is_valid(hwnd: HWND) -> bool {
 }
 
 unsafe fn calc_window_y(x: i32, caret_bottom: i32) -> i32 {
-    let pt = POINT {
-        x,
-        y: caret_bottom,
-    };
+    let pt = POINT { x, y: caret_bottom };
     let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     let mut mi = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,

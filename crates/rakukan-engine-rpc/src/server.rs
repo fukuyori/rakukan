@@ -78,7 +78,9 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
                     "protocol version mismatch: client={protocol_version} server={PROTOCOL_VERSION}"
                 ));
             }
-            Response::Hello { protocol_version: PROTOCOL_VERSION }
+            Response::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            }
         }
         Request::Create { config_json } => {
             // 既に存在すれば何もしない（idempotent）。
@@ -114,9 +116,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
 }
 
 /// SharedEngine を lock し、poisoned を回復する小物ヘルパ。
-fn lock_engine(
-    engine: &SharedEngine,
-) -> std::sync::MutexGuard<'_, Option<DynEngine>> {
+fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, Option<DynEngine>> {
     match engine.lock() {
         Ok(g) => g,
         Err(p) => {
@@ -128,10 +128,7 @@ fn lock_engine(
 
 /// 指定 config_json で DynEngine::load_auto し、既存 slot に入れる。
 /// 辞書・モデルの bg ロードも起動する。
-fn load_engine_into(
-    slot: &mut Option<DynEngine>,
-    config_json: Option<&str>,
-) -> Response {
+fn load_engine_into(slot: &mut Option<DynEngine>, config_json: Option<&str>) -> Response {
     let install = match rakukan_engine_abi::install_dir() {
         Some(p) => p,
         None => return Response::Error("install_dir not found".into()),
@@ -191,9 +188,7 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             None => Response::Strings(vec![]),
         },
         #[allow(deprecated)]
-        _ReservedBgTakeSegmentedCandidates { .. } => {
-            Response::Error("removed".into())
-        }
+        _ReservedBgTakeSegmentedCandidates { .. } => Response::Error("removed".into()),
         BgReclaim => {
             eng.bg_reclaim();
             Response::Unit
@@ -223,28 +218,20 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
 
         ConvertSync => Response::Strings(eng.convert_sync()),
         #[allow(deprecated)]
-        _ReservedConvertSyncSegmented => {
-            Response::Error("removed".into())
-        }
+        _ReservedConvertSyncSegmented => Response::Error("removed".into()),
         MergeCandidates { llm_cands, limit } => {
             Response::Strings(eng.merge_candidates(llm_cands, limit as usize))
         }
         #[allow(deprecated)]
-        _ReservedSegmentSurface { .. } => {
-            Response::Error("removed".into())
-        }
+        _ReservedSegmentSurface { .. } => Response::Error("removed".into()),
         #[allow(deprecated)]
-        _ReservedSegmentCandidate { .. } => {
-            Response::Error("removed".into())
-        }
+        _ReservedSegmentCandidate { .. } => Response::Error("removed".into()),
 
         #[allow(deprecated)]
         _ReservedConvertToSegments { .. } => {
             Response::Error("ConvertToSegments has been removed in ABI v6".into())
         }
-        ResizeSegment { .. } => {
-            Response::Error("resize_segment not yet implemented".into())
-        }
+        ResizeSegment { .. } => Response::Error("resize_segment not yet implemented".into()),
         SegmentCandidatesFor { .. } => {
             Response::Error("segment_candidates_for not yet implemented".into())
         }

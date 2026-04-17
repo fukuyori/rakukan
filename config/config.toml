@@ -35,12 +35,16 @@ reload_on_mode_switch = true
 [input]
 default_mode = "alphanumeric"
 remember_last_kana_mode = true
+# 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
+digit_width = "halfwidth"
 
 [live_conversion]
 enabled = false
 debounce_ms = 80
 use_llm = false
 prefer_dictionary_first = true
+# ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
+beam_size = 3
 
 [diagnostics]
 dump_active_config = true

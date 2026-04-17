@@ -1,4 +1,4 @@
-# rakukan v0.5.2
+# rakukan v0.6.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -115,15 +115,15 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 
 ### 主要設計書
 
-- [DESIGN.md](DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
-- [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — **進行中**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A〜F）
-- [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
-- [VIBRATO_PHASE1.md](VIBRATO_PHASE1.md) — Vibrato 形態素解析器の導入メモ
-- [handoff.md](handoff.md) — v0.4.4 引き継ぎ資料 + 残タスクリスト
+- [DESIGN.md](docs/DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
+- [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md) — **進行中**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A〜F）
+- [SEGMENT_EDIT_REDESIGN.md](docs/SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
+- [VIBRATO_PHASE1.md](docs/VIBRATO_PHASE1.md) — Vibrato 形態素解析器の導入メモ
+- [handoff.md](docs/handoff.md) — v0.4.4 引き継ぎ資料 + 残タスクリスト
 
 ### 進行中の主要課題
 
-**変換パイプライン再設計**（[CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md)）
+**変換パイプライン再設計**（[CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md)）
 
 - [ ] **Phase A**: 新データモデル（`Segments` / `Segment` / `Candidate`）と engine 基盤、数値保護レイヤー
 - [ ] **Phase B**: ライブ変換を beam=1 (greedy) 化、`Segments` 保持
@@ -132,7 +132,7 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 - [ ] **Phase E**: 部分確定・学習・Selecting 統合・候補一覧 Tab 展開
 - [ ] **Phase F**（独立）: Candidate 注釈（用法辞書） — Mozc `usage_dict.tsv` の取り込み
 
-**独立した技術課題**（[handoff.md §残タスク](handoff.md#残タスク優先度順)）
+**独立した技術課題**（[handoff.md §残タスク](docs/handoff.md#残タスク優先度順)）
 
 - [ ] `rakukan-engine-host.exe` の idle 自死（長時間アイドル時のメモリ解放）
 - [ ] ホストプロセスのヘルスチェックとクラッシュカウント
@@ -143,10 +143,10 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 
 v0.2.0 の状態を記録した以下の資料は **過去のスナップショット** であり、現在進行中のタスクではありません。
 
-- [PHASE1_SUMMARY.md](PHASE1_SUMMARY.md) — v0.2.0 時点の Phase 1 要約
-- [PHASE2_PREP.md](PHASE2_PREP.md) — v0.2.0 先行の Phase 2 着手前メモ
-- [PHASE2_STATUS.md](PHASE2_STATUS.md) — v0.2.0 時点の Phase 2 状況
-- [WARNING_FIXES.md](WARNING_FIXES.md) — v0.2.0 に含まれる warning 修正メモ
+- [PHASE1_SUMMARY.md](docs/archive/PHASE1_SUMMARY.md) — v0.2.0 時点の Phase 1 要約
+- [PHASE2_PREP.md](docs/archive/PHASE2_PREP.md) — v0.2.0 先行の Phase 2 着手前メモ
+- [PHASE2_STATUS.md](docs/archive/PHASE2_STATUS.md) — v0.2.0 時点の Phase 2 状況
+- [WARNING_FIXES.md](docs/archive/WARNING_FIXES.md) — v0.2.0 に含まれる warning 修正メモ
 
 ## ライセンス
 

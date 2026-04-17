@@ -854,10 +854,7 @@ pub fn on_live_timer() {
             return;
         }
         let preedit_full = eng.preedit_display();
-        let pending = preedit_full
-            .get(reading.len()..)
-            .unwrap_or("")
-            .to_string();
+        let pending = preedit_full.get(reading.len()..).unwrap_or("").to_string();
         let preview = eng
             .bg_take_candidates(&reading)
             .and_then(|c| c.into_iter().next());

@@ -41,9 +41,7 @@ enum CharKind {
 fn classify_char(c: char) -> CharKind {
     if c.is_ascii_digit() || ('０'..='９').contains(&c) {
         CharKind::Digit
-    } else if c.is_ascii_alphabetic()
-        || ('Ａ'..='Ｚ').contains(&c)
-        || ('ａ'..='ｚ').contains(&c)
+    } else if c.is_ascii_alphabetic() || ('Ａ'..='Ｚ').contains(&c) || ('ａ'..='ｚ').contains(&c)
     {
         CharKind::Alpha
     } else {

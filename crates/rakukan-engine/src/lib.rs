@@ -236,9 +236,7 @@ impl RakunEngine {
         // 数字 0–9（pending_romaji がない場合のみ）
         if self.pending_romaji_buf.is_empty() && c.is_ascii_digit() {
             let out = match self.config.digit_width {
-                DigitWidth::Fullwidth => {
-                    char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c)
-                }
+                DigitWidth::Fullwidth => char::from_u32(c as u32 - 0x30 + 0xFF10).unwrap_or(c),
                 DigitWidth::Halfwidth => c,
             };
             self.hiragana_buf.push(out);

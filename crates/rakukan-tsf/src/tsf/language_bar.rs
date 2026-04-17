@@ -5,7 +5,7 @@ use windows::Win32::{
     UI::TextServices::{
         GUID_COMPARTMENT_KEYBOARD_OPENCLOSE, GUID_LBI_INPUTMODE, ITfCompartmentMgr,
         ITfLangBarItemButton, ITfLangBarItemMgr, ITfThreadMgr, TF_LANGBARITEMINFO,
-        TF_LBI_STYLE_BTN_BUTTON,
+        TF_LBI_STYLE_BTN_BUTTON, TF_LBI_STYLE_SHOWNINTRAY,
     },
     UI::WindowsAndMessaging::{HICON, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED, LoadImageW},
 };
@@ -20,8 +20,9 @@ pub fn make_langbar_info() -> TF_LANGBARITEMINFO {
         clsidService: GUID_TEXT_SERVICE,
         // GUID_LBI_INPUTMODE: Windows 標準の入力モードボタン。
         // キーボードレイアウト表示の隣に統合される（mozc と同じ方式）。
+        // クリック時のポップアップメニューは OnClick 側で明示的に表示する。
         guidItem: GUID_LBI_INPUTMODE,
-        dwStyle: TF_LBI_STYLE_BTN_BUTTON | 2u32, // 2 = TF_LBI_STYLE_SHOWNINTRAY
+        dwStyle: TF_LBI_STYLE_BTN_BUTTON | TF_LBI_STYLE_SHOWNINTRAY,
         ulSort: 0,
         szDescription: [0; 32],
     };
@@ -76,6 +77,7 @@ pub unsafe fn set_open_close(
     Ok(())
 }
 
+#[allow(dead_code)]
 pub unsafe fn toggle_open_close(thread_mgr: &ITfThreadMgr, tid: u32) -> anyhow::Result<()> {
     // 現在値を取得してトグル
     let mgr = thread_mgr
@@ -132,14 +134,14 @@ pub unsafe fn load_tray_icon() -> windows::core::Result<HICON> {
 
 // ─── モード別アイコン動的生成 ────────────────────────────────────────────────
 
-use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, CreateFontW, DeleteDC, DeleteObject, DrawTextW,
-    SelectObject, SetBkMode, SetTextColor, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS,
-    DT_CENTER, DT_SINGLELINE, DT_VCENTER, HBITMAP, HFONT, TRANSPARENT,
-};
-use windows::Win32::Graphics::Gdi::HDC;
-use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 use std::ptr::null_mut;
+use windows::Win32::Graphics::Gdi::HDC;
+use windows::Win32::Graphics::Gdi::{
+    BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleDC, CreateDIBSection, CreateFontW,
+    DIB_RGB_COLORS, DT_CENTER, DT_SINGLELINE, DT_VCENTER, DeleteDC, DeleteObject, DrawTextW,
+    HBITMAP, HFONT, SelectObject, SetBkMode, SetTextColor, TRANSPARENT,
+};
+use windows::Win32::UI::WindowsAndMessaging::{CreateIconIndirect, ICONINFO};
 
 /// テーマ (ライト/ダーク) を検出する。判定不能時はダークと見なす。
 pub fn is_light_mode() -> bool {
@@ -152,7 +154,15 @@ pub fn is_light_mode() -> bool {
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, windows::core::PCWSTR(subkey.as_ptr()), 0, KEY_READ, &mut hkey).is_err() {
+        if RegOpenKeyExW(
+            HKEY_CURRENT_USER,
+            windows::core::PCWSTR(subkey.as_ptr()),
+            0,
+            KEY_READ,
+            &mut hkey,
+        )
+        .is_err()
+        {
             return false;
         }
         let val_name: Vec<u16> = "SystemUsesLightTheme"
@@ -169,7 +179,9 @@ pub fn is_light_mode() -> bool {
             Some(&mut kind),
             Some(&mut data as *mut u32 as *mut u8),
             Some(&mut size),
-        ).is_ok() {
+        )
+        .is_ok()
+        {
             data != 0
         } else {
             false
@@ -194,8 +206,7 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
     };
     let mut bits: *mut core::ffi::c_void = null_mut();
     let hdc = unsafe { CreateCompatibleDC(HDC(null_mut())) };
-    let hbmp: HBITMAP =
-        unsafe { CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)? };
+    let hbmp: HBITMAP = unsafe { CreateDIBSection(hdc, &bmi, DIB_RGB_COLORS, &mut bits, None, 0)? };
     let old = unsafe { SelectObject(hdc, hbmp) };
 
     // 背景塗り (テーマ対応)
@@ -224,7 +235,19 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
         .collect();
     let hfont: HFONT = unsafe {
         CreateFontW(
-            -14, 0, 0, 0, 800, 0, 0, 0, 1, 0, 0, 0, 0,
+            -14,
+            0,
+            0,
+            0,
+            800,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            0,
+            0,
             windows::core::PCWSTR(face.as_ptr()),
         )
     };
@@ -232,7 +255,11 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
     unsafe { SetBkMode(hdc, TRANSPARENT) };
 
     // 文字色
-    let color = if light { 0x00_00_00_00u32 } else { 0x00_FF_FF_FFu32 };
+    let color = if light {
+        0x00_00_00_00u32
+    } else {
+        0x00_FF_FF_FFu32
+    };
     unsafe { SetTextColor(hdc, windows::Win32::Foundation::COLORREF(color)) };
 
     let mut rc = windows::Win32::Foundation::RECT {
@@ -242,7 +269,14 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
         bottom: SIZE,
     };
     let mut wbuf: Vec<u16> = text.encode_utf16().collect();
-    let _ = unsafe { DrawTextW(hdc, &mut wbuf, &mut rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE) };
+    let _ = unsafe {
+        DrawTextW(
+            hdc,
+            &mut wbuf,
+            &mut rc,
+            DT_CENTER | DT_VCENTER | DT_SINGLELINE,
+        )
+    };
 
     // alpha 補正
     if !bits.is_null() {
@@ -258,7 +292,10 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
     let mask_bits = [0u8; (SIZE * SIZE / 8) as usize];
     let mask: HBITMAP = unsafe {
         windows::Win32::Graphics::Gdi::CreateBitmap(
-            SIZE, SIZE, 1, 1,
+            SIZE,
+            SIZE,
+            1,
+            1,
             Some(mask_bits.as_ptr() as *const core::ffi::c_void),
         )
     };

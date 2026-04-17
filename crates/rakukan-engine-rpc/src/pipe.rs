@@ -11,8 +11,8 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use windows::Win32::Foundation::{
-    CloseHandle, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL, INVALID_HANDLE_VALUE,
-    LocalFree,
+    CloseHandle, ERROR_PIPE_BUSY, GENERIC_READ, GENERIC_WRITE, HANDLE, HLOCAL,
+    INVALID_HANDLE_VALUE, LocalFree,
 };
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
@@ -55,7 +55,10 @@ pub fn pipe_name_for_current_user() -> String {
 }
 
 fn to_wide_z(s: &str) -> Vec<u16> {
-    OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    OsStr::new(s)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect()
 }
 
 // ─── Security Descriptor ヘルパ ────────────────────────────────────────────────
@@ -217,10 +220,7 @@ impl PipeStream {
                 Some(sa_ptr),
             );
             if h == INVALID_HANDLE_VALUE || h.0.is_null() {
-                bail!(
-                    "CreateNamedPipeW failed: {}",
-                    io::Error::last_os_error()
-                );
+                bail!("CreateNamedPipeW failed: {}", io::Error::last_os_error());
             }
             Ok(Self {
                 handle: h,

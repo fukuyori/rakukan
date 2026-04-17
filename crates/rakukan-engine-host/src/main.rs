@@ -44,10 +44,7 @@ fn init_tracing() {
 
 fn main() -> Result<()> {
     init_tracing();
-    tracing::info!(
-        "rakukan-engine-host starting (pid={})",
-        std::process::id()
-    );
+    tracing::info!("rakukan-engine-host starting (pid={})", std::process::id());
 
     // エンジンはまだ作らない。最初のクライアント Create リクエストで
     // DynEngine::load_auto が呼ばれる。これにより「ホストを起動しても

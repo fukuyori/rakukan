@@ -12,14 +12,31 @@
 # =============================================================================
 
 param(
-    [string]$Version = "0.5.1",
+    [string]$Version,
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
-    [string]$BuildDir = "C:\rb\release",
     [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"
 )
 
 $ErrorActionPreference = "Stop"
+$repoRoot = Split-Path $PSScriptRoot -Parent
 $distDir = "$PSScriptRoot\..\dist"
+
+function Remove-PathIfExists([string]$Path) {
+    if (Test-Path -LiteralPath $Path) {
+        Remove-Item -LiteralPath $Path -Recurse -Force
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $versionFile = Join-Path $repoRoot "VERSION"
+    if (Test-Path -LiteralPath $versionFile) {
+        $Version = (Get-Content -LiteralPath $versionFile -Raw).Trim()
+    }
+}
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    throw "Version is empty. Pass -Version or create VERSION."
+}
 
 # --- ISCC.exe の場所を探す ---
 $iscc = @(
@@ -33,6 +50,8 @@ if (-not $iscc) {
 }
 
 Write-Host "[1/3] dist フォルダを準備中..."
+# 前回ビルドの残骸を残すと、削除済みの成果物が次回インストーラーに混入する。
+Remove-PathIfExists $distDir
 New-Item -ItemType Directory -Force -Path $distDir | Out-Null
 New-Item -ItemType Directory -Force -Path "$distDir\models" | Out-Null
 
@@ -80,6 +99,16 @@ if (Test-Path $engineHost) {
     Write-Warning "rakukan-engine-host.exe が見つかりません ($engineHost) — cargo make install が古い可能性があります"
 }
 
+# Settings GUI (WinUI 3 app folder)
+$settingsDir = Join-Path $InstallDir "settings-ui"
+if (Test-Path $settingsDir) {
+    New-Item -ItemType Directory -Force -Path "$distDir\settings-ui" | Out-Null
+    Copy-Item "$settingsDir\*" "$distDir\settings-ui\" -Recurse -Force
+    Write-Host "  -> settings-ui\\"
+} else {
+    Write-Warning "settings-ui が見つかりません ($settingsDir)"
+}
+
 # 辞書
 $dict = Join-Path $env:LOCALAPPDATA "rakukan\dict\rakukan.dict"
 if (Test-Path $dict) {
@@ -90,9 +119,12 @@ if (Test-Path $dict) {
 }
 
 # ライセンス・帰属表示
-$repoRoot = "$PSScriptRoot\.."
-foreach ($f in @("NOTICE", "THIRD_PARTY_LICENSES.md")) {
-    $src = Join-Path $repoRoot $f
+foreach ($entry in @(
+    @{ Name = "NOTICE"; Source = (Join-Path $repoRoot "NOTICE") }
+    @{ Name = "THIRD_PARTY_LICENSES.md"; Source = (Join-Path $repoRoot "docs\THIRD_PARTY_LICENSES.md") }
+)) {
+    $f = $entry.Name
+    $src = $entry.Source
     if (Test-Path $src) {
         Copy-Item $src "$distDir\$f" -Force
         Write-Host "  -> $f"

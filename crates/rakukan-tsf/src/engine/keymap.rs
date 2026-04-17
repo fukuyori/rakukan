@@ -275,6 +275,8 @@ impl Keymap {
         let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 };
         let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 };
         let alt = unsafe { GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 };
+        let space_down = unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 };
+        let (vk, ctrl, shift, alt) = normalize_key_event(vk, ctrl, shift, alt, space_down);
 
         // ① キーマップ優先
         if let Some(ka) = self.resolve(vk, ctrl, shift, alt) {
@@ -636,5 +638,70 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("Shift+Right", KeyAction::SegmentExtend),
         ],
         KeymapPreset::Custom => Vec::new(),
+    }
+}
+
+fn normalize_key_event(
+    vk: u16,
+    ctrl: bool,
+    shift: bool,
+    alt: bool,
+    space_down: bool,
+) -> (u16, bool, bool, bool) {
+    // Windows の一部環境では Ctrl+Space が Ctrl+Alt+Right として通知されることがある。
+    // 実入力処理では IME トグルの別名として吸収する。
+    if vk == 0x27 && ctrl && alt && !shift && space_down {
+        return (0x20, true, false, false);
+    }
+    (vk, ctrl, shift, alt)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn custom_binding_overrides_preset_binding() {
+        let cfg = resolve_keymap_config(KeymapConfig {
+            preset: Some(KeymapPreset::MsImeJis),
+            inherit_preset: true,
+            bindings: vec![KeyBinding {
+                key: "Ctrl+Space".to_string(),
+                action: KeyAction::ModeAlphanumeric,
+            }],
+        });
+        let keymap = Keymap::build(cfg);
+        let action = keymap.resolve(0x20, true, false, false);
+        assert_eq!(action, Some(&KeyAction::ModeAlphanumeric));
+    }
+
+    #[test]
+    fn custom_preset_disables_inherited_defaults() {
+        let cfg = resolve_keymap_config(KeymapConfig {
+            preset: Some(KeymapPreset::Custom),
+            inherit_preset: false,
+            bindings: vec![KeyBinding {
+                key: "F6".to_string(),
+                action: KeyAction::Hiragana,
+            }],
+        });
+        let keymap = Keymap::build(cfg);
+        assert_eq!(
+            keymap.resolve(0x75, false, false, false),
+            Some(&KeyAction::Hiragana)
+        );
+        assert_eq!(keymap.resolve(0x20, false, false, false), None);
+    }
+
+    #[test]
+    fn normalize_ctrl_alt_right_aliases_ctrl_space() {
+        assert_eq!(
+            normalize_key_event(0x27, true, false, true, true),
+            (0x20, true, false, false)
+        );
+        assert_eq!(
+            normalize_key_event(0x27, true, false, true, false),
+            (0x27, true, false, true)
+        );
     }
 }

@@ -7,13 +7,14 @@ members = [
     "crates/rakukan-engine-cli",
     "crates/rakukan-engine-host",
     "crates/rakukan-engine-rpc",
+    "crates/rakukan-settings",
     "crates/rakukan-tray",
     "crates/rakukan-tsf",
 ]
 resolver = "2"
 
 [workspace.package]
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.85"
 authors = ["rakukan Contributors"]

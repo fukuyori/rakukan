@@ -10,8 +10,8 @@ use super::input_mode::InputMode;
 // 既存コードの大部分が触らないよう `DynEngine` の名前で re-export する。
 // 実体は `rakukan-engine-rpc` を通じて `rakukan-engine-host.exe` へ Named Pipe で
 // 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
-pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 pub use rakukan_engine_rpc::InputCharKind;
+pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -376,7 +376,10 @@ fn create_engine() -> anyhow::Result<DynEngine> {
     let cfg = build_engine_config_json();
     let engine = rakukan_engine_rpc::RpcEngine::connect_or_spawn(Some(cfg))
         .map_err(|e| anyhow::anyhow!("engine RPC connect failed: {e}"))?;
-    tracing::info!("engine connected via RPC: backend={}", engine.backend_label());
+    tracing::info!(
+        "engine connected via RPC: backend={}",
+        engine.backend_label()
+    );
     maybe_log_gpu_memory(&engine);
     Ok(engine)
 }
@@ -723,7 +726,12 @@ impl SessionState {
         }
     }
 
-    pub fn set_range_select(&mut self, full_reading: String, select_end: usize, original_preview: String) {
+    pub fn set_range_select(
+        &mut self,
+        full_reading: String,
+        select_end: usize,
+        original_preview: String,
+    ) {
         *self = SessionState::RangeSelect {
             full_reading,
             select_end,
@@ -738,7 +746,12 @@ impl SessionState {
 
     /// RangeSelect の選択範囲を 1 文字伸ばす。戻り値: 成功したか。
     pub fn range_select_extend(&mut self) -> bool {
-        if let SessionState::RangeSelect { full_reading, select_end, .. } = self {
+        if let SessionState::RangeSelect {
+            full_reading,
+            select_end,
+            ..
+        } = self
+        {
             let max = full_reading.chars().count();
             if *select_end < max {
                 *select_end += 1;
@@ -761,7 +774,12 @@ impl SessionState {
 
     /// RangeSelect の (selected_reading, unselected_reading) を返す。
     pub fn range_select_parts(&self) -> Option<(String, String)> {
-        if let SessionState::RangeSelect { full_reading, select_end, .. } = self {
+        if let SessionState::RangeSelect {
+            full_reading,
+            select_end,
+            ..
+        } = self
+        {
             let chars: Vec<char> = full_reading.chars().collect();
             let end = (*select_end).min(chars.len());
             let selected: String = chars[..end].iter().collect();
@@ -775,7 +793,10 @@ impl SessionState {
     /// RangeSelect の元の preview を返す（ESC で復帰用）。
     #[allow(dead_code)]
     pub fn range_select_original_preview(&self) -> Option<&str> {
-        if let SessionState::RangeSelect { original_preview, .. } = self {
+        if let SessionState::RangeSelect {
+            original_preview, ..
+        } = self
+        {
             Some(original_preview.as_str())
         } else {
             None
@@ -1353,4 +1374,3 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
         | "mintty"
     )
 }
-

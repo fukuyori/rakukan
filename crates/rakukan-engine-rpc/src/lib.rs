@@ -18,6 +18,4 @@ pub mod server;
 
 pub use client::RpcEngine;
 pub use protocol::{InputCharKind, PIPE_BASE_NAME, Request, Response};
-pub use rakukan_engine_abi::{
-    Candidate, CandidateSource, Segment, Segments,
-};
+pub use rakukan_engine_abi::{Candidate, CandidateSource, Segment, Segments};

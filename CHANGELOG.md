@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.5.2] - 2026-04-16
+## [0.6.0] - 2026-04-17
 
 ### Changed
 
@@ -100,7 +100,7 @@
 
 ### Added
 
-- **変換パイプライン再設計の設計書** [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md)
+- **変換パイプライン再設計の設計書** [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md)
   - ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計
   - Mozc の `Segments` / `Segment` / `Candidate` モデルを参考にした新データモデル
   - Phase A〜F の段階的移行計画

@@ -60,6 +60,18 @@ cmake_install.cmake
 # HuggingFace キャッシュ（再ダウンロード可能）
 .cache/
 
+# ローカルビルド・開発用キャッシュ
+.appdata/
+.build/
+.dotnet-home/
+.nuget-packages/
+
+# WinUI/.NET ビルド成果物
+apps/**/bin/
+apps/**/obj/
+apps/**/.dotnet-bin/
+apps/**/.dotnet-obj/
+
 # 配布物・ZIPアーカイブ
 *.zip
 dist/

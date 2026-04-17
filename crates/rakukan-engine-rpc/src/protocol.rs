@@ -31,15 +31,21 @@ pub enum InputCharKind {
 pub enum Request {
     // ─── 接続 ─────────────────────────────────────────────
     /// 接続直後に必ず送る。ホスト側はバージョン不一致なら Error を返して切断する。
-    Hello { protocol_version: u32 },
+    Hello {
+        protocol_version: u32,
+    },
     /// エンジン側セッションの初期化要求。config_json は EngineConfig の JSON。
     /// 既に DynEngine が存在する場合は何もしない（idempotent）。
-    Create { config_json: Option<String> },
+    Create {
+        config_json: Option<String>,
+    },
 
     /// 現在の DynEngine を drop し、新しい config_json で load_auto し直す。
     /// config.toml を編集したあとの IME モード切替で呼ばれる。
     /// model / 辞書の bg ロードもホスト側で再起動する。
-    Reload { config_json: Option<String> },
+    Reload {
+        config_json: Option<String>,
+    },
 
     // ─── 文字入力 ─────────────────────────────────────────
     PushChar(u32),
@@ -57,30 +63,50 @@ pub enum Request {
     CommittedText,
 
     // ─── BG 変換 ──────────────────────────────────────────
-    BgStart { n_cands: u32 },
+    BgStart {
+        n_cands: u32,
+    },
     BgStatus,
-    BgTakeCandidates { key: String },
+    BgTakeCandidates {
+        key: String,
+    },
     #[deprecated = "removed in ABI v7; do not use"]
-    _ReservedBgTakeSegmentedCandidates { key: String },
+    _ReservedBgTakeSegmentedCandidates {
+        key: String,
+    },
     BgReclaim,
-    BgWaitMs { timeout_ms: u64 },
+    BgWaitMs {
+        timeout_ms: u64,
+    },
 
     // ─── 確定・リセット ───────────────────────────────────
-    Commit { text: String },
+    Commit {
+        text: String,
+    },
     CommitAsHiragana,
     ResetPreedit,
-    ForcePreedit { text: String },
+    ForcePreedit {
+        text: String,
+    },
     ResetAll,
 
     // ─── 同期変換 ─────────────────────────────────────────
     ConvertSync,
     #[deprecated = "removed in ABI v7; do not use"]
     _ReservedConvertSyncSegmented,
-    MergeCandidates { llm_cands: Vec<String>, limit: u32 },
+    MergeCandidates {
+        llm_cands: Vec<String>,
+        limit: u32,
+    },
     #[deprecated = "removed in ABI v7; do not use"]
-    _ReservedSegmentSurface { surface: String },
+    _ReservedSegmentSurface {
+        surface: String,
+    },
     #[deprecated = "removed in ABI v7; do not use"]
-    _ReservedSegmentCandidate { surface: String, reading: String },
+    _ReservedSegmentCandidate {
+        surface: String,
+        reading: String,
+    },
 
     // ─── 非同期初期化 ─────────────────────────────────────
     StartLoadModel,
@@ -97,7 +123,10 @@ pub enum Request {
     AvailableModelsJson,
 
     // ─── 学習 ─────────────────────────────────────────────
-    Learn { reading: String, surface: String },
+    Learn {
+        reading: String,
+        surface: String,
+    },
 
     // ─── 診断 ─────────────────────────────────────────────
     LastError,
@@ -145,7 +174,9 @@ pub enum Request {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
-    Hello { protocol_version: u32 },
+    Hello {
+        protocol_version: u32,
+    },
     Unit,
     Bool(bool),
     U32(u32),

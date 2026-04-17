@@ -9,9 +9,7 @@ use std::{
 };
 
 use windows::Win32::{
-    Foundation::{
-        CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM,
-    },
+    Foundation::{CloseHandle, HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM, LRESULT, WPARAM},
     System::{
         Memory::{
             CreateFileMappingW, FILE_MAP_READ, MEMORY_MAPPED_VIEW_ADDRESS, MapViewOfFile,
@@ -23,17 +21,14 @@ use windows::Win32::{
         },
     },
     UI::{
-        Shell::{
-            NIF_GUID, NIM_DELETE,
-            NOTIFYICONDATAW, Shell_NotifyIconW,
-        },
+        Shell::{NIF_GUID, NIM_DELETE, NOTIFYICONDATAW, Shell_NotifyIconW},
         WindowsAndMessaging::{
-            AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW,
-            DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW,
-            LoadCursorW, MSG, PostMessageW, PostQuitMessage, RegisterClassW, SW_HIDE,
-            SetForegroundWindow, ShowWindow, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-            TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage, WM_APP, WM_COMMAND, WM_CREATE,
-            WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW, WS_OVERLAPPEDWINDOW,
+            AppendMenuW, CW_USEDEFAULT, CreatePopupMenu, CreateWindowExW, DefWindowProcW,
+            DispatchMessageW, GetCursorPos, GetMessageW, LoadCursorW, MSG, PostMessageW,
+            PostQuitMessage, RegisterClassW, SW_HIDE, SetForegroundWindow, ShowWindow,
+            TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_RIGHTBUTTON, TrackPopupMenu, TranslateMessage,
+            WM_APP, WM_COMMAND, WM_CREATE, WM_DESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+            WS_OVERLAPPEDWINDOW,
         },
     },
 };
@@ -153,9 +148,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             // トレイアイコン (Shell_NotifyIcon) は表示しない。
             LRESULT(0)
         }
-        WM_TIMER => {
-            LRESULT(0)
-        }
+        WM_TIMER => LRESULT(0),
         WM_TRAY => {
             // lParam: マウスメッセージ
             if l.0 as u32 == WM_RBUTTONUP {

@@ -18,7 +18,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.5.1"
+#define MyAppVersion   "0.6.0"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 
@@ -96,6 +96,9 @@ Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion
 ; これにより Zoom / Dropbox 等のホストアプリに llama.cpp を持ち込まない。
 Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion
 
+; ----- Settings GUI (WinUI 3) -----
+Source: "dist\settings-ui\*"; DestDir: "{app}\settings-ui"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+
 ; ----- 辞書 -----
 Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
 
@@ -161,6 +164,8 @@ Type: files;          Name: "{app}\rakukan_engine_vulkan.dll"
 Type: files;          Name: "{app}\rakukan_engine_cuda.dll"
 Type: files;          Name: "{app}\rakukan-engine-host.exe"
 Type: files;          Name: "{app}\rakukan-engine-host.log"
+Type: files;          Name: "{app}\rakukan-settings.exe"
+Type: filesandordirs; Name: "{app}\settings-ui"
 Type: filesandordirs; Name: "{app}\dict"
 ; config.toml・models は残す（ユーザーデータ）
 
