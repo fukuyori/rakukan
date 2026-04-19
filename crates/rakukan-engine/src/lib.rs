@@ -130,6 +130,9 @@ pub struct EngineConfig {
     pub digit_width: DigitWidth,
     /// ライブ変換時の候補数（beam 幅に影響）。1 = greedy（高速）、3 = beam（高品質）
     pub live_conv_beam_size: usize,
+    /// Space 変換時のビーム幅の**上限**（num_candidates と併せて min をとる）。
+    /// デフォルト 30 では実質上限なし、num_candidates がそのまま beam 幅になる。
+    pub convert_beam_size: usize,
 }
 
 impl Default for EngineConfig {
@@ -142,6 +145,7 @@ impl Default for EngineConfig {
             main_gpu: 0,
             digit_width: DigitWidth::default(),
             live_conv_beam_size: 3,
+            convert_beam_size: 30,
         }
     }
 }
@@ -208,8 +212,12 @@ impl RakunEngine {
             .map_err(|e| EngineError::InitFailed(e.to_string()))?
             .with_n_gpu_layers(config.n_gpu_layers)
             .with_main_gpu(config.main_gpu);
-        let mut converter =
-            KanaKanjiConverter::new(backend).map_err(|e| EngineError::InitFailed(e.to_string()))?;
+        let conv_cfg = kanji::ConversionConfig {
+            beam_size: config.convert_beam_size,
+            ..Default::default()
+        };
+        let mut converter = KanaKanjiConverter::with_config(backend, conv_cfg)
+            .map_err(|e| EngineError::InitFailed(e.to_string()))?;
         if config.n_threads > 0 {
             converter.set_n_threads(config.n_threads);
         }
@@ -604,10 +612,27 @@ impl RakunEngine {
 
     /// key が一致する BG 変換結果を取得し、converter を engine に戻す。
     /// None = まだ完了していない / キー不一致
+    ///
+    /// ユーザー辞書ヒットは LLM 結果より優先するため先頭にマージする。
+    /// ライブ変換 preview (先頭候補表示) でユーザー辞書が勝つ必要があるため。
     pub fn bg_take_candidates(&mut self, key: &str) -> Option<Vec<String>> {
         let (conv, cands) = conv_cache::take_ready(key)?;
         self.kanji = Some(conv);
-        Some(cands)
+        let user_cands: Vec<String> = self
+            .dict_store
+            .as_ref()
+            .map(|d| d.lookup_user(key))
+            .unwrap_or_default();
+        if user_cands.is_empty() {
+            return Some(cands);
+        }
+        let mut merged = user_cands;
+        for c in cands {
+            if !merged.contains(&c) {
+                merged.push(c);
+            }
+        }
+        Some(merged)
     }
 
     /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）

@@ -21,6 +21,7 @@
 //! 次のキー入力（Space 等）時の `waiting-poll` ブランチで行う。
 
 use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AO};
 
 use windows::{
@@ -32,11 +33,14 @@ use windows::{
             MonitorFromPoint, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
-        UI::WindowsAndMessaging::{
-            CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, HWND_TOPMOST, KillTimer,
-            RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer, SetWindowPos,
-            ShowWindow, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW, WS_BORDER, WS_EX_NOACTIVATE,
-            WS_EX_TOPMOST, WS_POPUP,
+        UI::{
+            TextServices::ITfThreadMgr,
+            WindowsAndMessaging::{
+                CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, HWND_TOPMOST, KillTimer,
+                PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
+                SetTimer, SetWindowPos, ShowWindow, WM_APP, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
+                WNDCLASSW, WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+            },
         },
     },
     core::PCWSTR,
@@ -77,7 +81,28 @@ thread_local! {
     static TL_LIVE_CTX: RefCell<Option<windows::Win32::UI::TextServices::ITfContext>>
         = RefCell::new(None);
     static TL_LIVE_TID: Cell<u32> = Cell::new(0);
+
+    // ─── [FocusDefer] OnSetFocus 非同期化用 ─────────────────────────────────────
+    // msctf._NotifyCallbacks 内で COM を触ると INVALID_POINTER_READ を誘発する
+    // ケースがあるため、OnSetFocus はキューに積んで即 return し、WM_APP_FOCUS_CHANGED
+    // で遅延処理する。
+    static TL_PENDING_FOCUS: RefCell<VecDeque<FocusChange>> = RefCell::new(VecDeque::new());
+    /// Activate 時にキャッシュする ITfThreadMgr（set_open_close で使用）。
+    static TL_THREAD_MGR: RefCell<Option<ITfThreadMgr>> = RefCell::new(None);
+    /// Activate 時にキャッシュする TSF client_id。
+    static TL_CLIENT_ID: Cell<u32> = Cell::new(0);
 }
+
+/// OnSetFocus から遅延処理キューへ積むフォーカス変化イベント。
+#[derive(Clone, Copy)]
+struct FocusChange {
+    prev_ptr: usize,
+    next_ptr: usize,
+    hwnd_val: usize,
+}
+
+/// カスタムメッセージ: OnSetFocus を msctf コールバック外で実行する。
+const WM_APP_FOCUS_CHANGED: u32 = WM_APP + 1;
 
 #[derive(Default, Clone)]
 struct CandData {
@@ -168,6 +193,11 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == LIVE_TIMER_ID {
                 crate::tsf::candidate_window::on_live_timer();
             }
+            LRESULT(0)
+        }
+        // OnSetFocus 遅延処理: msctf コールバックから抜けた後にここで処理する
+        m if m == WM_APP_FOCUS_CHANGED => {
+            handle_pending_focus_changes();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -462,6 +492,155 @@ pub fn destroy() {
         set_hwnd(HWND::default());
         tracing::debug!("candwin::destroy");
     }
+}
+
+// ─── HWND 確保ヘルパー ────────────────────────────────────────────────────────
+
+/// 候補ウィンドウ HWND を確保する（未作成なら 1x1 の非表示ウィンドウを作成）。
+///
+/// PostMessage / SetTimer のターゲット HWND が必要な全ての経路から呼ばれる。
+fn ensure_hwnd() -> HWND {
+    let h = get_hwnd();
+    if is_valid(h) {
+        return h;
+    }
+    unsafe {
+        ensure_class_registered();
+        let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+        match CreateWindowExW(
+            WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            PCWSTR(CLASS_NAME_UTF16.as_ptr()),
+            PCWSTR::null(),
+            WS_POPUP | WS_BORDER,
+            0,
+            0,
+            1,
+            1,
+            HWND::default(),
+            HMENU::default(),
+            hmod,
+            None,
+        ) {
+            Ok(new_hwnd) if is_valid(new_hwnd) => {
+                set_hwnd(new_hwnd);
+                tracing::debug!("candwin::ensure_hwnd: created hwnd={:?}", new_hwnd);
+                new_hwnd
+            }
+            _ => {
+                tracing::warn!("candwin::ensure_hwnd: CreateWindowExW failed");
+                HWND::default()
+            }
+        }
+    }
+}
+
+// ─── OnSetFocus 遅延処理 ──────────────────────────────────────────────────────
+
+/// Activate 時に ITfThreadMgr と client_id をキャッシュする。
+///
+/// WM_APP_FOCUS_CHANGED ハンドラの中で set_open_close を呼ぶために必要。
+pub fn cache_thread_mgr(tm: ITfThreadMgr, tid: u32) {
+    TL_THREAD_MGR.with(|c| *c.borrow_mut() = Some(tm));
+    TL_CLIENT_ID.with(|c| c.set(tid));
+}
+
+/// Deactivate 時にキャッシュをクリアする。
+pub fn clear_thread_mgr() {
+    TL_THREAD_MGR.with(|c| *c.borrow_mut() = None);
+    TL_CLIENT_ID.with(|c| c.set(0));
+    TL_PENDING_FOCUS.with(|q| q.borrow_mut().clear());
+}
+
+/// OnSetFocus から呼ばれる。イベントをキューに積み、WM_APP_FOCUS_CHANGED を
+/// PostMessage して即 return する（msctf._NotifyCallbacks からの再入を避ける）。
+pub fn post_focus_changed(prev_ptr: usize, next_ptr: usize, hwnd_val: usize) {
+    TL_PENDING_FOCUS.with(|q| {
+        q.borrow_mut().push_back(FocusChange {
+            prev_ptr,
+            next_ptr,
+            hwnd_val,
+        });
+    });
+    let hwnd = ensure_hwnd();
+    if is_valid(hwnd) {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_APP_FOCUS_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    } else {
+        // HWND 作成失敗時はキューから落として捨てる（次回の焦点遷移でまた積まれる）
+        TL_PENDING_FOCUS.with(|q| {
+            q.borrow_mut().pop_back();
+        });
+        tracing::warn!("post_focus_changed: no hwnd, event dropped");
+    }
+}
+
+/// WM_APP_FOCUS_CHANGED ハンドラ。キューに溜まった全イベントを順次処理する。
+fn handle_pending_focus_changes() {
+    loop {
+        let fc_opt = TL_PENDING_FOCUS.with(|q| q.borrow_mut().pop_front());
+        let Some(fc) = fc_opt else {
+            break;
+        };
+        process_focus_change(fc);
+    }
+}
+
+/// 実際のフォーカス変化処理（旧 OnSetFocus の本体）。
+///
+/// msctf._NotifyCallbacks コールバックの外で実行されるため、
+/// COM 再入 (set_open_close) や ITfContext の Drop (stop_live_timer) が安全。
+fn process_focus_change(fc: FocusChange) {
+    use crate::engine::input_mode::InputMode;
+
+    tracing::debug!(
+        "OnSetFocus(deferred): prev_dm={:#x} next_dm={:#x} hwnd={:#x}",
+        fc.prev_ptr,
+        fc.next_ptr,
+        fc.hwnd_val
+    );
+
+    // 別コンテキストへの移動 → 候補ウィンドウを閉じる + ライブタイマー停止
+    hide();
+    stop_live_timer();
+
+    // フォーカス先が null の場合は prev_dm のモード保存のみ
+    if fc.next_ptr == 0 {
+        let _ = crate::engine::state::doc_mode_on_focus_change(fc.prev_ptr, 0, fc.hwnd_val);
+        return;
+    }
+
+    let Some(new_mode) =
+        crate::engine::state::doc_mode_on_focus_change(fc.prev_ptr, fc.next_ptr, fc.hwnd_val)
+    else {
+        return;
+    };
+
+    // モードを適用
+    if let Ok(mut st) = crate::engine::state::ime_state_get() {
+        if st.input_mode != new_mode {
+            tracing::info!(
+                "OnSetFocus(deferred): mode {:?} → {:?}",
+                st.input_mode,
+                new_mode
+            );
+            st.set_mode(new_mode);
+        }
+    }
+
+    // KEYBOARD_OPENCLOSE を更新（ターミナル判定用）。
+    // この SetValue は msctf への再入だが、既に _NotifyCallbacks を抜けているので安全。
+    let is_open = new_mode != InputMode::Alphanumeric;
+    let tm_opt = TL_THREAD_MGR.with(|c| c.borrow().clone());
+    if let Some(tm) = tm_opt {
+        let tid = TL_CLIENT_ID.with(|c| c.get());
+        unsafe {
+            let _ = crate::tsf::language_bar::set_open_close(&tm, tid, is_open);
+        }
+    }
+
+    // トレイアイコン更新
+    crate::tsf::tray_ipc::publish(is_open, new_mode);
 }
 
 // ─── LLM待機タイマー ──────────────────────────────────────────────────────────
@@ -774,19 +953,31 @@ pub fn on_live_timer() {
     // ── エンジンのプリエディットバッファ確認 ─────────────────────────────────
     // 通常入力中のセッション状態は Idle のまま（SessionState::Preedit へ遷移するのは
     // Selecting/Waiting から戻るときのみ）。エンジンバッファで直接判定する。
-    let (has_preedit, bg_status_str, hiragana) = {
+    //
+    // engine_try_get() が Err を返すのは一時的なロック競合（Space 変換などが保持中）。
+    // このときに stop_live_timer() するとタイマーが死んで次の on_input まで復活しない
+    // ため、busy のときは何もせず次回発火を待つ。
+    let probe = {
         match engine_try_get() {
-            Ok(g) => {
-                let h = g
-                    .as_ref()
-                    .map(|e| e.hiragana_text().to_string())
-                    .unwrap_or_default();
-                let bg = g.as_ref().map(|e| e.bg_status()).unwrap_or("none");
-                (!h.is_empty(), bg, h)
+            Ok(g) => g.as_ref().map(|e| {
+                let h = e.hiragana_text().to_string();
+                let bg = e.bg_status();
+                (h, bg)
+            }),
+            Err(_) => {
+                tracing::trace!("[Live] on_live_timer: engine busy, retry next tick");
+                return;
             }
-            Err(_) => (false, "busy", String::new()),
         }
     };
+    let (hiragana, bg_status_str) = match probe {
+        Some(v) => v,
+        None => {
+            stop_live_timer();
+            return;
+        }
+    };
+    let has_preedit = !hiragana.is_empty();
     tracing::info!(
         "[Live] on_live_timer: FIRED elapsed={}ms has_preedit={} hira={:?} bg={}",
         elapsed,

@@ -49,6 +49,11 @@
                         <SymbolIcon Symbol="Switch" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
+                <NavigationViewItem Tag="UserDict" Content="ユーザー辞書">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Library" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
                 <NavigationViewItem Tag="Advanced" Content="補足">
                     <NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Document" />
@@ -130,8 +135,8 @@
                             CornerRadius="16">
                             <StackPanel Spacing="8">
                                 <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="候補表示" />
-                                <TextBlock Opacity="0.7" Text="変換候補の最大数です。1 から 9 の範囲で設定できます。" />
-                                <NumberBox x:Name="NumCandidatesBox" SmallChange="1" Minimum="1" Maximum="9" SpinButtonPlacementMode="Compact" />
+                                <TextBlock Opacity="0.7" Text="Space 変換で表示する候補の最大数です。1 から 30 の範囲で設定できます（未設定時は 9）。" />
+                                <NumberBox x:Name="NumCandidatesBox" SmallChange="1" Minimum="1" Maximum="30" SpinButtonPlacementMode="Inline" />
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -305,6 +310,53 @@
                                 </Grid>
                                 <ToggleSwitch x:Name="UseLlmToggle" Header="LLM をライブ変換に使う" />
                                 <ToggleSwitch x:Name="PreferDictionaryFirstToggle" Header="辞書候補を優先してから LLM 候補を使う" />
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <ScrollViewer x:Name="UserDictPage" Visibility="Collapsed">
+                    <StackPanel Margin="32,24,32,32" Spacing="20">
+                        <StackPanel Spacing="4">
+                            <TextBlock Style="{ThemeResource TitleTextBlockStyle}" Text="ユーザー辞書" />
+                            <TextBlock Style="{ThemeResource BodyTextBlockStyle}" Opacity="0.7" Text="読み (ひらがな) に対応する変換候補を登録します。登録語は他候補より優先されます。" />
+                        </StackPanel>
+
+                        <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="16">
+                            <StackPanel Spacing="12">
+                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                    <Button Content="追加" Click="UserDictAddButton_Click" />
+                                    <Button Content="編集" Click="UserDictEditButton_Click" />
+                                    <Button Content="削除" Click="UserDictDeleteButton_Click" />
+                                    <AppBarSeparator />
+                                    <Button Content="user_dict.toml を開く" Click="OpenUserDictButton_Click" />
+                                </StackPanel>
+                                <Grid ColumnSpacing="12" Padding="12,8,12,8" Background="{ThemeResource ControlFillColorSecondaryBrush}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="200" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <TextBlock Grid.Column="0" Text="読み" FontWeight="SemiBold" />
+                                    <TextBlock Grid.Column="1" Text="変換候補（先頭優先）" FontWeight="SemiBold" />
+                                </Grid>
+                                <ListView
+                                    x:Name="UserDictList"
+                                    MinHeight="380"
+                                    SelectionMode="Single"
+                                    DoubleTapped="UserDictList_DoubleTapped">
+                                    <ListView.ItemTemplate>
+                                        <DataTemplate>
+                                            <Grid ColumnSpacing="12">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="200" />
+                                                    <ColumnDefinition Width="*" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock Grid.Column="0" Text="{Binding Reading}" />
+                                                <TextBlock Grid.Column="1" Text="{Binding SurfacesJoined}" TextWrapping="Wrap" />
+                                            </Grid>
+                                        </DataTemplate>
+                                    </ListView.ItemTemplate>
+                                </ListView>
                             </StackPanel>
                         </Border>
                     </StackPanel>

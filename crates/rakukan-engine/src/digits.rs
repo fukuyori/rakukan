@@ -182,6 +182,7 @@ fn literal_candidates(run: &Run) -> Vec<String> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn literal_candidate_structs(run: &Run) -> Vec<Candidate> {
     match run {
         Run::Digit(s) => digit_candidate_structs(s),

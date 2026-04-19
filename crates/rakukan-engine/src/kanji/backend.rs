@@ -14,11 +14,18 @@ type Result<T> = super::error::Result<T>;
 pub struct ConversionConfig {
     /// Maximum number of new tokens to generate
     pub max_new_tokens: usize,
+    /// Space 変換時のビーム幅の**上限**（num_candidates と併せて min をとる）。
+    /// デフォルト 30 では実質無制限で、num_candidates がそのまま beam 幅になる。
+    /// 変換速度を抑えたいユーザは小さく設定する（例: 3）。ランタイムで [1, 30]。
+    pub beam_size: usize,
 }
 
 impl Default for ConversionConfig {
     fn default() -> Self {
-        Self { max_new_tokens: 15 }
+        Self {
+            max_new_tokens: 15,
+            beam_size: 30,
+        }
     }
 }
 
@@ -222,11 +229,15 @@ impl KanaKanjiConverter {
                 candidates.push(clean);
             }
         } else {
-            // Multiple candidates: use true beam search for better candidate quality
+            // Multiple candidates: use true beam search for better candidate quality.
             // d1_greedy is faster but generates candidates unrelated to the reading.
-            // Cap beam_size at 3 to balance quality and speed — true beam search
-            // runs eval_sequence() per beam per step so cost grows quickly.
-            let beam_size = num_candidates.min(3);
+            //
+            // beam_size は num_candidates に等しい（ユーザが要求した候補数がそのまま
+            // beam 幅になる）。`config.beam_size` は安全上限として機能し、デフォルト
+            // 30 で実質上限なし。変換速度を抑えたいユーザは config.toml の
+            // `[conversion] beam_size` を小さく設定して明示的に上限をかける。
+            let configured_cap = self.config.beam_size.clamp(1, 30);
+            let beam_size = num_candidates.min(configured_cap).clamp(1, 30);
             let results =
                 self.model
                     .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;

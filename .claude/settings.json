@@ -1,0 +1,26 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git -C d:/home/source/rust/rakukan show 7f1c275:crates/rakukan-tsf/src/tsf/factory.rs)",
+      "Bash(git -C d:/home/source/rust/rakukan show 738be09:crates/rakukan-tsf/src/tsf/factory.rs)",
+      "Bash(git -C d:/home/source/rust/rakukan log --all --oneline)",
+      "Bash(git -C d:/home/source/rust/rakukan show 738be09 --stat)",
+      "Bash(git -C d:/home/source/rust/rakukan diff 738be09..6387ea6 -- crates/rakukan-tsf/src/tsf/factory.rs)",
+      "Bash(cargo make *)",
+      "Bash(git -C d:/home/source/rust/rakukan show --stat 6387ea6)",
+      "Bash(git -C d:/home/source/rust/rakukan show 738be09 -- VERSION CHANGELOG.md README.md rakukan_installer.iss)",
+      "Bash(git -C d:/home/source/rust/rakukan show 738be09 -- VERSION rakukan_installer.iss)",
+      "Bash(git -C d:/home/source/rust/rakukan show 6387ea6 -- VERSION rakukan_installer.iss README.md)",
+      "Bash(grep -B1 \"^version = \\\\\"0.6.0\\\\\"$\" d:/home/source/rust/rakukan/Cargo.lock)",
+      "Bash(git -C d:/home/source/rust/rakukan status)",
+      "Bash(git -C d:/home/source/rust/rakukan diff --stat)",
+      "Bash(git -C d:/home/source/rust/rakukan diff apps/rakukan-settings-winui/ crates/rakukan-engine/src/kanji/backend.rs crates/rakukan-settings/src/main.rs crates/rakukan-tsf/src/engine/config.rs crates/rakukan-tsf/src/engine/state.rs)",
+      "Bash(git -C d:/home/source/rust/rakukan log --oneline -15)",
+      "Bash(git -C d:/home/source/rust/rakukan stash list)",
+      "Bash(git -C d:/home/source/rust/rakukan reflog -20)"
+    ],
+    "additionalDirectories": [
+      "\\tmp"
+    ]
+  }
+}

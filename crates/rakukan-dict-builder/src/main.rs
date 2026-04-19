@@ -423,7 +423,6 @@ fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
 
     fn make_tsv(lines: &[&str]) -> String {
         lines.join("\n")

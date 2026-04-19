@@ -1,11 +1,11 @@
-# Rakukan 引き継ぎ資料 (v0.6.0)
+# Rakukan 引き継ぎ資料 (v0.6.1)
 
-更新日: 2026-04-17
+更新日: 2026-04-19
 
 ## 現在の状態
 
-- **バージョン:** v0.6.0
-- **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正を反映
+- **バージョン:** v0.6.1
+- **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`
@@ -186,6 +186,10 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 - ~~**Segment ベースの文節管理**~~ → RangeSelect 方式に転換。vibrato / SplitPreedit を完全削除
 - ~~**数字・助数詞の構造対応**~~ → 数値保護で解決。助数詞結合は不要（分節しない方式のため）
 - ~~**[TSF-1] OnSetFocus 安定性**~~ → v0.6.0 で解決（TSF 通知ストーム対策、null DM 処理改善、フォーカス変化時の候補ウィンドウ閉じを条件付きに）
+- ~~**[Live-1] ライブ変換の停止不具合**~~ → v0.6.1 で解決（`on_live_timer` の engine 一時ロック競合を busy 判定せず次回 tick を待つよう修正）
+- ~~**[TSF-2] 候補ウィンドウのアプリ切替時残留**~~ → v0.6.1 で解決（`ITfThreadFocusSink` を登録し、Alt+Tab 等の非 TSF アプリへのフォーカス遷移で `hide()` / `stop_live_timer()` / `stop_waiting_timer()` を実行）
+- ~~**[Live-3] `num_candidates` 漏洩によるライブ変換遅延**~~ → v0.6.1 で解決（バッチ RPC 経路の prefetch 用 `bg_start(n)` を `live_conv_beam_size` に戻した）
+- ~~**[Dict-1] ライブ変換でユーザー辞書が優先されない**~~ → v0.6.1 で解決（`bg_take_candidates` がユーザー辞書候補を LLM 結果の先頭にマージ、読み完全一致のみ）
 
 ### 優先度: 中
 

@@ -9,6 +9,15 @@ internal sealed class SettingsBundle
 {
     public required SettingsData Config { get; init; }
     public required KeymapSettings Keymap { get; init; }
+    public required List<UserDictEntry> UserDict { get; init; }
+}
+
+internal sealed class UserDictEntry
+{
+    public string Reading { get; set; } = string.Empty;
+    public List<string> Surfaces { get; set; } = new();
+
+    public string SurfacesJoined => string.Join("、", Surfaces);
 }
 
 internal sealed class SettingsData
@@ -200,6 +209,11 @@ internal sealed class SettingsStore
         "rakukan",
         "keymap.toml");
 
+    public string UserDictPath => Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "rakukan",
+        "user_dict.toml");
+
     public SettingsBundle Load()
     {
         EnsureFile(ConfigPath, DefaultConfigText);
@@ -207,11 +221,13 @@ internal sealed class SettingsStore
 
         var configTable = LoadToml(ConfigPath);
         var keymapTable = LoadToml(KeymapPath);
+        var userDict = LoadUserDict(UserDictPath);
 
         return new SettingsBundle
         {
             Config = LoadConfig(configTable),
             Keymap = LoadKeymap(keymapTable),
+            UserDict = userDict,
         };
     }
 
@@ -227,11 +243,106 @@ internal sealed class SettingsStore
         var keymapTable = LoadToml(KeymapPath);
         SaveKeymap(keymapTable, bundle.Keymap);
         File.WriteAllText(KeymapPath, Toml.FromModel(keymapTable));
+
+        SaveUserDict(UserDictPath, bundle.UserDict);
     }
 
     public void OpenConfig() => OpenInNotepad(ConfigPath);
 
     public void OpenKeymap() => OpenInNotepad(KeymapPath);
+
+    private static List<UserDictEntry> LoadUserDict(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return new List<UserDictEntry>();
+        }
+
+        var root = LoadToml(path);
+        var result = new List<UserDictEntry>();
+
+        if (!root.TryGetValue("entries", out var entriesValue) || entriesValue is not TomlTableArray entries)
+        {
+            return result;
+        }
+
+        foreach (var item in entries.OfType<TomlTable>())
+        {
+            var reading = GetString(item, "reading");
+            if (string.IsNullOrWhiteSpace(reading))
+            {
+                continue;
+            }
+
+            var surfaces = new List<string>();
+            if (item.TryGetValue("surfaces", out var surfacesValue) && surfacesValue is TomlArray array)
+            {
+                foreach (var s in array.OfType<string>())
+                {
+                    if (!string.IsNullOrWhiteSpace(s))
+                    {
+                        surfaces.Add(s);
+                    }
+                }
+            }
+
+            if (surfaces.Count == 0)
+            {
+                continue;
+            }
+
+            result.Add(new UserDictEntry
+            {
+                Reading = reading!.Trim(),
+                Surfaces = surfaces,
+            });
+        }
+
+        return result;
+    }
+
+    private static void SaveUserDict(string path, List<UserDictEntry> entries)
+    {
+        EnsureDirectory(path);
+
+        var root = new TomlTable();
+        var array = new TomlTableArray();
+
+        foreach (var entry in entries)
+        {
+            if (string.IsNullOrWhiteSpace(entry.Reading) || entry.Surfaces.Count == 0)
+            {
+                continue;
+            }
+
+            var table = new TomlTable
+            {
+                ["reading"] = entry.Reading.Trim(),
+            };
+            var surfaces = new TomlArray();
+            foreach (var s in entry.Surfaces)
+            {
+                if (!string.IsNullOrWhiteSpace(s))
+                {
+                    surfaces.Add(s);
+                }
+            }
+            table["surfaces"] = surfaces;
+            array.Add(table);
+        }
+
+        root["entries"] = array;
+        File.WriteAllText(path, Toml.FromModel(root));
+    }
+
+    public void OpenUserDict()
+    {
+        EnsureFile(UserDictPath, "# rakukan ユーザー辞書\n# [[entries]] 形式で reading / surfaces を定義します。\n");
+        Process.Start(new ProcessStartInfo("notepad.exe", $"\"{UserDictPath}\"")
+        {
+            UseShellExecute = true,
+        });
+    }
 
     private static void OpenInNotepad(string path)
     {

@@ -702,7 +702,7 @@ unsafe fn init_window(hwnd: HWND) -> Result<()> {
     let num_candidates = create_labeled_edit(
         page_general,
         ID_NUM_CANDIDATES,
-        "候補数 (1-9)",
+        "候補数 (1-30)",
         left_x,
         left_x,
         178,
@@ -1491,8 +1491,8 @@ fn collect_settings(state: &WindowState) -> Result<(SettingsData, KeymapSettings
     let model_variant = optional_string(window_text(state.model_variant)?);
     let num_candidates = parse_optional_u32("候補数", &window_text(state.num_candidates)?)?;
     if let Some(value) = num_candidates {
-        if !(1..=9).contains(&value) {
-            bail!("候補数は 1 から 9 の範囲で入力してください。");
+        if !(1..=30).contains(&value) {
+            bail!("候補数は 1 から 30 の範囲で入力してください。");
         }
     }
     let keyboard_layout = combo_text(state.keyboard_layout)?;
@@ -2252,15 +2252,8 @@ action = "candidate_next"
         assert!(!is_valid_key_binding("Ctrl++"));
     }
 
-    #[test]
-    fn ctrl_alt_right_capture_is_normalized_to_ctrl_space() {
-        assert_eq!(
-            normalize_key_capture(0x27, true, false, true, true),
-            (0x20, true, false, false)
-        );
-        assert_eq!(
-            normalize_key_capture(0x27, true, false, true, false),
-            (0x27, true, false, true)
-        );
-    }
+    // TODO: `normalize_key_capture` テストが削除されています。
+    // 実装 (Ctrl+Shift+Right を Ctrl+Space に正規化するキー入力正規化処理) が
+    // 0.6.0 時点でコミットされていなかったため、孤児テストとして 0.6.1 で
+    // 撤去しました。キー正規化機能を追加する際に再実装 + テスト追加してください。
 }

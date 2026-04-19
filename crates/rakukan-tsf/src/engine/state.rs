@@ -295,6 +295,11 @@ pub fn engine_reload() {
     reset_ready_latches();
     // バックグラウンドで reload（UIスレッドをブロックしない）
     std::thread::spawn(|| {
+        // config.toml をディスクから再読み込みしてから EngineConfig JSON を生成する。
+        // 設定画面の保存ボタン → SignalReload → reload_watcher 経由で呼ばれた場合、
+        // CONFIG_MANAGER のキャッシュは古いままなので、ここで明示的にリロードする。
+        // （モード切替経由では `maybe_reload_on_mode_switch` が先に実ファイルを読む）
+        super::config::init_config_manager();
         let cfg = build_engine_config_json();
 
         // 既存ハンドルがあれば Reload を、無ければ connect_or_spawn を使う
@@ -396,16 +401,17 @@ fn build_engine_config_json() -> String {
         super::config::DigitWidth::Halfwidth => "halfwidth",
     };
     let live_conv_beam_size = cfg.live_conversion.beam_size.clamp(1, 9);
+    let convert_beam_size = cfg.conversion.beam_size.clamp(1, 30);
 
     tracing::info!(
-        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} live_conv_beam_size={live_conv_beam_size}"
+        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
     );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
         None => String::new(),
     };
     format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","live_conv_beam_size":{live_conv_beam_size}{mv_json}}}"#
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size}{mv_json}}}"#
     )
 }
 
@@ -419,6 +425,14 @@ pub fn get_live_conv_beam_size() -> usize {
         .live_conversion
         .beam_size
         .clamp(1, 9)
+}
+
+/// `[input] auto_learn` 設定を返す（デフォルト: false）。
+///
+/// `false` のとき、確定時の `engine.learn()` 呼び出しを抑止してユーザー辞書への
+/// 自動登録を止める。ユーザー辞書は設定画面からの手動登録のみで運用する。
+pub fn is_auto_learn_enabled() -> bool {
+    super::config::current_config().input.auto_learn
 }
 
 pub fn maybe_log_gpu_memory(engine: &DynEngine) {

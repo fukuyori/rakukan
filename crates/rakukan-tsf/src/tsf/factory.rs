@@ -49,7 +49,8 @@ use windows::{
                 ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfLangBarItem_Impl,
                 ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink, ITfMenu,
                 ITfSource, ITfSource_Impl, ITfTextInputProcessor, ITfTextInputProcessor_Impl,
-                ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
+                ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
+                ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
                 TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
             },
             WindowsAndMessaging::{
@@ -267,6 +268,8 @@ pub struct TextServiceState {
     pub langbar_sink: Option<ITfLangBarItemSink>,
     /// ITfThreadMgrEventSink の登録クッキー（Deactivate で解除）
     pub threadmgr_cookie: u32,
+    /// ITfThreadFocusSink の登録クッキー（Deactivate で解除）
+    pub threadfocus_cookie: u32,
 }
 
 impl Default for TextServiceState {
@@ -277,6 +280,7 @@ impl Default for TextServiceState {
             keymap: Keymap::default(),
             langbar_sink: None,
             threadmgr_cookie: 0,
+            threadfocus_cookie: 0,
         }
     }
 }
@@ -297,6 +301,7 @@ unsafe impl Send for TextServiceState {}
     ITfLangBarItem,
     ITfSource,
     ITfThreadMgrEventSink,
+    ITfThreadFocusSink,
     ITfDisplayAttributeProvider
 )]
 pub struct TextServiceFactory {
@@ -352,6 +357,9 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             inner.thread_mgr = Some(tm.clone());
             inner.keymap = Keymap::load();
         }
+
+        // OnSetFocus 遅延処理で set_open_close を呼ぶために ThreadMgr をキャッシュ
+        candidate_window::cache_thread_mgr(tm.clone(), tid);
 
         // エンジン DLL は Activate では一切ロードしない。
         // Zoom / Dropbox 等の「IME を実際には使わないアプリ」では
@@ -446,6 +454,27 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             }
         }
 
+        // ITfThreadFocusSink を登録してスレッド (= アプリ) 単位のフォーカス消失を受け取る。
+        // Alt+Tab 等で別アプリに移ったとき、ITfThreadMgrEventSink::OnSetFocus は TSF 対応
+        // アプリ以外では発火しないため、これが無いと候補ウィンドウが残ることがある。
+        unsafe {
+            if let Ok(src) = tm.cast::<ITfSource>() {
+                if let Ok(sink) = self.cast::<ITfThreadFocusSink>() {
+                    if let Ok(unk) = sink.cast::<IUnknown>() {
+                        match src.AdviseSink(&ITfThreadFocusSink::IID, &unk) {
+                            Ok(cookie) => {
+                                if let Ok(mut inner) = self.inner.try_borrow_mut() {
+                                    inner.threadfocus_cookie = cookie;
+                                }
+                                tracing::debug!("ITfThreadFocusSink registered cookie={cookie}");
+                            }
+                            Err(e) => tracing::warn!("AdviseSink(ThreadFocusSink) failed: {e}"),
+                        }
+                    }
+                }
+            }
+        }
+
         diag::event(DiagEvent::Activate { tid });
         tracing::info!("rakukan Activate client_id={tid}");
 
@@ -533,6 +562,13 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                         tracing::debug!("ITfThreadMgrEventSink unregistered");
                     }
                 }
+                // ITfThreadFocusSink 登録解除
+                if inner.threadfocus_cookie != 0 {
+                    if let Ok(src) = tm.cast::<ITfSource>() {
+                        let _ = src.UnadviseSink(inner.threadfocus_cookie);
+                        tracing::debug!("ITfThreadFocusSink unregistered");
+                    }
+                }
             }
         }
         let _ = composition_set(None);
@@ -543,6 +579,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         }
         candidate_window::destroy();
         candidate_window::stop_live_timer();
+        candidate_window::clear_thread_mgr();
         crate::tsf::mode_indicator::destroy();
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
@@ -1321,7 +1358,7 @@ impl TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if selected_text != reading {
+                if selected_text != reading && crate::engine::state::is_auto_learn_enabled() {
                     engine.learn(&reading, &selected_text);
                 }
                 engine.commit(&full_text);
@@ -1338,8 +1375,10 @@ impl TextServiceFactory_Impl {
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                let n_cands2 = crate::engine::state::get_num_candidates();
-                let (preedit, _hiragana, _bg) = engine2.input_char(c, kind, Some(n_cands2));
+                // 打鍵時の prefetch は live プレビュー用なので live_conv_beam_size を使う
+                // (num_candidates=30 を渡すと毎打鍵で重い beam=30 変換が走りワーカーが詰まる)
+                let live_beam = crate::engine::state::get_live_conv_beam_size();
+                let (preedit, _hiragana, _bg) = engine2.input_char(c, kind, Some(live_beam));
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
@@ -1357,13 +1396,18 @@ impl TextServiceFactory_Impl {
 
         // バッチ RPC: push + preedit + hiragana + bg_status + 条件付き bg_start
         // を 1 往復で処理する。0.4.5 で 1 打鍵 8〜9 RPC → 1 RPC に短縮。
-        let n_cands = crate::engine::state::get_num_candidates();
+        //
+        // 打鍵時の prefetch は live プレビュー用なので live_conv_beam_size を使う。
+        // ここで num_candidates (最大 30) を渡すと毎打鍵で重い beam=30 変換が走り
+        // ワーカーが詰まってライブプレビューが遅延する。Space 押下時は on_convert 内で
+        // bg_reclaim + bg_start(num_candidates) により fresh に変換し直す。
+        let live_beam = crate::engine::state::get_live_conv_beam_size();
         let kind = if c.is_ascii_uppercase() {
             crate::engine::state::InputCharKind::FullwidthAlpha
         } else {
             crate::engine::state::InputCharKind::Char
         };
-        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, Some(n_cands));
+        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, Some(live_beam));
         diag::event(DiagEvent::InputChar {
             ch: c,
             preedit_after: preedit.clone(),
@@ -1454,7 +1498,7 @@ impl TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if selected_text != reading {
+                if selected_text != reading && crate::engine::state::is_auto_learn_enabled() {
                     engine.learn(&reading, &selected_text);
                 }
                 engine.commit(&full_text);
@@ -1468,8 +1512,11 @@ impl TextServiceFactory_Impl {
                 };
                 engine2.push_raw(c);
                 let preedit = engine2.preedit_display();
-                let n_cands2 = crate::engine::state::get_num_candidates();
-                engine2.bg_start(n_cands2);
+                // 打鍵時の prefetch はライブプレビュー用なので beam=live_conv_beam_size
+                // （num_candidates=30 だと毎打鍵で重い beam=30 変換が走り、ワーカーが詰まる）。
+                // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
+                let live_beam = crate::engine::state::get_live_conv_beam_size();
+                engine2.bg_start(live_beam);
                 drop(guard2);
                 commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
                 return Ok(true);
@@ -1477,8 +1524,13 @@ impl TextServiceFactory_Impl {
         }
         engine.push_raw(c);
         let preedit = engine.preedit_display();
-        let n_cands = crate::engine::state::get_num_candidates();
-        engine.bg_start(n_cands);
+        // 打鍵時の prefetch はライブプレビュー用なので beam=live_conv_beam_size を使う。
+        // num_candidates (最大 30) を使うと毎打鍵で重い beam=30 変換が走り、ワーカーが
+        // 詰まってライブプレビューが更新されない。Space 押下時は on_convert 内で
+        // bg_reclaim + bg_start(num_candidates) により fresh に変換し直すため、
+        // ここの prefetch 結果は Space には流用されない（キャッシュは捨てられる）。
+        let live_beam = crate::engine::state::get_live_conv_beam_size();
+        engine.bg_start(live_beam);
         candidate_window::live_input_notify(&ctx, tid);
         drop(guard);
         update_composition(ctx, tid, sink, preedit)?;
@@ -2197,7 +2249,7 @@ impl TextServiceFactory_Impl {
                 drop(sess);
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
-                if preview != reading {
+                if preview != reading && crate::engine::state::is_auto_learn_enabled() {
                     engine.learn(&reading, &preview);
                 }
                 engine.commit(&preview);
@@ -2281,7 +2333,7 @@ impl TextServiceFactory_Impl {
                 } else {
                     text.clone()
                 };
-                if text != reading {
+                if text != reading && crate::engine::state::is_auto_learn_enabled() {
                     engine.learn(&reading, &text);
                 }
                 candidate_window::hide();
@@ -2356,7 +2408,9 @@ impl TextServiceFactory_Impl {
                             }
                             candidate_window::hide();
                             candidate_window::stop_live_timer();
-                            engine.learn(&reading, &preview);
+                            if crate::engine::state::is_auto_learn_enabled() {
+                                engine.learn(&reading, &preview);
+                            }
                             engine.commit(&preview);
                             engine.reset_preedit();
                             drop(guard);
@@ -2880,7 +2934,7 @@ impl TextServiceFactory_Impl {
         } else {
             text.clone()
         };
-        if text != reading {
+        if text != reading && crate::engine::state::is_auto_learn_enabled() {
             engine.learn(&reading, &text);
         }
         candidate_window::hide();
@@ -4350,10 +4404,12 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         pdimfocus: Option<&ITfDocumentMgr>,
         pdimprevfocus: Option<&ITfDocumentMgr>,
     ) -> windows::core::Result<()> {
-        // repr(transparent) な ITfDocumentMgr の内側の COM ポインタ値を読む。
-        // `d as *const _ as usize` はローカル参照のスタックアドレスになるため
-        // 呼び出しごとに異なる値になってしまう。内側の usize を直接読むことで
-        // 同一 DocumentManager を安定して識別できる。
+        // このハンドラは msctf!_NotifyCallbacks から同期的に呼ばれる。
+        // ここで msctf を再入（SetValue 等）したり COM 参照を drop すると、
+        // explorer タスクバーなどで `INVALID_POINTER_READ c0000005 in
+        // msctf!CThreadInputMgr::_NotifyCallbacks` を誘発することがあるため、
+        // イベントをキューに積むだけで即 return する。
+        // 実際の処理は WM_APP_FOCUS_CHANGED で msctf コールバック外で実行する。
         let dm_id = |d: &ITfDocumentMgr| -> usize {
             use windows::core::Interface;
             d.as_raw() as usize
@@ -4366,62 +4422,8 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             return Ok(());
         }
 
-        // フォーカス先が null（DM なし）の場合はモード保存だけ行い、
-        // モード変更はせず候補ウィンドウだけ閉じる
-        if next_ptr == 0 {
-            // prev_dm のモードを保存（アプリ切替で 0 経由する場合に失われないように）
-            let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
-            doc_mode_on_focus_change(prev_ptr, 0, hwnd_val);
-            candidate_window::hide();
-            candidate_window::stop_live_timer();
-            return Ok(());
-        }
-
-        // フォーカス先ウィンドウの HWND を取得（ターミナル判定用）
         let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
-
-        tracing::debug!(
-            "OnSetFocus: prev_dm={prev_ptr:#x} next_dm={next_ptr:#x} hwnd={hwnd_val:#x}"
-        );
-
-        // 別コンテキストへの移動 → 候補ウィンドウを閉じる
-        candidate_window::hide();
-        candidate_window::stop_live_timer();
-
-        let Some(new_mode) = doc_mode_on_focus_change(prev_ptr, next_ptr, hwnd_val) else {
-            return Ok(());
-        };
-
-        // モードを適用
-        {
-            if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                if st.input_mode != new_mode {
-                    tracing::info!("OnSetFocus: mode {:?} → {:?}", st.input_mode, new_mode);
-                    st.set_mode(new_mode);
-                }
-            }
-        }
-
-        // KEYBOARD_OPENCLOSE を更新（ターミナルはこれを見てキーをルーティングする）
-        {
-            use crate::engine::input_mode::InputMode;
-            let is_open = new_mode != InputMode::Alphanumeric;
-            if let Ok(inner) = self.inner.try_borrow() {
-                if let Some(tm) = &inner.thread_mgr {
-                    let tid = inner.client_id;
-                    unsafe {
-                        let _ = language_bar::set_open_close(tm, tid, is_open);
-                    }
-                }
-            }
-        }
-
-        // トレイアイコン更新
-        tray_ipc::publish(
-            new_mode != crate::engine::input_mode::InputMode::Alphanumeric,
-            new_mode,
-        );
-
+        candidate_window::post_focus_changed(prev_ptr, next_ptr, hwnd_val);
         Ok(())
     }
 
@@ -4429,6 +4431,28 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         Ok(())
     }
     fn OnPopContext(&self, _pic: Option<&ITfContext>) -> windows::core::Result<()> {
+        Ok(())
+    }
+}
+
+// ─── ITfThreadFocusSink ────────────────────────────────────────────────────────
+//
+// スレッド (= アプリ) 単位のフォーカス変化通知。Alt+Tab や別プロセスへの
+// フォーカス遷移で発火する。ITfThreadMgrEventSink::OnSetFocus は TSF 対応
+// アプリ間でしか呼ばれないため、非対応アプリへ抜けたときの候補ウィンドウ
+// 残留を防ぐためにこちらも必要。
+
+impl ITfThreadFocusSink_Impl for TextServiceFactory_Impl {
+    fn OnSetThreadFocus(&self) -> windows::core::Result<()> {
+        tracing::debug!("OnSetThreadFocus");
+        Ok(())
+    }
+
+    fn OnKillThreadFocus(&self) -> windows::core::Result<()> {
+        tracing::debug!("OnKillThreadFocus: hide candidate window & stop live timer");
+        candidate_window::hide();
+        candidate_window::stop_live_timer();
+        candidate_window::stop_waiting_timer();
         Ok(())
     }
 }

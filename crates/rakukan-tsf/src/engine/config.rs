@@ -16,6 +16,8 @@ pub struct AppConfig {
     #[serde(default)]
     pub live_conversion: LiveConversionConfig,
     #[serde(default)]
+    pub conversion: ConversionConfig,
+    #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 
     /// 旧形式との互換用（config.toml に num_candidates = N と書いた場合に有効）。
@@ -30,6 +32,7 @@ impl Default for AppConfig {
             keyboard: KeyboardConfig::default(),
             input: InputConfig::default(),
             live_conversion: LiveConversionConfig::default(),
+            conversion: ConversionConfig::default(),
             diagnostics: DiagnosticsConfig::default(),
             num_candidates: None,
         }
@@ -37,8 +40,9 @@ impl Default for AppConfig {
 }
 
 impl AppConfig {
+    /// Space 変換時に LLM から取得する候補数。
     pub fn effective_num_candidates(&self) -> usize {
-        self.num_candidates.unwrap_or(9).clamp(1, 9)
+        self.num_candidates.unwrap_or(9).clamp(1, 30)
     }
 }
 
@@ -141,6 +145,11 @@ pub struct InputConfig {
     pub remember_last_kana_mode: bool,
     #[serde(default)]
     pub digit_width: DigitWidth,
+    /// 確定時にユーザー辞書へ `(reading → 選択表記)` を自動登録するか。
+    /// デフォルト `false` (自動学習を抑止)。`true` にすると Space 確定のたびに
+    /// user_dict.toml が肥大化するため、通常は手動登録のみで運用する。
+    #[serde(default)]
+    pub auto_learn: bool,
 }
 
 impl Default for InputConfig {
@@ -149,6 +158,7 @@ impl Default for InputConfig {
             default_mode: default_input_mode(),
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
+            auto_learn: false,
         }
     }
 }
@@ -187,6 +197,28 @@ impl Default for LiveConversionConfig {
             use_llm: false,
             prefer_dictionary_first: true,
             beam_size: 3,
+        }
+    }
+}
+
+fn default_convert_beam_size() -> usize {
+    30
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ConversionConfig {
+    /// Space 変換時のビーム幅の**上限**。num_candidates と併せて min をとる。
+    /// デフォルト 30 では実質上限なしで、num_candidates がそのまま候補数になる。
+    /// 変換を速くしたい場合は小さく (例: 3) 設定することで beam 幅が抑えられる。
+    /// 範囲: 1〜30。
+    #[serde(default = "default_convert_beam_size")]
+    pub beam_size: usize,
+}
+
+impl Default for ConversionConfig {
+    fn default() -> Self {
+        Self {
+            beam_size: default_convert_beam_size(),
         }
     }
 }
@@ -371,6 +403,9 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
+# 確定時にユーザー辞書へ自動登録するか (デフォルト: false)。
+# true にすると Space 確定のたびに user_dict.toml が追記され肥大化する。
+auto_learn = false
 
 [live_conversion]
 enabled = false
@@ -380,11 +415,19 @@ prefer_dictionary_first = true
 # ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
 beam_size = 3
 
+[conversion]
+# Space 変換のビーム幅上限（num_candidates と min をとる）。
+# デフォルト 30 では num_candidates がそのまま候補数になる。
+# 変換を高速化したい場合は小さく設定する（例: beam_size = 3 で最大 3 候補、高速）。
+# 範囲: 1〜30。
+beam_size = 30
+
 [diagnostics]
 dump_active_config = true
 warn_on_unknown_key = true
 
-# 旧形式との互換用
+# Space 変換で表示する候補数（1〜30、デフォルト 9）。
+# 実際に得られる候補数は [conversion] beam_size で制約される。
 # num_candidates = 9
 "#
 }

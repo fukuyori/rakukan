@@ -1,5 +1,29 @@
 # Changelog
 
+<!-- markdownlint-disable MD024 -->
+<!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
+
+## [0.6.1] - 2026-04-19
+
+### Added
+
+- **ユーザー辞書 管理 UI**（WinUI 設定アプリ）— 「ユーザー辞書」ナビゲーション項目を追加。読みと変換候補の追加・編集・削除、`user_dict.toml` を notepad で開くボタンを提供
+- **候補数の上限拡張** — Space 変換の候補数 (`num_candidates`) の上限を 1-9 → 1-30 に拡張。WinUI 設定 / 従来設定ダイアログ双方の UI バリデーションも追従
+- **`[conversion] beam_size` 設定** — Space 変換の beam 幅上限（`num_candidates` と min をとる）。デフォルト 30（実質無制限）。変換速度を抑えたい場合に小さく設定することで beam 幅を制限できる
+- **`[input] auto_learn` フラグ** — 確定時のユーザー辞書自動登録を制御する設定を追加。デフォルト `false`（`user_dict.toml` の肥大化を抑止、ユーザー辞書は手動登録のみで運用）
+
+### Fixed
+
+- **ライブ変換の停止不具合** — `on_live_timer` が `engine_try_get` の一時的ロック競合で `has_preedit=false` と誤判定し `stop_live_timer` を呼んでいたのを修正。busy のときはタイマーを止めず次回 tick を待つ
+- **候補ウィンドウのアプリ切替時残留** — `ITfThreadFocusSink` を登録、`OnKillThreadFocus` で `hide()` / `stop_live_timer()` / `stop_waiting_timer()` を実行（Alt+Tab 等の非 TSF アプリへのフォーカス遷移に対応）
+- **`num_candidates` がライブ変換を遅延させる回帰** — バッチ RPC 経路の `input_char` が prefetch 用 `bg_start(n)` に `num_candidates`（最大 30）を渡していたのを `live_conv_beam_size` に修正。Space 変換時は従来どおり `num_candidates` を使用
+- **設定画面からの reload で config.toml が古いまま適用される問題** — `engine_reload` の冒頭で `config::init_config_manager` を呼び、ディスクから最新 `config.toml` を読み直してから EngineConfig JSON を生成するよう修正
+
+### Changed
+
+- **ライブ変換 preview でユーザー辞書を優先** — `bg_take_candidates` がユーザー辞書候補を先頭にマージするよう変更（読み完全一致のみ）
+- **`ConversionConfig::beam_size` を engine 側で尊重** — `KanaKanjiConverter` の `beam_size` を `num_candidates.min(config.beam_size).clamp(1, 30)` として計算し、従来のハードコード上限 3 を撤廃
+
 ## [0.6.0] - 2026-04-17
 
 ### Changed

@@ -1,6 +1,7 @@
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using System.Collections.ObjectModel;
 using System.Threading;
 using Windows.Graphics;
 
@@ -13,6 +14,7 @@ public sealed partial class MainWindow : Window
     private readonly SettingsStore _store = new();
     private readonly Dictionary<ManagedKeyAction, TextBox> _keyFields;
     private readonly SettingsBundle _settings;
+    private readonly ObservableCollection<UserDictEntry> _userDictEntries = new();
     private bool _isClosingAfterApply;
 
     public MainWindow()
@@ -34,6 +36,7 @@ public sealed partial class MainWindow : Window
         };
 
         _settings = _store.Load();
+        UserDictList.ItemsSource = _userDictEntries;
         ApplySettingsToUi(_settings);
 
         if (RootNavigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault() is { } first)
@@ -50,7 +53,9 @@ public sealed partial class MainWindow : Window
         NGpuLayersBox.Value = bundle.Config.NGpuLayers ?? double.NaN;
         MainGpuBox.Value = bundle.Config.MainGpu;
         ModelVariantBox.Text = bundle.Config.ModelVariant ?? string.Empty;
-        NumCandidatesBox.Value = bundle.Config.NumCandidates ?? double.NaN;
+        // null の場合はデフォルト (9) を表示する。NaN だと WinUI NumberBox の
+        // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
+        NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 9;
 
         SelectComboValue(KeyboardLayoutCombo, bundle.Config.KeyboardLayout);
         ReloadOnModeSwitchToggle.IsOn = bundle.Config.ReloadOnModeSwitch;
@@ -70,11 +75,27 @@ public sealed partial class MainWindow : Window
         BeamSizeBox.Value = bundle.Config.BeamSize;
         UseLlmToggle.IsOn = bundle.Config.UseLlm;
         PreferDictionaryFirstToggle.IsOn = bundle.Config.PreferDictionaryFirst;
+
+        _userDictEntries.Clear();
+        foreach (var entry in bundle.UserDict)
+        {
+            _userDictEntries.Add(new UserDictEntry
+            {
+                Reading = entry.Reading,
+                Surfaces = new List<string>(entry.Surfaces),
+            });
+        }
     }
 
     private SettingsBundle CaptureSettingsFromUi()
     {
-        var numCandidates = ParseOptionalUInt(NumCandidatesBox.Value, "候補数", 1, 9);
+        var numCandidates = ParseOptionalUInt(NumCandidatesBox.Value, "候補数", 1, 30);
+        // デフォルト値 (9) のまま保存した場合は config.toml に書き込まない
+        // （コメントアウト状態を維持して将来のデフォルト変更に追従しやすくする）
+        if (numCandidates == 9)
+        {
+            numCandidates = null;
+        }
         var beamSize = ParseUInt(BeamSizeBox.Value, "beam_size", 1, 9);
 
         var config = new SettingsData
@@ -115,10 +136,19 @@ public sealed partial class MainWindow : Window
             keymap.ManagedExtras[pair.Key] = [.. pair.Value];
         }
 
+        var userDict = _userDictEntries
+            .Select(e => new UserDictEntry
+            {
+                Reading = e.Reading,
+                Surfaces = new List<string>(e.Surfaces),
+            })
+            .ToList();
+
         return new SettingsBundle
         {
             Config = config,
             Keymap = keymap,
+            UserDict = userDict,
         };
     }
 
@@ -133,6 +163,7 @@ public sealed partial class MainWindow : Window
         InputPage.Visibility = tag == "Input" ? Visibility.Visible : Visibility.Collapsed;
         KeysPage.Visibility = tag == "Keys" ? Visibility.Visible : Visibility.Collapsed;
         LivePage.Visibility = tag == "Live" ? Visibility.Visible : Visibility.Collapsed;
+        UserDictPage.Visibility = tag == "UserDict" ? Visibility.Visible : Visibility.Collapsed;
         AdvancedPage.Visibility = tag == "Advanced" ? Visibility.Visible : Visibility.Collapsed;
     }
 
@@ -215,6 +246,135 @@ public sealed partial class MainWindow : Window
         {
             await ShowDialogAsync("keymap.toml を開けませんでした", ex.Message);
         }
+    }
+
+    private async void OpenUserDictButton_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _store.OpenUserDict();
+        }
+        catch (Exception ex)
+        {
+            await ShowDialogAsync("user_dict.toml を開けませんでした", ex.Message);
+        }
+    }
+
+    private async void UserDictAddButton_Click(object sender, RoutedEventArgs e)
+    {
+        var entry = await ShowUserDictEditorAsync(null);
+        if (entry is not null)
+        {
+            _userDictEntries.Add(entry);
+            UserDictList.SelectedItem = entry;
+        }
+    }
+
+    private async void UserDictEditButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (UserDictList.SelectedItem is not UserDictEntry current)
+        {
+            await ShowDialogAsync("編集する項目を選択してください", "リストから編集したい行を選んでから「編集」を押してください。");
+            return;
+        }
+        await EditEntryAsync(current);
+    }
+
+    private void UserDictDeleteButton_Click(object sender, RoutedEventArgs e)
+    {
+        if (UserDictList.SelectedItem is UserDictEntry current)
+        {
+            _userDictEntries.Remove(current);
+        }
+    }
+
+    private async void UserDictList_DoubleTapped(object sender, Microsoft.UI.Xaml.Input.DoubleTappedRoutedEventArgs e)
+    {
+        if (UserDictList.SelectedItem is UserDictEntry current)
+        {
+            await EditEntryAsync(current);
+        }
+    }
+
+    private async Task EditEntryAsync(UserDictEntry current)
+    {
+        var edited = await ShowUserDictEditorAsync(current);
+        if (edited is null)
+        {
+            return;
+        }
+        current.Reading = edited.Reading;
+        current.Surfaces = edited.Surfaces;
+        var index = _userDictEntries.IndexOf(current);
+        if (index >= 0)
+        {
+            _userDictEntries.RemoveAt(index);
+            _userDictEntries.Insert(index, current);
+            UserDictList.SelectedItem = current;
+        }
+    }
+
+    private async Task<UserDictEntry?> ShowUserDictEditorAsync(UserDictEntry? existing)
+    {
+        var readingBox = new TextBox
+        {
+            Header = "読み (ひらがな)",
+            PlaceholderText = "例: きむら",
+            Text = existing?.Reading ?? string.Empty,
+        };
+        var surfacesBox = new TextBox
+        {
+            Header = "変換候補 (1 行に 1 つ、先頭行が最優先)",
+            PlaceholderText = "例:\n木村\n金村",
+            Text = existing is null ? string.Empty : string.Join(Environment.NewLine, existing.Surfaces),
+            AcceptsReturn = true,
+            TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
+            MinHeight = 120,
+        };
+
+        var panel = new StackPanel { Spacing = 12 };
+        panel.Children.Add(readingBox);
+        panel.Children.Add(surfacesBox);
+
+        var dialog = new ContentDialog
+        {
+            Title = existing is null ? "ユーザー辞書に追加" : "ユーザー辞書を編集",
+            Content = panel,
+            PrimaryButtonText = "OK",
+            CloseButtonText = "キャンセル",
+            DefaultButton = ContentDialogButton.Primary,
+            XamlRoot = Content.XamlRoot,
+        };
+
+        var result = await dialog.ShowAsync();
+        if (result != ContentDialogResult.Primary)
+        {
+            return null;
+        }
+
+        var reading = (readingBox.Text ?? string.Empty).Trim();
+        var surfaces = (surfacesBox.Text ?? string.Empty)
+            .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(s => s.Trim())
+            .Where(s => !string.IsNullOrEmpty(s))
+            .ToList();
+
+        if (string.IsNullOrEmpty(reading))
+        {
+            await ShowDialogAsync("入力が不完全です", "読みを入力してください。");
+            return null;
+        }
+        if (surfaces.Count == 0)
+        {
+            await ShowDialogAsync("入力が不完全です", "変換候補を 1 つ以上入力してください。");
+            return null;
+        }
+
+        return new UserDictEntry
+        {
+            Reading = reading,
+            Surfaces = surfaces,
+        };
     }
 
     private async Task ShowDialogAsync(string title, string message)
