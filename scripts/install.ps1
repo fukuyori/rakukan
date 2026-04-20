@@ -131,8 +131,12 @@ if ($configToml -and (Test-Path -LiteralPath $configToml)) {
 if ($gpuBackend -in @("cuda", "vulkan", "cpu")) {
     Write-Host "[0/4] Using config.toml backend: $gpuBackend"
 } else {
+    if ($gpuBackend -eq "auto") {
+        Write-Host "[0/4] gpu_backend = `"auto`" in config.toml -> running detect-gpu.ps1"
+    } else {
+        Write-Host "[0/4] gpu_backend not set in config.toml -> running detect-gpu.ps1"
+    }
     $gpuBackend = "cpu"
-    Write-Host "[0/4] gpu_backend not set in config.toml -> running detect-gpu.ps1"
     try {
         $detected = & "$PSScriptRoot\detect-gpu.ps1" -SaveResult
         if ($detected -and ($detected.Trim().ToLower() -in @("cuda","vulkan","cpu"))) {
@@ -537,9 +541,13 @@ if (-not $modelVariant) {
     Write-Host "  To enable LLM conversion, add model_variant to config.toml."
 } else {
     # Map variant id to repo and filename
+    # 注: この表は crates/rakukan-engine/models.toml と同期が必要
+    # (scripts/refresh-models.ps1 で最新の variant を検出できる)
     $modelMap = @{
         "jinen-v1-small-q5"   = @{ repo = "togatogah/jinen-v1-small.gguf";   file = "jinen-v1-small-Q5_K_M.gguf";   tok = "tokenizer.json" }
         "jinen-v1-xsmall-q5"  = @{ repo = "togatogah/jinen-v1-xsmall.gguf";  file = "jinen-v1-xsmall-Q5_K_M.gguf";  tok = "tokenizer.json" }
+        "jinen-v1-small-f16"  = @{ repo = "togatogah/jinen-v1-small.gguf";   file = "jinen-v1-small-f16.gguf";      tok = "tokenizer.json" }
+        "jinen-v1-xsmall-f16" = @{ repo = "togatogah/jinen-v1-xsmall.gguf";  file = "jinen-v1-xsmall-f16.gguf";     tok = "tokenizer.json" }
     }
     if (-not $modelMap.ContainsKey($modelVariant)) {
         Write-Host ("  Unknown model_variant: " + $modelVariant + " - skipping.")

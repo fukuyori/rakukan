@@ -121,7 +121,12 @@
 
                                     <StackPanel Grid.Row="2" Grid.ColumnSpan="2" Spacing="8">
                                         <TextBlock Text="モデル ID" />
-                                        <TextBox x:Name="ModelVariantBox" PlaceholderText="jinen-v1-small-q5" />
+                                        <ComboBox x:Name="ModelVariantCombo" IsEditable="True" PlaceholderText="jinen-v1-xsmall-q5" SelectionChanged="ModelVariantCombo_SelectionChanged">
+                                            <ComboBoxItem Content="jinen-v1-xsmall-q5   (約 30 MB)" Tag="jinen-v1-xsmall-q5" />
+                                            <ComboBoxItem Content="jinen-v1-small-q5    (約 84 MB)" Tag="jinen-v1-small-q5" />
+                                            <ComboBoxItem Content="jinen-v1-xsmall-f16  (約 138 MB)" Tag="jinen-v1-xsmall-f16" />
+                                            <ComboBoxItem Content="jinen-v1-small-f16   (約 423 MB)" Tag="jinen-v1-small-f16" />
+                                        </ComboBox>
                                     </StackPanel>
                                 </Grid>
                             </StackPanel>

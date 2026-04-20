@@ -42,7 +42,11 @@ impl Default for AppConfig {
 impl AppConfig {
     /// Space 変換時に LLM から取得する候補数。
     pub fn effective_num_candidates(&self) -> usize {
-        self.num_candidates.unwrap_or(9).clamp(1, 30)
+        self.conversion
+            .num_candidates
+            .or(self.num_candidates)
+            .unwrap_or(9)
+            .clamp(1, 30)
     }
 }
 
@@ -213,18 +217,23 @@ pub struct ConversionConfig {
     /// 範囲: 1〜30。
     #[serde(default = "default_convert_beam_size")]
     pub beam_size: usize,
+    /// Space 変換で候補ウィンドウに表示する候補数。
+    /// 新形式では `[conversion].num_candidates` に保存する。
+    #[serde(default)]
+    pub num_candidates: Option<usize>,
 }
 
 impl Default for ConversionConfig {
     fn default() -> Self {
         Self {
             beam_size: default_convert_beam_size(),
+            num_candidates: None,
         }
     }
 }
 
 fn default_dump_active_config() -> bool {
-    true
+    false
 }
 fn default_warn_on_unknown_key() -> bool {
     true
@@ -241,7 +250,7 @@ pub struct DiagnosticsConfig {
 impl Default for DiagnosticsConfig {
     fn default() -> Self {
         Self {
-            dump_active_config: true,
+            dump_active_config: false,
             warn_on_unknown_key: true,
         }
     }
@@ -373,26 +382,29 @@ fn default_config_text() -> &'static str {
 # info:  通常運用。初期化・確定・モード変更のみ
 # trace: 詳細調査時。ループ内・トークン単位まで出力される（低速）
 # 環境変数 RAKUKAN_LOG が設定されている場合はそちらが優先される
-log_level = "debug"
+log_level = "info"
 
-# GPU バックエンド: "cuda" / "vulkan" / "cpu"
-# 未指定の場合は CPU を使用する
+# GPU バックエンド: "auto" / "cuda" / "vulkan" / "cpu"
+# "auto"   : インストール済みの DLL から cuda → vulkan → cpu の順で自動選択（デフォルト）
 # "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
 # "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
-# gpu_backend = "cuda"
+gpu_backend = "auto"
 
 # GPU に載せるレイヤー数
 # 0 で CPU のみ、未指定で全レイヤーを GPU にオフロード
 # GPU 競合や他アプリの異常終了がある場合は 8 / 16 / 24 など小さめを試す
-# n_gpu_layers = 16
+n_gpu_layers = 16
 
 # 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
-# main_gpu = 0
+main_gpu = 0
 
 # LLM モデル ID
-# model_variant = "jinen-v1-small-q5"
-# model_variant = "jinen-v1-xsmall-q5"
+# jinen-v1-xsmall-q5  : 軽量・推奨（約 30 MB、低スペック PC 向け、デフォルト）
+# jinen-v1-small-q5   : 標準（約 84 MB、通常用途）
+# jinen-v1-xsmall-f16 : 高精度・大容量（約 138 MB、量子化なし FP16）
+# jinen-v1-small-f16  : 高精度・大容量（約 423 MB、量子化なし FP16）
+model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
 layout = "jis"
@@ -422,12 +434,40 @@ beam_size = 3
 # 範囲: 1〜30。
 beam_size = 30
 
+# Space 変換で表示する候補数（1〜30、デフォルト 9）。
+# 新形式は [conversion].num_candidates。旧形式のルート直下 num_candidates も引き続き読める。
+# num_candidates = 9
+
 [diagnostics]
-dump_active_config = true
+dump_active_config = false
 warn_on_unknown_key = true
 
-# Space 変換で表示する候補数（1〜30、デフォルト 9）。
-# 実際に得られる候補数は [conversion] beam_size で制約される。
+# 旧形式との互換用:
 # num_candidates = 9
 "#
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppConfig;
+
+    #[test]
+    fn effective_num_candidates_reads_new_conversion_key() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[conversion]
+num_candidates = 12
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(cfg.effective_num_candidates(), 12);
+    }
+
+    #[test]
+    fn effective_num_candidates_falls_back_to_legacy_root_key() {
+        let cfg: AppConfig = toml::from_str("num_candidates = 7").expect("config should parse");
+
+        assert_eq!(cfg.effective_num_candidates(), 7);
+    }
 }

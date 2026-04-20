@@ -92,26 +92,29 @@ const DEFAULT_CONFIG_TEXT: &str = r#"# rakukan 設定ファイル
 # info:  通常運用。初期化・確定・モード変更のみ
 # trace: 詳細調査時。ループ内・トークン単位まで出力される（低速）
 # 環境変数 RAKUKAN_LOG が設定されている場合はそちらが優先される
-log_level = "debug"
+log_level = "info"
 
-# GPU バックエンド: "cuda" / "vulkan" / "cpu"
-# 未指定の場合は CPU を使用する
+# GPU バックエンド: "auto" / "cuda" / "vulkan" / "cpu"
+# "auto"   : インストール済みの DLL から cuda → vulkan → cpu の順で自動選択（デフォルト）
 # "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
 # "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
-# gpu_backend = "cuda"
+gpu_backend = "auto"
 
 # GPU に載せるレイヤー数
 # 0 で CPU のみ、未指定で全レイヤーを GPU にオフロード
 # GPU 競合や他アプリの異常終了がある場合は 8 / 16 / 24 など小さめを試す
-# n_gpu_layers = 16
+n_gpu_layers = 16
 
 # 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
-# main_gpu = 0
+main_gpu = 0
 
 # LLM モデル ID
-# model_variant = "jinen-v1-small-q5"
-# model_variant = "jinen-v1-xsmall-q5"
+# jinen-v1-xsmall-q5  : 軽量・推奨（約 30 MB、低スペック PC 向け、デフォルト）
+# jinen-v1-small-q5   : 標準（約 84 MB、通常用途）
+# jinen-v1-xsmall-f16 : 高精度・大容量（約 138 MB、量子化なし FP16）
+# jinen-v1-small-f16  : 高精度・大容量（約 423 MB、量子化なし FP16）
+model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
 layout = "jis"
@@ -131,8 +134,17 @@ prefer_dictionary_first = true
 # ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
 beam_size = 3
 
+[conversion]
+# Space 変換のビーム幅上限（num_candidates と min をとる）。
+# デフォルト 30 では num_candidates がそのまま候補数になる。
+beam_size = 30
+
+# Space 変換で表示する候補数（1〜30、デフォルト 9）。
+# 新形式は [conversion].num_candidates。旧形式のルート直下 num_candidates も引き続き読める。
+# num_candidates = 9
+
 [diagnostics]
-dump_active_config = true
+dump_active_config = false
 warn_on_unknown_key = true
 
 # 旧形式との互換用
@@ -175,11 +187,11 @@ struct SettingsData {
 impl Default for SettingsData {
     fn default() -> Self {
         Self {
-            log_level: "debug".to_string(),
-            gpu_backend: None,
-            n_gpu_layers: None,
+            log_level: "info".to_string(),
+            gpu_backend: Some("auto".to_string()),
+            n_gpu_layers: Some(16),
             main_gpu: 0,
-            model_variant: None,
+            model_variant: Some("jinen-v1-xsmall-q5".to_string()),
             num_candidates: None,
             keyboard_layout: "jis".to_string(),
             reload_on_mode_switch: true,
@@ -1482,10 +1494,7 @@ unsafe fn create_control(
 
 fn collect_settings(state: &WindowState) -> Result<(SettingsData, KeymapSettings)> {
     let log_level = combo_text(state.log_level)?;
-    let gpu_backend = match combo_text(state.gpu_backend)?.as_str() {
-        "auto" => None,
-        value => Some(value.to_string()),
-    };
+    let gpu_backend = Some(combo_text(state.gpu_backend)?);
     let n_gpu_layers = parse_optional_u32("GPU レイヤー数", &window_text(state.n_gpu_layers)?)?;
     let main_gpu = parse_i32("使用 GPU インデックス", &window_text(state.main_gpu)?)?;
     let model_variant = optional_string(window_text(state.model_variant)?);
@@ -1576,7 +1585,8 @@ fn load_settings(path: &Path) -> Result<SettingsData> {
         n_gpu_layers: get_u32(&value, &["general", "n_gpu_layers"]),
         main_gpu: get_i32(&value, &["general", "main_gpu"]).unwrap_or(0),
         model_variant: get_string(&value, &["general", "model_variant"]),
-        num_candidates: get_u32(&value, &["num_candidates"]),
+        num_candidates: get_u32(&value, &["conversion", "num_candidates"])
+            .or_else(|| get_u32(&value, &["num_candidates"])),
         keyboard_layout: get_string(&value, &["keyboard", "layout"])
             .unwrap_or_else(|| "jis".to_string()),
         reload_on_mode_switch: get_bool(&value, &["keyboard", "reload_on_mode_switch"])
@@ -1673,7 +1683,12 @@ fn save_settings(path: &Path, settings: &SettingsData) -> Result<()> {
         &["live_conversion", "beam_size"],
         settings.beam_size,
     );
-    set_optional_u32(&mut value, &["num_candidates"], settings.num_candidates);
+    set_optional_u32(
+        &mut value,
+        &["conversion", "num_candidates"],
+        settings.num_candidates,
+    );
+    remove_value(&mut value, &["num_candidates"]);
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;

@@ -2,6 +2,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Threading;
 using Windows.Graphics;
 
@@ -10,6 +11,7 @@ namespace Rakukan.Settings.WinUI;
 public sealed partial class MainWindow : Window
 {
     private const string ReloadEventName = @"Local\rakukan.engine.reload";
+    private static readonly string AppIconPath = Path.Combine(AppContext.BaseDirectory, "rakukan.ico");
 
     private readonly SettingsStore _store = new();
     private readonly Dictionary<ManagedKeyAction, TextBox> _keyFields;
@@ -20,6 +22,7 @@ public sealed partial class MainWindow : Window
     public MainWindow()
     {
         InitializeComponent();
+        SetWindowIcon();
         AppWindow.Resize(new SizeInt32(1080, 760));
         AppWindow.Closing += AppWindow_Closing;
 
@@ -46,13 +49,21 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    private void SetWindowIcon()
+    {
+        if (File.Exists(AppIconPath))
+        {
+            AppWindow.SetIcon(AppIconPath);
+        }
+    }
+
     private void ApplySettingsToUi(SettingsBundle bundle)
     {
         SelectComboValue(LogLevelCombo, bundle.Config.LogLevel);
         SelectComboValue(GpuBackendCombo, bundle.Config.GpuBackend ?? "auto");
         NGpuLayersBox.Value = bundle.Config.NGpuLayers ?? double.NaN;
         MainGpuBox.Value = bundle.Config.MainGpu;
-        ModelVariantBox.Text = bundle.Config.ModelVariant ?? string.Empty;
+        ModelVariantCombo.Text = bundle.Config.ModelVariant ?? string.Empty;
         // null の場合はデフォルト (9) を表示する。NaN だと WinUI NumberBox の
         // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
         NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 9;
@@ -101,10 +112,10 @@ public sealed partial class MainWindow : Window
         var config = new SettingsData
         {
             LogLevel = SelectedComboValue(LogLevelCombo),
-            GpuBackend = NormalizeOptional(SelectedComboValue(GpuBackendCombo), "auto"),
+            GpuBackend = NormalizeOptional(SelectedComboValue(GpuBackendCombo), string.Empty),
             NGpuLayers = ParseOptionalUInt(NGpuLayersBox.Value, "GPU レイヤー数"),
             MainGpu = ParseInt(MainGpuBox.Value, "使用 GPU インデックス"),
-            ModelVariant = NormalizeOptional(ModelVariantBox.Text, string.Empty),
+            ModelVariant = NormalizeOptional(ModelVariantCombo.Text, string.Empty),
             NumCandidates = numCandidates,
             KeyboardLayout = SelectedComboValue(KeyboardLayoutCombo),
             ReloadOnModeSwitch = ReloadOnModeSwitchToggle.IsOn,
@@ -170,6 +181,16 @@ public sealed partial class MainWindow : Window
     private void KeymapPresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         ApplyKeymapPresetDefaults();
+    }
+
+    private void ModelVariantCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // ComboBoxItem.Content は "xxx (約 NN MB)" の表示用文字列なので、
+        // config.toml には Tag に格納した variant ID だけを書き出す。
+        if (ModelVariantCombo.SelectedItem is ComboBoxItem item && item.Tag is string variantId)
+        {
+            ModelVariantCombo.Text = variantId;
+        }
     }
 
     private void KeymapInheritToggle_Toggled(object sender, RoutedEventArgs e)
