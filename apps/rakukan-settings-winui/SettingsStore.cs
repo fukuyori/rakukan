@@ -178,6 +178,7 @@ internal sealed class SettingsStore
         default_mode = "alphanumeric"
         remember_last_kana_mode = true
         digit_width = "halfwidth"
+        auto_learn = false
 
         [live_conversion]
         enabled = false
@@ -185,6 +186,9 @@ internal sealed class SettingsStore
         use_llm = false
         prefer_dictionary_first = true
         beam_size = 3
+
+        [conversion]
+        beam_size = 30
 
         [diagnostics]
         dump_active_config = true
@@ -365,15 +369,16 @@ internal sealed class SettingsStore
         var keyboard = GetOrCreateTable(root, "keyboard");
         var input = GetOrCreateTable(root, "input");
         var live = GetOrCreateTable(root, "live_conversion");
+        var conversion = GetOrCreateTable(root, "conversion");
 
         return new SettingsData
         {
-            LogLevel = GetString(general, "log_level") ?? "debug",
+            LogLevel = GetString(general, "log_level") ?? "info",
             GpuBackend = NormalizeOptional(GetString(general, "gpu_backend")),
             NGpuLayers = GetUInt(general, "n_gpu_layers"),
             MainGpu = GetInt(general, "main_gpu") ?? 0,
             ModelVariant = NormalizeOptional(GetString(general, "model_variant")),
-            NumCandidates = GetUInt(root, "num_candidates"),
+            NumCandidates = GetUInt(conversion, "num_candidates") ?? GetUInt(root, "num_candidates"),
             KeyboardLayout = GetString(keyboard, "layout") ?? "jis",
             ReloadOnModeSwitch = GetBool(keyboard, "reload_on_mode_switch") ?? true,
             DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
@@ -393,6 +398,7 @@ internal sealed class SettingsStore
         var keyboard = GetOrCreateTable(root, "keyboard");
         var input = GetOrCreateTable(root, "input");
         var live = GetOrCreateTable(root, "live_conversion");
+        var conversion = GetOrCreateTable(root, "conversion");
 
         general["log_level"] = data.LogLevel;
         SetOptional(general, "gpu_backend", data.GpuBackend);
@@ -413,7 +419,8 @@ internal sealed class SettingsStore
         live["prefer_dictionary_first"] = data.PreferDictionaryFirst;
         live["beam_size"] = data.BeamSize;
 
-        SetOptional(root, "num_candidates", data.NumCandidates);
+        SetOptional(conversion, "num_candidates", data.NumCandidates);
+        root.Remove("num_candidates");
     }
 
     private static KeymapSettings LoadKeymap(TomlTable root)

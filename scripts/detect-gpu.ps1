@@ -10,13 +10,15 @@ param([switch]$SaveResult)
 function Read-ConfigTomlBackend {
     # config.toml の gpu_backend = "..." を読んでユーザー指定を取得する。
     # コメント行・空白行は無視。値がなければ $null を返す。
+    # "auto" は「自動検出してほしい」という明示的なユーザー指示として扱う
+    # （本関数の戻り値としては "auto" を返し、呼び出し側で未指定と等価に扱う）。
     $configPath = Join-Path $env:APPDATA "rakukan\config.toml"
     if (-not (Test-Path $configPath)) { return $null }
     foreach ($line in (Get-Content $configPath -ErrorAction SilentlyContinue)) {
         $line = $line.Trim()
         if ($line -match '^#') { continue }                     # コメント行
         if ($line -match '^gpu_backend\s*=\s*"([^"]+)"') {
-            return $Matches[1].ToLower()                         # "cuda" / "vulkan" / "cpu"
+            return $Matches[1].ToLower()                         # "cuda" / "vulkan" / "cpu" / "auto"
         }
     }
     return $null
@@ -161,8 +163,12 @@ if ($hasCuda) {
 Write-Host ""
 
 # [3.5] config.toml でユーザー指定があるか確認
+# "auto" は「自動検出して欲しい」という明示指示 -> 未指定と等価に扱う
 $configPreference = Read-ConfigTomlBackend
-if ($configPreference) {
+if ($configPreference -eq "auto") {
+    Write-Host "[3.5] config.toml の gpu_backend = \"auto\" -> 自動選択します" -ForegroundColor Gray
+    $configPreference = $null
+} elseif ($configPreference) {
     Write-Host "[3.5] config.toml に gpu_backend = \"$configPreference\" が指定されています" -ForegroundColor Cyan
 } else {
     Write-Host "[3.5] config.toml に gpu_backend 指定なし -> 自動選択します" -ForegroundColor Gray
@@ -215,8 +221,8 @@ Write-Host "  確定: $finalBackend" -ForegroundColor Green
 # 環境変数にセット（呼び出し元スクリプトで参照可能）
 $env:RAKUKAN_BACKEND = $finalBackend
 
-# backend.json には保存しない。設定の正は config.toml とする。
-Write-Host "  backend.json には保存しません。gpu_backend は config.toml で管理します。" -ForegroundColor Gray
+# GPU バックエンド設定の正は config.toml とする。
+Write-Host "  gpu_backend の設定は config.toml で管理します。" -ForegroundColor Gray
 Write-Host ""
 
 # 戻り値

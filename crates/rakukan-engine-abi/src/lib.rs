@@ -4,8 +4,9 @@
 //! バックエンド DLL（cuda/vulkan/cpu）に処理を委譲する。
 //!
 //! # バックエンド選択順
-//! 1. `config.toml` の `gpu_backend` キー
-//! 2. デフォルト: `cpu`
+//! 1. `config.toml` の `gpu_backend` キー（`cuda` / `vulkan` / `cpu` / `auto`）
+//! 2. キー未指定または `auto` の場合は、インストール済みの DLL を
+//!    `cuda` → `vulkan` → `cpu` の順で探索して採用する。
 //!
 //! # DLL ファイル名
 //! `rakukan_engine_<backend>.dll` がインストールディレクトリに存在すること。
@@ -268,8 +269,17 @@ impl DynEngine {
     /// `install_dir`: rakukan DLL が配置されているディレクトリ
     /// `config_json`: EngineConfig JSON（null の場合はデフォルト）
     pub fn load_auto(install_dir: &Path, config_json: Option<&str>) -> Result<Self> {
-        let backend = detect_backend();
-        tracing::info!("Selected backend: {backend}");
+        let backend = match detect_backend() {
+            BackendSelection::Explicit(b) => {
+                tracing::info!("Selected backend (explicit): {b}");
+                b
+            }
+            BackendSelection::Auto => {
+                let b = detect_best_installed_backend(install_dir);
+                tracing::info!("Selected backend (auto): {b}");
+                b
+            }
+        };
         Self::load_backend(install_dir, &backend, config_json)
     }
 
@@ -575,16 +585,44 @@ impl Drop for DynEngine {
 
 // ─── バックエンド自動検出 ──────────────────────────────────────────────────────
 
-/// config.toml → "cpu" の優先順でバックエンドを返す
-fn detect_backend() -> String {
-    // 1. config.toml
-    if let Some(b) = read_config_toml_backend() {
-        tracing::debug!("backend::select: from config.toml={b}");
-        return b;
+/// config.toml の gpu_backend 指定をどう解釈するか。
+enum BackendSelection {
+    /// `cuda` / `vulkan` / `cpu` のいずれかが明示されている
+    Explicit(String),
+    /// 未指定、または `auto` が指定されている（DLL 存在で実行時判定）
+    Auto,
+}
+
+/// config.toml の `gpu_backend` キーを読み取り、明示指定 / auto を区別して返す。
+fn detect_backend() -> BackendSelection {
+    match read_config_toml_backend() {
+        Some(b) if matches!(b.as_str(), "cuda" | "vulkan" | "cpu") => {
+            tracing::debug!("backend::select: from config.toml={b}");
+            BackendSelection::Explicit(b)
+        }
+        Some(b) => {
+            // "auto" もしくは想定外文字列 → 自動検出にフォールバック
+            tracing::debug!("backend::select: config.toml={b} -> auto");
+            BackendSelection::Auto
+        }
+        None => {
+            tracing::debug!("backend::select: gpu_backend not set -> auto");
+            BackendSelection::Auto
+        }
     }
-    // 2. デフォルト
-    tracing::warn!("backend not configured, using cpu");
-    "cpu".into()
+}
+
+/// インストール済みの DLL を `cuda` → `vulkan` → `cpu` の順に探索して
+/// 最良のバックエンド名を返す。どれも見つからなければ `cpu` を返す
+/// （`load_backend` 側の最終フォールバックで適切なエラーになる）。
+fn detect_best_installed_backend(install_dir: &Path) -> String {
+    for backend in ["cuda", "vulkan", "cpu"] {
+        let dll = install_dir.join(format!("rakukan_engine_{}.dll", backend));
+        if dll.exists() {
+            return backend.to_string();
+        }
+    }
+    "cpu".to_string()
 }
 
 fn appdata_rakukan() -> Option<PathBuf> {
@@ -609,7 +647,7 @@ fn read_config_toml_backend() -> Option<String> {
                 .trim()
                 .trim_matches('"')
                 .trim_matches('\'');
-            if matches!(val, "cuda" | "vulkan" | "cpu") {
+            if matches!(val, "cuda" | "vulkan" | "cpu" | "auto") {
                 return Some(val.to_string());
             }
         }
