@@ -1,4 +1,4 @@
-# scripts\install.ps1 - rakukan インストール (コピー + 登録 + tray 起動)
+﻿# scripts\install.ps1 - rakukan インストール (コピー + 登録 + tray 起動)
 #
 # ★ このスクリプトはビルドを行いません。
 #    先に以下を実行してビルド成果物を用意してください:
@@ -14,11 +14,52 @@
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
-    [string]$BuildDir = "C:\rb"
+    [string]$BuildDir = "C:\rb",
+    [switch]$NoElevate      # 自動昇格をスキップ (内部利用)
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
+
+# Console encoding: UTF-8 (Windows PowerShell 5.1 で日本語出力の文字化けを防ぐ)
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding = [System.Text.UTF8Encoding]::new()
+} catch {}
+
+# --- Auto-elevate to Administrator ---
+# TSF DLL 登録 (regsvr32 → HKLM 書き込み) とプロセス停止 (ctfmon 等) のため
+# 管理者権限が必須。非管理者セッションから呼ばれた場合は UAC で昇格して再実行する。
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin -and -not $NoElevate) {
+    Write-Host "[install] Requesting administrator privileges (UAC)..." -ForegroundColor Yellow
+    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-NoElevate")
+    foreach ($pair in $PSBoundParameters.GetEnumerator()) {
+        $name  = $pair.Key
+        $value = $pair.Value
+        if ($value -is [switch]) {
+            if ($value.IsPresent) { $argList += "-$name" }
+        } elseif ($null -ne $value -and $value -ne "") {
+            $argList += "-$name"
+            $argList += "`"$value`""
+        }
+    }
+    # Note: Start-Process -Wait は UAC 昇格 (-Verb RunAs) と組み合わせた場合
+    # Windows PowerShell 5.1 で正しく待機しないことがあるため、PassThru で
+    # Process オブジェクトを受け取り WaitForExit() で明示的に待機する。
+    try {
+        $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList -PassThru
+        if (-not $proc) {
+            Write-Error "[install] Failed to launch elevated PowerShell"
+            exit 1
+        }
+        $proc.WaitForExit()
+        exit $proc.ExitCode
+    } catch {
+        Write-Error "[install] Elevation failed: $_"
+        exit 1
+    }
+}
 
 # --- Log file setup ---
 $LogFile  = Join-Path (Get-Location).Path "rakukan_install.log"
@@ -97,11 +138,8 @@ function Promote-TrayIcon() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Admin / folder setup
+# Folder setup (admin は冒頭で自動昇格済み)
 # ─────────────────────────────────────────────────────────────────────────────
-
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin) { throw "Administrator privileges are required." }
 
 $local = Get-KnownFolderSafe ([Environment+SpecialFolder]::LocalApplicationData)
 if (-not $local) { $local = $env:LOCALAPPDATA }

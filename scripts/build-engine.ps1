@@ -1,4 +1,4 @@
-# scripts\build-engine.ps1 - rakukan-engine DLL builder (cpu / vulkan / cuda)
+﻿# scripts\build-engine.ps1 - rakukan-engine DLL builder (cpu / vulkan / cuda)
 #
 # Usage (standalone):
 #   powershell -ExecutionPolicy Bypass -File scripts\build-engine.ps1 [-Profile release|debug]
@@ -47,9 +47,13 @@ $null = New-Item -ItemType Directory -Force -Path $BuildDir
 # config.toml の gpu_backend を参照して、前回ビルド時のバックエンドと異なれば
 # llama-cpp-sys-2 ビルドキャッシュを削除する。MSB1009 "install.vcxproj not found"
 # などの再現性のない失敗を予防する。
-$roamingConfig = Join-Path $env:APPDATA "rakukan\config.toml"
+$roamingBase = $env:APPDATA
+if ([string]::IsNullOrWhiteSpace($roamingBase)) {
+    try { $roamingBase = [Environment]::GetFolderPath('ApplicationData') } catch { $roamingBase = $null }
+}
+$roamingConfig = if ($roamingBase) { Join-Path $roamingBase "rakukan\config.toml" } else { $null }
 $gpuBackend = $null
-if (Test-Path -LiteralPath $roamingConfig) {
+if ($roamingConfig -and (Test-Path -LiteralPath $roamingConfig)) {
     foreach ($line in Get-Content -LiteralPath $roamingConfig -ErrorAction SilentlyContinue) {
         if ($line -match '^\s*gpu_backend\s*=\s*"([^"]+)"') {
             $gpuBackend = $Matches[1].ToLower()

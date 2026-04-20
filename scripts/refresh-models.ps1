@@ -1,4 +1,4 @@
-# scripts/refresh-models.ps1
+﻿# scripts/refresh-models.ps1
 #
 # HuggingFace で公開されているモデルファイルの最新状況を確認し、
 # crates/rakukan-engine/models.toml に未登録の .gguf があれば検出する。

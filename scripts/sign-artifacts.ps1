@@ -1,4 +1,4 @@
-# scripts\sign-artifacts.ps1 - ビルド成果物に電子署名を付与
+﻿# scripts\sign-artifacts.ps1 - ビルド成果物に電子署名を付与
 #
 # インストール前の段階で signtool を走らせるため、%LOCALAPPDATA% 配下の
 # 実行中プロセスとの競合を回避できる (ロックが起きない)。
@@ -22,37 +22,23 @@ param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
     [string]$BuildDir = "C:\rb",
     [string]$SigntoolPath = $null,
-    [string]$TimestampUrl = "http://timestamp.digicert.com",
-    [switch]$NoElevate      # 管理者昇格をスキップ (既に昇格済みの場合の内部利用)
+    [string]$TimestampUrl = "http://timestamp.digicert.com"
 )
 
 $ErrorActionPreference = "Stop"
 
-# --- 管理者権限チェック + 自動昇格 ---
-# 証明書が LocalMachine ストアにある場合など、signtool は admin 権限を要求することがある。
-# 非管理者セッションから cargo make sign を呼んだ場合は UAC で昇格して再実行する。
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if (-not $isAdmin -and -not $NoElevate) {
-    Write-Host "[sign] 管理者権限で再起動します (UAC)..." -ForegroundColor Yellow
-    $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", "`"$PSCommandPath`"", "-NoElevate")
-    foreach ($pair in $PSBoundParameters.GetEnumerator()) {
-        $name = $pair.Key
-        $value = $pair.Value
-        if ($value -is [switch]) {
-            if ($value.IsPresent) { $argList += "-$name" }
-        } elseif ($null -ne $value -and $value -ne "") {
-            $argList += "-$name"
-            $argList += "`"$value`""
-        }
-    }
-    try {
-        $proc = Start-Process -FilePath "powershell.exe" -Verb RunAs -ArgumentList $argList -Wait -PassThru
-        exit $proc.ExitCode
-    } catch {
-        Write-Error "[sign] 管理者昇格に失敗しました: $_"
-        exit 1
-    }
-}
+# Console encoding: UTF-8 で Write-Host できるよう設定 (文字化け防止)
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+    $OutputEncoding = [System.Text.UTF8Encoding]::new()
+} catch {}
+
+# 注: このスクリプトは **非管理者セッション** で実行することを想定している。
+# ユーザー証明書ストア (CurrentUser\My) にある code-signing 証明書を signtool /a が
+# 自動選択できるのは、当該ユーザーのセッションからのみ。UAC で昇格すると
+# プロファイルコンテキストが変わり、証明書が見つからず失敗する。
+# LocalMachine ストアの証明書を使いたい場合は、明示的に管理者 PowerShell から
+# このスクリプトを起動すること。
 
 Set-Location (Split-Path $PSScriptRoot)
 
@@ -98,9 +84,12 @@ $targets = @(
     (Join-Path $winuiBin "rakukan-settings.dll")
 )
 
-$success = 0
+# signtool は複数ファイル (dll / exe 混在可) を 1 回の起動で処理できる。
+# 1 回にまとめて呼べば、証明書パスワード入力プロンプトも 1 回で済む。
+# (Windows PowerShell 5.1 で `New-Object System.Collections.Generic.List[string]`
+#  が null を返すケースがあるため、明示的に [type]::new() を使う)
+$presentTargets = [System.Collections.Generic.List[string]]::new()
 $skipped = 0
-$failed  = 0
 
 foreach ($file in $targets) {
     if (-not (Test-Path -LiteralPath $file)) {
@@ -108,13 +97,24 @@ foreach ($file in $targets) {
         $skipped++
         continue
     }
-    Write-Host "[sign] Signing: $file" -ForegroundColor Cyan
-    & $signtool sign /fd SHA256 /a /tr $TimestampUrl /td SHA256 $file
+    $null = $presentTargets.Add($file)
+}
+
+$success = 0
+$failed  = 0
+
+if ($presentTargets.Count -eq 0) {
+    Write-Host "[sign] No files to sign." -ForegroundColor Yellow
+} else {
+    Write-Host "[sign] Signing $($presentTargets.Count) files in a single signtool invocation:" -ForegroundColor Cyan
+    foreach ($f in $presentTargets) { Write-Host ("  - " + $f) -ForegroundColor Gray }
+    $sigArgs = @("sign","/fd","SHA256","/a","/tr",$TimestampUrl,"/td","SHA256") + $presentTargets
+    & $signtool @sigArgs
     if ($LASTEXITCODE -eq 0) {
-        $success++
+        $success = $presentTargets.Count
     } else {
-        Write-Warning ("[sign] FAILED: " + $file + " (exit " + $LASTEXITCODE + ")")
-        $failed++
+        Write-Warning ("[sign] FAILED (exit " + $LASTEXITCODE + ")")
+        $failed = $presentTargets.Count
     }
 }
 

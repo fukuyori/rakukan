@@ -1,4 +1,4 @@
-# scripts\build-tsf.ps1 - TSF 系バイナリのビルド (engine DLL は別)
+﻿# scripts\build-tsf.ps1 - TSF 系バイナリのビルド (engine DLL は別)
 #
 # ビルド対象:
 #   rakukan-tsf         (TSF DLL)

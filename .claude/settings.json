@@ -23,7 +23,12 @@
       "Bash(pwsh -NoProfile -File scripts/build-settings-winui.ps1)",
       "Bash(pwsh -NoProfile -File \"d:\\\\home\\\\source\\\\rust\\\\rakukan\\\\scripts\\\\build-settings-winui.ps1\")",
       "Bash(git check-ignore *)",
-      "Bash(pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''__TRACKED_VAR__'\\\\'', [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -gt 0\\) { '\\\\''FAIL: '\\\\'' + \\($errors.Count\\) + '\\\\'' errors'\\\\'' } else { '\\\\''OK'\\\\'' }')"
+      "Bash(pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''__TRACKED_VAR__'\\\\'', [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -gt 0\\) { '\\\\''FAIL: '\\\\'' + \\($errors.Count\\) + '\\\\'' errors'\\\\'' } else { '\\\\''OK'\\\\'' }')",
+      "Bash(pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''scripts/sign-artifacts.ps1'\\\\'', [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -gt 0\\) { $errors | ForEach-Object { $_.ToString\\(\\) }; '\\\\''FAIL'\\\\'' } else { '\\\\''Parse OK'\\\\'' }')",
+      "Bash(pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''scripts/install.ps1'\\\\'', [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -gt 0\\) { $errors | ForEach-Object { $_.ToString\\(\\) }; '\\\\''FAIL'\\\\'' } else { '\\\\''Parse OK'\\\\'' }')",
+      "Bash(git check-attr *)",
+      "Bash(pwsh -NoProfile -Command ' *)",
+      "Bash(pwsh -NoProfile -Command '$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile\\('\\\\''__TRACKED_VAR__'\\\\'', [ref]$tokens, [ref]$errors\\) | Out-Null; if \\($errors.Count -gt 0\\) { '\\\\''FAIL: '\\\\'' + $errors.Count + '\\\\'' errors'\\\\'' } else { '\\\\''OK'\\\\'' }')"
     ],
     "additionalDirectories": [
       "\\tmp"
