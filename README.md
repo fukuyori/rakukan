@@ -22,7 +22,11 @@ Windows 向け日本語 IME。
 
 ## 0.6.2 変更点
 
-- バージョン番号を `0.6.2` に更新
+- **`gpu_backend = "auto"` サポート**: インストール済みの `rakukan_engine_*.dll` を `cuda` → `vulkan` → `cpu` の順で自動選択。デフォルトで有効
+- **モデル variant `f16` 追加**: `jinen-v1-xsmall-f16` / `jinen-v1-small-f16`（量子化なし FP16、高精度・大容量）を追加
+- **設定デフォルト値を整理**: `log_level = "info"`、`n_gpu_layers = 16`、`main_gpu = 0`、`model_variant = "jinen-v1-xsmall-q5"` を有効化。`dump_active_config = false` に変更
+- **WinUI 設定のモデル選択 UI 改善**: ドロップダウンに各 variant のファイルサイズを併記（例: `jinen-v1-xsmall-q5 (約 30 MB)`）
+- **モデル登録ツール `scripts/refresh-models.ps1`**: HuggingFace 公開中の `.gguf` を走査して `models.toml` 未登録分を検出、`-Apply` で自動追記
 
 ## 0.6.1 変更点
 

@@ -5,9 +5,23 @@
 
 ## [0.6.2] - 2026-04-20
 
+### Added
+
+- **`gpu_backend = "auto"` サポート** — `config.toml` で `"auto"` を明示できるように（従来はキー未指定時のみ自動検出）。実行時にインストール済みの `rakukan_engine_*.dll` を `cuda` → `vulkan` → `cpu` の順で探索して選択する
+- **モデル variant `f16` 追加** — `jinen-v1-xsmall-f16` / `jinen-v1-small-f16`（量子化なし FP16、高精度・大容量）を `models.toml` / `install.ps1 $modelMap` / WinUI ComboBox に追加
+- **`scripts/refresh-models.ps1`** — HuggingFace API で公開中の `.gguf` を走査し、`models.toml` 未登録分を検出する開発用ツール。`-Apply` で `models.toml` 末尾に自動追記可能
+- **WinUI 設定のモデル選択 UI** — TextBox → 編集可能 ComboBox に変更。ドロップダウンにファイルサイズを併記（例: `jinen-v1-xsmall-q5 (約 30 MB)`）。Tag/Content 分離で config.toml には variant ID のみ書き出す
+
 ### Changed
 
-- バージョン番号を `0.6.2` に更新
+- **設定デフォルト値を 3 config テンプレートで統一**
+  - `log_level = "info"`（テンプレート内の `"debug"` を修正し、Rust 側の構造体デフォルトと一致）
+  - `gpu_backend = "auto"` を有効化（旧: コメントアウト）
+  - `n_gpu_layers = 16` / `main_gpu = 0` / `model_variant = "jinen-v1-xsmall-q5"` を有効化（旧: コメントアウト）
+  - `dump_active_config = false`（旧: `true`、通常運用では不要なため）
+- **`config.toml` の `model_variant` コメント拡充** — 4 variant それぞれのサイズ・用途を併記（約 30 / 84 / 138 / 423 MB）
+- **WinUI 設定: `gpu_backend = "auto"` を文字列として保存** — Win32 設定と挙動を統一（旧仕様では `"auto"` 選択時にキー自体を削除していた）
+- **WinUI 設定: `log_level` 未設定時のフォールバックを `"info"` に** — Rust 側デフォルトと一致
 
 ## [0.6.1] - 2026-04-19
 
