@@ -54,4 +54,4 @@ if (Test-Path $regFile) {
 }
 
 Write-Host ""
-Write-Host "Cleanup complete. Now run: cargo make install" -ForegroundColor Green
+Write-Host "Cleanup complete. Now run: cargo make full-install" -ForegroundColor Green

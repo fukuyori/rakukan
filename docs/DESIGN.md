@@ -766,18 +766,20 @@ BG 初期化が完了するまで（辞書・モデルの両方が `ready`）、
 
 ## 14. ビルド・開発フロー
 
-### 通常の開発ビルド（TSF のみ変更）
+### 4 ステップに分離された標準フロー
 
 ```powershell
-cargo make build-tsf    # TSF DLL のみビルド + インストール
-cargo make reinstall    # 再インストール（ビルドなし）
+cargo make build-engine   # ① engine DLL (cpu/vulkan/cuda) ビルド
+cargo make build-tsf      # ② tsf/tray/host/dict-builder/WinUI ビルド
+cargo make sign           # ③ ビルド成果物に電子署名 (任意)
+cargo make install        # ④ コピー + TSF 登録 + tray 起動 (★管理者)
 ```
 
-### エンジン DLL の変更を含む場合
+### まとめ実行
 
 ```powershell
-cargo make build-engine  # エンジン DLL ビルド（CUDA/Vulkan 含む）
-cargo make reinstall
+cargo make full-install    # ①〜④ を一括 (リリース向け)
+cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名なし、開発用)
 ```
 
 ### ログ確認

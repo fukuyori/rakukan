@@ -43,7 +43,7 @@ Windows 向け日本語 IME。
 - **数字入力の半角/全角設定**: `config.toml` の `[input] digit_width = "halfwidth"` で制御（デフォルト: 半角）
 - **vibrato / SplitPreedit の完全削除**: 形態素解析ベースの分節分割を廃止し、reading 文字位置ベースの範囲指定に置換
 
-> 0.5.0 では engine ABI が v7 に更新されています。`cargo make build-engine && cargo make reinstall` で全コンポーネントを更新してください。
+> 0.5.0 では engine ABI が v7 に更新されています。`cargo make full-install` で全コンポーネントを更新してください。
 
 ## 0.4.4 変更点
 
@@ -59,16 +59,34 @@ Windows 向け日本語 IME。
 
 ## インストール
 
+ビルド → 署名 → インストールを **4 ステップ** に分離しています:
+
 ```powershell
 # 初回: esaxx-rs パッチのセットアップ
 cargo fetch
 .\scripts\setup-esaxx-patch.ps1
 
-# engine に変更がある場合
+# ① engine DLL をビルド (cpu/vulkan/cuda)
 cargo make build-engine
 
-# TSF/engine をインストール先へ反映
-cargo make reinstall
+# ② tsf + tray + host + dict-builder + WinUI settings をビルド
+cargo make build-tsf
+
+# ③ 電子署名 (任意; 配布用)
+cargo make sign
+
+# ④ %LOCALAPPDATA%\rakukan\ にコピー + TSF 登録 + tray 起動 (★管理者権限)
+cargo make install
+```
+
+まとめ実行:
+
+```powershell
+# ①〜④ を一括 (リリース向け)
+cargo make full-install
+
+# 開発時の高速再インストール (engine 使いまわし、署名なし)
+cargo make quick-install
 ```
 
 インストール先: `%LOCALAPPDATA%\rakukan\`  
@@ -78,7 +96,7 @@ cargo make reinstall
 - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
 - エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
 
-> `cargo make build-tsf` はビルドのみです。実機確認には `cargo make reinstall` を使ってください。
+> 各ステップはそれぞれ独立に実行できます。ビルド (`build-engine` / `build-tsf`) は管理者不要、`install` のみ管理者権限が必要です。
 
 ## 設定の目安
 
@@ -115,8 +133,8 @@ cargo make reinstall
 
 ## 開発メモ
 
-- TSF 層だけの変更確認: `cargo make build-tsf`
-- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make reinstall`
+- TSF 層だけの変更確認: `cargo make quick-install` (= `build-tsf` + `install`)
+- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make quick-install`
 - 同梱 Vibrato 辞書: `assets/vibrato/system.dic`
 - 生成ログ確認:
 

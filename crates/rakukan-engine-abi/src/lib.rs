@@ -170,13 +170,13 @@ impl EngineVTable {
             load_sym_opt!(lib, b"engine_abi_version\0");
         let Some(abi_version) = abi_version else {
             bail!(
-                "installed engine DLL is outdated: missing engine_abi_version; run `cargo make build-engine` and `cargo make reinstall`"
+                "installed engine DLL is outdated: missing engine_abi_version; run `cargo make full-install`"
             );
         };
         let actual = unsafe { abi_version() };
         if actual != EXPECTED_ENGINE_ABI_VERSION {
             bail!(
-                "installed engine DLL ABI mismatch: expected {}, got {}; run `cargo make build-engine` and `cargo make reinstall`",
+                "installed engine DLL ABI mismatch: expected {}, got {}; run `cargo make full-install`",
                 EXPECTED_ENGINE_ABI_VERSION,
                 actual
             );

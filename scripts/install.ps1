@@ -1,25 +1,35 @@
-# scripts\install.ps1 - rakukan installer (robust)
-# Run from an elevated (Administrator) PowerShell:
+# scripts\install.ps1 - rakukan インストール (コピー + 登録 + tray 起動)
+#
+# ★ このスクリプトはビルドを行いません。
+#    先に以下を実行してビルド成果物を用意してください:
+#      cargo make build-engine
+#      cargo make build-tsf
+#      cargo make sign         (署名が必要な場合)
+#
+# ★ 管理者権限 (elevated PowerShell) で実行してください。
+#
+# 使い方:
 #   cargo make install
+#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Profile release|debug]
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
-    [switch]$SkipEngine,  # engine DLL ????????????tsf / tray / dict-builder ???????
-    [switch]$BuildOnly    # build only, skip install
+    [string]$BuildDir = "C:\rb"
 )
 
 $ErrorActionPreference = "Stop"
 $ProgressPreference = "SilentlyContinue"
 
 # --- Log file setup ---
-# stdout + stderr are both captured via Start-Transcript.
-# Each run creates a timestamped log in %TEMP%.
 $LogFile  = Join-Path (Get-Location).Path "rakukan_install.log"
 Start-Transcript -Path $LogFile -Force | Out-Null
-$global:TRANSCRIPT_STARTED = $true   # prevents build-engine.ps1 from starting its own transcript
 Write-Host "Log: $LogFile"
 
 Set-Location (Split-Path $PSScriptRoot)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Helpers
+# ─────────────────────────────────────────────────────────────────────────────
 
 function Assert-NotEmpty([string]$name, [string]$value) {
     if ([string]::IsNullOrWhiteSpace($value)) { throw "$name is empty" }
@@ -39,9 +49,8 @@ function Stop-ProcSilent([string]$name) {
 
 function Invoke-Regsvr32Strict([string]$DllPath) {
     Assert-NotEmpty "DllPath" $DllPath
-
-    $regsvr64 = Join-Path $env:WINDIR "System32\regsvr32.exe"   # 64-bit
-    $regsvr32 = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"  # 32-bit
+    $regsvr64 = Join-Path $env:WINDIR "System32\regsvr32.exe"
+    $regsvr32 = Join-Path $env:WINDIR "SysWOW64\regsvr32.exe"
 
     $p = Start-Process -FilePath $regsvr64 -ArgumentList "/s `"$DllPath`"" -Wait -PassThru
     if ($p.ExitCode -eq 0) { return "x64" }
@@ -74,212 +83,91 @@ function Assert-ComRegistered([string]$DllPath) {
 function Setup-RunTray([string]$TrayExe) {
     if ([string]::IsNullOrWhiteSpace($TrayExe)) { return }
     if (-not (Test-Path -LiteralPath $TrayExe)) { return }
-
     $runKey  = "HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
     $trayCmd = "`"$TrayExe`""
     & reg.exe ADD $runKey /v "rakukan-tray" /t REG_SZ /d $trayCmd /f | Out-Null
 }
 
 function Promote-TrayIcon() {
-    # Best-effort: ask Windows to show the tray icon in the main area (not overflow).
-    # This is a per-user setting keyed by the NOTIFYICON GUID (must match rakukan-tray TRAY_GUID).
     try {
         $trayGuid = "{9C8B5A79-9F7F-4D6A-BF87-2E50B5D7A2C1}"
         $key = "HKCU\Software\Classes\Local Settings\Software\Microsoft\Windows\CurrentVersion\TrayNotify\NotifyIconSettings\$trayGuid"
         & reg.exe ADD $key /v "IsPromoted" /t REG_DWORD /d 1 /f | Out-Null
-    } catch {
-        # ignore
-    }
+    } catch {}
 }
 
-# --- Administrator check (skipped for -BuildOnly) ---
-$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+# ─────────────────────────────────────────────────────────────────────────────
+# Admin / folder setup
+# ─────────────────────────────────────────────────────────────────────────────
 
-# --- Folders (do NOT assume env vars exist) ---
+$isAdmin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+if (-not $isAdmin) { throw "Administrator privileges are required." }
+
 $local = Get-KnownFolderSafe ([Environment+SpecialFolder]::LocalApplicationData)
 if (-not $local) { $local = $env:LOCALAPPDATA }
 if (-not $local) { $local = Join-Path $HOME "AppData\Local" }
 Assert-NotEmpty "LocalAppData" $local
 
-$roaming = Get-KnownFolderSafe ([Environment+SpecialFolder]::ApplicationData)
-
-$buildDir   = "C:\rb"  # Short path to avoid Windows MAX_PATH (260) overflow in deep CMake builds
-$installDir = Join-Path $local "rakukan"
-$regFile    = Join-Path $installDir "registered.txt"
-$trayExe    = Join-Path $installDir "rakukan-tray.exe"
+$installDir  = Join-Path $local "rakukan"
+$regFile     = Join-Path $installDir "registered.txt"
+$trayExe     = Join-Path $installDir "rakukan-tray.exe"
 $settingsDir = Join-Path $installDir "settings-ui"
-$settingsExe = Join-Path $settingsDir "rakukan-settings.exe"
 
-# --- 0/4 Backend (best-effort; never fail install) ---
-$configToml = $null
-if ($roaming) {
-    $configToml = Join-Path $roaming "rakukan\config.toml"
+$profileDir     = if ($Profile -eq "release") { "release" } else { "debug" }
+$cfgName        = if ($Profile -eq "release") { "Release" } else { "Debug" }
+$srcDll         = Join-Path $BuildDir "$profileDir\rakukan_tsf.dll"
+$srcTray        = Join-Path $BuildDir "$profileDir\rakukan-tray.exe"
+$srcHost        = Join-Path $BuildDir "$profileDir\rakukan-engine-host.exe"
+$srcBuilder     = Join-Path $BuildDir "$profileDir\rakukan-dict-builder.exe"
+$srcSettingsDir = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\$cfgName\net8.0-windows10.0.19041.0\win-x64"
+$engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
+    $p = Join-Path $BuildDir "$profileDir\rakukan_engine_$_.dll"
+    if (Test-Path $p) { $p } else { $null }
+} | Where-Object { $_ }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Pre-flight: required build outputs
+# ─────────────────────────────────────────────────────────────────────────────
+
+if (-not (Test-Path -LiteralPath $srcDll)) {
+    throw "[install] $srcDll not found. Run 'cargo make build-tsf' first."
 }
 
-$gpuBackend = $null
-if ($configToml -and (Test-Path -LiteralPath $configToml)) {
-    try {
-        foreach ($line in Get-Content -LiteralPath $configToml) {
-            if ($line -match '^\s*gpu_backend\s*=\s*"([^"]+)"') {
-                $gpuBackend = $Matches[1].ToLower()
-                break
-            }
-        }
-    } catch { }
-}
-
-if ($gpuBackend -in @("cuda", "vulkan", "cpu")) {
-    Write-Host "[0/4] Using config.toml backend: $gpuBackend"
-} else {
-    if ($gpuBackend -eq "auto") {
-        Write-Host "[0/4] gpu_backend = `"auto`" in config.toml -> running detect-gpu.ps1"
-    } else {
-        Write-Host "[0/4] gpu_backend not set in config.toml -> running detect-gpu.ps1"
+if ($engineDlls.Count -eq 0) {
+    # engine DLL がビルド出力になくても、既存インストール先にあれば使いまわす。
+    # どちらも無ければ Activate() が失敗するのでエラー停止。
+    $existingCpuDll = Join-Path $installDir "rakukan_engine_cpu.dll"
+    if (-not (Test-Path -LiteralPath $existingCpuDll)) {
+        throw "[install] rakukan_engine_cpu.dll not found in $BuildDir\$profileDir\ nor in $installDir\. Run 'cargo make build-engine' first."
     }
-    $gpuBackend = "cpu"
-    try {
-        $detected = & "$PSScriptRoot\detect-gpu.ps1" -SaveResult
-        if ($detected -and ($detected.Trim().ToLower() -in @("cuda","vulkan","cpu"))) {
-            $gpuBackend = $detected.Trim().ToLower()
-        }
-    } catch { }
-}
-Write-Host "[0/4] Cargo GPU features: (all backends built by build-engine.ps1)"
-
-# --- 0.5/6 Clean stale CMake cache for llama-cpp-sys-2 (only on backend change) ---
-# The cmake crate skips reconfiguration if the build dir exists.
-# If the GPU backend changed (e.g. cpu -> cuda), the stale cache causes
-# MSB1009 "install.vcxproj not found". We track the last-built backend in
-# a stamp file and only wipe the cache when it changes.
-$lastBackendFile = "C:\rb\last_gpu_backend.txt"
-$lastBackend = if (Test-Path $lastBackendFile) {
-    (Get-Content $lastBackendFile -ErrorAction SilentlyContinue) -replace '\s',''
-} else { "" }
-
-if ($lastBackend -ne $gpuBackend) {
-    Write-Host "[0.5/6] GPU backend changed ($lastBackend -> $gpuBackend): clearing llama-cpp-sys-2 build cache"
-    $llamaBuildGlob = "C:\rb\release\build\llama-cpp-sys-2-*"
-    Get-Item $llamaBuildGlob -ErrorAction SilentlyContinue | ForEach-Object {
-        Write-Host "  Removing: $($_.FullName)"
-        Remove-Item $_.FullName -Recurse -Force
-    }
-    # Update stamp file
-    New-Item -ItemType Directory -Force -Path (Split-Path $lastBackendFile) | Out-Null
-    $gpuBackend | Set-Content -LiteralPath $lastBackendFile -NoNewline
-} else {
-    Write-Host "[0.5/6] GPU backend unchanged ($gpuBackend): skipping cache wipe (incremental build)"
+    Write-Host "[install] [WARN] Engine DLL not rebuilt; reusing existing: $existingCpuDll"
 }
 
-# --- 1/6 Build engine DLLs (cpu / vulkan / cuda) ---
-if ($SkipEngine) {
-    Write-Host "[1/6] Skipping engine DLL build (-SkipEngine)"
-    # Remove rakukan-engine-abi cache directly (cargo clean is unreliable with multiple target dirs).
-    $prev = $ErrorActionPreference; $ErrorActionPreference = "Continue"
-    foreach ($root in @($buildDir, "target")) {
-        Get-ChildItem $root -Recurse -Directory -Filter "rakukan_engine_abi-*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Recurse -Force -ErrorAction SilentlyContinue }
-        Get-ChildItem "$root" -Recurse -Filter "librakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-        Get-ChildItem "$root" -Recurse -Filter "rakukan_engine_abi*" -ErrorAction SilentlyContinue |
-            ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
-    }
-    $ErrorActionPreference = $prev
-} else {
-    Write-Host "[1/6] Building rakukan-engine DLLs..."
-    & "$PSScriptRoot\build-engine.ps1" -Profile $Profile -BuildDir $buildDir
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
+# ─────────────────────────────────────────────────────────────────────────────
+# [1/5] Copy to LocalAppData
+# ─────────────────────────────────────────────────────────────────────────────
 
-# Build helper (tsf / tray / dict-builder)
-function Invoke-CargoBuild {
-    param([string]$Package, [string]$Profile, [string]$Features = "")
-    $args_list = @("build", "-p", $Package)
-    if ($Profile -eq "release") { $args_list += "--release" }
-    if ($Features)              { $args_list += "--features=$Features" }
-    $prev = $ErrorActionPreference
-    $ErrorActionPreference = "Continue"
-    & cargo @args_list 2>&1 | ForEach-Object {
-        if ($_ -is [System.Management.Automation.ErrorRecord]) {
-            Write-Host $_.Exception.Message
-        } else {
-            Write-Host $_
-        }
-    }
-    $ErrorActionPreference = $prev
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-}
-
-$env:CARGO_TARGET_DIR = $buildDir
-$profileDir = if ($Profile -eq "release") { "release" } else { "debug" }
-
-# rakukan-tsf does NOT depend on rakukan-engine features (uses DynEngine loader)
-if ($Profile -eq "release") {
-    Invoke-CargoBuild -Package "rakukan-tsf"          -Profile "release"
-    Invoke-CargoBuild -Package "rakukan-tray"         -Profile "release"
-    Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "release"
-    Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "release"
-    & "$PSScriptRoot\build-settings-winui.ps1" -Configuration "Release"
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $srcDll     = Join-Path $buildDir "release\rakukan_tsf.dll"
-    $srcTray    = Join-Path $buildDir "release\rakukan-tray.exe"
-    $srcHost    = Join-Path $buildDir "release\rakukan-engine-host.exe"
-    $srcBuilder = Join-Path $buildDir "release\rakukan-dict-builder.exe"
-    $srcSettingsDir = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\Release\net8.0-windows10.0.19041.0\win-x64"
-    $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
-        $p = Join-Path $buildDir "release\rakukan_engine_$_.dll"
-        if (Test-Path $p) { $p } else { $null }
-    } | Where-Object { $_ }
-} else {
-    Invoke-CargoBuild -Package "rakukan-tsf"          -Profile "debug"
-    Invoke-CargoBuild -Package "rakukan-tray"         -Profile "debug"
-    Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile "debug"
-    Invoke-CargoBuild -Package "rakukan-dict-builder"  -Profile "debug"
-    & "$PSScriptRoot\build-settings-winui.ps1" -Configuration "Debug"
-    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-    $srcDll     = Join-Path $buildDir "debug\rakukan_tsf.dll"
-    $srcTray    = Join-Path $buildDir "debug\rakukan-tray.exe"
-    $srcHost    = Join-Path $buildDir "debug\rakukan-engine-host.exe"
-    $srcBuilder = Join-Path $buildDir "debug\rakukan-dict-builder.exe"
-    $srcSettingsDir = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\Debug\net8.0-windows10.0.19041.0\win-x64"
-    $engineDlls = @("cpu","vulkan","cuda") | ForEach-Object {
-        $p = Join-Path $buildDir "debug\rakukan_engine_$_.dll"
-        if (Test-Path $p) { $p } else { $null }
-    } | Where-Object { $_ }
-}
-
-$env:CARGO_TARGET_DIR = $null
-if (-not (Test-Path -LiteralPath $srcDll)) { throw "Build output not found: $srcDll" }
-
-if ($BuildOnly) {
-    Write-Host "[build-only] Build complete. Skipping install (-BuildOnly)."
-    Stop-Transcript | Out-Null
-    Write-Host "Log saved: $LogFile"
-    exit 0
-}
-
-# Admin required for install/register
-if (-not $isAdmin) { throw "Administrator privileges are required." }
-
-# --- 2/6 Install (copy to LocalAppData) ---
-Write-Host "[2/6] Installing..."
+Write-Host "[1/5] Installing to $installDir ..."
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
-# Unregister old DLL first so TSF releases the engine DLLs it holds
+# Unregister old DLL to release engine DLL file locks
 if (Test-Path -LiteralPath $regFile) {
     $oldDllEarly = Get-Content -LiteralPath $regFile -ErrorAction SilentlyContinue
     if ($oldDllEarly) { Invoke-Regsvr32UnregisterBestEffort $oldDllEarly }
 }
-# Stop IME processes after unregister to release DLL file locks
 Stop-ProcSilent "rakukan-tray"
+Stop-ProcSilent "rakukan-engine-host"
+Stop-ProcSilent "rakukan-settings"
 Stop-ProcSilent "ctfmon"
 Stop-ProcSilent "TextInputHost"
 Start-Sleep -Milliseconds 1200
 
+# TSF DLL
 $dst = Join-Path $installDir "rakukan_tsf.dll"
 Copy-Item -LiteralPath $srcDll -Destination $dst -Force
 Write-Host "  -> $dst"
 
-# 古いタイムスタンプ付き DLL を削除（rakukan_tsf_YYYYMMDD_HHmmss.dll）
+# 古いタイムスタンプ付き DLL を削除
 Get-ChildItem -Path $installDir -Filter "rakukan_tsf_????????_??????.dll" -ErrorAction SilentlyContinue |
     ForEach-Object {
         try {
@@ -291,70 +179,55 @@ Get-ChildItem -Path $installDir -Filter "rakukan_tsf_????????_??????.dll" -Error
         }
     }
 
-# Copy engine DLLs (rakukan_engine_cpu.dll / _vulkan.dll / _cuda.dll)
-if ($engineDlls.Count -eq 0) {
-    # engine DLL がビルドディレクトリに存在しない場合、インストール先の既存 DLL を確認する。
-    # 既存 DLL もなければ Activate() が失敗して IME が選択不可になるため、エラーで停止する。
-    $existingCpuDll = Join-Path $installDir "rakukan_engine_cpu.dll"
-    if (-not (Test-Path -LiteralPath $existingCpuDll)) {
-        throw "[ERROR] rakukan_engine_cpu.dll not found in build dir ($buildDir\$profileDir) " +
-              "and not already installed. Run 'cargo make build-engine' first."
-    }
-    Write-Host "  [WARN] Engine DLL not rebuilt; using existing: $existingCpuDll"
-} else {
-    foreach ($engineDll in $engineDlls) {
-        $dllName = [IO.Path]::GetFileName($engineDll)
-        $engineDst = Join-Path $installDir $dllName
-        Copy-Item -LiteralPath $engineDll -Destination $engineDst -Force
-        Write-Host "  -> $engineDst"
-    }
+# Engine DLLs
+foreach ($engineDll in $engineDlls) {
+    $dllName = [IO.Path]::GetFileName($engineDll)
+    $engineDst = Join-Path $installDir $dllName
+    Copy-Item -LiteralPath $engineDll -Destination $engineDst -Force
+    Write-Host "  -> $engineDst"
 }
 
+# tray.exe
 if (Test-Path -LiteralPath $srcTray) {
-    Stop-ProcSilent "rakukan-tray"
-    Start-Sleep -Milliseconds 300
     try {
         Copy-Item -LiteralPath $srcTray -Destination $trayExe -Force
     } catch {
-        $tmpTray = "$trayExe.new"
-        Copy-Item -LiteralPath $srcTray -Destination $tmpTray -Force
-        Move-Item -LiteralPath $tmpTray -Destination $trayExe -Force
+        $tmp = "$trayExe.new"
+        Copy-Item -LiteralPath $srcTray -Destination $tmp -Force
+        Move-Item -LiteralPath $tmp -Destination $trayExe -Force
     }
     Write-Host "  -> $trayExe"
 }
 
-if (Test-Path -LiteralPath $srcSettingsDir) {
-    Stop-ProcSilent "rakukan-settings"
-    Start-Sleep -Milliseconds 300
-    Remove-Item -LiteralPath $settingsDir -Recurse -Force -ErrorAction SilentlyContinue
-    New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
-    Copy-Item -Path (Join-Path $srcSettingsDir "*") -Destination $settingsDir -Recurse -Force
-    Write-Host "  -> $settingsDir"
-}
-
-# rakukan-engine-host.exe をインストール（out-of-process エンジンホスト）
+# engine-host.exe
 if (Test-Path -LiteralPath $srcHost) {
     $hostExe = Join-Path $installDir "rakukan-engine-host.exe"
-    Stop-ProcSilent "rakukan-engine-host"
-    Start-Sleep -Milliseconds 300
     try {
         Copy-Item -LiteralPath $srcHost -Destination $hostExe -Force
     } catch {
-        $tmpHost = "$hostExe.new"
-        Copy-Item -LiteralPath $srcHost -Destination $tmpHost -Force
-        Move-Item -LiteralPath $tmpHost -Destination $hostExe -Force
+        $tmp = "$hostExe.new"
+        Copy-Item -LiteralPath $srcHost -Destination $tmp -Force
+        Move-Item -LiteralPath $tmp -Destination $hostExe -Force
     }
     Write-Host "  -> $hostExe"
 }
 
-# Copy rakukan-dict-builder.exe to install dir
+# dict-builder.exe
 if (Test-Path -LiteralPath $srcBuilder) {
     $builderDest = Join-Path $installDir "rakukan-dict-builder.exe"
     Copy-Item -LiteralPath $srcBuilder -Destination $builderDest -Force
     Write-Host "  -> $builderDest"
 }
 
-# Deploy config.toml only on first install (skip if already exists)
+# WinUI settings UI (folder)
+if (Test-Path -LiteralPath $srcSettingsDir) {
+    Remove-Item -LiteralPath $settingsDir -Recurse -Force -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+    Copy-Item -Path (Join-Path $srcSettingsDir "*") -Destination $settingsDir -Recurse -Force
+    Write-Host "  -> $settingsDir"
+}
+
+# config.toml (first install only)
 $configDir  = Join-Path $env:APPDATA "rakukan"
 $configDest = Join-Path $configDir "config.toml"
 $configSrc  = Join-Path $PSScriptRoot "..\config\config.toml"
@@ -368,8 +241,11 @@ if (-not (Test-Path -LiteralPath $configDest)) {
     Write-Host "  -> config.toml already exists, skipping"
 }
 
-# --- 3/6 Unregister old (already done in step 2, repeat best-effort) ---
-Write-Host "[3/6] Unregistering old version..."
+# ─────────────────────────────────────────────────────────────────────────────
+# [2/5] Unregister old / Register new TSF DLL
+# ─────────────────────────────────────────────────────────────────────────────
+
+Write-Host "[2/5] Unregistering old version..."
 if (Test-Path -LiteralPath $regFile) {
     $oldDll = Get-Content -LiteralPath $regFile -ErrorAction SilentlyContinue
     if ($oldDll) { Invoke-Regsvr32UnregisterBestEffort $oldDll }
@@ -378,46 +254,36 @@ Stop-ProcSilent "ctfmon"
 Stop-ProcSilent "TextInputHost"
 Start-Sleep -Milliseconds 400
 
-# --- 4/6 Register new (and verify COM) ---
-Write-Host "[4/6] Registering..."
+Write-Host "[3/5] Registering new TSF DLL..."
 $arch = Invoke-Regsvr32Strict $dst
 Assert-ComRegistered $dst
-Write-Host "Registered ($arch): $dst"
-
+Write-Host "  Registered ($arch): $dst"
 $dst | Set-Content -LiteralPath $regFile
-# --- Some Windows 11 setups only surface TIPs in Settings when HKCU also contains the TIP keys.
-#     Mirror the HKLM TIP registration into HKCU (best-effort).
-try {
-    $dllPathForFind = $dst
 
-    $hit = (reg.exe query "HKCR\CLSID" /s /f $dllPathForFind 2>$null |
+# HKCU TIP mirror (Windows 11 Settings 表示対応)
+try {
+    $hit = (reg.exe query "HKCR\CLSID" /s /f $dst 2>$null |
         Select-String -Pattern 'HKEY_CLASSES_ROOT\\CLSID\\\{[0-9A-Fa-f-]+\}\\InProcServer32' |
         Select-Object -First 1)
-
     if ($hit) {
         $clsid = ($hit.ToString() -replace '.*\\CLSID\\(\{[0-9A-Fa-f-]+\})\\InProcServer32','$1')
         reg.exe COPY "HKLM\Software\Microsoft\CTF\TIP\$clsid" "HKCU\Software\Microsoft\CTF\TIP\$clsid" /s /f | Out-Null
     }
-} catch {
-    # best-effort; ignore
-}
+} catch {}
 
-
-# restart ctfmon
 Start-Process ctfmon | Out-Null
 
-# --- 5/6 Dictionary setup ---
-Write-Host "[5/6] Setting up dictionaries..."
-Write-Host ""
+# ─────────────────────────────────────────────────────────────────────────────
+# [4/5] Dictionary & LLM model setup
+# ─────────────────────────────────────────────────────────────────────────────
 
+Write-Host "[4/5] Setting up dictionaries..."
 $dictDir   = Join-Path $env:LOCALAPPDATA "rakukan\dict"
 New-Item -ItemType Directory -Force -Path $dictDir | Out-Null
 $forceDict = $env:RAKUKAN_FORCE_DICT -eq "1"
 
-# --- 5a: mozc dictionary (Apache 2.0) ---
-Write-Host "  [5a] mozc dictionary (Apache 2.0)..."
-Write-Host "  Source: https://github.com/google/mozc"
-
+# mozc dictionary (Apache 2.0)
+Write-Host "  [4a] mozc dictionary (Apache 2.0)..."
 $mozcDictOut    = Join-Path $dictDir "rakukan.dict"
 $mozcTsvDir     = Join-Path $dictDir "mozc_tsv"
 $dictBuilderExe = Join-Path $installDir "rakukan-dict-builder.exe"
@@ -442,7 +308,6 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
     Write-Host "     (To rebuild, set RAKUKAN_FORCE_DICT=1 and re-run)"
 } elseif (-not (Test-Path -LiteralPath $dictBuilderExe)) {
     Write-Host "  [WARNING] rakukan-dict-builder.exe not found, skipping mozc dict."
-    Write-Host "  rakukan.dict will not be built."
 } else {
     New-Item -ItemType Directory -Force -Path $mozcTsvDir | Out-Null
     $downloadedTsvs = [System.Collections.Generic.List[string]]::new()
@@ -459,21 +324,17 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
                 Write-Host ("    Downloaded: " + $tsv)
             } catch {
                 $tmpPath = $tsvPath + ".tmp"
-                if (Test-Path -LiteralPath $tmpPath) {
-                    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
-                }
+                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
                 Write-Host ("    [WARNING] Failed: " + $tsv + " - " + $_)
             }
         }
-        if (Test-Path -LiteralPath $tsvPath) {
-            $downloadedTsvs.Add($tsvPath)
-        }
+        if (Test-Path -LiteralPath $tsvPath) { $downloadedTsvs.Add($tsvPath) }
     }
 
     if ($downloadedTsvs.Count -eq 0) {
         Write-Host "  [WARNING] No mozc TSV files downloaded. rakukan.dict will not be built."
     } else {
-        # Download symbol.tsv (Apache 2.0)
+        # symbol.tsv (Apache 2.0)
         $symbolTsvPath = Join-Path $mozcTsvDir "symbol.tsv"
         $symbolUrl     = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/symbol/symbol.tsv"
         if ((-not (Test-Path -LiteralPath $symbolTsvPath)) -or $forceDict) {
@@ -484,9 +345,7 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
                 Write-Host "    Downloaded: symbol.tsv"
             } catch {
                 $tmpPath = $symbolTsvPath + ".tmp"
-                if (Test-Path -LiteralPath $tmpPath) {
-                    Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue
-                }
+                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
                 Write-Host ("    [WARNING] Failed to download symbol.tsv: " + $_)
             }
         }
@@ -518,15 +377,14 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
     }
 }
 
-
-# --- 5c: LLM model pre-download ---
+# LLM model pre-download
 Write-Host ""
-Write-Host "  [5c] LLM model pre-download..."
+Write-Host "  [4b] LLM model pre-download..."
 
-$configToml   = Join-Path $env:APPDATA "rakukan\config.toml"
-$modelVariant = $null
-if (Test-Path -LiteralPath $configToml) {
-    foreach ($line in (Get-Content $configToml -Encoding UTF8)) {
+$userConfigToml = Join-Path $env:APPDATA "rakukan\config.toml"
+$modelVariant   = $null
+if (Test-Path -LiteralPath $userConfigToml) {
+    foreach ($line in (Get-Content $userConfigToml -Encoding UTF8)) {
         $line = $line.Trim()
         if ($line.StartsWith('#')) { continue }
         if ($line -match '^model_variant\s*=\s*"([^"]+)"') {
@@ -538,9 +396,7 @@ if (Test-Path -LiteralPath $configToml) {
 
 if (-not $modelVariant) {
     Write-Host "  model_variant not set in config.toml - skipping model download."
-    Write-Host "  To enable LLM conversion, add model_variant to config.toml."
 } else {
-    # Map variant id to repo and filename
     # 注: この表は crates/rakukan-engine/models.toml と同期が必要
     # (scripts/refresh-models.ps1 で最新の variant を検出できる)
     $modelMap = @{
@@ -581,14 +437,17 @@ if (-not $modelVariant) {
     }
 }
 
-# --- 6/6 Tray setup ---
-Write-Host "[6/6] Setting up tray icon..."
+# ─────────────────────────────────────────────────────────────────────────────
+# [5/5] Tray
+# ─────────────────────────────────────────────────────────────────────────────
+
+Write-Host "[5/5] Setting up tray icon..."
 if (Test-Path -LiteralPath $trayExe) {
     Stop-ProcSilent "rakukan-tray"
     Setup-RunTray $trayExe
     Promote-TrayIcon
     Start-Process -FilePath $trayExe | Out-Null
-    Write-Host "Tray started."
+    Write-Host "  Tray started."
 }
 
 Write-Host ""

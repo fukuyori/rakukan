@@ -1,56 +1,69 @@
 # Makefile.toml - rakukan build tasks
 # cargo make <task>
 #
-# 主要タスク:
-#   install         フルビルド（engine + tsf/tray）& インストール  ★管理者必要
-#   build-engine    engine DLL のみビルド（cpu/vulkan/cuda）        管理者不要
-#   reinstall       engine 以外ビルド（tsf/tray）& インストール     ★管理者必要
+# 標準のビルド & インストールフロー (4 ステップ):
+#   1. cargo make build-engine   engine DLL (cpu/vulkan/cuda) をビルド
+#   2. cargo make build-tsf      tsf/tray/host/dict-builder/WinUI をビルド
+#   3. cargo make sign           ビルド成果物に電子署名 (任意)
+#   4. cargo make install        %LOCALAPPDATA%\rakukan\ にコピー + 登録 + tray 起動  ★管理者必要
+#
+# まとめて実行したい場合:
+#   cargo make full-install      上記 1〜4 を順に実行
+#   cargo make quick-install     build-tsf + install (engine 使いまわし、署名なし、開発時の高速再インストール用)
 #
 # その他:
-#   uninstall       登録解除                                        ★管理者必要
-#   check           型チェック（高速）
-#   test            エンジン単体テスト
+#   cargo make uninstall          登録解除                                          ★管理者必要
+#   cargo make build-engine-full  engine DLL フルクリーンビルド (llama CUDA キャッシュも削除、低速)
+#   cargo make check              型チェック (高速)
+#   cargo make test               エンジン単体テスト
 
 [config]
 default_to_workspace = false
 
 # ─────────────────────────────────────────────────────────────────────────────
-# 主要3タスク
+# コア 4 タスク (ビルド → 署名 → インストール)
 # ─────────────────────────────────────────────────────────────────────────────
 
-[tasks.install]
-description = "ビルド（tsf/tray のみ）& インストール ★管理者必要"
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine"]
-
-[tasks.install-full]
-description = "フルビルド（engine + tsf/tray）& インストール ★管理者必要"
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
-
 [tasks.build-engine]
-description = "engine DLL のみビルド（高速: llamaキャッシュ維持、ABI変更対応済み）管理者不要"
+description = "① engine DLL (cpu/vulkan/cuda) をビルド"
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release"]
 
-[tasks.build-engine-full]
-description = "engine DLL フルクリーンビルド（llama CUDA キャッシュも削除、低速）管理者不要"
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release", "-FullClean"]
-
-[tasks.reinstall]
-description = "engine 以外ビルド（tsf/tray）& インストール ★管理者必要"
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine"]
-
 [tasks.build-tsf]
-description = "engine 以外ビルドのみ（tsf/tray）インストールなし 管理者不要"
+description = "② tsf + tray + host + dict-builder + WinUI settings をビルド"
 command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-SkipEngine", "-BuildOnly"]
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-tsf.ps1", "-Profile", "release"]
+
+[tasks.sign]
+description = "③ ビルド成果物に電子署名 (signtool, 任意)"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\sign-artifacts.ps1", "-Profile", "release"]
+
+[tasks.install]
+description = "④ %LOCALAPPDATA%\\rakukan\\ にコピー + TSF 登録 + tray 起動 ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
+
+# ─────────────────────────────────────────────────────────────────────────────
+# まとめ実行
+# ─────────────────────────────────────────────────────────────────────────────
+
+[tasks.full-install]
+description = "build-engine + build-tsf + sign + install を一括実行 (リリース向け)"
+dependencies = ["build-engine", "build-tsf", "sign", "install"]
+
+[tasks.quick-install]
+description = "build-tsf + install のみ (engine 使いまわし、署名なし、開発用)"
+dependencies = ["build-tsf", "install"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # その他
 # ─────────────────────────────────────────────────────────────────────────────
+
+[tasks.build-engine-full]
+description = "engine DLL フルクリーンビルド (llama CUDA キャッシュも削除、低速)"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release", "-FullClean"]
 
 [tasks.uninstall]
 description = "登録解除 ★管理者必要"
@@ -58,7 +71,7 @@ command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\uninstall.ps1"]
 
 [tasks.check]
-description = "型チェックのみ（高速）"
+description = "型チェックのみ (高速)"
 command = "cargo"
 args = ["check", "-p", "rakukan-tsf"]
 
@@ -68,4 +81,4 @@ command = "cargo"
 args = ["test", "-p", "rakukan-engine", "--", "--nocapture"]
 
 [tasks.default]
-alias = "install"
+alias = "quick-install"
