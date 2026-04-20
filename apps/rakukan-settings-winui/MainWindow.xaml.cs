@@ -115,7 +115,7 @@ public sealed partial class MainWindow : Window
             GpuBackend = NormalizeOptional(SelectedComboValue(GpuBackendCombo), string.Empty),
             NGpuLayers = ParseOptionalUInt(NGpuLayersBox.Value, "GPU レイヤー数"),
             MainGpu = ParseInt(MainGpuBox.Value, "使用 GPU インデックス"),
-            ModelVariant = NormalizeOptional(ModelVariantCombo.Text, string.Empty),
+            ModelVariant = NormalizeOptional(ReadModelVariantFromCombo(), string.Empty),
             NumCandidates = numCandidates,
             KeyboardLayout = SelectedComboValue(KeyboardLayoutCombo),
             ReloadOnModeSwitch = ReloadOnModeSwitchToggle.IsOn,
@@ -183,13 +183,39 @@ public sealed partial class MainWindow : Window
         ApplyKeymapPresetDefaults();
     }
 
-    private void ModelVariantCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    // DispatcherQueue での遅延代入が万が一失敗しても、Text に混入した表示用
+    // サフィックス ("xxx (約 NN MB)") を config.toml に書き出さないよう、
+    // 保存時は必ず SelectedItem.Tag を優先する。Text が Tag のどれとも
+    // マッチしない場合のみ Text を使う (将来の未知 variant を手入力する用途)。
+    private string ReadModelVariantFromCombo()
     {
-        // ComboBoxItem.Content は "xxx (約 NN MB)" の表示用文字列なので、
-        // config.toml には Tag に格納した variant ID だけを書き出す。
         if (ModelVariantCombo.SelectedItem is ComboBoxItem item && item.Tag is string variantId)
         {
-            ModelVariantCombo.Text = variantId;
+            return variantId;
+        }
+
+        var text = ModelVariantCombo.Text ?? string.Empty;
+        foreach (var obj in ModelVariantCombo.Items)
+        {
+            if (obj is ComboBoxItem candidate
+                && candidate.Tag is string tag
+                && string.Equals(text.Trim(), tag, StringComparison.Ordinal))
+            {
+                return tag;
+            }
+        }
+        return text;
+    }
+
+    private void ModelVariantCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        // ComboBoxItem.Content は "xxx (約 NN MB)" の表示用文字列。
+        // IsEditable=True の ComboBox は SelectionChanged の **後** に
+        // Text を Content で上書きするため、ここで即代入すると無効化される。
+        // DispatcherQueue で遅延させ、WinUI の Text 更新後に Tag (variant ID) に置き換える。
+        if (ModelVariantCombo.SelectedItem is ComboBoxItem item && item.Tag is string variantId)
+        {
+            DispatcherQueue.TryEnqueue(() => ModelVariantCombo.Text = variantId);
         }
     }
 
