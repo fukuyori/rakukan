@@ -3,6 +3,12 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.2] - 2026-04-20
+
+### Changed
+
+- バージョン番号を `0.6.2` に更新
+
 ## [0.6.1] - 2026-04-19
 
 ### Added

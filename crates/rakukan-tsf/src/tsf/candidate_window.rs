@@ -81,6 +81,9 @@ thread_local! {
     static TL_LIVE_CTX: RefCell<Option<windows::Win32::UI::TextServices::ITfContext>>
         = RefCell::new(None);
     static TL_LIVE_TID: Cell<u32> = Cell::new(0);
+    /// `TL_LIVE_CTX` を取得した時点の DocumentMgr ptr。
+    /// Explorer などで DM が再生成されたら stale 判定に使う。
+    static TL_LIVE_DM_PTR: Cell<usize> = Cell::new(0);
 
     // ─── [FocusDefer] OnSetFocus 非同期化用 ─────────────────────────────────────
     // msctf._NotifyCallbacks 内で COM を触ると INVALID_POINTER_READ を誘発する
@@ -551,6 +554,42 @@ pub fn clear_thread_mgr() {
     TL_PENDING_FOCUS.with(|q| q.borrow_mut().clear());
 }
 
+fn current_focus_dm_ptr() -> Option<usize> {
+    use windows::core::Interface;
+
+    TL_THREAD_MGR.with(|c| {
+        c.borrow()
+            .as_ref()
+            .and_then(|tm| unsafe { tm.GetFocus().ok() })
+            .map(|dm| dm.as_raw() as usize)
+    })
+}
+
+/// `OnUninitDocumentMgr` から呼ばれる。
+///
+/// msctf コールバック中に COM 参照を drop しないよう、ここでは stale 印を付けるだけに留める。
+/// 実際の fallback / timer 停止は `on_live_timer` 側で安全な文脈で実施する。
+pub fn invalidate_live_context_for_dm(dm_ptr: usize) {
+    if dm_ptr == 0 {
+        return;
+    }
+
+    let matched = TL_LIVE_DM_PTR.with(|c| {
+        if c.get() == dm_ptr {
+            c.set(0);
+            true
+        } else {
+            false
+        }
+    });
+
+    if matched {
+        tracing::debug!(
+            "[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}"
+        );
+    }
+}
+
 /// OnSetFocus から呼ばれる。イベントをキューに積み、WM_APP_FOCUS_CHANGED を
 /// PostMessage して即 return する（msctf._NotifyCallbacks からの再入を避ける）。
 pub fn post_focus_changed(prev_ptr: usize, next_ptr: usize, hwnd_val: usize) {
@@ -834,6 +873,8 @@ pub fn on_waiting_timer() {
 /// `config.live_conversion.enabled = false` の場合は何もしない。
 /// ライブタイマーが既に動いている場合でも SetTimer は内部でリセットされる（同一 ID なら上書き）。
 pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid: u32) {
+    use windows::core::Interface;
+
     // ── config.live_conversion.enabled チェック ─────────────────────────────
     let cfg = crate::engine::config::current_config();
     if !cfg.live_conversion.enabled {
@@ -855,6 +896,13 @@ pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid
         *c.borrow_mut() = Some(ctx.clone());
     });
     TL_LIVE_TID.with(|c| c.set(tid));
+    let live_dm_ptr = unsafe { ctx.GetDocumentMgr().ok() }
+        .map(|dm| dm.as_raw() as usize)
+        .unwrap_or(0);
+    TL_LIVE_DM_PTR.with(|c| c.set(live_dm_ptr));
+    if live_dm_ptr == 0 {
+        tracing::debug!("[Live] live_input_notify: no document manager, Phase1A disabled");
+    }
 
     // HWND が未作成の場合は非表示ウィンドウを先行作成してタイマー用HWNDを確保する
     let hwnd = {
@@ -917,6 +965,8 @@ pub fn stop_live_timer() {
     TL_LIVE_CTX.with(|c| {
         *c.borrow_mut() = None;
     });
+    TL_LIVE_TID.with(|c| c.set(0));
+    TL_LIVE_DM_PTR.with(|c| c.set(0));
     tracing::debug!("[Live] stop_live_timer");
 }
 
@@ -1072,9 +1122,21 @@ pub fn on_live_timer() {
     // ── Phase 1A: RequestEditSession で直接 composition を更新 ───────────
     let ctx_opt = TL_LIVE_CTX.with(|c| c.borrow().clone());
     let tid = TL_LIVE_TID.with(|c| c.get());
+    let live_dm_ptr = TL_LIVE_DM_PTR.with(|c| c.get());
+    let focused_dm_ptr = current_focus_dm_ptr();
+    let dm_matches_focus = live_dm_ptr != 0 && focused_dm_ptr == Some(live_dm_ptr);
 
-    let phase1a_possible =
-        ctx_opt.is_some() && tid > 0 && composition_clone().map(|g| g.is_some()).unwrap_or(false);
+    let phase1a_possible = ctx_opt.is_some()
+        && tid > 0
+        && composition_clone().map(|g| g.is_some()).unwrap_or(false)
+        && dm_matches_focus;
+
+    if ctx_opt.is_some() && tid > 0 && !dm_matches_focus {
+        tracing::debug!(
+            "[Live] Phase1A skipped: stale or unfocused dm cached={live_dm_ptr:#x} focus={:?}",
+            focused_dm_ptr
+        );
+    }
 
     if phase1a_possible {
         let ctx = ctx_opt.unwrap();

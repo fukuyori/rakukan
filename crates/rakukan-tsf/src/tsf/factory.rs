@@ -4394,6 +4394,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
                 dm.as_raw() as usize
             };
             doc_mode_remove(ptr);
+            candidate_window::invalidate_live_context_for_dm(ptr);
             tracing::trace!("OnUninitDocumentMgr: removed dm={ptr:#x}");
         }
         Ok(())

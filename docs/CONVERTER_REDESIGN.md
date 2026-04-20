@@ -2,7 +2,7 @@
 
 バージョン: draft-3
 作成日: 2026-04-13（Phase A 実装済み: 2026-04-16 v0.5.0）
-前提: v0.6.1 時点の rakukan コードベース
+前提: v0.6.2 時点の rakukan コードベース
 関連資料:
 - [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針（Segment 列を正とする）
 - ~~[VIBRATO_PHASE1.md](VIBRATO_PHASE1.md) — vibrato 形態素解析器の導入~~ （v0.5.1 で vibrato 完全削除済み）

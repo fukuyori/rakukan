@@ -17,7 +17,12 @@
       "Bash(git -C d:/home/source/rust/rakukan diff apps/rakukan-settings-winui/ crates/rakukan-engine/src/kanji/backend.rs crates/rakukan-settings/src/main.rs crates/rakukan-tsf/src/engine/config.rs crates/rakukan-tsf/src/engine/state.rs)",
       "Bash(git -C d:/home/source/rust/rakukan log --oneline -15)",
       "Bash(git -C d:/home/source/rust/rakukan stash list)",
-      "Bash(git -C d:/home/source/rust/rakukan reflog -20)"
+      "Bash(git -C d:/home/source/rust/rakukan reflog -20)",
+      "Bash(pwsh -NoProfile -File scripts/refresh-models.ps1 -Apply)",
+      "Bash(dotnet build *)",
+      "Bash(pwsh -NoProfile -File scripts/build-settings-winui.ps1)",
+      "Bash(pwsh -NoProfile -File \"d:\\\\home\\\\source\\\\rust\\\\rakukan\\\\scripts\\\\build-settings-winui.ps1\")",
+      "Bash(git check-ignore *)"
     ],
     "additionalDirectories": [
       "\\tmp"

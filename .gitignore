@@ -33,9 +33,7 @@ rakukan.dict
 
 # ユーザー設定・学習データ（個人情報を含む可能性）
 user_dict.toml
-
-# バックエンド検出キャッシュ
-backend.json
+BUILD.NOTE
 
 # GPU 判定スタンプ
 ninja_generator.stamp
@@ -63,6 +61,7 @@ cmake_install.cmake
 # ローカルビルド・開発用キャッシュ
 .appdata/
 .build/
+.dotnet/
 .dotnet-home/
 .nuget-packages/
 

@@ -1,10 +1,10 @@
-# Rakukan 引き継ぎ資料 (v0.6.1)
+# Rakukan 引き継ぎ資料 (v0.6.2)
 
-更新日: 2026-04-19
+更新日: 2026-04-20
 
 ## 現在の状態
 
-- **バージョン:** v0.6.1
+- **バージョン:** v0.6.2
 - **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
@@ -177,6 +177,50 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 - ホストは **idle 自死しない**（一度起動すると常駐）。気になれば後日 `--idle-exit-secs` 付きで改善可能
 - `rakukan-engine-host.exe` は TSF DLL と同じ install_dir（`%LOCALAPPDATA%\rakukan`）に配置される必要がある
 - SDDL は現在ログインユーザー + SYSTEM に限定。同一ユーザーの別プロセス（別アプリの TSF DLL）は接続可（これが IME として期待される動作）
+
+## 既知の問題
+
+### Explorer の稀な異常終了（0.6.0 以降頻度低下、残存）
+
+**症状**: Explorer (`explorer.exe`) が `MSCTF.dll` 関連のアクセス違反 (`0xc0000005`) で異常終了することがある。
+
+**現状**:
+- 0.6.0 の OnSetFocus 安定性修正（TSF 通知ストーム対策、`prev_dm == next_dm` 早期 return、null DM 処理）で **発生頻度は大幅に低下**
+- ただし完全に根絶できておらず、Explorer 使用中にごく稀に再現する
+
+**根本原因の推定**:
+- `WM_TIMER` から呼ばれる Phase1A (`RequestEditSession` 直呼び) が、DM が再生成される Explorer のシェル領域で stale な `ITfContext` を掴む競合が残存している可能性
+
+**2026-04 再調査メモ**:
+- `OnSetFocus` 本体はすでに `WM_APP_FOCUS_CHANGED` へのキュー積みへ移されており、`msctf!_NotifyCallbacks` 直下で COM 再入しない方針は入っている
+- 一方で live conversion の Phase1A は `candidate_window.rs` の `TL_LIVE_CTX` に保持した `ITfContext` を `WM_TIMER` から直接使って `RequestEditSession` を試行している
+- `process_focus_change()` では `stop_live_timer()` を呼んでいるが、Explorer 側で DocumentMgr が短時間に再生成されると、フォーカス遷移通知より先に stale な context を掴んだ timer tick が残る可能性がある
+- `OnUninitDocumentMgr` は現在 `doc_mode_remove()` のみで、live timer が保持している context / DM の失効判定には使っていない
+
+**優先度付きの対策候補**:
+
+| 対策 | 優先度 | ねらい / メモ |
+|------|--------|---------------|
+| live context に DM 世代ガードを追加 | 最優先 | `live_input_notify()` で `ctx.GetDocumentMgr()` の ptr も保持し、Phase1A 実行直前に `ITfThreadMgr::GetFocus()` と一致する場合だけ `RequestEditSession` を許可する。`OnUninitDocumentMgr` でも一致 DM の live cache を失効させる |
+| `WM_TIMER` 直呼びをやめ、`WM_APP_LIVE_APPLY` 経由で Phase1A を遅延実行 | 高 | `WM_APP_FOCUS_CHANGED` と同じ流儀に寄せ、timer callback 中の COM 呼び出しを減らす。Phase1A の race 窓をさらに狭める |
+| Explorer シェルクラスのみ Phase1A を無効化 | 中 | `Shell_TrayWnd` / `Progman` / `WorkerW` 等では Queue fallback に倒す。局所回避としては有効だが、Explorer 専用分岐なので第一選択にはしない |
+| `COMPOSITION` のスコープ縮小（`thread_local!` 化） | 中 | 既存保留案。効果はあり得るが変更範囲が大きく、まずは Phase1A 側の stale context ガードを先に入れる |
+
+**推奨方針**:
+1. まずは Explorer 専用分岐を増やさず、live timer Phase1A に共通の DM 整合性チェックを入れる
+2. それでも再発する場合のみ、`WM_APP_LIVE_APPLY` 化または Explorer シェルクラスでの Phase1A 無効化を追加で検討する
+3. live conversion が `enabled = false` の状態でも Explorer crash が出るなら、本件は別経路の可能性が高いため切り分けをやり直す
+
+**検討済み / 見送り対策**:
+
+| 対策 | 状態 | 理由 |
+|------|------|------|
+| Phase1A 無効化（Phase1B キュー方式に一本化） | 見送り | ライブ変換が機能しなくなる（composition 更新がキー入力まで遅延） |
+| Explorer シェルクラスでライブ変換無効化 | 見送り | `Shell_TrayWnd` / `Progman` 等を `GetClassNameW` で判定する方針は妥当だが、処理分岐が微妙で今回は外した |
+| `COMPOSITION` のスコープ縮小（`thread_local!` 化） | 保留 | 呼び出し箇所が `factory.rs` 全体に散在、変更量大。次回バージョンで検討 |
+| `hwnd_modes` の Explorer 無効化 | 保留 | 上記の COMPOSITION 修正と合わせて次回検討 |
+
+**当面の対応方針**: 現状の頻度は許容範囲として、再発が増悪した場合に見送り対策を再検討する。
 
 ## 残タスク（優先度順）
 
