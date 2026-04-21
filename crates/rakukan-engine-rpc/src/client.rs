@@ -15,11 +15,11 @@ use std::path::PathBuf;
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 
 use crate::codec::{read_frame, write_frame};
-use crate::pipe::{pipe_name_for_current_user, PipeStream};
-use crate::protocol::{InputCharKind, Request, Response, PIPE_BASE_NAME, PROTOCOL_VERSION};
+use crate::pipe::{PipeStream, pipe_name_for_current_user};
+use crate::protocol::{InputCharKind, PIPE_BASE_NAME, PROTOCOL_VERSION, Request, Response};
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
 

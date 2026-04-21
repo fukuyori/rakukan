@@ -25,25 +25,26 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AO};
 
 use windows::{
+    core::PCWSTR,
     Win32::{
         Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::{
-            BACKGROUND_MODE, BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint,
-            FillRect, GetMonitorInfoW, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
-            MonitorFromPoint, PAINTSTRUCT, SelectObject, SetBkMode, SetTextColor, TextOutW,
+            BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
+            GetMonitorInfoW, InvalidateRect, MonitorFromPoint, SelectObject, SetBkMode,
+            SetTextColor, TextOutW, BACKGROUND_MODE, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+            PAINTSTRUCT,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             TextServices::ITfThreadMgr,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, HWND_TOPMOST, KillTimer,
-                PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE,
-                SetTimer, SetWindowPos, ShowWindow, WM_APP, WM_ERASEBKGND, WM_PAINT, WM_TIMER,
-                WNDCLASSW, WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, PostMessageW,
+                RegisterClassW, SetTimer, SetWindowPos, ShowWindow, HMENU, HWND_TOPMOST,
+                SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_ERASEBKGND, WM_PAINT,
+                WM_TIMER, WNDCLASSW, WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
-    core::PCWSTR,
 };
 
 // ─── レイアウト定数 ───────────────────────────────────────────────────────────
@@ -584,9 +585,7 @@ pub fn invalidate_live_context_for_dm(dm_ptr: usize) {
     });
 
     if matched {
-        tracing::debug!(
-            "[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}"
-        );
+        tracing::debug!("[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}");
     }
 }
 
@@ -736,7 +735,7 @@ pub fn stop_waiting_timer() {
 /// bg_status == "done" になったら候補を取り出して表示する。
 pub fn on_waiting_timer() {
     use crate::engine::state::engine_get;
-    use crate::engine::state::{SessionState, session_get};
+    use crate::engine::state::{session_get, SessionState};
 
     // セッションが Waiting 状態かチェック
     let wait_info = {
@@ -986,7 +985,7 @@ fn current_millis() -> u64 {
 /// - Phase 1B fallback: 失敗時は LIVE_PREVIEW_QUEUE に書き込み → 次キー入力で反映
 pub fn on_live_timer() {
     use crate::engine::state::{
-        LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY, composition_clone, engine_try_get,
+        composition_clone, engine_try_get, LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY,
     };
     use crate::tsf::edit_session::EditSession;
     use windows::Win32::UI::TextServices::TF_ES_READWRITE;
@@ -1095,7 +1094,13 @@ pub fn on_live_timer() {
             return;
         }
         let preedit_full = eng.preedit_display();
-        let pending = preedit_full.get(reading.len()..).unwrap_or("").to_string();
+        let pending =
+            crate::engine::text_util::suffix_after_prefix_or_empty(
+                &preedit_full,
+                &reading,
+                "on_live_timer pending",
+            )
+            .to_string();
         let preview = eng
             .bg_take_candidates(&reading)
             .and_then(|c| c.into_iter().next());
@@ -1138,16 +1143,25 @@ pub fn on_live_timer() {
         );
     }
 
-    if phase1a_possible {
-        let ctx = ctx_opt.unwrap();
+    if let Some(ctx) = ctx_opt.filter(|_| phase1a_possible) {
         let ctx_req = ctx.clone();
         let preview_1a = display_shown.clone();
+        let captured_dm_ptr = live_dm_ptr;
 
         let session = EditSession::new(move |ec| unsafe {
             use windows::Win32::Foundation::E_FAIL;
             use windows::Win32::UI::TextServices::{
-                TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+                TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
             };
+            let now_focus = current_focus_dm_ptr();
+            if now_focus != Some(captured_dm_ptr) {
+                return Err(windows::core::Error::new(
+                    E_FAIL,
+                    format!(
+                        "focus DM changed between request and callback execution: expected={captured_dm_ptr:#x} actual={now_focus:?}"
+                    ),
+                ));
+            }
             let comp = crate::engine::state::composition_clone()
                 .unwrap_or(None)
                 .ok_or_else(|| windows::core::Error::new(E_FAIL, "no composition"))?;

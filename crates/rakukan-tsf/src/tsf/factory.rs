@@ -32,34 +32,34 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 use windows::{
+    core::{implement, IUnknown, Interface, BSTR, GUID},
     Win32::{
         Foundation::{BOOL, E_FAIL, E_INVALIDARG, FALSE, LPARAM, POINT, RECT, TRUE, WPARAM},
         Graphics::Gdi::HBITMAP,
         System::{
-            Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IClassFactory, IClassFactory_Impl},
+            Com::{CoCreateInstance, IClassFactory, IClassFactory_Impl, CLSCTX_INPROC_SERVER},
             Ole::CONNECT_E_CANNOTCONNECT,
         },
         UI::{
             Input::KeyboardAndMouse::GetKeyState,
             TextServices::{
-                CLSID_TF_CategoryMgr, GUID_PROP_ATTRIBUTE, IEnumTfDisplayAttributeInfo,
-                ITfCategoryMgr, ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl,
-                ITfContext, ITfDisplayAttributeInfo, ITfDisplayAttributeProvider,
-                ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfKeyEventSink,
-                ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfLangBarItem_Impl,
-                ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink, ITfMenu,
-                ITfSource, ITfSource_Impl, ITfTextInputProcessor, ITfTextInputProcessor_Impl,
-                ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
-                ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
-                TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
+                CLSID_TF_CategoryMgr, IEnumTfDisplayAttributeInfo, ITfCategoryMgr, ITfComposition,
+                ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfDisplayAttributeInfo,
+                ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr,
+                ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
+                ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink,
+                ITfLangBarItem_Impl, ITfMenu, ITfSource, ITfSource_Impl, ITfTextInputProcessor,
+                ITfTextInputProcessor_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl,
+                ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TfLBIClick,
+                GUID_PROP_ATTRIBUTE, TF_ES_READWRITE, TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED,
+                TF_LBMENUF_SEPARATOR,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, DestroyMenu, GetForegroundWindow, HICON,
-                MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                AppendMenuW, CreatePopupMenu, DestroyMenu, GetForegroundWindow, TrackPopupMenu,
+                HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
             },
         },
     },
-    core::{BSTR, GUID, IUnknown, Interface, implement},
 };
 
 use crate::{
@@ -67,9 +67,10 @@ use crate::{
     engine::{
         keymap::Keymap,
         state::{
-            SessionState, caret_rect_get, caret_rect_set, composition_clone, composition_set,
-            composition_take, doc_mode_on_focus_change, doc_mode_remove, engine_get,
-            engine_try_get_or_create, session_get, session_is_selecting_fast,
+            caret_rect_get, caret_rect_set, composition_clone, composition_set,
+            composition_set_with_dm, composition_take, doc_mode_on_focus_change, doc_mode_remove,
+            engine_get, engine_try_get_or_create, invalidate_composition_for_dm, session_get,
+            session_is_selecting_fast, SessionState,
         },
         text_util,
         user_action::UserAction,
@@ -78,7 +79,7 @@ use crate::{
     tsf::{
         candidate_window, display_attr,
         edit_session::EditSession,
-        language_bar::{self, LANGBAR_SINK_COOKIE, get_open_close},
+        language_bar::{self, get_open_close, LANGBAR_SINK_COOKIE},
         settings_launcher, tray_ipc,
     },
 };
@@ -998,7 +999,12 @@ impl TextServiceFactory_Impl {
                             let reading = engine.hiragana_text().to_string();
                             let preedit_full = engine.preedit_display();
                             let pending =
-                                preedit_full.get(reading.len()..).unwrap_or("").to_string();
+                                text_util::suffix_after_prefix_or_empty(
+                                    &preedit_full,
+                                    &reading,
+                                    "phase1b pending",
+                                )
+                                .to_string();
                             if !reading.is_empty() {
                                 tracing::info!(
                                     "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
@@ -1309,7 +1315,11 @@ impl TextServiceFactory_Impl {
                 // 表示にはこれを末尾に付けて見えるようにするが、
                 // session に保存する display はひらがなのみの版にする
                 // （次回 suffix 計算や BG preview 更新で汚染されないように）。
-                let pending = preedit.get(new_reading.len()..).unwrap_or("");
+                let pending = text_util::suffix_after_prefix_or_empty(
+                    &preedit,
+                    &new_reading,
+                    "live_conv input pending",
+                );
                 let display_hira = format!("{preview}{suffix}");
                 let display_shown = format!("{display_hira}{pending}");
                 sess.set_live_conv(new_reading.clone(), display_hira);
@@ -1679,7 +1689,11 @@ impl TextServiceFactory_Impl {
                 let candidates = match bg_cands {
                     Some(llm) if !llm.is_empty() => {
                         let m = engine.merge_candidates(llm, 32);
-                        if m.is_empty() { sync_cands } else { m }
+                        if m.is_empty() {
+                            sync_cands
+                        } else {
+                            m
+                        }
                     }
                     _ => sync_cands,
                 };
@@ -2692,7 +2706,11 @@ impl TextServiceFactory_Impl {
         let source = if !has_kana {
             // ラテン文字のみ → romaji_log からひらがなを復元
             let hira = engine.hiragana_from_romaji_log();
-            if hira.is_empty() { p.clone() } else { hira }
+            if hira.is_empty() {
+                p.clone()
+            } else {
+                hira
+            }
         } else {
             p.clone()
         };
@@ -3744,7 +3762,7 @@ unsafe fn get_cursor_range(
 ) -> Option<windows::Win32::UI::TextServices::ITfRange> {
     use windows::Win32::Foundation::BOOL;
     use windows::Win32::UI::TextServices::{
-        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+        TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
     };
 
     // windows-rs 0.58: GetSelection(ec, ulIndex, pSelection: &mut [TF_SELECTION]) -> *mut u32
@@ -3770,6 +3788,41 @@ unsafe fn get_cursor_range(
     Some(cloned)
 }
 
+/// 現在カーソル位置の range を優先し、取得できなければ `GetEnd` にフォールバックする。
+///
+/// TSF/COM が不安定な瞬間でも panic でホストプロセスを巻き込まないよう、
+/// 失敗は `E_FAIL` に変換して呼び元へ返す。
+unsafe fn get_insert_range_or_end(
+    ctx: &windows::Win32::UI::TextServices::ITfContext,
+    ec: u32,
+    op: &str,
+) -> windows::core::Result<windows::Win32::UI::TextServices::ITfRange> {
+    use windows::Win32::Foundation::E_FAIL;
+
+    if let Some(range) = get_cursor_range(ctx, ec) {
+        return Ok(range);
+    }
+
+    tracing::debug!("{op}: cursor range unavailable, falling back to GetEnd");
+    ctx.GetEnd(ec)
+        .map_err(|e| windows::core::Error::new(E_FAIL, format!("{op}: GetEnd: {e}")))
+}
+
+/// `GetEnd` を安全に取得する。
+///
+/// `commit_then_start_composition` のように「現在選択位置を使うと意味が変わる」
+/// 経路では、cursor range を見に行かず `GetEnd` を明示的に使う。
+unsafe fn get_document_end_range(
+    ctx: &windows::Win32::UI::TextServices::ITfContext,
+    ec: u32,
+    op: &str,
+) -> windows::core::Result<windows::Win32::UI::TextServices::ITfRange> {
+    use windows::Win32::Foundation::E_FAIL;
+
+    ctx.GetEnd(ec)
+        .map_err(|e| windows::core::Error::new(E_FAIL, format!("{op}: GetEnd: {e}")))
+}
+
 fn update_composition(
     ctx: ITfContext,
     tid: u32,
@@ -3780,7 +3833,7 @@ fn update_composition(
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
-            ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+            ITfContextComposition, TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
 
         let preedit_w: Vec<u16> = preedit.encode_utf16().collect();
@@ -3795,8 +3848,7 @@ fn update_composition(
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
         } else {
             // Fix2: GetEnd(文書末尾)ではなく現在のカーソル位置を使う
-            let insert_point =
-                get_cursor_range(&ctx, ec).unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+            let insert_point = get_insert_range_or_end(&ctx, ec, "update_composition")?;
             let cc: ITfContextComposition = ctx.cast().map_err(|e| {
                 windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}"))
             })?;
@@ -3806,7 +3858,12 @@ fn update_composition(
             let r = new_comp
                 .GetRange()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))?;
-            let _ = composition_set(Some(new_comp));
+            let dm_ptr = ctx
+                .GetDocumentMgr()
+                .ok()
+                .map(|dm| dm.as_raw() as usize)
+                .unwrap_or(0);
+            let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
             r
         };
 
@@ -3860,7 +3917,7 @@ fn commit_then_start_composition(
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
-            ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+            ITfContextComposition, TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
 
         let comp = composition_take().unwrap_or(None);
@@ -3897,7 +3954,7 @@ fn commit_then_start_composition(
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))?;
         } else if !commit_text.is_empty() {
             let insert_point =
-                get_cursor_range(&ctx, ec).unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+                get_insert_range_or_end(&ctx, ec, "commit_then_start direct commit")?;
             insert_point.SetText(ec, 0, &commit_w).map_err(|e| {
                 windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}"))
             })?;
@@ -3919,7 +3976,7 @@ fn commit_then_start_composition(
             p
         } else {
             tracing::warn!("commit_then_start: insert_after_commit=None, falling back to GetEnd");
-            ctx.GetEnd(ec).unwrap()
+            get_document_end_range(&ctx, ec, "commit_then_start new composition")?
         };
         let cc: ITfContextComposition = ctx.cast().map_err(|e| {
             windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}"))
@@ -3930,7 +3987,12 @@ fn commit_then_start_composition(
         let new_range = new_comp
             .GetRange()
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))?;
-        let _ = composition_set(Some(new_comp));
+        let dm_ptr = ctx
+            .GetDocumentMgr()
+            .ok()
+            .map(|dm| dm.as_raw() as usize)
+            .unwrap_or(0);
+        let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
 
         let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
         new_range
@@ -4013,7 +4075,7 @@ fn update_composition_candidate_parts(
 
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
-            ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+            ITfContextComposition, TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
 
         let full_w: Vec<u16> = full.encode_utf16().collect();
@@ -4024,7 +4086,7 @@ fn update_composition_candidate_parts(
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
         } else {
             let insert_point =
-                get_cursor_range(&ctx, ec).unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+                get_insert_range_or_end(&ctx, ec, "update_composition_candidate_parts")?;
             let cc: ITfContextComposition = ctx
                 .cast()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("cast: {e}")))?;
@@ -4034,7 +4096,12 @@ fn update_composition_candidate_parts(
             let r = new_comp
                 .GetRange()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))?;
-            let _ = composition_set(Some(new_comp));
+            let dm_ptr = ctx
+                .GetDocumentMgr()
+                .ok()
+                .map(|dm| dm.as_raw() as usize)
+                .unwrap_or(0);
+            let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
             r
         };
 
@@ -4114,7 +4181,7 @@ fn update_caret_rect(ctx: ITfContext, tid: u32) {
 
 fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result<()> {
     use windows::Win32::UI::TextServices::{
-        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+        TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
     };
     // composition_take() をセッション内に移動する。
     // セッション外で take すると COMPOSITION=None になった直後に次のキー入力が来たとき、
@@ -4129,7 +4196,7 @@ fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result<()> {
                 if !text.is_empty() {
                     let text_w: Vec<u16> = text.encode_utf16().collect();
                     let insert =
-                        get_cursor_range(&ctx2, ec).unwrap_or_else(|| ctx2.GetEnd(ec).unwrap());
+                        get_insert_range_or_end(&ctx2, ec, "end_composition direct insert")?;
                     let _ = insert.SetText(ec, 0, &text_w);
                 }
                 return Ok(());
@@ -4175,11 +4242,11 @@ fn commit_text(ctx: ITfContext, tid: u32, text: String) -> Result<()> {
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
-            TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+            TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
         let text_w: Vec<u16> = text.encode_utf16().collect();
         // 現在のカーソル位置に挿入（GetEnd=文書末尾ではなくカーソル位置）
-        let insert = get_cursor_range(&ctx, ec).unwrap_or_else(|| ctx.GetEnd(ec).unwrap());
+        let insert = get_insert_range_or_end(&ctx, ec, "commit_text")?;
         insert
             .SetText(ec, 0, &text_w)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText commit: {e}")))?;
@@ -4395,6 +4462,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             };
             doc_mode_remove(ptr);
             candidate_window::invalidate_live_context_for_dm(ptr);
+            invalidate_composition_for_dm(ptr);
             tracing::trace!("OnUninitDocumentMgr: removed dm={ptr:#x}");
         }
         Ok(())

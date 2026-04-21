@@ -13,14 +13,14 @@ use super::input_mode::InputMode;
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+use windows::core::{Interface, GUID};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
-    IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
+    CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
+    DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
 };
-use windows::core::{GUID, Interface};
 
 // ─── INPUT_MODE_ATOMIC ────────────────────────────────────────────────────────
 // IMEState.input_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
@@ -340,7 +340,7 @@ pub fn start_reload_watcher() {
     std::thread::Builder::new()
         .name("rakukan-reload-watcher".into())
         .spawn(|| {
-            use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
+            use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
             let name: Vec<u16> = "Local\\rakukan.engine.reload\0".encode_utf16().collect();
             let evt = unsafe {
                 CreateEventW(
@@ -568,12 +568,21 @@ pub fn ime_state_get() -> anyhow::Result<MutexGuard<'static, IMEState>> {
 
 use windows::Win32::UI::TextServices::ITfComposition;
 
-pub(crate) struct CompositionWrapper(pub Option<ITfComposition>);
+pub(crate) struct CompositionWrapper {
+    comp: Option<ITfComposition>,
+    dm_ptr: usize,
+    stale: bool,
+}
 unsafe impl Send for CompositionWrapper {}
 unsafe impl Sync for CompositionWrapper {}
 
-pub static COMPOSITION: LazyLock<Mutex<CompositionWrapper>> =
-    LazyLock::new(|| Mutex::new(CompositionWrapper(None)));
+pub static COMPOSITION: LazyLock<Mutex<CompositionWrapper>> = LazyLock::new(|| {
+    Mutex::new(CompositionWrapper {
+        comp: None,
+        dm_ptr: 0,
+        stale: false,
+    })
+});
 
 /// ホットパス用: ブロックしない
 #[inline]
@@ -584,23 +593,60 @@ pub fn composition_try_get() -> anyhow::Result<MutexGuard<'static, CompositionWr
 }
 
 pub fn composition_set(comp: Option<ITfComposition>) -> anyhow::Result<()> {
+    composition_set_with_dm(comp, 0)
+}
+
+pub fn composition_set_with_dm(comp: Option<ITfComposition>, dm_ptr: usize) -> anyhow::Result<()> {
     // set はホットパスでもブロックを許容（短い操作のため）
     let mut g = COMPOSITION.lock().map_err(|p| {
         let _ = p;
         anyhow::anyhow!("composition poison")
     })?;
-    g.0 = comp;
+    g.comp = comp;
+    g.dm_ptr = if g.comp.is_some() { dm_ptr } else { 0 };
+    g.stale = false;
     Ok(())
 }
 
 pub fn composition_take() -> anyhow::Result<Option<ITfComposition>> {
     let mut g = composition_try_get()?;
-    Ok(g.0.take())
+    if g.stale {
+        g.dm_ptr = 0;
+        g.stale = false;
+        let _ = g.comp.take();
+        return Ok(None);
+    }
+    let comp = g.comp.take();
+    g.dm_ptr = 0;
+    Ok(comp)
 }
 
 pub fn composition_clone() -> anyhow::Result<Option<ITfComposition>> {
     let g = composition_try_get()?;
-    Ok(g.0.clone())
+    if g.stale {
+        return Ok(None);
+    }
+    Ok(g.comp.clone())
+}
+
+/// `OnUninitDocumentMgr` から呼ばれる。
+///
+/// msctf コールバック中に stale な `ITfComposition` を drop しないよう、
+/// ここでは mark だけ付け、実際の破棄は後続の安全な文脈へ遅延させる。
+pub fn invalidate_composition_for_dm(dm_ptr: usize) {
+    if dm_ptr == 0 {
+        return;
+    }
+
+    let Ok(mut g) = composition_try_get() else {
+        tracing::trace!("composition invalidate skipped: busy dm={dm_ptr:#x}");
+        return;
+    };
+
+    if g.comp.is_some() && g.dm_ptr == dm_ptr {
+        g.stale = true;
+        tracing::debug!("composition marked stale for dm={dm_ptr:#x}");
+    }
 }
 
 // ─── SessionState ────────────────────────────────────────────────────────────
@@ -1263,7 +1309,7 @@ pub fn doc_mode_on_focus_change(
     next_dm_ptr: usize,
     next_hwnd: usize,
 ) -> Option<InputMode> {
-    use super::config::{DefaultInputMode, current_config};
+    use super::config::{current_config, DefaultInputMode};
 
     let cfg = current_config();
     let remember = cfg.input.remember_last_kana_mode;

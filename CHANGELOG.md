@@ -3,6 +3,16 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.4] - 2026-04-21
+
+### Fixed
+
+- **Explorer 異常終了対策の hardening (Phase 1〜3)**:
+  - **Phase 1**: `OnUninitDocumentMgr` で破棄される DM に紐づく `COMPOSITION` も stale フラグを立てる。`COMPOSITION` 構造体に `dm_ptr` / `stale` フィールドを追加。msctf コールバック中に即 drop せず後続の安全な文脈で無効化することで、Phase1A callback が stale な composition を掴むレースを縮小
+  - **Phase 2**: Phase1A の `EditSession` callback 冒頭で `current_focus_dm_ptr()` を再検証し、`live_input_notify()` 時点の DM と一致しなければ `E_FAIL` で中断。`RequestEditSession` から callback 実行までの間に focus DM が切り替わるレースを完全にカバー
+  - **Phase 3**: `EditSession` 経路の panic 直結箇所を `Result` 化。`get_insert_range_or_end()` / `get_document_end_range()` で `unwrap()` を撤去、`suffix_after_prefix_or_empty()` で byte index 依存の panic を抑止。`panic = "abort"` 下で TSF DLL 内の panic が Explorer プロセスを停止させる経路を縮小
+- **Phase 3 ゲート検証スクリプト**: `scripts/verify-phase3.ps1` で hardening 完了を機械的に検証可能
+
 ## [0.6.3] - 2026-04-21
 
 ### Fixed

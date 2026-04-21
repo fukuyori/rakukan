@@ -1,10 +1,10 @@
-# Rakukan 引き継ぎ資料 (v0.6.3)
+# Rakukan 引き継ぎ資料 (v0.6.4)
 
 更新日: 2026-04-21
 
 ## 現在の状態
 
-- **バージョン:** v0.6.3
+- **バージョン:** v0.6.4
 - **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
@@ -12,6 +12,13 @@
 - **ログ:**
   - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
   - エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
+
+## 関連資料
+
+- [DESIGN.md](DESIGN.md) — 全体設計書
+- [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — 変換パイプライン / 文節編集 再設計
+- [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針
+- [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) — engine-host 多重起動時の GPU メモリ実態（**「GPU 浪費」と論じない**根拠）
 
 ## 0.4.4 の目玉: エンジン別プロセス化
 
@@ -204,21 +211,115 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 - `OnSetFocus` 本体はすでに `WM_APP_FOCUS_CHANGED` へのキュー積みへ移されており、`msctf!_NotifyCallbacks` 直下で COM 再入しない方針は入っている
 - 一方で live conversion の Phase1A は `candidate_window.rs` の `TL_LIVE_CTX` に保持した `ITfContext` を `WM_TIMER` から直接使って `RequestEditSession` を試行している
 - `process_focus_change()` では `stop_live_timer()` を呼んでいるが、Explorer 側で DocumentMgr が短時間に再生成されると、フォーカス遷移通知より先に stale な context を掴んだ timer tick が残る可能性がある
-- `OnUninitDocumentMgr` は現在 `doc_mode_remove()` のみで、live timer が保持している context / DM の失効判定には使っていない
+- `OnUninitDocumentMgr` は現在 `doc_mode_remove()` / `invalidate_live_context_for_dm()` に加えて `invalidate_composition_for_dm()` も呼び、破棄される DM に紐づく composition を stale 扱いにする
 
-**優先度付きの対策候補**:
+**2026-04-21 時点のフェーズ進捗**:
 
-| 対策 | 優先度 | ねらい / メモ |
-|------|--------|---------------|
-| live context に DM 世代ガードを追加 | 最優先 | `live_input_notify()` で `ctx.GetDocumentMgr()` の ptr も保持し、Phase1A 実行直前に `ITfThreadMgr::GetFocus()` と一致する場合だけ `RequestEditSession` を許可する。`OnUninitDocumentMgr` でも一致 DM の live cache を失効させる |
-| `WM_TIMER` 直呼びをやめ、`WM_APP_LIVE_APPLY` 経由で Phase1A を遅延実行 | 高 | `WM_APP_FOCUS_CHANGED` と同じ流儀に寄せ、timer callback 中の COM 呼び出しを減らす。Phase1A の race 窓をさらに狭める |
-| Explorer シェルクラスのみ Phase1A を無効化 | 中 | `Shell_TrayWnd` / `Progman` / `WorkerW` 等では Queue fallback に倒す。局所回避としては有効だが、Explorer 専用分岐なので第一選択にはしない |
-| `COMPOSITION` のスコープ縮小（`thread_local!` 化） | 中 | 既存保留案。効果はあり得るが変更範囲が大きく、まずは Phase1A 側の stale context ガードを先に入れる |
+| Phase | 状態 | 実装内容 | 備考 |
+|------|------|----------|------|
+| 1 | 完了 | `OnUninitDocumentMgr` で live context に加えて composition も失効対象に含めた | `COMPOSITION` には `dm_ptr` と `stale` を保持。msctf コールバック中に即 drop せず後続の安全な文脈で無効化 |
+| 2 | 完了 | Phase1A callback 冒頭で `current_focus_dm_ptr()` を再検証し、不一致なら `E_FAIL` で中断 | stale DM に対する `RequestEditSession` 実行窓をさらに縮小 |
+| 3 | 進行中 | panic audit / hardening | ライブ変換を阻害しないことを優先し、panic 直結箇所から順に `Result` 化 |
 
-**推奨方針**:
-1. まずは Explorer 専用分岐を増やさず、live timer Phase1A に共通の DM 整合性チェックを入れる
-2. それでも再発する場合のみ、`WM_APP_LIVE_APPLY` 化または Explorer シェルクラスでの Phase1A 無効化を追加で検討する
-3. live conversion が `enabled = false` の状態でも Explorer crash が出るなら、本件は別経路の可能性が高いため切り分けをやり直す
+**Phase 3 の現状**:
+
+| 項目 | 状態 | 内容 |
+|------|------|------|
+| `EditSession` 内の `GetEnd(...).unwrap()` 除去 | 完了 | `get_insert_range_or_end()` / `get_document_end_range()` を導入し、panic ではなく `E_FAIL` へ落とす |
+| live conversion の `pending` 抽出 hardening | 完了 | byte index 依存を減らし、`suffix_after_prefix_or_empty()` で prefix 不一致時は空文字 + debug ログに倒す |
+| Phase 3 ゲート検証 | 完了 | `scripts/verify-phase3.ps1` が PASS。`phase3-result.json` に `2026-04-21T11:41:19` の PASS を記録 |
+| `on_live_timer` / `EditSession` 周辺の panic 監査 | 継続 | 主要 hot path の panic 直結箇所は潰したが、最終的な網羅確認はまだ |
+| Explorer 実機での再現確認 | 未完了 | Phase 3 ゲートは通過。release ビルドも完了。install / TSF 登録は UAC を伴うため、このセッションでは自動継続できず、Explorer での再現試験とログ確認が残っている |
+
+**次の打ち手**:
+
+#### 1. Explorer 実機テスト（最優先）
+
+**事前準備**: WerFault によるユーザーモードクラッシュダンプを有効化。Explorer が落ちた時に minidump が `%LOCALAPPDATA%\CrashDumps\` に自動保存される。
+
+```powershell
+# 管理者 PowerShell で 1 回だけ実行
+$key = "HKLM:\SOFTWARE\Microsoft\Windows\Windows Error Reporting\LocalDumps\explorer.exe"
+New-Item -Path $key -Force | Out-Null
+Set-ItemProperty -Path $key -Name "DumpFolder" -Value "$env:LOCALAPPDATA\CrashDumps" -Type ExpandString
+Set-ItemProperty -Path $key -Name "DumpType" -Value 2 -Type DWord  # 2 = full dump
+Set-ItemProperty -Path $key -Name "DumpCount" -Value 10 -Type DWord
+```
+
+**インストール**: 一旦サインアウト → 再ログオン → `sudo cargo make install` で v0.6.4 を反映。インストール後に言語バーで rakukan に切替。
+
+**テスト操作**（30 分以上連続実施を目安）:
+
+| 操作 | 頻度 | 狙い |
+| --- | --- | --- |
+| Explorer のアドレスバーに日本語を打って変換 → Enter | 5 回／分 | live conversion + composition の典型パス |
+| ファイル名のリネームで日本語入力 | 3 回／分 | リネーム edit control = TSF クライアントの中で DM 再生成が頻発 |
+| フォルダ間の移動 + アドレスバー入力 | 2 回／分 | DocumentMgr 切替時の OnUninitDocumentMgr / OnSetFocus race |
+| Alt+Tab で他アプリ（VS Code, ブラウザ）と Explorer を行き来 | 1 回／分 | Phase1A timer fire 中の focus 遷移 |
+| 候補ウィンドウを開いた状態でフォーカスを Explorer に戻す | 任意 | candidate window の stale ctx 検証 |
+
+**判定基準**:
+
+- 30 分連続で Explorer crash が 0 件 → **PASS** とみなす
+- 1 回でも crash → **FAIL**。`%LOCALAPPDATA%\CrashDumps\explorer.exe.*.dmp` を確保し、対応する `%LOCALAPPDATA%\rakukan\rakukan.log` の同時刻帯を抽出して原因分析へ
+- **理想的には 1 日 (8 時間) 連続使用で crash 0 件**を目指す
+
+**ログ取得**: テスト中は `RUST_LOG=debug` を有効化して `[Live] Phase1A skipped: stale or unfocused dm` の出現頻度を確認（DM 世代ガードが実際に発火しているかの傍証になる）。
+
+#### 2. クラッシュ再発時の調査手順
+
+1. Event Viewer → Windows ログ → Application で `Application Error` (EventID 1000) を絞り、`explorer.exe` + `MSCTF.dll` 関連のスタックを確認
+2. `%LOCALAPPDATA%\CrashDumps\explorer.exe.*.dmp` を WinDbg で開き、`!analyze -v` でフォルト IP / 直前のスタックを採取
+3. 同時刻帯の `rakukan.log` に `Phase1A` / `OnUninitDocumentMgr` / `live_input_notify` のシーケンスがあれば抜粋
+4. dump + ログを `docs/archive/explorer-crash-YYYYMMDD/` に保存して再現条件を記録
+
+#### 3. Phase 3 残監査（panic 源の網羅確認）
+
+**目的**: panic = abort 下でも Explorer プロセスが落ちる経路を残さない。
+
+**対象範囲**: TSF DLL（`crates/rakukan-tsf/src/`）の hot path（OnKeyDown / wnd_proc / EditSession callback / TSF コールバック実装）に絞る。engine-host は別プロセスなので落ちても Explorer に直接影響しない。
+
+**検出パターン**（`rg` で機械的に拾えるもの）:
+
+```bash
+# TSF crate の hot path で以下を確認、各 hit を Result 化 or unreachable 排除
+rg '\.unwrap\(\)'    crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engine/
+rg '\.expect\('      crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engine/
+rg 'panic!\('        crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engine/
+rg 'unreachable!\('  crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engine/
+rg '\[\.\.\d'        crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engine/  # byte-index slicing
+```
+
+**判定**: 残った hit がすべて以下のどちらかに該当することを確認:
+
+- (a) 静的に panic 不可（const, debug_assert!, テストコード等）
+- (b) panic しても Explorer に到達しない経路（engine-host 専用、初期化前のみ等）
+
+該当しないものは順次 `Result` 化 or `if let` 展開。
+
+#### 4. 追加対策の発動条件と設計案
+
+実機テストで再発する場合のみ次のいずれかを実装する。実機 PASS なら不要。
+
+**(A) `WM_APP_LIVE_APPLY` 化**（中工数、~50-100 行）:
+
+- `wm_app_live_apply: u32 = WM_APP + 2` を追加
+- 既存 `LIVE_TIMER_ID` の `WM_TIMER` ハンドラは `PostMessage(hwnd, WM_APP_LIVE_APPLY, 0, 0)` だけして即 return
+- `WM_APP_LIVE_APPLY` ハンドラを `wnd_proc` に追加し、現状の `on_live_timer` 本体を移動
+- 効果: timer fire と RequestEditSession の間に他のメッセージ（OnUninitDocumentMgr 等）処理が割り込める
+- 副作用: なし（既存 debounce と timer 停止ロジックはそのまま流用可）
+
+**(B) Explorer シェルクラスでの Phase1A 無効化**（小工数、~20 行）:
+
+- `live_input_notify()` で `GetFocus()` → `WindowFromPoint` → `GetClassNameW` でクラス取得
+- `Shell_TrayWnd` / `Progman` / `WorkerW` / `CabinetWClass` のいずれかなら Phase1A をスキップして即 Phase1B
+- 副作用: Explorer 内では live conversion が「キー入力時のみ反映」になる（ユーザー体感として劣化）
+
+**(C) `live conversion = false` で再発するか確認**:
+
+- `config.toml` で `[live_conversion] enabled = false` にして 30 分テスト
+- それでも crash → 別経路。Phase1A はシロで、別の TSF 経路（OnKeyDown 中の直接 RequestEditSession 等）を疑う
+- crash しない → Phase1A 系統が原因確定。(A) or (B) を実装
 
 **検討済み / 見送り対策**:
 
@@ -229,7 +330,7 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 | `COMPOSITION` のスコープ縮小（`thread_local!` 化） | 保留 | 呼び出し箇所が `factory.rs` 全体に散在、変更量大。次回バージョンで検討 |
 | `hwnd_modes` の Explorer 無効化 | 保留 | 上記の COMPOSITION 修正と合わせて次回検討 |
 
-**当面の対応方針**: 現状の頻度は許容範囲として、再発が増悪した場合に見送り対策を再検討する。
+**当面の対応方針**: Phase 1/2 は完了、Phase 3 は hardening の中核まで完了。次は Explorer 実機確認を優先し、そこでなお再発する場合のみ `WM_APP_LIVE_APPLY` 化などの追加対策へ進む。
 
 ## 残タスク（優先度順）
 

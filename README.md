@@ -1,4 +1,4 @@
-# rakukan v0.6.3
+# rakukan v0.6.4
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,10 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.6.4 変更点
+
+- **Explorer 異常終了の hardening**: `OnUninitDocumentMgr` で破棄される DM に紐づく `COMPOSITION` も stale 扱いし、Phase1A callback では `current_focus_dm_ptr()` を実行直前に再検証する。あわせて `EditSession` 経路の `unwrap()` を `get_insert_range_or_end` / `suffix_after_prefix_or_empty` 等で `Result` 化し、panic=abort 下でのプロセス停止経路を縮小
 
 ## 0.6.3 変更点
 

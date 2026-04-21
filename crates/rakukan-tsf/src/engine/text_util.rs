@@ -69,6 +69,26 @@ pub(crate) fn fullwidth_symbol_to_hankaku(c: char) -> char {
     }
 }
 
+/// `full = prefix + suffix` を前提に suffix 部分を返す。
+///
+/// ライブ変換の preedit は `reading + pending_romaji` 構成なので `strip_prefix`
+/// を優先して使う。前提が崩れていた場合は panic せず空文字へ倒し、
+/// 観測用に debug ログだけ残す。
+pub(crate) fn suffix_after_prefix_or_empty<'a>(full: &'a str, prefix: &str, op: &str) -> &'a str {
+    if prefix.is_empty() {
+        return full;
+    }
+
+    if let Some(suffix) = full.strip_prefix(prefix) {
+        return suffix;
+    }
+
+    tracing::debug!(
+        "{op}: prefix mismatch while extracting suffix full={full:?} prefix={prefix:?}"
+    );
+    ""
+}
+
 /// ひらがな → カタカナ変換（F7）
 ///
 /// - ひらがな → 全角カタカナ
