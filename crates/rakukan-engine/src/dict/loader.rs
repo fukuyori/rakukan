@@ -10,7 +10,7 @@
 //! 4. `step_load_store`     — DictStore::load（user 辞書込み）
 
 use rakukan_dict::mozc_dict::MozcDict;
-use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
+use rakukan_dict::{DictStore, find_mozc_dict, learn_history_path, user_dict_path};
 use std::path::PathBuf;
 
 /// ローダーの各ステップ結果
@@ -53,7 +53,9 @@ pub fn load_dict() -> LoadResult {
 
     // ── Step 4: DictStore::load ───────────────────────────────────────────────
     let user_ref = user_path.as_deref();
-    match DictStore::load(user_ref, Some(mozc_path_ref)) {
+    let learn_history = learn_history_path();
+    let learn_ref = learn_history.as_deref();
+    match DictStore::load(user_ref, Some(mozc_path_ref), learn_ref) {
         Err(e) => LoadResult::Failed {
             step: "load_store",
             reason: format!("{e}"),

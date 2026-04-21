@@ -1,4 +1,16 @@
-﻿# scripts\build-tsf.ps1 - TSF 系バイナリのビルド (engine DLL は別)
+﻿# ============================================================================
+#  [AI ASSISTANT NOTICE / Claude Code 向け注意]
+# ============================================================================
+#  このスクリプトをユーザーに直接実行させるよう案内しないこと。
+#  正規の入口は以下の cargo make コマンドです:
+#
+#      cargo make build-tsf
+#
+#  このファイルは Makefile.toml から呼び出される内部実装です。
+#  PS1 を直接叩く手順を提示すると cargo make と二重化してユーザーが混乱します。
+# ============================================================================
+#
+# scripts\build-tsf.ps1 - TSF 系バイナリのビルド (engine DLL は別)
 #
 # ビルド対象:
 #   rakukan-tsf         (TSF DLL)
@@ -8,10 +20,6 @@
 #   WinUI 設定アプリ (rakukan-settings)
 #
 # 管理者不要。インストールは行わない。
-#
-# 使い方:
-#   cargo make build-tsf
-#   powershell -ExecutionPolicy Bypass -File scripts\build-tsf.ps1 [-Profile release|debug]
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",

@@ -488,11 +488,17 @@ impl RakunEngine {
     pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
         let hiragana = &self.hiragana_buf;
 
-        // 優先順位: ユーザー辞書 → LLM → mozc
+        // 優先順位: ユーザー辞書 → 学習履歴 (mozc 候補の押し上げ) → LLM → mozc
         let user_cands: Vec<String> = self
             .dict_store
             .as_ref()
             .map(|d| d.lookup_user(hiragana))
+            .unwrap_or_default();
+
+        let learn_cands: Vec<String> = self
+            .dict_store
+            .as_ref()
+            .map(|d| d.lookup_learn(hiragana))
             .unwrap_or_default();
 
         let dict_cands: Vec<String> = self
@@ -502,7 +508,7 @@ impl RakunEngine {
             .unwrap_or_default();
 
         debug!(
-            "engine::merge: reading={:?} dict_store={} dict_cands={:?} llm_cands={:?}",
+            "engine::merge: reading={:?} dict_store={} dict_cands={:?} learn_cands={:?} llm_cands={:?}",
             hiragana,
             if self.dict_store.is_some() {
                 "Some"
@@ -510,6 +516,7 @@ impl RakunEngine {
                 "None"
             },
             dict_cands,
+            learn_cands,
             llm_candidates
         );
 
@@ -525,12 +532,26 @@ impl RakunEngine {
             }
         }
 
+        // 2. 学習履歴: mozc/user に既にある surface のうち、最近/よく選ばれたものを前に出す。
+        //    学習履歴にしかない surface (辞書ガードで弾かれているはずだが防御的に確認) は追加しない。
+        for c in &learn_cands {
+            if merged.len() >= limit {
+                break;
+            }
+            if merged.contains(c) {
+                continue;
+            }
+            if dict_cands.contains(c) || user_cands.contains(c) {
+                merged.push(c.clone());
+            }
+        }
+
         // 辞書候補に確保するスロット数（limit の半分、最低3件）
         let dict_slots = (limit / 2).max(3);
         // LLM は残りのスロットを使用
         let llm_limit = limit.saturating_sub(dict_slots).max(1);
 
-        // 2. LLM候補（文脈考慮、上限 llm_limit）
+        // 3. LLM候補（文脈考慮、上限 llm_limit）
         let mut llm_count = 0;
         for c in llm_candidates {
             if llm_count >= llm_limit {
@@ -545,7 +566,7 @@ impl RakunEngine {
             }
         }
 
-        // 3. mozc候補（残りスロットを全て使用）
+        // 4. mozc候補（残りスロットを全て使用）
         for c in dict_cands {
             if merged.len() >= limit {
                 break;

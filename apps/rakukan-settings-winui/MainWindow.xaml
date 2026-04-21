@@ -195,6 +195,14 @@
                                 <ToggleSwitch x:Name="RememberKanaModeToggle" Header="前回のかなモードをアプリごとに記憶する" />
                             </StackPanel>
                         </Border>
+
+                        <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="16">
+                            <StackPanel Spacing="8">
+                                <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="学習" />
+                                <TextBlock Opacity="0.7" Text="変換を確定するたびに、選択した候補を次回以降の優先順位に反映します。" />
+                                <ToggleSwitch x:Name="AutoLearnToggle" Header="変換確定時に学習する" />
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
 

@@ -63,7 +63,7 @@ public sealed partial class MainWindow : Window
         SelectComboValue(GpuBackendCombo, bundle.Config.GpuBackend ?? "auto");
         NGpuLayersBox.Value = bundle.Config.NGpuLayers ?? double.NaN;
         MainGpuBox.Value = bundle.Config.MainGpu;
-        ModelVariantCombo.Text = bundle.Config.ModelVariant ?? string.Empty;
+        ApplyModelVariantToCombo(bundle.Config.ModelVariant);
         // null の場合はデフォルト (9) を表示する。NaN だと WinUI NumberBox の
         // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
         NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 9;
@@ -73,6 +73,7 @@ public sealed partial class MainWindow : Window
         SelectComboValue(DefaultModeCombo, bundle.Config.DefaultMode);
         RememberKanaModeToggle.IsOn = bundle.Config.RememberLastKanaMode;
         SelectComboValue(DigitWidthCombo, bundle.Config.DigitWidth);
+        AutoLearnToggle.IsOn = bundle.Config.AutoLearn;
 
         SelectComboValue(KeymapPresetCombo, bundle.Keymap.Preset);
         KeymapInheritToggle.IsOn = bundle.Keymap.InheritPreset;
@@ -122,6 +123,7 @@ public sealed partial class MainWindow : Window
             DefaultMode = SelectedComboValue(DefaultModeCombo),
             RememberLastKanaMode = RememberKanaModeToggle.IsOn,
             DigitWidth = SelectedComboValue(DigitWidthCombo),
+            AutoLearn = AutoLearnToggle.IsOn,
             LiveEnabled = LiveEnabledToggle.IsOn,
             DebounceMs = ParseULong(DebounceMsBox.Value, "デバウンス"),
             UseLlm = UseLlmToggle.IsOn,
@@ -181,6 +183,37 @@ public sealed partial class MainWindow : Window
     private void KeymapPresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         ApplyKeymapPresetDefaults();
+    }
+
+    // 保存された variantId (pure ID) から一致する ComboBoxItem を明示選択する。
+    // Text だけ代入すると SelectedItem=null のままになり、IsEditable ComboBox の
+    // 内部挙動で Text が後から空になって config.toml の model_variant が消失する。
+    private void ApplyModelVariantToCombo(string? variantId)
+    {
+        if (string.IsNullOrWhiteSpace(variantId))
+        {
+            ModelVariantCombo.SelectedItem = null;
+            ModelVariantCombo.Text = string.Empty;
+            return;
+        }
+
+        foreach (var obj in ModelVariantCombo.Items)
+        {
+            if (obj is ComboBoxItem item
+                && item.Tag is string tag
+                && string.Equals(tag, variantId, StringComparison.Ordinal))
+            {
+                ModelVariantCombo.SelectedItem = item;
+                // SelectionChanged → DispatcherQueue で Text = Tag に更新されるが、
+                // 保存タイミングで間に合わない可能性があるため明示的に上書きしておく。
+                ModelVariantCombo.Text = tag;
+                return;
+            }
+        }
+
+        // 未知の variant (将来の追加や手入力) の場合は自由入力として扱う。
+        ModelVariantCombo.SelectedItem = null;
+        ModelVariantCombo.Text = variantId;
     }
 
     // DispatcherQueue での遅延代入が万が一失敗しても、Text に混入した表示用

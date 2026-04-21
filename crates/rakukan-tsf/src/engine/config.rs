@@ -149,11 +149,15 @@ pub struct InputConfig {
     pub remember_last_kana_mode: bool,
     #[serde(default)]
     pub digit_width: DigitWidth,
-    /// 確定時にユーザー辞書へ `(reading → 選択表記)` を自動登録するか。
-    /// デフォルト `false` (自動学習を抑止)。`true` にすると Space 確定のたびに
-    /// user_dict.toml が肥大化するため、通常は手動登録のみで運用する。
-    #[serde(default)]
+    /// 確定時に学習するか (デフォルト `true`)。
+    /// Phase 1: 従来どおり user_dict.toml に追記される (肥大化注意)。
+    /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
+    #[serde(default = "default_auto_learn")]
     pub auto_learn: bool,
+}
+
+fn default_auto_learn() -> bool {
+    true
 }
 
 impl Default for InputConfig {
@@ -162,7 +166,7 @@ impl Default for InputConfig {
             default_mode: default_input_mode(),
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
-            auto_learn: false,
+            auto_learn: default_auto_learn(),
         }
     }
 }
@@ -415,9 +419,9 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
-# 確定時にユーザー辞書へ自動登録するか (デフォルト: false)。
-# true にすると Space 確定のたびに user_dict.toml が追記され肥大化する。
-auto_learn = false
+# 確定時に学習するか (デフォルト: true)。
+# false にすると学習を完全に抑止する。
+auto_learn = true
 
 [live_conversion]
 enabled = false

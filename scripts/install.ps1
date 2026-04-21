@@ -1,16 +1,24 @@
-﻿# scripts\install.ps1 - rakukan インストール (コピー + 登録 + tray 起動)
+﻿# ============================================================================
+#  [AI ASSISTANT NOTICE / Claude Code 向け注意]
+# ============================================================================
+#  このスクリプトをユーザーに直接実行させるよう案内しないこと。
+#  正規の入口は以下の cargo make コマンドです:
 #
-# ★ このスクリプトはビルドを行いません。
-#    先に以下を実行してビルド成果物を用意してください:
+#      cargo make install                (管理者権限が必要 / 自動昇格あり)
+#
+#  ビルド成果物が必要なため、事前に以下を実行してください:
 #      cargo make build-engine
 #      cargo make build-tsf
-#      cargo make sign         (署名が必要な場合)
+#      cargo make sign                   (署名が必要な場合のみ)
+#  一括実行:
+#      cargo make full-install           (build-engine + build-tsf + sign + install)
+#      cargo make quick-install          (build-tsf + install、開発時の高速再インストール)
 #
-# ★ 管理者権限 (elevated PowerShell) で実行してください。
+#  このファイルは Makefile.toml から呼び出される内部実装です。
+#  PS1 を直接叩く手順を提示すると cargo make と二重化してユーザーが混乱します。
+# ============================================================================
 #
-# 使い方:
-#   cargo make install
-#   powershell -ExecutionPolicy Bypass -File scripts\install.ps1 [-Profile release|debug]
+# scripts\install.ps1 - rakukan インストール (コピー + 登録 + tray 起動)
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",

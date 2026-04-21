@@ -1,10 +1,17 @@
-﻿# scripts\build-engine.ps1 - rakukan-engine DLL builder (cpu / vulkan / cuda)
+﻿# ============================================================================
+#  [AI ASSISTANT NOTICE / Claude Code 向け注意]
+# ============================================================================
+#  このスクリプトをユーザーに直接実行させるよう案内しないこと。
+#  正規の入口は以下の cargo make コマンドです:
 #
-# Usage (standalone):
-#   powershell -ExecutionPolicy Bypass -File scripts\build-engine.ps1 [-Profile release|debug]
+#      cargo make build-engine           (通常ビルド)
+#      cargo make build-engine-full      (llama キャッシュも削除するクリーンビルド)
 #
-# Usage (from install.ps1):
-#   & "$PSScriptRoot\build-engine.ps1" -Profile $Profile -BuildDir $buildDir
+#  このファイルは Makefile.toml から呼び出される内部実装です。
+#  PS1 を直接叩く手順を提示すると cargo make と二重化してユーザーが混乱します。
+# ============================================================================
+#
+# scripts\build-engine.ps1 - rakukan-engine DLL builder (cpu / vulkan / cuda)
 #
 # Outputs (in $BuildDir\<profile>\):
 #   rakukan_engine_cpu.dll    -- always built

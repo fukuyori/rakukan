@@ -3,6 +3,31 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.5] - 2026-04-21
+
+### Added
+
+- **学習履歴の永続化** (`%APPDATA%\rakukan\learn_history.bin`) — 確定した候補ごとに `(reading → surface, last_access_time, suggestion_freq)` を bincode 形式で記録。IME プロセスの再起動後も学習結果が保持される。
+- **WinUI 設定に「学習」トグル** — 「入力」ページに `変換確定時に学習する` トグルを追加。`[input] auto_learn` の on/off を GUI から制御できる
+- `DictStore::flush_learn_history()` — 明示的に学習履歴を同期書き出しする API（プロセス終了時やテスト用）
+- `DictStore::learn_entry_count()` — 診断用の統合エントリ数取得
+
+### Changed
+
+- **`[input] auto_learn` のデフォルトを `true` に** — 既定で学習が有効に。`user_dict.toml` は手動登録専用に戻り、学習履歴は独立した `learn_history.bin` に書き出される（user_dict.toml が学習で肥大化する問題を解消）
+- **学習ロジックを MOZC UserHistoryPredictor 準拠に刷新**
+  - 学習対象は **MOZC 辞書またはユーザー辞書に存在する surface** のみ。LLM 由来 / 数字変換 / リテラル候補は学習されない（`DictStore::is_dict_surface` ガード）
+  - スコア式 = `last_access_time + 86400 * suggestion_freq * 0.5^(Δdays/30) - chars_count(surface)`。半減期 30 日で頻度ボーナスが減衰する
+  - LRU 上限 30,000 件（mozc の `kLruCacheSize` 準拠）、超過時は `last_access_time` 最古から削除
+  - `merge_candidates` の優先順位を `user_dict → 学習履歴 (mozc 候補の押し上げ) → LLM → mozc` に変更
+- **学習書き込みは `learn()` 内で同期実行** — アトミック書き込み (`.bin.tmp` → rename) で crash 時の破損を防止。write lock は in-memory 更新中のみ、I/O は snapshot に対して lock 外で実行。
+  *（Phase 2c 初版では BG スレッド + Drop flush の非同期方式を採用したが、engine DLL 内で BG スレッドを spawn する構成が engine reload 経路 (`SignalReload`) でデッドロック／パニックを誘発し、WinUI 設定画面を開閉するたびに LLM 変換が止まる回帰が発生。hotfix で同期保存に変更し、DLL 側に BG スレッドや Drop I/O を置かない方針に統一）*
+- **`user_dict.toml` は学習で更新されなくなった** — `DictStore::learn()` は `learn_history` のみを更新し、`user_dict.toml` には一切書き込まない。ユーザー辞書は設定画面から手動管理する仕様に統一
+
+### Fixed
+
+- **WinUI 設定: モデル ID (ModelVariant) 保存バグ** — 設定画面を開いて閉じる（または再起動）すると `model_variant` キーが `config.toml` から消失し、次回起動時に placeholder (`jinen-v1-xsmall-q5`) に戻る問題を修正。`ApplyModelVariantToCombo()` ヘルパーで `ComboBox.SelectedItem` を明示的に Tag 一致の `ComboBoxItem` に設定するようにし、`IsEditable=True` ComboBox の `Text` だけ代入する旧実装が内部で失効していた挙動を回避
+
 ## [0.6.4] - 2026-04-21
 
 ### Fixed

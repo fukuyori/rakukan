@@ -1,10 +1,10 @@
-# Rakukan 引き継ぎ資料 (v0.6.4)
+# Rakukan 引き継ぎ資料 (v0.6.5)
 
 更新日: 2026-04-21
 
 ## 現在の状態
 
-- **バージョン:** v0.6.4
+- **バージョン:** v0.6.5
 - **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
@@ -246,7 +246,7 @@ Set-ItemProperty -Path $key -Name "DumpType" -Value 2 -Type DWord  # 2 = full du
 Set-ItemProperty -Path $key -Name "DumpCount" -Value 10 -Type DWord
 ```
 
-**インストール**: 一旦サインアウト → 再ログオン → `sudo cargo make install` で v0.6.4 を反映。インストール後に言語バーで rakukan に切替。
+**インストール**: 一旦サインアウト → 再ログオン → `sudo cargo make install` で v0.6.5 を反映。インストール後に言語バーで rakukan に切替。
 
 **テスト操作**（30 分以上連続実施を目安）:
 

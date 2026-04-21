@@ -115,6 +115,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
+name = "bincode"
+version = "1.3.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1615,9 +1624,10 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rakukan-dict"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
+ "bincode",
  "memmap2",
  "serde",
  "tempfile",
@@ -1628,7 +1638,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-dict-builder"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1639,7 +1649,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -1661,7 +1671,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-abi"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "libloading",
@@ -1672,7 +1682,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-cli"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "clap",
@@ -1683,7 +1693,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-host"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "rakukan-engine-abi",
@@ -1694,7 +1704,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-rpc"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "postcard",
@@ -1706,7 +1716,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-settings"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "toml",
@@ -1715,7 +1725,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tray"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "windows",
@@ -1723,7 +1733,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tsf"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "anyhow",
  "embed-resource",

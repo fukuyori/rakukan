@@ -13,6 +13,7 @@ thiserror    = { workspace = true }
 tracing      = { workspace = true }
 serde        = { workspace = true }
 toml         = "0.8"
+bincode      = { workspace = true }   # 学習履歴 learn_history.bin
 memmap2      = { workspace = true }   # rakukan.dict の mmap 読み取り
 
 [dev-dependencies]

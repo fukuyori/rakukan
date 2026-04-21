@@ -1,4 +1,4 @@
-# rakukan v0.6.4
+# rakukan v0.6.5
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,12 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.6.5 変更点
+
+- **学習機能を `learn_history.bin` に分離** — 確定時の学習を独立ファイル (`%APPDATA%\rakukan\learn_history.bin`) に記録し、MOZC の `UserHistoryPredictor` 準拠のスコア式 (`last_access_time + 86400 * freq * 0.5^(Δdays/30) - chars_count`) で優先順位を制御。半減期 30 日の頻度減衰、LRU 30,000 件上限、学習対象は MOZC 辞書・ユーザー辞書由来の surface のみ (LLM 生成は対象外)
+- **`[input] auto_learn` デフォルト true + WinUI 設定にトグル追加** — 既定で学習が有効に。`user_dict.toml` は手動登録専用に戻る
+- **WinUI モデル ID 保存バグ修正** — 設定画面で ModelVariant が再起動時に `jinen-v1-xsmall-q5` にリセットされていた問題を修正
 
 ## 0.6.4 変更点
 

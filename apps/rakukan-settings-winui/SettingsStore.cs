@@ -33,6 +33,7 @@ internal sealed class SettingsData
     public string DefaultMode { get; set; } = "alphanumeric";
     public bool RememberLastKanaMode { get; set; } = true;
     public string DigitWidth { get; set; } = "halfwidth";
+    public bool AutoLearn { get; set; } = true;
     public bool LiveEnabled { get; set; }
     public ulong DebounceMs { get; set; } = 80;
     public bool UseLlm { get; set; }
@@ -178,7 +179,7 @@ internal sealed class SettingsStore
         default_mode = "alphanumeric"
         remember_last_kana_mode = true
         digit_width = "halfwidth"
-        auto_learn = false
+        auto_learn = true
 
         [live_conversion]
         enabled = false
@@ -384,6 +385,7 @@ internal sealed class SettingsStore
             DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
             RememberLastKanaMode = GetBool(input, "remember_last_kana_mode") ?? true,
             DigitWidth = GetString(input, "digit_width") ?? "halfwidth",
+            AutoLearn = GetBool(input, "auto_learn") ?? true,
             LiveEnabled = GetBool(live, "enabled") ?? false,
             DebounceMs = GetULong(live, "debounce_ms") ?? 80,
             UseLlm = GetBool(live, "use_llm") ?? false,
@@ -412,6 +414,7 @@ internal sealed class SettingsStore
         input["default_mode"] = data.DefaultMode;
         input["remember_last_kana_mode"] = data.RememberLastKanaMode;
         input["digit_width"] = data.DigitWidth;
+        input["auto_learn"] = data.AutoLearn;
 
         live["enabled"] = data.LiveEnabled;
         live["debounce_ms"] = data.DebounceMs;

@@ -54,6 +54,31 @@ pub fn user_dict_path() -> Option<PathBuf> {
     None
 }
 
+/// 学習履歴ファイルパス（%APPDATA%\rakukan\learn_history.bin）
+///
+/// `engine.learn()` で更新される `(reading, surface) → LearnEntry` マップを
+/// bincode バイナリ形式で保存する。user_dict.toml とは別ファイル。
+pub fn learn_history_path() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return Some(
+            PathBuf::from(appdata)
+                .join("rakukan")
+                .join("learn_history.bin"),
+        );
+    }
+    #[cfg(not(target_os = "windows"))]
+    if let Ok(home) = std::env::var("HOME") {
+        return Some(
+            PathBuf::from(home)
+                .join(".config")
+                .join("rakukan")
+                .join("learn_history.bin"),
+        );
+    }
+    None
+}
+
 /// rakukan.dict のパス（%LOCALAPPDATA%\rakukan\dict\rakukan.dict）
 pub fn find_mozc_dict() -> Option<PathBuf> {
     let p = dict_dir()?.join("rakukan.dict");
