@@ -271,24 +271,23 @@ impl RakunEngine {
         }
 
         // ,./[]\- および英字 → ローマ字ルール（trie）に委ねる
+        // pending_romaji_buf と romaji.buffer は常に同じ状態を保つ。
+        // ConversionEvent variant ではなく romaji.output / romaji.buffer の差分から
+        // 「確定したひらがな」と「未確定として残っているローマ字」を判定する。
+        // （PassThrough の連鎖で複数文字が確定するケースを正しく扱うため）
         self.pending_romaji_buf.push(c);
-        match self.romaji.push(c) {
-            ConversionEvent::Converted(hiragana) => {
-                debug!("engine::push: romaji → hira={:?}", hiragana);
-                self.hiragana_buf.push_str(&hiragana);
-                // pending_romaji_buf 全体が今の確定分
-                let entry = std::mem::take(&mut self.pending_romaji_buf);
-                self.romaji_input_log.push(entry);
-            }
-            ConversionEvent::Buffered => {
-                // pending_romaji_buf に積み上がっているだけ。
-                // log への記録は Converted / PassThrough で確定時にまとめて行う。
-            }
-            ConversionEvent::PassThrough(ch) => {
-                self.hiragana_buf.push(ch);
-                let entry = std::mem::take(&mut self.pending_romaji_buf);
-                self.romaji_input_log.push(entry);
-            }
+        let prev_output_len = self.romaji.output().len();
+        let _ = self.romaji.push(c);
+
+        let added = self.romaji.output()[prev_output_len..].to_string();
+        let new_buffer_len = self.romaji.buffer().len();
+        debug_assert!(new_buffer_len <= self.pending_romaji_buf.len());
+        let consumed_len = self.pending_romaji_buf.len() - new_buffer_len;
+        if consumed_len > 0 {
+            let entry: String = self.pending_romaji_buf.drain(..consumed_len).collect();
+            self.hiragana_buf.push_str(&added);
+            debug!("engine::push: romaji {:?} → {:?}", entry, added);
+            self.romaji_input_log.push(entry);
         }
         self.current_preedit()
     }
@@ -865,5 +864,49 @@ mod digit_width_tests {
     fn default_is_halfwidth() {
         assert_eq!(DigitWidth::default(), DigitWidth::Halfwidth);
         assert_eq!(push_digit(DigitWidth::default(), '3'), "3");
+    }
+}
+
+#[cfg(test)]
+mod passthrough_sync_tests {
+    //! pending_romaji_buf と romaji.buffer の同期を検証する。
+    //! PassThrough 連鎖で複数文字が確定する場合に、未確定ローマ字が
+    //! 表示から落ちないことを保証する（旧バグ: "qwrty" → "qwry" 表示）。
+    use super::{EngineConfig, RakunEngine};
+
+    fn type_string(input: &str) -> RakunEngine {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        for c in input.chars() {
+            e.push_char(c);
+        }
+        e
+    }
+
+    #[test]
+    fn qwrty_shows_all_typed_chars() {
+        let e = type_string("qwrty");
+        assert_eq!(e.current_preedit().display(), "qwrty");
+    }
+
+    #[test]
+    fn kana_then_kq_shows_pending_q() {
+        let e = type_string("kanakq");
+        assert_eq!(e.current_preedit().display(), "かなkq");
+    }
+
+    #[test]
+    fn kana_then_kq_then_bs_removes_q_only() {
+        let mut e = type_string("kanakq");
+        e.backspace();
+        assert_eq!(e.current_preedit().display(), "かなk");
+    }
+
+    #[test]
+    fn romaji_log_matches_typed_input_for_qwrty() {
+        // F9/F10 復元のため、log + pending = ユーザーが入力したローマ字列 を保つ。
+        let e = type_string("qwrty");
+        let log = e.romaji_log_str();
+        let pending = e.current_preedit().pending_romaji.clone();
+        assert_eq!(format!("{}{}", log, pending), "qwrty");
     }
 }

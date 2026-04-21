@@ -188,6 +188,8 @@ if ($engineDlls.Count -eq 0) {
 Write-Host "[1/5] Installing to $installDir ..."
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 
+try {
+
 # Unregister old DLL to release engine DLL file locks
 if (Test-Path -LiteralPath $regFile) {
     $oldDllEarly = Get-Content -LiteralPath $regFile -ErrorAction SilentlyContinue
@@ -277,6 +279,17 @@ if (-not (Test-Path -LiteralPath $configDest)) {
     }
 } else {
     Write-Host "  -> config.toml already exists, skipping"
+}
+
+} catch [System.IO.IOException] {
+    Write-Host ""
+    Write-Host "[install] ファイルがロックされていてコピーできません:" -ForegroundColor Red
+    Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
+    Write-Host ""
+    Write-Host "  対処: 一旦サインアウト→再ログオンしてから 'sudo cargo make install' を再実行してください。" -ForegroundColor Yellow
+    Write-Host "        (TSF DLL / engine DLL は再ログオンで自動解放されます)" -ForegroundColor Yellow
+    Stop-Transcript | Out-Null
+    exit 1
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

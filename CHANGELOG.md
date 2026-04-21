@@ -3,6 +3,15 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.3] - 2026-04-21
+
+### Fixed
+
+- **ローマ字入力時の未確定文字消失** — `RakunEngine::push_char` で engine 側 `pending_romaji_buf` と `RomajiConverter` 内部 `buffer` がズレ、`PassThrough` 連鎖時に未確定ローマ字がプリエディット表示から落ちていた問題を修正。`romaji.output` / `romaji.buffer` の差分から「確定したひらがな」と「未確定ローマ字」を判定する方式に変更
+  - `qwrty` 入力時に `t` が表示から消えていた
+  - `かなkq` 入力時に `q` が表示から消えていた
+  - 同根原因として F9/F10 サイクル変換のローマ字復元ログ (`romaji_input_log`) も整合を取り戻す
+
 ## [0.6.2] - 2026-04-20
 
 ### Added
