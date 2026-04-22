@@ -1,4 +1,4 @@
-# rakukan v0.6.6
+# rakukan v0.6.7
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,15 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.6.7 変更点
+
+- **辞書候補の増強**: Space 変換の `DICT_LIMIT` を 20 → 40、`merge_candidates` の辞書スロット配分を `limit/2` → `limit*2/3` に変更。LLM beam を広げずに辞書由来候補を最大 26 件程度まで提示
+- **設定画面を開閉しただけで変換が止まる問題を解消**: WinUI 設定が on-disk TOML との diff を検出した時のみ engine reload を発火するよう変更（無変更クローズでは reload しない）
+- **変換中のキー入力取りこぼしを軽減**: `on_convert` の inline LLM 待機を 3〜15 秒 → 250ms に短縮。超過時は既存の WM_TIMER ポーリングにフォールバックして ⏳ 表示のまま継続。hot path のロック占有時間を 1 桁以上縮める
+- **範囲指定変換の二重ブロック解消**: 旧実装の `convert_sync` + `bg_wait_ms(1500)` を `bg_start` + 250ms inline + WM_TIMER fallback に統一。`SessionState::Waiting` に `remainder` フィールドを追加し、非同期で Selecting 昇格する際も残り読みを保持
+- **変体仮名 (Hentaigana) を辞書ビルド時に除外**: Windows 標準フォントで描画できない Kana Extended-B / Supplement / Extended-A / Small Kana Extension (U+1AFF0–U+1B16F) を含む surface を dict-builder が恒久排除。絵文字・CJK 拡張漢字・⏩ 等の BMP 記号は誤爆せず残る
+- **絵文字 (mozc emoji_data.tsv) に対応**: dict-builder に `--emoji <path>` 引数と `parse_emoji_tsv` を追加。install.ps1 が `emoji_data.tsv` を GitHub からダウンロードして辞書に統合する。「はーと」→ ♥️、「はやおくり」→ ⏩ 等の hiragana 読みで引ける（候補ウィンドウ内は GDI の制約で白黒表示、確定先アプリではカラーで入力される）
 
 ## 0.6.6 変更点
 

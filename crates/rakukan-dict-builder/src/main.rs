@@ -63,6 +63,10 @@ struct Args {
     #[arg(long = "symbol")]
     symbols: Vec<PathBuf>,
 
+    /// Input emoji TSV files (mozc emoji/emoji_data.tsv format, multiple allowed)
+    #[arg(long = "emoji")]
+    emojis: Vec<PathBuf>,
+
     /// Output binary file
     #[arg(short, long)]
     output: PathBuf,
@@ -74,6 +78,10 @@ struct Args {
     /// Max cost threshold (default: no limit)
     #[arg(long, default_value = "65535")]
     max_cost: u16,
+
+    /// Cost for emoji entries (default: 6000 — 一般語より下、symbol より下で候補末尾寄り)
+    #[arg(long, default_value = "6000")]
+    emoji_cost: u16,
 }
 
 // ─── TSV パーサー ─────────────────────────────────────────────────────────────
@@ -86,6 +94,25 @@ struct Entry {
     cost: u16,
 }
 
+/// Windows 11 標準フォント + 既定 font linking で描画できない仮名ブロックを
+/// 含むかを判定する。
+///
+/// 対象範囲 U+1AFF0..=U+1B16F は以下 4 ブロック:
+/// - Kana Extended-B  (U+1AFF0–U+1AFFF)
+/// - Kana Supplement  (U+1B000–U+1B0FF) — 変体仮名
+/// - Kana Extended-A  (U+1B100–U+1B12F) — 変体仮名追加
+/// - Small Kana Extension (U+1B130–U+1B16F)
+///
+/// これらの surface は候補ウィンドウで「‥」相当のフォールバック字形になるため、
+/// 辞書ビルド時に恒久的に除外する。絵文字 (U+1F000+) や CJK 漢字
+/// (U+4E00 / U+20000+) は範囲が重ならないので誤爆しない。
+fn has_unrenderable_kana(s: &str) -> bool {
+    s.chars().any(|c| {
+        let n = c as u32;
+        (0x1AFF0..=0x1B16F).contains(&n)
+    })
+}
+
 /// mozc TSV を読み込んでエントリ列を返す
 fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
     let text = std::fs::read_to_string(path)
@@ -93,6 +120,7 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
 
     let mut entries = Vec::new();
     let mut skipped = 0usize;
+    let mut skipped_unrenderable = 0usize;
 
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -148,6 +176,12 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
             continue;
         }
 
+        // 変体仮名等の描画不可文字を含む surface を除外
+        if has_unrenderable_kana(&surface) {
+            skipped_unrenderable += 1;
+            continue;
+        }
+
         entries.push(Entry {
             reading,
             surface,
@@ -156,10 +190,11 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
     }
 
     tracing::info!(
-        "{}: {} エントリ読み込み、{} スキップ",
+        "{}: {} エントリ読み込み、{} スキップ (うち描画不可仮名 {})",
         path.display(),
         entries.len(),
-        skipped
+        skipped + skipped_unrenderable,
+        skipped_unrenderable
     );
     Ok(entries)
 }
@@ -184,6 +219,7 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
 
     let mut entries = Vec::new();
     let mut skipped = 0usize;
+    let mut skipped_unrenderable = 0usize;
 
     for (_lineno, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -203,6 +239,12 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
 
         if surface.is_empty() {
             skipped += 1;
+            continue;
+        }
+
+        // 変体仮名等の描画不可文字を含む surface を除外
+        if has_unrenderable_kana(&surface) {
+            skipped_unrenderable += 1;
             continue;
         }
 
@@ -237,10 +279,96 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
     }
 
     tracing::info!(
-        "{}: {} symbol entries, {} skipped",
+        "{}: {} symbol entries, {} skipped (うち描画不可仮名 {})",
         path.display(),
         entries.len(),
-        skipped
+        skipped + skipped_unrenderable,
+        skipped_unrenderable
+    );
+    Ok(entries)
+}
+
+/// mozc emoji_data.tsv パーサー
+///
+/// フォーマット (タブ区切り、7 カラム):
+/// 1. unicode code point (空白区切り hex、例: "23E9 FE0F")
+/// 2. 実データ (UTF-8 文字、例: "⏩️")
+/// 3. 読み (空白区切り、例: "はやおくり ばいそく ぼたん")
+/// 4. unicode name (空の場合あり)
+/// 5. 日本語名 (例: "早送り")
+/// 6. 説明語 (空白区切り)
+/// 7. emoji version (例: "E0.6")
+///
+/// 読み (カラム 3) のうち「ひらがな + 長音符」のみで構成されるトークンを reading として採用。
+/// surface は カラム 2 をそのまま使う。
+/// 変体仮名は `has_unrenderable_kana` で surface 単位で除外するが、emoji は U+1F000 以上
+/// もしくは BMP 内の Misc Technical 系で、そもそもフィルタ範囲と重ならない。
+fn parse_emoji_tsv(path: &PathBuf, cost: u16) -> Result<Vec<Entry>> {
+    let text = std::fs::read_to_string(path)
+        .with_context(|| format!("emoji TSV read failed: {}", path.display()))?;
+
+    let mut entries = Vec::new();
+    let mut skipped = 0usize;
+    let mut skipped_no_reading = 0usize;
+
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let cols: Vec<&str> = line.split('\t').collect();
+        if cols.len() < 3 {
+            skipped += 1;
+            continue;
+        }
+
+        let surface = cols[1].trim().to_string();
+        let readings_raw = cols[2];
+
+        if surface.is_empty() {
+            skipped += 1;
+            continue;
+        }
+
+        // surface に変体仮名等が混ざっていないか念のため確認
+        if has_unrenderable_kana(&surface) {
+            skipped += 1;
+            continue;
+        }
+
+        // readings: 空白区切り、ひらがな (U+3041–U+309F) + 長音符 (U+30FC) のみのトークンを採用
+        let hira_readings: Vec<&str> = readings_raw
+            .split(' ')
+            .filter(|t| {
+                !t.is_empty()
+                    && t.chars().all(|c| {
+                        let n = c as u32;
+                        (0x3041..=0x309F).contains(&n) || c == 'ー'
+                    })
+            })
+            .collect();
+
+        if hira_readings.is_empty() {
+            skipped_no_reading += 1;
+            continue;
+        }
+
+        for reading in hira_readings {
+            entries.push(Entry {
+                reading: reading.to_string(),
+                surface: surface.clone(),
+                cost,
+            });
+        }
+    }
+
+    tracing::info!(
+        "{}: {} emoji entries, {} skipped (読み無し {})",
+        path.display(),
+        entries.len(),
+        skipped + skipped_no_reading,
+        skipped_no_reading
     );
     Ok(entries)
 }
@@ -405,6 +533,13 @@ fn main() -> Result<()> {
         all_entries.extend(entries);
     }
 
+    // emoji_data.tsv を読み込んでマージ
+    for path in &args.emojis {
+        let entries = parse_emoji_tsv(path, args.emoji_cost)
+            .with_context(|| format!("emoji TSV パース失敗: {}", path.display()))?;
+        all_entries.extend(entries);
+    }
+
     tracing::info!("合計 {} エントリ", all_entries.len());
 
     // 読みごとにグループ化・ソート
@@ -440,6 +575,93 @@ mod tests {
         std::fs::write(tmp.path(), &content).unwrap();
         let entries = parse_tsv(&tmp.path().to_path_buf(), 65535).unwrap();
         assert_eq!(entries.len(), 3);
+    }
+
+    #[test]
+    fn test_has_unrenderable_kana() {
+        // ── 描画不可（フィルタ対象）──
+        assert!(has_unrenderable_kana("\u{1B0B3}"));       // HENTAIGANA LETTER HU-1
+        assert!(has_unrenderable_kana("\u{1B0B5}"));       // HENTAIGANA LETTER HU-3
+        assert!(has_unrenderable_kana("\u{1B000}"));       // Kana Supplement 先頭
+        assert!(has_unrenderable_kana("\u{1B16F}"));       // Small Kana Extension 末尾
+        assert!(has_unrenderable_kana("\u{1AFF0}"));       // Kana Extended-B 先頭
+        assert!(has_unrenderable_kana("ふ\u{1B0B3}る"));   // 混在していても hit
+
+        // ── 描画可（フィルタ対象外、絵文字・漢字・通常仮名）──
+        assert!(!has_unrenderable_kana("日本"));           // CJK 基本
+        assert!(!has_unrenderable_kana("にほん"));          // ひらがな
+        assert!(!has_unrenderable_kana("ニホン"));          // カタカナ
+        assert!(!has_unrenderable_kana("\u{23E9}"));       // ⏩ Misc Technical
+        assert!(!has_unrenderable_kana("\u{1F389}"));      // 🎉 絵文字
+        assert!(!has_unrenderable_kana("\u{1F680}"));      // 🚀 絵文字
+        assert!(!has_unrenderable_kana("\u{20000}"));      // CJK Ext B 先頭（保持）
+        assert!(!has_unrenderable_kana("\u{1AFEF}"));      // フィルタ範囲の 1 つ下
+        assert!(!has_unrenderable_kana("\u{1B170}"));      // フィルタ範囲の 1 つ上
+    }
+
+    #[test]
+    fn test_parse_emoji_tsv() {
+        // mozc emoji_data.tsv 形式（7 カラム、タブ区切り）
+        // header コメント行 + データ行 3 つ
+        let content = [
+            "# This is a comment",
+            "# The data format is tab separated fields",
+            // ⏩: はやおくり / ばいそく / ぼたん などが hiragana-only → 有効
+            "23E9 FE0F\t\u{23E9}\u{FE0F}\tはやおくり ばいそく ぼたん\t\t早送り\tボタン 倍速\tE0.6",
+            // 1️⃣: 数字 "1" や "１" は filter で落ちる、"いち" は採用
+            "31 FE0F 20E3\t1\u{FE0F}\u{20E3}\t1 いち\t\t絵文字\t1 一\tE0.6",
+            // 読み無し（ASCII のみ）→ skip
+            "30\t0\t0\t\t絵文字\t\tE0.6",
+        ]
+        .join("\n");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &content).unwrap();
+        let entries = parse_emoji_tsv(&tmp.path().to_path_buf(), 6000).unwrap();
+
+        // ⏩ → 3 readings (はやおくり, ばいそく, ぼたん)
+        // 1️⃣ → 1 reading (いち)
+        // 3 行目 → 0 readings、skip
+        assert_eq!(entries.len(), 4);
+
+        // surface にすべて filter に引っかかる文字が含まれていないこと
+        for e in &entries {
+            assert!(!has_unrenderable_kana(&e.surface));
+        }
+
+        // cost は引数値
+        assert!(entries.iter().all(|e| e.cost == 6000));
+
+        // ⏩ が hiragana 読みで引けること
+        let hayaokuri: Vec<&Entry> = entries.iter().filter(|e| e.reading == "はやおくり").collect();
+        assert_eq!(hayaokuri.len(), 1);
+        assert_eq!(hayaokuri[0].surface, "\u{23E9}\u{FE0F}");
+
+        let itchi: Vec<&Entry> = entries.iter().filter(|e| e.reading == "いち").collect();
+        assert_eq!(itchi.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_filters_unrenderable_kana() {
+        // mozc TSV 形式: reading TAB lid TAB rid TAB cost TAB surface
+        // 通常エントリ 2 + 変体仮名 surface 1 → 2 件のみ残る
+        let content = make_tsv(&[
+            "にほん\t1849\t1849\t3394\t日本",
+            "ふ\t1234\t1234\t5000\t\u{1B0B3}",       // surface = HENTAIGANA HU-1
+            "にほんご\t1849\t1849\t4000\t日本語",
+        ]);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &content).unwrap();
+        let entries = parse_tsv(&tmp.path().to_path_buf(), 65535).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().all(|e| !has_unrenderable_kana(&e.surface)));
+        // 絵文字・通常漢字は残る確認
+        let content2 = make_tsv(&[
+            "はやおくり\t1849\t1849\t3000\t\u{23E9}",  // ⏩
+            "にほん\t1849\t1849\t3394\t日本",
+        ]);
+        std::fs::write(tmp.path(), &content2).unwrap();
+        let entries2 = parse_tsv(&tmp.path().to_path_buf(), 65535).unwrap();
+        assert_eq!(entries2.len(), 2);
     }
 
     #[test]

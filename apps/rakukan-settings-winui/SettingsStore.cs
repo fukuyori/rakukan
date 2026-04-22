@@ -236,20 +236,42 @@ internal sealed class SettingsStore
         };
     }
 
-    public void Save(SettingsBundle bundle)
+    /// <summary>
+    /// 設定を保存する。戻り値 true = 少なくとも 1 ファイルが実際にディスク上で書き換わった。
+    /// 戻り値 false = 全ファイルが既存の内容と完全一致で書き込みをスキップ（= エンジン reload 不要）。
+    /// </summary>
+    public bool Save(SettingsBundle bundle)
     {
         EnsureDirectory(ConfigPath);
         EnsureDirectory(KeymapPath);
 
         var configTable = LoadToml(ConfigPath);
         SaveConfig(configTable, bundle.Config);
-        File.WriteAllText(ConfigPath, Toml.FromModel(configTable));
+        var configText = Toml.FromModel(configTable);
+        var configChanged = WriteIfDifferent(ConfigPath, configText);
 
         var keymapTable = LoadToml(KeymapPath);
         SaveKeymap(keymapTable, bundle.Keymap);
-        File.WriteAllText(KeymapPath, Toml.FromModel(keymapTable));
+        var keymapText = Toml.FromModel(keymapTable);
+        var keymapChanged = WriteIfDifferent(KeymapPath, keymapText);
 
-        SaveUserDict(UserDictPath, bundle.UserDict);
+        var userDictChanged = SaveUserDict(UserDictPath, bundle.UserDict);
+
+        return configChanged || keymapChanged || userDictChanged;
+    }
+
+    private static bool WriteIfDifferent(string path, string contents)
+    {
+        if (File.Exists(path))
+        {
+            var existing = File.ReadAllText(path);
+            if (string.Equals(existing, contents, StringComparison.Ordinal))
+            {
+                return false;
+            }
+        }
+        File.WriteAllText(path, contents);
+        return true;
     }
 
     public void OpenConfig() => OpenInNotepad(ConfigPath);
@@ -306,7 +328,7 @@ internal sealed class SettingsStore
         return result;
     }
 
-    private static void SaveUserDict(string path, List<UserDictEntry> entries)
+    private static bool SaveUserDict(string path, List<UserDictEntry> entries)
     {
         EnsureDirectory(path);
 
@@ -337,7 +359,7 @@ internal sealed class SettingsStore
         }
 
         root["entries"] = array;
-        File.WriteAllText(path, Toml.FromModel(root));
+        return WriteIfDifferent(path, Toml.FromModel(root));
     }
 
     public void OpenUserDict()

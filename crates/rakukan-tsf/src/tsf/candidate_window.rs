@@ -741,8 +741,21 @@ pub fn on_waiting_timer() {
     let wait_info = {
         match session_get() {
             Ok(sess) => {
-                if let SessionState::Waiting { text, pos_x, pos_y } = &*sess {
-                    Some((text.clone(), *pos_x, *pos_y))
+                if let SessionState::Waiting {
+                    text,
+                    pos_x,
+                    pos_y,
+                    remainder,
+                    remainder_reading,
+                } = &*sess
+                {
+                    Some((
+                        text.clone(),
+                        *pos_x,
+                        *pos_y,
+                        remainder.clone(),
+                        remainder_reading.clone(),
+                    ))
                 } else {
                     None
                 }
@@ -751,7 +764,7 @@ pub fn on_waiting_timer() {
         }
     };
 
-    let (wait_preedit, pos_x, pos_y) = match wait_info {
+    let (wait_preedit, pos_x, pos_y, remainder, remainder_reading) = match wait_info {
         Some(v) => v,
         None => {
             // Waiting ではなくなっていたらタイマー停止
@@ -775,7 +788,7 @@ pub fn on_waiting_timer() {
     // bg=done → 候補を取り出して表示
     stop_waiting_timer();
 
-    const DICT_LIMIT: usize = 20;
+    const DICT_LIMIT: usize = 40;
     let _llm_limit = crate::engine::state::get_num_candidates();
 
     let result = (|| -> Option<(Vec<String>, String)> {
@@ -840,7 +853,7 @@ pub fn on_waiting_timer() {
         }
     };
 
-    // セッションを Selecting に遷移
+    // セッションを Selecting に遷移。範囲指定変換経由で remainder があれば引き継ぐ。
     let page_info_str;
     let page_cands;
     {
@@ -848,7 +861,17 @@ pub fn on_waiting_timer() {
             Ok(s) => s,
             Err(_) => return,
         };
-        sess.activate_selecting(merged, wait_preedit.clone(), pos_x, pos_y, false);
+        sess.activate_selecting_with_affixes(
+            merged,
+            wait_preedit.clone(),
+            pos_x,
+            pos_y,
+            false,
+            String::new(),
+            String::new(),
+            remainder,
+            remainder_reading,
+        );
         page_cands = sess.page_candidates().to_vec();
         page_info_str = sess.page_info().to_string();
     }

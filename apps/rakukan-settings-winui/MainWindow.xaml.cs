@@ -636,12 +636,24 @@ public sealed partial class MainWindow : Window
         try
         {
             var captured = CaptureSettingsFromUi();
-            _store.Save(captured);
-            SignalReload();
+            var wroteAnything = _store.Save(captured);
 
-            StatusBar.Severity = InfoBarSeverity.Success;
-            StatusBar.Title = "反映しました";
-            StatusBar.Message = "設定を保存し、現在の IME に反映しました。";
+            // ディスク上で実際に内容が変わった時だけ engine reload を発火する。
+            // reload 経路は RAKUKAN_ENGINE mutex を数秒握るため、
+            // 変更なしの「閉じるだけ」で変換が止まるのを避ける。
+            if (wroteAnything)
+            {
+                SignalReload();
+                StatusBar.Severity = InfoBarSeverity.Success;
+                StatusBar.Title = "反映しました";
+                StatusBar.Message = "設定を保存し、現在の IME に反映しました。";
+            }
+            else
+            {
+                StatusBar.Severity = InfoBarSeverity.Informational;
+                StatusBar.Title = "変更なし";
+                StatusBar.Message = "設定内容に変更がないため、保存も再読込もスキップしました。";
+            }
             StatusBar.IsOpen = true;
 
             error = string.Empty;

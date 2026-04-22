@@ -3,6 +3,25 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.7] - 2026-04-22
+
+### Added
+
+- **絵文字辞書 (`mozc emoji_data.tsv`) 対応** — dict-builder に `--emoji <path>` / `--emoji-cost <u16>` 引数と `parse_emoji_tsv()` を追加。install.ps1 が `emoji_data.tsv` を GitHub からダウンロードして辞書に統合。mozc 由来の hiragana 読み（例: 「はーと」→ ♥️、「はやおくり」→ ⏩、「ろけっと」→ 🚀）で引ける。cost デフォルト 6000 で一般語より下位に配置される。候補ウィンドウ内は GDI の制約でモノクロ表示だが、確定先アプリ（Chrome / VSCode / Slack 等の DirectWrite 系）ではカラーで入力される
+- **`SessionState::Waiting` に `remainder` / `remainder_reading` フィールドを追加** — WM_TIMER fallback で Selecting 昇格する際に、範囲指定変換の残り読みを正しく引き継げるようになった
+
+### Changed
+
+- **辞書スロット配分を dict 優先化** — `merge_candidates` の `dict_slots` 算出を `(limit/2).max(3)` → `(limit*2/3).max(5)` に変更。辞書ルックアップは mmap binary search で LLM より圧倒的に軽く、性能ペナルティなしで候補密度が上がる
+- **Space 変換の `DICT_LIMIT` を 20 → 40 に拡張** — `merge_candidates` に渡す上限を倍増。`num_candidates=9` のままでも辞書由来候補が最大 26 件程度まで並ぶ
+- **`on_convert` の inline LLM 待機を 3〜15 秒 → 250ms に短縮** — `LLM_WAIT_MAX_MS` を廃止して `LLM_WAIT_INLINE_MS = 250` に統一。タイムアウト時は既存の WM_TIMER ポーリング経路（`start_waiting_timer`）に即委譲し、hot path の `RAKUKAN_ENGINE` / RpcEngine Connection ミューテックス占有時間を 1 桁以上縮める。⏳ 表示は維持したまま、他のキー入力が待たされない
+- **範囲指定変換 (RangeSelect → Space) の二重ブロックを解消** — 旧実装の `convert_sync` + `bg_wait_ms(1500)` を `bg_start` + 250ms inline + WM_TIMER fallback に統一。`on_convert[new]` と同じパターンに合わせて重複 LLM 推論を排除
+
+### Fixed
+
+- **設定画面を開いて閉じただけで変換が止まる問題** — WinUI の `SettingsStore.Save()` が 3 ファイル（`config.toml` / `keymap.toml` / `user_dict.toml`）について on-disk 内容との diff を取り、**実際に書き換わったときだけ `true` を返す**ように変更。`MainWindow.TrySaveAndApply()` は戻り値 `true` の時のみ `SignalReload()` を発火する。これにより内容未変更のクローズでは engine reload（RAKUKAN_ENGINE ミューテックスを数秒占有する経路）が走らず、直後の変換がブロックされない
+- **変体仮名の「‥」表示問題** — Windows 標準フォント + 既定 font linking で描画できない Kana Extended-B (U+1AFF0–U+1AFFF) / Kana Supplement (U+1B000–U+1B0FF、変体仮名) / Kana Extended-A (U+1B100–U+1B12F) / Small Kana Extension (U+1B130–U+1B16F) を含む surface を dict-builder が恒久排除。範囲指定型フィルタなので、絵文字 (U+1F000+) や CJK 拡張漢字 (U+20000+) や ⏩ 等の BMP 記号は誤爆せず残る
+
 ## [0.6.6] - 2026-04-22
 
 ### Fixed

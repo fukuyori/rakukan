@@ -1040,7 +1040,7 @@ impl TextServiceFactory_Impl {
 
         // LLM候補待機中に完了した場合、候補ウィンドウを自動更新
         if session_is_selecting_fast() {
-            const DICT_LIMIT_POLL: usize = 20;
+            const DICT_LIMIT_POLL: usize = 40;
             if let Ok(mut sess) = session_get() {
                 let poll_info = if let SessionState::Selecting {
                     ref original_preedit,
@@ -1121,7 +1121,7 @@ impl TextServiceFactory_Impl {
         // （ポーリングで Waiting→Preedit 遷移すると on_cancel が fallthrough して全消去になる）
         let is_cancel = matches!(action, UserAction::Cancel | UserAction::CancelAll);
         if !is_cancel {
-            const DICT_LIMIT_WAIT: usize = 20;
+            const DICT_LIMIT_WAIT: usize = 40;
             if let Ok(mut sess) = session_get() {
                 if let Some((wait_preedit, pos_x, pos_y)) =
                     sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y))
@@ -1654,51 +1654,78 @@ impl TextServiceFactory_Impl {
                 drop(sess);
                 candidate_window::stop_live_timer();
 
-                // 通常変換（on_convert の続行部分に乗せる）
-                // ここから先は on_convert の通常パスが処理する
-                // remainder は Selecting 状態に渡す必要がある
-                // → 通常パスに任せず、ここで直接変換する
+                // on_convert[new] と同じ「bg_start → 短時間 inline 待機 → 取れなければ
+                // WM_TIMER fallback」方式に統一。旧実装の `convert_sync` + `bg_wait_ms(1500)`
+                // の二重ブロック（最長数秒）を排除し、hot path のロック占有を 250ms 以下に抑える。
+                const LLM_WAIT_INLINE_MS: u64 = 250;
+                const DICT_LIMIT: usize = 40;
                 let n_cands = crate::engine::state::get_num_candidates();
                 let kanji_ready = engine.is_kanji_ready();
                 let target = selected;
-
-                let sync_cands: Vec<String> = if kanji_ready {
-                    let llm_cands = engine.convert_sync();
-                    let merged = engine.merge_candidates(llm_cands, 32);
-                    if merged.is_empty() {
-                        vec![target.clone()]
-                    } else {
-                        merged
-                    }
-                } else {
-                    vec![target.clone()]
-                };
-
-                let bg_cands = if kanji_ready {
-                    engine.bg_start(n_cands);
-                    let completed = engine.bg_wait_ms(1500);
-                    if completed {
-                        engine.bg_take_candidates(&target)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                let candidates = match bg_cands {
-                    Some(llm) if !llm.is_empty() => {
-                        let m = engine.merge_candidates(llm, 32);
-                        if m.is_empty() {
-                            sync_cands
-                        } else {
-                            m
-                        }
-                    }
-                    _ => sync_cands,
-                };
-
                 let caret = caret_rect_get();
+
+                if !kanji_ready {
+                    // モデル未ロード → target をそのままプレビューとして Selecting 化
+                    let candidates = vec![target.clone()];
+                    {
+                        let mut sess = session_get()?;
+                        sess.activate_selecting_with_affixes(
+                            candidates.clone(),
+                            target,
+                            caret.left,
+                            caret.bottom,
+                            false,
+                            String::new(),
+                            String::new(),
+                            remainder,
+                            remainder_reading,
+                        );
+                    }
+                    drop(guard);
+                    candidate_window::show(&candidates, 0, "", caret.left, caret.bottom);
+                    return Ok(true);
+                }
+
+                // ⏳ 表示して待機状態にしてから bg_start
+                if let Ok(mut sess) = session_get() {
+                    sess.set_waiting_with_affixes(
+                        target.clone(),
+                        caret.left,
+                        caret.bottom,
+                        remainder.clone(),
+                        remainder_reading.clone(),
+                    );
+                }
+                let dummy = vec![target.clone()];
+                candidate_window::show_with_status(
+                    &dummy,
+                    0,
+                    "",
+                    caret.left,
+                    caret.bottom,
+                    Some("⏳ 変換中..."),
+                );
+
+                if engine.bg_status() != "done" {
+                    engine.bg_start(n_cands);
+                }
+                let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+                if !completed {
+                    // 短時間で終わらない → WM_TIMER fallback（Waiting の remainder は保持済み）
+                    drop(guard);
+                    candidate_window::start_waiting_timer();
+                    return Ok(true);
+                }
+
+                // inline 完走 → 取得してマージ
+                let llm_cands = engine.bg_take_candidates(&target).unwrap_or_default();
+                let candidates = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                let candidates = if candidates.is_empty() {
+                    vec![target.clone()]
+                } else {
+                    candidates
+                };
+
                 {
                     let mut sess = session_get()?;
                     sess.activate_selecting_with_affixes(
@@ -1714,6 +1741,7 @@ impl TextServiceFactory_Impl {
                     );
                 }
                 drop(guard);
+                candidate_window::stop_waiting_timer();
                 let page_size = 9usize;
                 let page_cands: Vec<String> = candidates.into_iter().take(page_size).collect();
                 candidate_window::show(&page_cands, 0, "", caret.left, caret.bottom);
@@ -1763,7 +1791,7 @@ impl TextServiceFactory_Impl {
 
                     let bg_done = engine.bg_status() == "done";
                     tracing::debug!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
-                    const DICT_LIMIT: usize = 20;
+                    const DICT_LIMIT: usize = 40;
 
                     if bg_done {
                         // LLM完了 → 候補をマージして表示
@@ -1972,7 +2000,7 @@ impl TextServiceFactory_Impl {
 
         // 新規変換
         let llm_limit = crate::engine::state::get_num_candidates();
-        const DICT_LIMIT: usize = 20;
+        const DICT_LIMIT: usize = 40;
         let _ = crate::engine::state::poll_dict_ready_cached(engine);
         let _ = crate::engine::state::poll_model_ready_cached(engine);
         // Done 状態の converter を先に回収する。
@@ -2005,16 +2033,14 @@ impl TextServiceFactory_Impl {
             bg_status
         );
 
-        // LLM が実行中なら完了まで最大 LLM_WAIT_MAX_MS 待機して候補を取得する。
-        // TSF スレッドで待つため UI がブロックするが、完了後に composition text まで
-        // 一気に更新できる（WM_TIMER 経由では composition text を更新できないため）。
-        // 文字数に応じてタイムアウトを伸ばす（長文は推論に時間がかかる）。
-        // 基本 3 秒 + 1 文字あたり 300ms、上限 15 秒。
-        let char_count = preedit.chars().count() as u64;
-        let LLM_WAIT_MAX_MS: u64 = (3000 + char_count * 300).min(15_000);
-        tracing::debug!(
-            "on_convert[new]: LLM_WAIT_MAX_MS={LLM_WAIT_MAX_MS}ms (chars={char_count})"
-        );
+        // LLM が実行中の場合、**短時間だけ** 同期で完了を待ち、タイムアウトしたら
+        // WM_TIMER ポーリング経路に委譲する。ここで長く待つと RAKUKAN_ENGINE と
+        // RpcEngine の Connection ミューテックスが押さえっぱなしになり、
+        // 続くキー入力のホットパス（try_lock）がすべて弾かれて「入力が止まる」
+        // 症状になる。inline 完走はキャッシュヒット等の高速ケースに限定し、
+        // 通常は ⏳ 表示 + WM_TIMER で非同期に解決する。
+        const LLM_WAIT_INLINE_MS: u64 = 250;
+        tracing::debug!("on_convert[new]: LLM_WAIT_INLINE_MS={LLM_WAIT_INLINE_MS}ms");
         if bg_running && kanji_ready {
             let caret = caret_rect_get();
             // まず ⏳ を即表示してユーザーに変換中であることを伝える
@@ -2033,11 +2059,10 @@ impl TextServiceFactory_Impl {
                 caret.bottom,
                 Some("⏳ 変換中..."),
             );
-            // LLM完了を待機
-            let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
-            tracing::debug!("on_convert[new]: bg_wait({LLM_WAIT_MAX_MS}ms) completed={completed}");
+            // LLM完了を待機（短時間のみ）。超えたら WM_TIMER に任せて抜ける。
+            let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+            tracing::debug!("on_convert[new]: bg_wait({LLM_WAIT_INLINE_MS}ms) completed={completed}");
             if !completed {
-                // タイムアウト → WM_TIMER に任せて return
                 drop(guard);
                 candidate_window::start_waiting_timer();
                 return Ok(true);
@@ -2064,16 +2089,27 @@ impl TextServiceFactory_Impl {
             tracing::debug!(
                 "on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish"
             );
-            let completed = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+            let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
             tracing::debug!("on_convert[new]: prev bg wait completed={completed}");
+            if !completed {
+                // 前の bg が inline 時間で終わらない → WM_TIMER に任せる
+                drop(guard);
+                candidate_window::start_waiting_timer();
+                return Ok(true);
+            }
             // 前の bg が完了したら converter を回収して新しいキーで再起動
             engine.bg_reclaim();
             let kanji_ready2 = engine.is_kanji_ready();
             tracing::debug!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
             if kanji_ready2 {
                 engine.bg_start(llm_limit);
-                let completed2 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+                let completed2 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
                 tracing::debug!("on_convert[new]: new bg wait completed={completed2}");
+                if !completed2 {
+                    drop(guard);
+                    candidate_window::start_waiting_timer();
+                    return Ok(true);
+                }
                 // kanji_ready を更新して後続の候補取得処理へ続行
             } else {
                 // モデル自体が未ロード → タイマーに任せる
@@ -2109,7 +2145,8 @@ impl TextServiceFactory_Impl {
             "on_convert[new]: bg_cands={:?}",
             bg_cands.as_ref().map(|c| c.len())
         );
-        // いずれも None だった場合 → bg_reclaim + bg_start でブロッキング再試行
+        // いずれも None だった場合 → bg_reclaim + bg_start で inline 再試行。
+        // 短時間で取れなければ WM_TIMER fallback に委譲して抜ける。
         let bg_cands = if bg_cands.is_none() && kanji_ready_now {
             tracing::warn!(
                 "Convert: bg_take_candidates None (hira={:?} preedit={:?}) → reclaim+restart",
@@ -2119,8 +2156,13 @@ impl TextServiceFactory_Impl {
             engine.bg_reclaim();
             if engine.is_kanji_ready() {
                 engine.bg_start(llm_limit);
-                let completed3 = engine.bg_wait_ms(LLM_WAIT_MAX_MS);
+                let completed3 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
                 tracing::debug!("Convert: retry bg_wait completed={completed3}");
+                if !completed3 {
+                    drop(guard);
+                    candidate_window::start_waiting_timer();
+                    return Ok(true);
+                }
                 let hira3 = engine.hiragana_text().to_string();
                 engine
                     .bg_take_candidates(&hira3)
@@ -3266,7 +3308,7 @@ impl TextServiceFactory_Impl {
         update_caret_rect(ctx.clone(), tid);
 
         let llm_limit = crate::engine::state::get_num_candidates();
-        const DICT_LIMIT: usize = 20;
+        const DICT_LIMIT: usize = 40;
         let _ = crate::engine::state::poll_dict_ready_cached(engine);
         let _ = crate::engine::state::poll_model_ready_cached(engine);
         let kanji_ready = engine.is_kanji_ready();

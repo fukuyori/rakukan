@@ -1,11 +1,15 @@
-# Rakukan 引き継ぎ資料 (v0.6.6)
+# Rakukan 引き継ぎ資料 (v0.6.7)
 
 更新日: 2026-04-22
 
 ## 現在の状態
 
-- **バージョン:** v0.6.6
-- **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
+- **バージョン:** v0.6.7
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消。v0.6.7 で候補体験と変換中レスポンス、辞書内容の整理を実施:
+  - 辞書スロット配分を dict 優先（`limit*2/3`）に、`DICT_LIMIT` 20 → 40
+  - 設定画面クローズで内容変更が無ければ engine reload を発火しない
+  - `on_convert` / 範囲変換の同期 LLM 待機を 250ms に短縮、超過は WM_TIMER fallback
+  - 変体仮名 (U+1AFF0–U+1B16F) を dict-builder で恒久除外、絵文字 (`emoji_data.tsv`) を統合
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`
@@ -19,6 +23,8 @@
 - [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — 変換パイプライン / 文節編集 再設計
 - [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針
 - [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) — engine-host 多重起動時の GPU メモリ実態（**「GPU 浪費」と論じない**根拠）
+- [ROADMAP.md](ROADMAP.md) — **post v0.6.6 の作業計画書**（リファクタリング + LIVE_CONV_REDESIGN 採用検討の段取り）
+- [LIVE_CONV_REDESIGN_REVISED.md](LIVE_CONV_REDESIGN_REVISED.md) — ライブ変換再設計案（§18 で採否仕分け済み）
 
 ## 0.4.4 の目玉: エンジン別プロセス化
 

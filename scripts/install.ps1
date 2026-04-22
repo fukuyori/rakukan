@@ -409,7 +409,23 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
             }
         }
 
-        Write-Host ("  Building rakukan.dict from " + $downloadedTsvs.Count + " TSV files + symbol.tsv...")
+        # emoji_data.tsv (Apache 2.0)
+        $emojiTsvPath = Join-Path $mozcTsvDir "emoji_data.tsv"
+        $emojiUrl     = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/emoji/emoji_data.tsv"
+        if ((-not (Test-Path -LiteralPath $emojiTsvPath)) -or $forceDict) {
+            try {
+                $tmpPath = $emojiTsvPath + ".tmp"
+                Invoke-WebRequest -Uri $emojiUrl -OutFile $tmpPath -UseBasicParsing -TimeoutSec 60
+                Move-Item -LiteralPath $tmpPath -Destination $emojiTsvPath -Force
+                Write-Host "    Downloaded: emoji_data.tsv"
+            } catch {
+                $tmpPath = $emojiTsvPath + ".tmp"
+                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
+                Write-Host ("    [WARNING] Failed to download emoji_data.tsv: " + $_)
+            }
+        }
+
+        Write-Host ("  Building rakukan.dict from " + $downloadedTsvs.Count + " TSV files + symbol.tsv + emoji_data.tsv...")
         $inputArgs = @()
         foreach ($f in $downloadedTsvs) {
             $inputArgs += "--input"
@@ -418,6 +434,10 @@ if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
         if (Test-Path -LiteralPath $symbolTsvPath) {
             $inputArgs += "--symbol"
             $inputArgs += $symbolTsvPath
+        }
+        if (Test-Path -LiteralPath $emojiTsvPath) {
+            $inputArgs += "--emoji"
+            $inputArgs += $emojiTsvPath
         }
         $inputArgs += "--output"
         $inputArgs += $mozcDictOut

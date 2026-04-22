@@ -546,8 +546,10 @@ impl RakunEngine {
             }
         }
 
-        // 辞書候補に確保するスロット数（limit の半分、最低3件）
-        let dict_slots = (limit / 2).max(3);
+        // 辞書候補に確保するスロット数（limit の約 2/3、最低 5 件）。
+        // 辞書ルックアップは binary search + 固定バイト読みで LLM より圧倒的に軽いため、
+        // 性能を落とさずに候補数を増やす第一の手段として dict 優先の配分にしている。
+        let dict_slots = (limit * 2 / 3).max(5);
         // LLM は残りのスロットを使用
         let llm_limit = limit.saturating_sub(dict_slots).max(1);
 

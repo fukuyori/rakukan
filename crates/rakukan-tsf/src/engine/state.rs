@@ -663,6 +663,11 @@ pub enum SessionState {
         text: String,
         pos_x: i32,
         pos_y: i32,
+        /// 範囲指定変換から遷移してきた場合の「変換しない残り部分」
+        /// （通常の on_convert 経由では空）。
+        /// Waiting → Selecting 遷移時に `activate_selecting_with_affixes` に渡す。
+        remainder: String,
+        remainder_reading: String,
     },
     Selecting {
         original_preedit: String,
@@ -864,7 +869,27 @@ impl SessionState {
     }
 
     pub fn set_waiting(&mut self, text: String, pos_x: i32, pos_y: i32) {
-        *self = SessionState::Waiting { text, pos_x, pos_y };
+        self.set_waiting_with_affixes(text, pos_x, pos_y, String::new(), String::new());
+    }
+
+    /// 範囲指定変換 → WM_TIMER 経由のための Waiting 遷移。
+    /// `remainder` / `remainder_reading` は Waiting → Selecting 昇格時に
+    /// `activate_selecting_with_affixes` へ渡される。
+    pub fn set_waiting_with_affixes(
+        &mut self,
+        text: String,
+        pos_x: i32,
+        pos_y: i32,
+        remainder: String,
+        remainder_reading: String,
+    ) {
+        *self = SessionState::Waiting {
+            text,
+            pos_x,
+            pos_y,
+            remainder,
+            remainder_reading,
+        };
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
     }
 
@@ -945,10 +970,13 @@ impl SessionState {
 
     pub fn waiting_info(&self) -> Option<(&str, i32, i32)> {
         match self {
-            SessionState::Waiting { text, pos_x, pos_y } => Some((text.as_str(), *pos_x, *pos_y)),
+            SessionState::Waiting {
+                text, pos_x, pos_y, ..
+            } => Some((text.as_str(), *pos_x, *pos_y)),
             _ => None,
         }
     }
+
 
     pub fn current_candidate(&self) -> Option<&str> {
         match self {
