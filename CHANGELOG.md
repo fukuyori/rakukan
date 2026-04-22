@@ -3,6 +3,16 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.6.6] - 2026-04-22
+
+### Fixed
+
+- **Explorer 異常終了の真因対策（DLL unload race）** — `DllCanUnloadNow` を常に `S_FALSE` 固定し、TSF DLL をプロセス常駐させる。
+  - **解析**: 2026-04-22 07:23 (UTC 22:23) のクラッシュダンプ (`explorer.exe.3124.dmp`) を WinDbg で解析した結果、`Failure.Bucket = BAD_INSTRUCTION_PTR_c0000005_rakukan_tsf.dll!Unloaded` と判明。スタックは `explorer!CTray::_MessageLoop` → `PeekMessageW` → `UserCallWinProcCheckWow` → `<Unloaded_rakukan_tsf.dll>+0x13e70`。
+  - **真因**: `candidate_window.rs:166` の `RegisterClassW` で登録した window class が `UnregisterClassW` されないまま `DllCanUnloadNow=S_OK` で `FreeLibrary` され、in-flight な WM_TIMER / WM_PAINT / kernel callback continuation が消えた wnd_proc アドレスを呼び出して AV。
+  - **対策**: `DllCanUnloadNow` で常に `S_FALSE` を返すことで unload race を完全回避。Microsoft 標準 IME も同パターン。メモリコストは TSF クライアントプロセス毎に ~2 MB 程度で実用上無視できる。
+  - **位置付け**: v0.6.4 で入れた Phase 1〜3 hardening は別経路の race（Phase1A の stale ITfContext）を想定した preventive defense であり、今回の root cause とは独立。残置する。
+
 ## [0.6.5] - 2026-04-21
 
 ### Added

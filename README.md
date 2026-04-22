@@ -1,4 +1,4 @@
-# rakukan v0.6.5
+# rakukan v0.6.6
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,10 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.6.6 変更点
+
+- **Explorer 異常終了の真因対策**: `DllCanUnloadNow` を常に `S_FALSE` 固定。2026-04-22 のクラッシュダンプ解析で、unload 済み TSF DLL の wnd_proc アドレスへ in-flight メッセージがディスパッチされる race（`BAD_INSTRUCTION_PTR_c0000005_rakukan_tsf.dll!Unloaded`）が真因と判明。プロセス常駐させて完全回避（メモリコスト ~2 MB/process）
 
 ## 0.6.5 変更点
 

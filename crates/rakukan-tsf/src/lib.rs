@@ -115,10 +115,19 @@ pub unsafe extern "system" fn DllGetClassObject(
 
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllCanUnloadNow() -> windows::core::HRESULT {
-    match DllModule::get() {
-        Ok(m) if m.ref_count.load(std::sync::atomic::Ordering::SeqCst) == 0 => S_OK,
-        _ => S_FALSE,
-    }
+    // 常に S_FALSE を返し、TSF DLL を unload させない。
+    //
+    // 背景: 2026-04-22 の Explorer crash 解析で、DllCanUnloadNow=S_OK 後の
+    // FreeLibrary と、in-flight な WM_TIMER / WM_PAINT 等のメッセージが衝突し、
+    // unload 済みアドレスにある wnd_proc / RegisterClassW 登録ポインタへ
+    // ディスパッチされて AV (BAD_INSTRUCTION_PTR_c0000005_rakukan_tsf.dll!Unloaded)
+    // を起こしていた。
+    //
+    // RegisterClassW は UnregisterClassW を呼ばない限り wnd_proc ポインタを
+    // 内部に保持し続けるため、DLL unload と完全に整合させるのが困難。
+    // 常駐させる方が安全（メモリコストはプロセス毎に ~2 MB 程度で実用上無視できる）。
+    // Microsoft 標準 IME も同パターン。
+    S_FALSE
 }
 
 #[unsafe(no_mangle)]

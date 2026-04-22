@@ -1,10 +1,10 @@
-# Rakukan 引き継ぎ資料 (v0.6.5)
+# Rakukan 引き継ぎ資料 (v0.6.6)
 
-更新日: 2026-04-21
+更新日: 2026-04-22
 
 ## 現在の状態
 
-- **バージョン:** v0.6.5
+- **バージョン:** v0.6.6
 - **位置づけ:** 変換パイプライン改修完了（数値保護 + 範囲指定変換 + vibrato/SplitPreedit 完全削除）。v0.6.0 で OnSetFocus の安定性修正、v0.6.1 でライブ変換の挙動修正（停止不具合・候補ウィンドウ残留・`num_candidates` 漏洩回帰・ユーザー辞書優先）を反映
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
@@ -196,18 +196,51 @@ tasklist /FI "IMAGENAME eq rakukan-engine-host.exe"
 
 ## 既知の問題
 
-### Explorer の稀な異常終了（0.6.0 以降頻度低下、残存）
+### Explorer の稀な異常終了（0.6.6 で根本対策、Phase1A race とは別経路だった）
 
-**症状**: Explorer (`explorer.exe`) が `MSCTF.dll` 関連のアクセス違反 (`0xc0000005`) で異常終了することがある。
+**症状**: Explorer (`explorer.exe`) が `0xc0000005` のアクセス違反で異常終了することがある。
+
+**2026-04-22 の crash dump 解析で真因が判明**:
+
+```text
+Failure.Bucket = BAD_INSTRUCTION_PTR_c0000005_rakukan_tsf.dll!Unloaded
+
+スタック:
+  <Unloaded_rakukan_tsf.dll>+0x13e70    ← unload 済みアドレスへ実行が飛んだ
+  user32!UserCallWinProcCheckWow+0x356  ← WNDPROC ディスパッチ
+  user32!PeekMessageW+0x168
+  explorer!CTray::_MessageLoop+0x2c1
+```
+
+つまり真因は **MSCTF 経路の Phase1A race ではなく、TSF DLL の unload race** だった:
+
+1. `DllCanUnloadNow` が `ref_count == 0` で `S_OK` を返すと Explorer が `FreeLibrary` する
+2. しかし `candidate_window.rs:166` の `RegisterClassW` で登録した window class は `UnregisterClassW` していないため、wnd_proc 関数ポインタが Windows 側に残存
+3. unload 完了と前後して in-flight な WM_TIMER / WM_PAINT / kernel-side callback continuation が wnd_proc を呼ぶ → 既に消えたアドレスへ実行 → AV
+
+**v0.6.6 の対策**: `DllCanUnloadNow` を常に `S_FALSE` 固定。プロセス常駐させて unload race を完全回避する。Microsoft 標準 IME も同パターン。メモリコストはプロセス毎に ~2 MB 程度で実用上無視できる。
+
+**Phase 1〜3 の再評価**:
+
+- v0.6.4 で入れた hardening（DM 世代ガード / OnUninit composition 失効 / Phase1A focus DM 再検証 / panic audit）は、handoff.md の旧版が「Phase1A の race が主因」と推定したため設計したもの
+- 今回の dump 解析で **直接の root cause は別経路（DLL unload）** だったと判明
+- ただし Phase 1〜3 は preventive defense として有効（将来の race 路を狭める）ので残置する
+
+---
+
+> **以下は v0.6.4 までの調査記録（履歴）**。v0.6.6 の dump 解析で真因は DLL unload race と判明したが、Phase 1〜3 の hardening 設計に至った経緯としてそのまま残す。
 
 **現状**:
+
 - 0.6.0 の OnSetFocus 安定性修正（TSF 通知ストーム対策、`prev_dm == next_dm` 早期 return、null DM 処理）で **発生頻度は大幅に低下**
 - ただし完全に根絶できておらず、Explorer 使用中にごく稀に再現する
 
-**根本原因の推定**:
+**根本原因の推定**（※ v0.6.6 で訂正済 — 真因は DLL unload race）:
+
 - `WM_TIMER` から呼ばれる Phase1A (`RequestEditSession` 直呼び) が、DM が再生成される Explorer のシェル領域で stale な `ITfContext` を掴む競合が残存している可能性
 
 **2026-04 再調査メモ**:
+
 - `OnSetFocus` 本体はすでに `WM_APP_FOCUS_CHANGED` へのキュー積みへ移されており、`msctf!_NotifyCallbacks` 直下で COM 再入しない方針は入っている
 - 一方で live conversion の Phase1A は `candidate_window.rs` の `TL_LIVE_CTX` に保持した `ITfContext` を `WM_TIMER` から直接使って `RequestEditSession` を試行している
 - `process_focus_change()` では `stop_live_timer()` を呼んでいるが、Explorer 側で DocumentMgr が短時間に再生成されると、フォーカス遷移通知より先に stale な context を掴んだ timer tick が残る可能性がある
