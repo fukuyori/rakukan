@@ -3,6 +3,25 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.0] - 2026-04-24
+
+### Fixed
+
+- **ブラウザで入力モードが保持されない問題** (M1.7 T-MODE1 / T-MODE2 / T-MODE3) — Chrome / Edge / Firefox 等でタブ切替・ページ遷移時に入力モードが `config.input.default_mode` へ戻ってしまう race を修正。原因は 3 層で、それぞれ対応:
+  - **T-MODE1** `OnUninitDocumentMgr` が `OnSetFocus` より先に同期発火し `doc_mode_remove` が `dm_to_hwnd` を削除 → 後続の focus 変化処理で HWND 退避がスキップされる経路。`doc_mode_remove` で削除前に `hwnd_modes[hwnd] = mode` をコピーするよう変更
+  - **T-MODE2** 同じ DM 内でモードを変えても store は focus-out スナップショット依存のため未反映。Firefox のタブ切替で「直前タブのモード」が他タブへ流出して反転する原因。`IMEState::set_mode` から `doc_mode_remember_current` を呼び、`dm_modes` / `hwnd_modes` を即時更新。`TL_CURRENT_DM` / `TL_CURRENT_HWND` は `process_focus_change` 入口で更新
+  - **T-MODE3** `GetForegroundWindow()` が子 HWND を返すケースに対応し、`GetAncestor(GA_ROOT)` でルート HWND に正規化する `foreground_root_hwnd()` ヘルパを導入。doc_mode 経路（Activate 初期化 / `OnSetFocus`）で使用
+- **ライブ変換 preview の尻切れによる誤確定** (M1.5 T-BUG2) — LLM の greedy/beam 生成が reading を使い切る前に EOS を出すケースで、preview が極端に短くなり中間部分が欠落する問題に対する防壁を追加。reading との char 数比が 30% 未満なら preview を破棄し reading をそのまま表示する `sanity_check_preview()` を Phase 1A / Phase 1B 両経路に挿入
+- **ライブ変換中の中間文字消失** (M1.8 T-MID1) — 速打ち時に「あいうえおかきくけこさしすせそ」入力が「あいうえおかきくけこさし」のように中間〜末尾の文字が消える race を修正。原因は 2 経路で両方に対策:
+  - **Phase 1B キュー経路**: `LIVE_PREVIEW_QUEUE` の型を `Option<String>` → `Option<PreviewEntry { preview, reading, gen_when_requested }>` に拡張し、世代カウンタ `LIVE_CONV_GEN: AtomicU32` と reading スナップショットを付与。apply 時点で世代 / reading 不一致なら stale として discard
+  - **Phase 1A EditSession 経路**: `TF_ES_READWRITE`（非 SYNC）で遅延実行される EditSession callback に `captured_gen` を渡し、実行時点の世代と比較。不一致なら `E_FAIL` を返し、Phase 1B へ落とす（Phase 1B 側も stale なら discard されるので最終的に no-op）
+  - `on_input` / `on_input_raw` / `on_backspace` の入口で `live_conv_gen_bump()` を呼び、reading 変化ごとに世代を前進
+- **候補ウィンドウが長い候補に対して狭すぎる問題** — 固定幅 `WIN_WIDTH = 260` を廃止し、`compute_needed_width()` で GDI 実測（`GetTextExtentPoint32W` + Meiryo UI 17px）した幅を `WIN_WIDTH_MIN = 260` / `WIN_WIDTH_MAX = 900` にクランプして使用。`TL_WIN_WIDTH: Cell<i32>` で描画時にも参照。status 行・pager 行も測定対象に含める
+
+### Changed
+
+- **バージョン 0.6.x → 0.7.x シリーズへ移行** — v0.6.6 で Explorer crash の DLL unload race を解消した地点から、安定性向上と user-facing bug fix を中心とした 0.7.x シリーズに移行。0.7.0 は bug fix 集中リリース
+
 ## [0.6.7] - 2026-04-22
 
 ### Added

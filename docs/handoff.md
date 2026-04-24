@@ -1,15 +1,16 @@
-# Rakukan 引き継ぎ資料 (v0.6.7)
+# Rakukan 引き継ぎ資料 (v0.7.0)
 
-更新日: 2026-04-22
+更新日: 2026-04-24
 
 ## 現在の状態
 
-- **バージョン:** v0.6.7
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消。v0.6.7 で候補体験と変換中レスポンス、辞書内容の整理を実施:
-  - 辞書スロット配分を dict 優先（`limit*2/3`）に、`DICT_LIMIT` 20 → 40
-  - 設定画面クローズで内容変更が無ければ engine reload を発火しない
-  - `on_convert` / 範囲変換の同期 LLM 待機を 250ms に短縮、超過は WM_TIMER fallback
-  - 変体仮名 (U+1AFF0–U+1B16F) を dict-builder で恒久除外、絵文字 (`emoji_data.tsv`) を統合
+- **バージョン:** v0.7.0
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消、v0.6.7 で候補体験 / 変換中レスポンス / 辞書を整理した地点から、**0.7.x シリーズ（安定性向上・user-facing bug fix 集中）** に移行。v0.7.0 は bug fix 集中リリース:
+  - ブラウザ（Chrome / Edge / Firefox）でタブ切替時に入力モードが戻る / 反転する問題を 3 層で修正（M1.7 T-MODE1 / T-MODE2 / T-MODE3）
+  - ライブ変換 preview の尻切れ防壁（char 数比 <30% で破棄 → reading 置換、M1.5 T-BUG2）
+  - ライブ変換中の中間 / 末尾文字消失を修正（Phase1B キュー経路 + Phase1A EditSession 経路の両方に `LIVE_CONV_GEN` による stale discard、M1.8 T-MID1）
+  - 候補ウィンドウ幅を候補内容に応じて動的計算（GDI 実測、260〜900px でクランプ）
+- **旧バージョン（v0.6.7）の目玉:** 辞書スロット配分を dict 優先（`limit*2/3`）、`DICT_LIMIT` 20 → 40、設定画面クローズで内容変更が無ければ engine reload を発火しない、`on_convert` / 範囲変換の同期 LLM 待機を 250ms に短縮、変体仮名 (U+1AFF0–U+1B16F) を dict-builder で恒久除外、絵文字 (`emoji_data.tsv`) を統合
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`

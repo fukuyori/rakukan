@@ -13,7 +13,7 @@ use super::input_mode::InputMode;
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering as AO};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{Interface, GUID};
@@ -555,6 +555,12 @@ impl IMEState {
         self.input_mode = mode;
         // ホットパス用アトミックも同期更新
         input_mode_set_atomic(mode);
+        // M1.7 T-MODE2: doc_mode store を即時更新。focus-out を待たずに
+        // 現在の DM / HWND に mode を紐付ける。これがないと、同じ DM 内で
+        // モードを変えても store 側は「前回 focus-in 時のモード」のままで、
+        // 別 DM から戻ってきたときに最新モードが反映されない（Firefox の
+        // タブ切替で反転する症状の原因）。
+        doc_mode_remember_current(mode);
     }
 }
 
@@ -744,10 +750,42 @@ pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
 // handle_action が読み出して composition を更新する。
 //
 // Phase 1A（WM_TIMER から直接 RequestEditSession）が確認できれば使わなくなる。
+//
+// # gen タグ（M1.8 T-MID1）
+// `PreviewEntry.gen_when_requested` は preview 要求時点の `LIVE_CONV_GEN`
+// スナップショット。キュー消費時に現在値と比較し、古ければ apply せず
+// discard する（reading が進んでいるのに古い preview で中間を上書きする race
+// を防ぐ）。reading も保持し、世代一致でも reading 不一致なら破棄する二重安全策。
 
-pub static LIVE_PREVIEW_QUEUE: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+#[derive(Debug, Clone)]
+pub struct PreviewEntry {
+    pub preview: String,
+    pub reading: String,
+    pub gen_when_requested: u32,
+}
+
+pub static LIVE_PREVIEW_QUEUE: LazyLock<Mutex<Option<PreviewEntry>>> =
+    LazyLock::new(|| Mutex::new(None));
 pub static LIVE_PREVIEW_READY: AtomicBool = AtomicBool::new(false);
 pub static SUPPRESS_LIVE_COMMIT_ONCE: AtomicBool = AtomicBool::new(false);
+
+/// ライブ変換中の reading 世代カウンタ（M1.8 T-MID1）。
+///
+/// reading を変更する経路（キー入力 / backspace / pending flush / commit 等）
+/// で `fetch_add(1, Release)` する。Phase1B キューへの書き込み時点の値と
+/// apply 時点の値を比較し、古ければ stale として discard する。
+pub static LIVE_CONV_GEN: AtomicU32 = AtomicU32::new(0);
+
+/// reading を変更する全経路から呼ぶ。世代カウンタを前進させる。
+#[inline]
+pub fn live_conv_gen_bump() {
+    LIVE_CONV_GEN.fetch_add(1, AO::Release);
+}
+
+#[inline]
+pub fn live_conv_gen_snapshot() -> u32 {
+    LIVE_CONV_GEN.load(AO::Acquire)
+}
 
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
     SESSION_STATE
@@ -1420,10 +1458,57 @@ pub fn doc_mode_on_focus_change(
     Some(mode)
 }
 
+/// M1.7 T-MODE2: モード変更が起きた瞬間に現在フォーカス中の DM / HWND を
+/// キーに store を即時更新する。従来は focus-out 時にしか `dm_modes` /
+/// `hwnd_modes` が書かれなかったため、同じ DM 内でモードを変えた直後に
+/// DM が破棄されると最新モードが永久に失われていた（特に Firefox で DM が
+/// 頻繁に再作成されるケースで、タブ切替時にモードが反転する原因）。
+///
+/// 呼び出し元は [IMEState::set_mode]。TL_CURRENT_DM / TL_CURRENT_HWND は
+/// focus 切替の deferred 処理で更新される。
+///
+/// TSF スレッド以外（例: WinUI → 設定反映）からの呼び出しでは TL が 0 を返すため
+/// save を skip する。
+pub fn doc_mode_remember_current(mode: InputMode) {
+    let (dm, hwnd) = crate::tsf::candidate_window::current_dm_hwnd();
+    if dm == 0 && hwnd == 0 {
+        return;
+    }
+    if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
+        if dm != 0 {
+            store.dm_modes.insert(dm, mode);
+            if hwnd != 0 {
+                store.dm_to_hwnd.insert(dm, hwnd);
+            }
+        }
+        if hwnd != 0 {
+            store.hwnd_modes.insert(hwnd, mode);
+        }
+        tracing::trace!(
+            "doc_mode: remembered mode={mode:?} for dm={dm:#x} hwnd={hwnd:#x}"
+        );
+    }
+}
+
 /// DocumentManager が破棄されたとき（OnUninitDocumentMgr）にエントリを削除する。
 /// hwnd_modes は残す（同じ HWND で DM が再作成されたとき復元に使うため）。
+///
+/// ブラウザ（Chrome / Edge / Firefox）はタブ切替で DM を破棄→再作成するが、
+/// その際 OnUninitDocumentMgr が OnSetFocus より先に同期発火するため、
+/// 通常の focus-out 経路では `dm_to_hwnd` が削除済みになっていて HWND 退避が
+/// 走らない。ここで破棄前に HWND へコピーしておくことで、同じ HWND で
+/// 新しい DM が作られたときに hwnd_modes から復元できる。
 pub fn doc_mode_remove(dm_ptr: usize) {
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
+        if let (Some(&mode), Some(&hwnd)) =
+            (store.dm_modes.get(&dm_ptr), store.dm_to_hwnd.get(&dm_ptr))
+            && hwnd != 0
+        {
+            store.hwnd_modes.insert(hwnd, mode);
+            tracing::debug!(
+                "doc_mode: retained mode={mode:?} for hwnd={hwnd:#x} before removing dm={dm_ptr:#x}"
+            );
+        }
         store.dm_modes.remove(&dm_ptr);
         store.dm_to_hwnd.remove(&dm_ptr);
         tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");

@@ -55,8 +55,8 @@ use windows::{
                 TF_LBMENUF_SEPARATOR,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, DestroyMenu, GetForegroundWindow, TrackPopupMenu,
-                HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON,
+                AppendMenuW, CreatePopupMenu, DestroyMenu, GA_ROOT, GetAncestor, GetForegroundWindow,
+                HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
             },
         },
     },
@@ -98,6 +98,27 @@ fn current_langbar_mode(open: bool) -> crate::engine::input_mode::InputMode {
             .ok()
             .map(|state| state.input_mode)
             .unwrap_or(crate::engine::input_mode::InputMode::Hiragana)
+    }
+}
+
+/// `GetForegroundWindow()` の結果を `GA_ROOT` でルート HWND に正規化して返す。
+///
+/// Chrome / Edge 等は内部で子 HWND (`Chrome_RenderWidgetHostHWND` 等) を
+/// フォーカスターゲットにしているケースがあり、`GetForegroundWindow()` が
+/// その子 HWND を返すことがある。doc_mode の `hwnd_modes` キーとして使うには
+/// ルートに揃えないとキーが fragment する。
+fn foreground_root_hwnd() -> usize {
+    unsafe {
+        let raw = GetForegroundWindow();
+        if raw.0.is_null() {
+            return 0;
+        }
+        let root = GetAncestor(raw, GA_ROOT);
+        if root.0.is_null() {
+            raw.0 as usize
+        } else {
+            root.0 as usize
+        }
     }
 }
 
@@ -500,7 +521,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // ため、ここで config.input.default_mode を確定・適用する。
         {
             use crate::engine::input_mode::InputMode;
-            let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
+            let hwnd_val = foreground_root_hwnd();
             let focused_dm_ptr = {
                 let inner = self.inner.try_borrow().ok();
                 inner.and_then(|g| {
@@ -979,12 +1000,31 @@ impl TextServiceFactory_Impl {
         // WM_TIMER から RequestEditSession が呼べない場合のフォールバック。
         // タイマーが書き込んだプレビューをここで拾って composition に反映する。
         // Preedit 状態のみ適用（変換中・選択中には適用しない）。
+        //
+        // キューエントリには書き込み時点の gen / reading が添えられており、
+        // 現在の gen / reading と一致しない場合は stale として discard する
+        // （M1.8 T-MID1: 中間文字消失 race の対策）。
         {
-            use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
+            use crate::engine::state::{live_conv_gen_snapshot, LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
             if LIVE_PREVIEW_READY.swap(false, std::sync::atomic::Ordering::AcqRel) {
                 if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    if let Some(preview) = q.take() {
-                        // Preedit 中のみ適用
+                    if let Some(entry) = q.take() {
+                        // stale 判定
+                        let current_gen = live_conv_gen_snapshot();
+                        let current_reading = engine.hiragana_text().to_string();
+                        let stale_gen = entry.gen_when_requested != current_gen;
+                        let stale_reading = entry.reading != current_reading;
+                        if stale_gen || stale_reading {
+                            tracing::warn!(
+                                "[Live] Phase1B: discarded stale preview entry_gen={} cur_gen={} entry_reading={:?} cur_reading={:?}",
+                                entry.gen_when_requested,
+                                current_gen,
+                                entry.reading,
+                                current_reading
+                            );
+                            // Preedit 中のみ適用
+                        } else {
+                        let preview = entry.preview;
                         let apply = if let Ok(sess) = session_get() {
                             matches!(*sess, SessionState::Preedit { .. })
                         } else {
@@ -1006,6 +1046,13 @@ impl TextServiceFactory_Impl {
                                 )
                                 .to_string();
                             if !reading.is_empty() {
+                                // 尻切れ防壁（M1.5 T-BUG2）: Phase1B 経路でも同じく
+                                // preview の長さが reading に対して極端に短ければ破棄
+                                let preview = candidate_window::sanity_check_preview(
+                                    &reading,
+                                    preview,
+                                    "Phase1B",
+                                );
                                 tracing::info!(
                                     "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
                                     preview,
@@ -1028,6 +1075,7 @@ impl TextServiceFactory_Impl {
                                 guard = engine_try_get_or_create()?;
                             }
                         }
+                        } // end stale check branch (non-stale)
                     }
                 }
             }
@@ -1276,6 +1324,10 @@ impl TextServiceFactory_Impl {
         sink: ITfCompositionSink,
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
+        // M1.8 T-MID1: キー入力は reading を変化させるので、ライブ変換世代を
+        // 前進させる。Phase1B キューに残っている古い preview は apply 時に
+        // gen 不一致で discard される。
+        crate::engine::state::live_conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(true),
@@ -1447,6 +1499,8 @@ impl TextServiceFactory_Impl {
         sink: ITfCompositionSink,
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
+        // M1.8 T-MID1: reading 変化経路。on_input と同じく gen を前進させる。
+        crate::engine::state::live_conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(false),
@@ -2506,6 +2560,8 @@ impl TextServiceFactory_Impl {
         sink: ITfCompositionSink,
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
+        // M1.8 T-MID1: reading が短くなるので gen を前進させる。
+        crate::engine::state::live_conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(false),
@@ -4533,7 +4589,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             return Ok(());
         }
 
-        let hwnd_val = unsafe { GetForegroundWindow().0 as usize };
+        let hwnd_val = foreground_root_hwnd();
         candidate_window::post_focus_changed(prev_ptr, next_ptr, hwnd_val);
         Ok(())
     }

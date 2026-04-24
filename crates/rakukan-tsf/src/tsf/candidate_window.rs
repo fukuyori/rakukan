@@ -27,12 +27,12 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AO};
 use windows::{
     core::PCWSTR,
     Win32::{
-        Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-            GetMonitorInfoW, InvalidateRect, MonitorFromPoint, SelectObject, SetBkMode,
-            SetTextColor, TextOutW, BACKGROUND_MODE, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-            PAINTSTRUCT,
+            BeginPaint, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
+            EndPaint, FillRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, InvalidateRect,
+            MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
+            BACKGROUND_MODE, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -53,7 +53,10 @@ const PADDING_X: i32 = 10;
 const PADDING_Y: i32 = 4;
 const ITEM_HEIGHT: i32 = 26;
 const FONT_HEIGHT: i32 = 17;
-const WIN_WIDTH: i32 = 260;
+/// 候補ウィンドウの最小幅（最大幅は `compute_needed_width` で動的に算出）
+const WIN_WIDTH_MIN: i32 = 260;
+/// 候補ウィンドウの上限幅（画面幅に対する暴走を防ぐ）
+const WIN_WIDTH_MAX: i32 = 900;
 /// ページインジケーター行の高さ
 const PAGER_HEIGHT: i32 = 22;
 /// キャレット高さの推定値（画面端反転時に使用）
@@ -75,6 +78,8 @@ thread_local! {
     static TL_HWND: Cell<isize> = Cell::new(0);
     /// 表示中の候補データ（WM_PAINT コールバックで参照）
     static TL_CAND: RefCell<CandData> = RefCell::new(CandData::default());
+    /// 最後に `show_inner` で算出したウィンドウ幅。WM_PAINT でも使う。
+    static TL_WIN_WIDTH: Cell<i32> = Cell::new(WIN_WIDTH_MIN);
 
     // ─── [Live] ライブ変換用: 最後の ITfContext と client_id ───────────────────────
     // on_input から保存し、on_live_timer から RequestEditSession を呼ぶために使う。
@@ -95,6 +100,22 @@ thread_local! {
     static TL_THREAD_MGR: RefCell<Option<ITfThreadMgr>> = RefCell::new(None);
     /// Activate 時にキャッシュする TSF client_id。
     static TL_CLIENT_ID: Cell<u32> = Cell::new(0);
+
+    // ─── [M1.7 T-MODE2] フォーカス中 DM / HWND キャッシュ ─────────────────────────
+    // `IMEState::set_mode` から呼ぶ `doc_mode_remember_current` が、モード変更の
+    // 瞬間に現在の (dm_ptr, hwnd) を知るために使う。focus 処理の完了時に更新される。
+    static TL_CURRENT_DM: Cell<usize> = Cell::new(0);
+    static TL_CURRENT_HWND: Cell<usize> = Cell::new(0);
+}
+
+/// 現在フォーカス中の DocumentManager ポインタと root HWND を返す。
+/// `IMEState::set_mode` が `doc_mode_remember_current` を呼ぶときに使用。
+/// TSF スレッド以外からの呼び出し（例: WinUI 設定 → TSF への通知）では
+/// TL が 0 を返すので、その場合は save を skip する設計にしてある。
+pub fn current_dm_hwnd() -> (usize, usize) {
+    let dm = TL_CURRENT_DM.try_with(|c| c.get()).unwrap_or(0);
+    let hwnd = TL_CURRENT_HWND.try_with(|c| c.get()).unwrap_or(0);
+    (dm, hwnd)
 }
 
 /// OnSetFocus から遅延処理キューへ積むフォーカス変化イベント。
@@ -210,6 +231,74 @@ unsafe extern "system" fn wnd_proc(
 
 // ─── 描画 ─────────────────────────────────────────────────────────────────────
 
+/// 全候補 / status / pager 行を Meiryo UI で GDI 実測し、必要なウィンドウ幅を返す。
+///
+/// スクリーン DC をソースに CreateCompatibleDC で measuring DC を作成し、
+/// CreateFontW で描画時と同じフォントを選択して GetTextExtentPoint32W で測る。
+/// 描画時に各行は `PADDING_X + text_w + PADDING_X` の幅が必要。
+/// 結果は [`WIN_WIDTH_MIN`, `WIN_WIDTH_MAX`] にクランプする。
+unsafe fn compute_needed_width(
+    candidates: &[String],
+    status_line: Option<&str>,
+    page_info: &str,
+) -> i32 {
+    // measuring DC
+    let screen_dc = GetDC(HWND::default());
+    if screen_dc.is_invalid() {
+        return WIN_WIDTH_MIN;
+    }
+    let mem_dc = CreateCompatibleDC(screen_dc);
+    if mem_dc.is_invalid() {
+        ReleaseDC(HWND::default(), screen_dc);
+        return WIN_WIDTH_MIN;
+    }
+
+    let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
+    let font = CreateFontW(
+        FONT_HEIGHT, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+        PCWSTR(face.as_ptr()),
+    );
+    let old_font = SelectObject(mem_dc, font);
+
+    let measure = |text: &str| -> i32 {
+        let w: Vec<u16> = text.encode_utf16().collect();
+        let mut size = SIZE { cx: 0, cy: 0 };
+        if GetTextExtentPoint32W(mem_dc, &w, &mut size).as_bool() {
+            size.cx
+        } else {
+            // フォールバック: ASCII 9px / その他 18px の概算
+            let (ascii, other) = text.chars().fold((0, 0), |(a, o), c| {
+                if c.is_ascii() { (a + 1, o) } else { (a, o + 1) }
+            });
+            ascii * 9 + other * 18
+        }
+    };
+
+    let mut max_text = 0i32;
+    for (i, cand) in candidates.iter().enumerate() {
+        // draw 側と同じ "{n} {cand}" 形式で測る
+        let text = format!("{} {}", i + 1, cand);
+        max_text = max_text.max(measure(&text));
+    }
+    if let Some(s) = status_line {
+        max_text = max_text.max(measure(s));
+    }
+    if !page_info.is_empty() {
+        let pager_text = format!("◀  {}  ▶", page_info);
+        max_text = max_text.max(measure(&pager_text));
+    }
+
+    // クリーンアップ
+    SelectObject(mem_dc, old_font);
+    let _ = DeleteObject(font);
+    let _ = DeleteDC(mem_dc);
+    ReleaseDC(HWND::default(), screen_dc);
+
+    // padding + 実測 + padding + スクロールバー的余白（2px）
+    let needed = PADDING_X + max_text + PADDING_X + 2;
+    needed.clamp(WIN_WIDTH_MIN, WIN_WIDTH_MAX)
+}
+
 unsafe fn draw(hdc: HDC) {
     let data = TL_CAND.with(|c| c.borrow().clone());
     if data.candidates.is_empty() {
@@ -219,13 +308,14 @@ unsafe fn draw(hdc: HDC) {
     let has_pager = !data.page_info.is_empty();
     let has_status = data.status_line.is_some();
     let win_h = window_height(n, has_pager, has_status);
+    let win_width = TL_WIN_WIDTH.with(|c| c.get());
 
     // 背景を白で塗りつぶし
     let bg_brush = CreateSolidBrush(COLOR_BG);
     let full = RECT {
         left: 0,
         top: 0,
-        right: WIN_WIDTH,
+        right: win_width,
         bottom: win_h,
     };
     FillRect(hdc, &full, bg_brush);
@@ -263,7 +353,7 @@ unsafe fn draw(hdc: HDC) {
             let row = RECT {
                 left: 0,
                 top: PADDING_Y,
-                right: WIN_WIDTH,
+                right: win_width,
                 bottom: PADDING_Y + STATUS_HEIGHT,
             };
             FillRect(hdc, &row, status_brush);
@@ -287,7 +377,7 @@ unsafe fn draw(hdc: HDC) {
         let row = RECT {
             left: 0,
             top: y,
-            right: WIN_WIDTH,
+            right: win_width,
             bottom: y + ITEM_HEIGHT,
         };
         let is_sel = i == data.selected;
@@ -304,12 +394,12 @@ unsafe fn draw(hdc: HDC) {
         let row = RECT {
             left: 0,
             top: y,
-            right: WIN_WIDTH,
+            right: win_width,
             bottom: y + PAGER_HEIGHT,
         };
         FillRect(hdc, &row, pager_brush);
         let _ = windows::Win32::Graphics::Gdi::MoveToEx(hdc, 0, y, None);
-        let _ = windows::Win32::Graphics::Gdi::LineTo(hdc, WIN_WIDTH, y);
+        let _ = windows::Win32::Graphics::Gdi::LineTo(hdc, win_width, y);
         SetTextColor(hdc, COLORREF(0x00_55_55_55));
         let pager_text = format!("◀  {}  ▶", data.page_info);
         let pager_w: Vec<u16> = pager_text.encode_utf16().collect();
@@ -383,6 +473,11 @@ pub fn show_with_status(
     let n = page_candidates.len();
     let win_h = window_height(n, has_pager, has_status);
 
+    // 最長候補 / status 行に合わせてウィンドウ幅を動的に算出する。
+    // GDI で実測するので Meiryo UI の実字幅で正確。
+    let win_width = unsafe { compute_needed_width(page_candidates, status_line, page_info) };
+    TL_WIN_WIDTH.with(|c| c.set(win_width));
+
     // ─── 画面端検出：ウィンドウが画面外にはみ出す場合はキャレットの上側に反転 ───
     let win_y = unsafe { calc_window_y(x, y, win_h) };
 
@@ -395,7 +490,7 @@ pub fn show_with_status(
                 HWND_TOPMOST,
                 x,
                 win_y,
-                WIN_WIDTH,
+                win_width,
                 win_h,
                 SWP_NOACTIVATE,
             );
@@ -413,7 +508,7 @@ pub fn show_with_status(
                 WS_POPUP | WS_BORDER,
                 x,
                 win_y,
-                WIN_WIDTH,
+                win_width,
                 win_h,
                 HWND::default(),
                 HMENU::default(),
@@ -637,6 +732,13 @@ fn process_focus_change(fc: FocusChange) {
         fc.next_ptr,
         fc.hwnd_val
     );
+
+    // M1.7 T-MODE2: 現在フォーカス中の (DM, HWND) を TL に確定させる。
+    // `doc_mode_on_focus_change` 内の `set_mode` や、その後のユーザのモード
+    // 変更経路が `doc_mode_remember_current` を呼ぶときに使う。
+    // next_ptr == 0（フォーカスを失う）のケースでは 0 をセット。
+    TL_CURRENT_DM.with(|c| c.set(fc.next_ptr));
+    TL_CURRENT_HWND.with(|c| c.set(fc.hwnd_val));
 
     // 別コンテキストへの移動 → 候補ウィンドウを閉じる + ライブタイマー停止
     hide();
@@ -1001,6 +1103,29 @@ fn current_millis() -> u64 {
         .unwrap_or(0)
 }
 
+/// Preview の長さが reading に対して極端に短い場合、LLM が早期 EOS を出して
+/// 尻切れを起こしたと判定し、preview を破棄して reading をそのまま返す（M1.5 T-BUG2）。
+///
+/// RATIO は 30% (3/10) で、漢字圧縮の自然下限を残しつつ尻切れを弾く目安。
+/// 閾値に達する preview はそのまま返す。
+pub(crate) fn sanity_check_preview(reading: &str, preview: String, site: &str) -> String {
+    const RATIO_NUM: usize = 3;
+    const RATIO_DEN: usize = 10;
+    let reading_len = reading.chars().count();
+    let preview_len = preview.chars().count();
+    if preview_len * RATIO_DEN < reading_len * RATIO_NUM {
+        tracing::warn!(
+            "[Live] {site}: preview discarded (too short) reading_len={} preview_len={} preview={:?}",
+            reading_len,
+            preview_len,
+            preview
+        );
+        reading.to_string()
+    } else {
+        preview
+    }
+}
+
 /// WM_TIMER(LIVE_TIMER_ID) コールバック。
 ///
 /// # 動作方針
@@ -1135,6 +1260,11 @@ pub fn on_live_timer() {
         return;
     };
 
+    // 尻切れ防壁: LLM が reading を使い切る前に EOS を出すと preview が極端に
+    // 短くなる（M1.5 T-BUG2）。char 数比が閾値未満なら preview を破棄して
+    // reading をそのまま表示する。RATIO は漢字圧縮の自然下限 (30%) を目安。
+    let preview = sanity_check_preview(&reading, preview, "on_live_timer");
+
     let display_shown = if pending.is_empty() {
         preview.clone()
     } else {
@@ -1170,6 +1300,13 @@ pub fn on_live_timer() {
         let ctx_req = ctx.clone();
         let preview_1a = display_shown.clone();
         let captured_dm_ptr = live_dm_ptr;
+        // M1.8 T-MID1 Phase1A 側: EditSession は TF_ES_READWRITE（非 SYNC）で
+        // 遅延実行されうる。登録時点の reading / gen を捕捉し、実行時に
+        // 現在値と比較して stale なら apply を skip する。これをしないと
+        // タイマー発火 → EditSession dispatch の間に打鍵された文字が
+        // 古い display_shown で上書きされて消える。
+        let captured_reading = reading.clone();
+        let captured_gen = crate::engine::state::live_conv_gen_snapshot();
 
         let session = EditSession::new(move |ec| unsafe {
             use windows::Win32::Foundation::E_FAIL;
@@ -1183,6 +1320,21 @@ pub fn on_live_timer() {
                     format!(
                         "focus DM changed between request and callback execution: expected={captured_dm_ptr:#x} actual={now_focus:?}"
                     ),
+                ));
+            }
+            // Stale 判定（M1.8 T-MID1 Phase1A 側）: EditSession が遅延実行され
+            // ている間に reading が進んでいたら apply しない。
+            let current_gen = crate::engine::state::live_conv_gen_snapshot();
+            if current_gen != captured_gen {
+                tracing::warn!(
+                    "[Live] Phase1A: discarded stale SetText captured_gen={} current_gen={} reading={:?}",
+                    captured_gen,
+                    current_gen,
+                    captured_reading
+                );
+                return Err(windows::core::Error::new(
+                    E_FAIL,
+                    "stale gen in Phase1A",
                 ));
             }
             let comp = crate::engine::state::composition_clone()
@@ -1239,13 +1391,20 @@ pub fn on_live_timer() {
 
     // ── Phase 1B フォールバック: キューに書き込む ────────────────────────────
     // 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
+    // gen と reading のスナップショットを添えることで、消費側で stale を弾く（M1.8 T-MID1）。
     if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-        *q = Some(preview.clone());
+        let gen_snapshot = crate::engine::state::live_conv_gen_snapshot();
+        *q = Some(crate::engine::state::PreviewEntry {
+            preview: preview.clone(),
+            reading: reading.clone(),
+            gen_when_requested: gen_snapshot,
+        });
         LIVE_PREVIEW_READY.store(true, AO::Release);
         tracing::debug!(
-            "[Live] Phase1B: queued preview={:?} for reading={:?}",
+            "[Live] Phase1B: queued preview={:?} reading={:?} gen={}",
             preview,
-            reading
+            reading,
+            gen_snapshot
         );
     } else {
         tracing::warn!("[Live] Phase1B: LIVE_PREVIEW_QUEUE busy, skipping");

@@ -1,4 +1,4 @@
-# rakukan v0.6.7
+# rakukan v0.7.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,13 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.0 変更点
+
+- **ブラウザでの入力モード保持を修正** (M1.7 T-MODE1 / T-MODE2 / T-MODE3): Chrome / Edge / Firefox でタブ切替・ページ遷移の際に入力モードが戻ったり反転したりする問題を 3 層で修正。`doc_mode_remove` で DM 破棄前に HWND に mode を退避、`IMEState::set_mode` からモード変更を即座に store へ反映（`doc_mode_remember_current`）、`GetForegroundWindow()` を `GetAncestor(GA_ROOT)` で正規化
+- **ライブ変換の尻切れを抑制** (M1.5 T-BUG2): LLM が早期 EOS を出したときに preview が極端に短くなるケースを検出し、reading との char 数比が 30% 未満なら preview を破棄して reading で置換
+- **ライブ変換中の中間文字消失を修正** (M1.8 T-MID1): Phase1B キュー経路と Phase1A EditSession 経路の両方に世代カウンタ (`LIVE_CONV_GEN`) による stale discard を導入。速打ちで「あいうえおかきくけこさしすせそ」→「あいうえおかきくけこさし」のように末尾・中間が消える race を解消
+- **候補ウィンドウの幅を動的に計算**: 固定幅 260px から、最長候補を GDI 実測 (`GetTextExtentPoint32W`) して 260〜900px の範囲で自動調整。長い候補が切れず表示されるようになった
 
 ## 0.6.7 変更点
 
