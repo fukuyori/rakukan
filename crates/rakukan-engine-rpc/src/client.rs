@@ -126,6 +126,42 @@ impl RpcEngine {
         }
     }
 
+    /// ホストプロセスに self-exit を依頼する（M1.6 T-HOST1）。
+    ///
+    /// `Reload` の代替: DLL drop → 再ロードの race を避けるため、プロセス全体を
+    /// 終了させて次回 API 呼び出しで自動 re-spawn させる。
+    ///
+    /// - `Request::Shutdown` を送って `Response::Unit` を受信
+    /// - 成否に関わらず内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
+    /// - `config_json` は保持する（次回 `connect_or_spawn` 時に再送する）
+    /// - サーバが応答を返す前に exit してしまい read が失敗するケースも想定し、
+    ///   read エラーはログだけ出して Ok として扱う（exit が目的なので）
+    pub fn shutdown(&self, config_json: Option<String>) -> Result<()> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
+        if let Some(cfg) = config_json {
+            guard.config_json = Some(cfg);
+        }
+        let result = guard.call_with_retry(Request::Shutdown);
+        // 応答の有無に関わらず既存接続は捨てる（サーバが exit 中か直後）。
+        guard.stream = None;
+        match result {
+            Ok(Response::Unit) => {
+                tracing::info!("rpc: Shutdown acknowledged by host");
+                Ok(())
+            }
+            Ok(Response::Error(e)) => bail!("shutdown error: {e}"),
+            Ok(other) => bail!("unexpected shutdown response: {:?}", other),
+            Err(e) => {
+                // 応答を読む前に相手が exit した可能性が高い。警告にとどめて成功扱い。
+                tracing::warn!("rpc: shutdown call failed (likely host exited early): {e}");
+                Ok(())
+            }
+        }
+    }
+
     fn call(&self, req: Request) -> Result<Response> {
         let mut guard = self
             .inner

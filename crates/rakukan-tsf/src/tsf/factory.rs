@@ -68,9 +68,9 @@ use crate::{
         keymap::Keymap,
         state::{
             caret_rect_get, caret_rect_set, composition_clone, composition_set,
-            composition_set_with_dm, composition_take, doc_mode_on_focus_change, doc_mode_remove,
-            engine_get, engine_try_get_or_create, invalidate_composition_for_dm, session_get,
-            session_is_selecting_fast, SessionState,
+            composition_set_with_dm, composition_take, doc_mode_on_focus_change,
+            engine_get, engine_try_get_or_create, session_get, session_is_selecting_fast,
+            SessionState,
         },
         text_util,
         user_action::UserAction,
@@ -98,6 +98,24 @@ fn current_langbar_mode(open: bool) -> crate::engine::input_mode::InputMode {
             .ok()
             .map(|state| state.input_mode)
             .unwrap_or(crate::engine::input_mode::InputMode::Hiragana)
+    }
+}
+
+/// M1.6 T-HOST3: 読込中インジケータの記号とメッセージを決める。
+///
+/// 現状の `mode_indicator` は 1 文字固定のため、記号のみを表示する。メッセージ
+/// は将来 mode_indicator を可変長対応化したときに使う想定で返しているだけで、
+/// 今は呼び出し側で捨てて良い（`_msg` で受けている）。
+///
+/// 経過時間は `ready_reset_elapsed_ms()` を参照。`None`（= 初期状態 or 既に
+/// ready）なら単純な砂時計を返す。
+fn loading_indicator_symbol() -> (&'static str, &'static str) {
+    match crate::engine::state::ready_reset_elapsed_ms() {
+        None => ("⏳", "エンジン読込中"),
+        Some(ms) if ms < 10_000 => ("⏳", "エンジン読込中"),
+        Some(ms) if ms < 30_000 => ("⌛", "エンジン読込中..."),
+        Some(ms) if ms < 60_000 => ("⚠", "読込に時間がかかっています"),
+        Some(_) => ("✕", "エンジン起動失敗の可能性"),
     }
 }
 
@@ -1330,8 +1348,39 @@ impl TextServiceFactory_Impl {
         crate::engine::state::live_conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
-            None => return Ok(true),
+            None => {
+                // M1.6 T-HOST4: engine 未ロード中の握り潰しを撤去。
+                // キーを後で replay するためにバッファへ積み、composition は
+                // 空のままにして次回復帰時にまとめて流し込む。return Ok(true) で
+                // アプリ側にはキーが消費されたことを示す（アプリがそのまま受け
+                // 取ってしまうと二重入力になるため）。
+                let kind = if c.is_ascii_uppercase() {
+                    crate::engine::state::InputCharKind::FullwidthAlpha
+                } else {
+                    crate::engine::state::InputCharKind::Char
+                };
+                crate::engine::state::push_pending_key(c, kind, false);
+                // M1.6 T-HOST3: 読込中のキャレット近傍フィードバック。
+                // 経過時間に応じて記号を切り替える。位置は (0,0) で
+                // get_caret_screen_pos() fallback に任せる。
+                let (sym, _msg) = loading_indicator_symbol();
+                crate::tsf::mode_indicator::show(sym, 0, 0);
+                return Ok(true);
+            }
         };
+        // engine が復帰した時点で、過去に積んだキーを先に replay する。
+        // 現在の c を処理する前に hiragana_buf を最新状態に揃えることで
+        // 「先に押したキーほど先に反映される」挙動を保つ。
+        {
+            let pending = crate::engine::state::drain_pending_keys();
+            for (pc, pk, raw) in pending {
+                if raw {
+                    engine.push_raw(pc);
+                } else {
+                    let _ = engine.input_char(pc, pk, None);
+                }
+            }
+        }
         crate::engine::state::maybe_log_gpu_memory(engine);
         let _t = diag::span("Input");
 
@@ -1503,8 +1552,31 @@ impl TextServiceFactory_Impl {
         crate::engine::state::live_conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
-            None => return Ok(false),
+            None => {
+                // M1.6 T-HOST4: raw 経路（テンキー記号等）も握り潰しをやめて
+                // buffer へ。raw フラグを立てて後で `push_raw` 経由で replay する。
+                crate::engine::state::push_pending_key(
+                    c,
+                    crate::engine::state::InputCharKind::Char,
+                    true,
+                );
+                // M1.6 T-HOST3: 読込中の視覚フィードバック
+                let (sym, _msg) = loading_indicator_symbol();
+                crate::tsf::mode_indicator::show(sym, 0, 0);
+                return Ok(true);
+            }
         };
+        // 積まれていた未処理キーを先に流し込む（on_input と同じ replay ポリシー）。
+        {
+            let pending = crate::engine::state::drain_pending_keys();
+            for (pc, pk, raw) in pending {
+                if raw {
+                    engine.push_raw(pc);
+                } else {
+                    let _ = engine.input_char(pc, pk, None);
+                }
+            }
+        }
         crate::engine::state::maybe_log_gpu_memory(engine);
         if let Ok(mut sess) = session_get() {
             crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
@@ -4558,9 +4630,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
                 use windows::core::Interface;
                 dm.as_raw() as usize
             };
-            doc_mode_remove(ptr);
-            candidate_window::invalidate_live_context_for_dm(ptr);
-            invalidate_composition_for_dm(ptr);
+            crate::engine::state::dispose_dm_resources(ptr);
             tracing::trace!("OnUninitDocumentMgr: removed dm={ptr:#x}");
         }
         Ok(())

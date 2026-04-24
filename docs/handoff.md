@@ -1,11 +1,18 @@
-# Rakukan 引き継ぎ資料 (v0.7.0)
+# Rakukan 引き継ぎ資料 (v0.7.1)
 
 更新日: 2026-04-24
 
 ## 現在の状態
 
-- **バージョン:** v0.7.0
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消、v0.6.7 で候補体験 / 変換中レスポンス / 辞書を整理した地点から、**0.7.x シリーズ（安定性向上・user-facing bug fix 集中）** に移行。v0.7.0 は bug fix 集中リリース:
+- **バージョン:** v0.7.1
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消、v0.6.7 で候補体験 / 変換中レスポンス / 辞書を整理した地点から、**0.7.x シリーズ（安定性向上・user-facing bug fix 集中）** に移行。v0.7.1 は host crash 根絶と基盤整理:
+  - 設定反映時の `rakukan-engine-host.exe` crash を根絶（M1.6 T-HOST1: `Request::Shutdown` 追加 + engine_reload を shutdown + re-spawn 経路化。DLL drop→load 間の unmap race を回避）
+  - エンジン読込中の入力握り潰しを解消（M1.6 T-HOST4: `PENDING_KEYS` に積んで engine 復帰後 replay）
+  - エンジン読込中のキャレット近傍視覚フィードバック（M1.6 T-HOST3: `⏳` → `⌛` → `⚠` → `✕` の段階表示）
+  - reload 時間計測ログ（M1.6 T-HOST2: `dict ready: X ms` / `model ready: X ms`）
+  - dead code 削除 + dispose 集約（M1 T3-A: `engine_get_or_create()` 削除、M1 T3-B: `dispose_dm_resources()` ヘルパ導入）
+  - クラッシュ調査資料新設（M1 T1-D: `docs/EXPLORER_CRASH_HISTORY.md` / `docs/INVESTIGATION_GUIDE.md`）
+- **v0.7.0 の内容（継続有効）:**
   - ブラウザ（Chrome / Edge / Firefox）でタブ切替時に入力モードが戻る / 反転する問題を 3 層で修正（M1.7 T-MODE1 / T-MODE2 / T-MODE3）
   - ライブ変換 preview の尻切れ防壁（char 数比 <30% で破棄 → reading 置換、M1.5 T-BUG2）
   - ライブ変換中の中間 / 末尾文字消失を修正（Phase1B キュー経路 + Phase1A EditSession 経路の両方に `LIVE_CONV_GEN` による stale discard、M1.8 T-MID1）

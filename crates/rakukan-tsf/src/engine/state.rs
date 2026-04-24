@@ -75,6 +75,19 @@ static DICT_READY_LATCH: AtomicBool = AtomicBool::new(false);
 /// モデルロード完了のラッチ（`DICT_READY_LATCH` と同じ方針）。
 static MODEL_READY_LATCH: AtomicBool = AtomicBool::new(false);
 
+/// M1.6 T-HOST2: ラッチリセット時刻（UNIX epoch ms）。false → true 遷移で
+/// 経過時間をログする。0 の間は計測無効（起動直後など）。
+static READY_RESET_AT_MS: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn now_ms() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// 辞書 ready 状態を取得。未 ready のうちだけ RPC で poll する。
 ///
 /// ホットパス（`on_input` 等）から 1 キーストロークごとに呼ばれる前提。
@@ -85,7 +98,14 @@ pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
     }
     let r = eng.poll_dict_ready();
     if r {
-        DICT_READY_LATCH.store(true, AO::Release);
+        // M1.6 T-HOST2: false → true の遷移で計測
+        if !DICT_READY_LATCH.swap(true, AO::AcqRel) {
+            let reset_at = READY_RESET_AT_MS.load(AO::Acquire);
+            if reset_at != 0 {
+                let elapsed = now_ms().saturating_sub(reset_at);
+                tracing::info!("dict ready: {} ms since reload reset", elapsed);
+            }
+        }
     }
     r
 }
@@ -98,17 +118,72 @@ pub fn poll_model_ready_cached(eng: &DynEngine) -> bool {
     }
     let r = eng.poll_model_ready();
     if r {
-        MODEL_READY_LATCH.store(true, AO::Release);
+        if !MODEL_READY_LATCH.swap(true, AO::AcqRel) {
+            let reset_at = READY_RESET_AT_MS.load(AO::Acquire);
+            if reset_at != 0 {
+                let elapsed = now_ms().saturating_sub(reset_at);
+                tracing::info!("model ready: {} ms since reload reset", elapsed);
+            }
+        }
     }
     r
 }
 
 /// reload 時など、ready 状態を強制的に再評価させたいときに呼ぶ。
+/// M1.6 T-HOST2: リセット時刻を記録し、以降の ready 遷移で経過時間をログする。
 #[inline]
 pub fn reset_ready_latches() {
     DICT_READY_LATCH.store(false, AO::Release);
     MODEL_READY_LATCH.store(false, AO::Release);
+    READY_RESET_AT_MS.store(now_ms(), AO::Release);
 }
+
+/// M1.6 T-HOST3: 読込中 UI で「経過時間」を表示するため、直近の reset からの
+/// 経過 ms を返す。reset されていない（= 初期状態 or 既に ready）なら `None`。
+pub fn ready_reset_elapsed_ms() -> Option<u64> {
+    let reset_at = READY_RESET_AT_MS.load(AO::Acquire);
+    if reset_at == 0 {
+        return None;
+    }
+    Some(now_ms().saturating_sub(reset_at))
+}
+
+/// M1.6 T-HOST4: engine が未 ready（None）の期間に打鍵されたキーを積むバッファ。
+///
+/// 旧実装では [factory::on_input] / [factory::on_input_raw] が `guard.as_mut()`
+/// で `None` を受けると `return Ok(true)` で入力を握り潰していた。reload 中や
+/// 初回起動中に打鍵した文字が全部消える原因。
+///
+/// T-HOST4 ではここに積んでおき、engine 復帰後の最初の on_input で先に drain
+/// してから現在のキーを処理する。これによりユーザ体感は「入力が一瞬遅れるが
+/// 消えない」状態になる。
+static PENDING_KEYS: LazyLock<Mutex<Vec<(char, InputCharKind, bool)>>> =
+    LazyLock::new(|| Mutex::new(Vec::new()));
+
+/// engine 未 ready 時の「握り潰さない」代替: 後で engine に流し込むため積む。
+/// `raw` = true なら `input_char` ではなく `push_raw` 経路を使いたい旨のフラグ。
+pub fn push_pending_key(c: char, kind: InputCharKind, raw: bool) {
+    if let Ok(mut v) = PENDING_KEYS.lock() {
+        v.push((c, kind, raw));
+        tracing::debug!("pending_keys: buffered c={:?} kind={:?} raw={} (total={})", c, kind, raw, v.len());
+    }
+}
+
+/// engine が復帰した時点で呼び、積んだキーを返す（所有権を奪う）。
+/// 呼び出し元は返却された各要素に対して engine メソッドを呼んで replay する。
+pub fn drain_pending_keys() -> Vec<(char, InputCharKind, bool)> {
+    if let Ok(mut v) = PENDING_KEYS.lock() {
+        if v.is_empty() {
+            return Vec::new();
+        }
+        let out = std::mem::take(&mut *v);
+        tracing::info!("pending_keys: draining {} buffered keys for replay", out.len());
+        out
+    } else {
+        Vec::new()
+    }
+}
+
 static LAST_GPU_MEMORY_LOG_MS: AtomicU64 = AtomicU64::new(0);
 const GPU_MEMORY_LOG_INTERVAL_MS: u64 = 30_000;
 
@@ -211,33 +286,6 @@ pub fn engine_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
     }
 }
 
-/// エンジンを作成して返す（未初期化の場合のみ作成する）。
-/// 現在は engine_start_bg_init() が初期化を担当するため直接呼ばれないが、
-/// engine_reload() 等の内部用途・将来の拡張のために残す。
-#[allow(dead_code)]
-pub fn engine_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
-    {
-        let mut g = engine_get()?;
-        if g.0.is_none() {
-            let e = create_engine()?;
-            g.0 = Some(e);
-            drop(g);
-            if let Ok(mut g2) = RAKUKAN_ENGINE.lock() {
-                if let Some(eng) = g2.0.as_mut() {
-                    if !eng.is_dict_ready() {
-                        eng.start_load_dict();
-                    }
-                    if !eng.is_kanji_ready() {
-                        eng.start_load_model();
-                    }
-                }
-            }
-            return engine_get();
-        }
-    }
-    engine_get()
-}
-
 /// ホットパス用: エンジンを取得するだけ（DLL ロードしない）。
 /// ただしエンジンが未ロードなら、ここで初めて bg init を「1 回だけ」スポーンする。
 ///
@@ -284,17 +332,26 @@ pub fn engine_force_recreate() {
 /// IME モード切替で呼ばれる。
 ///
 /// Phase A（out-of-process 化）以降は、TSF 側のハンドル (RpcEngine) を捨てずに
-/// ホスト側の DynEngine だけを `Request::Reload` で作り直す。これにより
-/// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** が
-/// 新しい config_json で反映される。
+/// ホストプロセスを終了させ、次回 API 呼び出しで新プロセスを自動 spawn させる
+/// （M1.6 T-HOST1: host 再起動化）。
 ///
-/// ホスト内で model / 辞書の bg ロードも連動して再起動されるため、
-/// TSF 側から明示的に `start_load_dict` を叩く必要はない。
+/// 旧実装では `Request::Reload` で DLL を drop → 再ロードしていたが、engine DLL
+/// 内で bg スレッドが動いている状態で `FreeLibrary` が走ると unmapped な
+/// 命令ポインタで AV を誘発していた（0.6.5 以降も learn_history 以外の経路で
+/// 残存）。ここでは `Request::Shutdown` を送ってホストに自死させ、次回
+/// `connect_or_spawn` が新 PID を立ち上げる。OS がプロセス終了時に全スレッドと
+/// DLL マッピングをまとめて回収するため、unmap race が原理的に起きない。
+///
+/// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** は
+/// 新 PID の `Create { config_json }` で反映される。client 側は `shutdown()` に
+/// 渡した `config_json` を保持し、再接続時に Create で再送する。
 pub fn engine_reload() {
     // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
     reset_ready_latches();
-    // バックグラウンドで reload（UIスレッドをブロックしない）
+    // バックグラウンドで shutdown（UI スレッドをブロックしない）
     std::thread::spawn(|| {
+        let t_start = std::time::Instant::now();
+
         // config.toml をディスクから再読み込みしてから EngineConfig JSON を生成する。
         // 設定画面の保存ボタン → SignalReload → reload_watcher 経由で呼ばれた場合、
         // CONFIG_MANAGER のキャッシュは古いままなので、ここで明示的にリロードする。
@@ -302,7 +359,6 @@ pub fn engine_reload() {
         super::config::init_config_manager();
         let cfg = build_engine_config_json();
 
-        // 既存ハンドルがあれば Reload を、無ければ connect_or_spawn を使う
         let mut guard = match RAKUKAN_ENGINE.lock() {
             Ok(g) => g,
             Err(p) => {
@@ -311,18 +367,26 @@ pub fn engine_reload() {
             }
         };
         match guard.0.as_mut() {
-            Some(eng) => match eng.reload(Some(cfg)) {
-                Ok(()) => {
-                    tracing::info!("engine_reload: host engine reloaded via RPC");
+            Some(eng) => {
+                // ホストに self-exit を依頼。応答は待つが失敗しても前進する
+                // （相手が exit 中で応答が返らないのは想定内）。
+                let r = eng.shutdown(Some(cfg));
+                let elapsed = t_start.elapsed();
+                match r {
+                    Ok(()) => tracing::info!(
+                        "engine_reload: host shutdown requested ({:?})",
+                        elapsed
+                    ),
+                    Err(e) => tracing::warn!(
+                        "engine_reload: host shutdown call returned error ({:?}): {e}",
+                        elapsed
+                    ),
                 }
-                Err(e) => {
-                    tracing::error!("engine_reload: RPC reload failed: {e}");
-                    // RPC reload に失敗した場合はハンドルを捨てて次回アクセスで
-                    // 再接続させる。ホストが死んでいる可能性に備える。
-                    guard.0 = None;
-                    ENGINE_INIT_STARTED.store(false, AO::Release);
-                }
-            },
+                // 応答の可否に関わらずハンドルは捨てる。次回
+                // `engine_try_get_or_create()` が新 PID へ自動 spawn + 再接続する。
+                guard.0 = None;
+                ENGINE_INIT_STARTED.store(false, AO::Release);
+            }
             None => {
                 // ハンドル未作成 = まだ一度も使われていない or 前回落ちた状態。
                 // 通常の初回ロードパスに合流させる。
@@ -1513,6 +1577,18 @@ pub fn doc_mode_remove(dm_ptr: usize) {
         store.dm_to_hwnd.remove(&dm_ptr);
         tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
     }
+}
+
+/// DocumentManager 破棄時 (`OnUninitDocumentMgr`) の後片付けを集約する (M1 T3-B)。
+///
+/// かつては `OnUninitDocumentMgr` から 3 つの関数を個別に呼んでいたが、
+/// どれか 1 つを忘れると DM ごとの状態がリークして不整合になるため、
+/// 追加先を 1 箇所に寄せておく。呼び出し順は既存のままで、モード退避 →
+/// ライブ変換 context の無効化 → composition の無効化。
+pub fn dispose_dm_resources(dm_ptr: usize) {
+    doc_mode_remove(dm_ptr);
+    crate::tsf::candidate_window::invalidate_live_context_for_dm(dm_ptr);
+    invalidate_composition_for_dm(dm_ptr);
 }
 
 /// HWND がターミナル系ウィンドウかどうかを判定する。

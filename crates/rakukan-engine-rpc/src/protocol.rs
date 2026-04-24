@@ -170,6 +170,20 @@ pub enum Request {
         kind: InputCharKind,
         bg_start_n_cands: Option<u32>,
     },
+
+    // ─── プロセス終了（M1.6 T-HOST1）─────────────────────────
+    /// ホストプロセスに self-exit を依頼する。
+    ///
+    /// `Reload` の代替経路: 旧 `Reload` は engine DLL を drop → 新規 load で
+    /// 反映していたが、BG スレッドが DLL を参照している瞬間に unmap が走ると
+    /// AV を誘発する。`Shutdown` を受けたホストは `Response::Unit` を返して
+    /// flush 後、`std::process::exit(0)` でプロセスごと終了する。OS が
+    /// 全スレッドと DLL マッピングをまとめて回収するため race が原理的に起きない。
+    ///
+    /// クライアント側は応答受信後、既存接続を破棄する。次回 API 呼び出し時に
+    /// `connect_or_spawn` で自動的にホストを再 spawn する経路が既にあるため、
+    /// TSF 側コードはほぼ無変更で済む。
+    Shutdown,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

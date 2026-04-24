@@ -1,4 +1,4 @@
-# rakukan v0.7.0
+# rakukan v0.7.1
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,15 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.1 変更点
+
+- **設定反映時の host crash を根絶** (M1.6): WinUI 設定の保存後などに `rakukan-engine-host.exe` が crash して変換できなくなる問題を修正。旧実装は engine DLL を drop → 再 load するときに bg スレッドが unmapped な命令ポインタを指して AV していた。新実装は `Request::Shutdown` を追加してホストに self-exit させ、次回 API 呼び出しで自動的に新プロセスを spawn する。OS がプロセス終了時に全スレッドと DLL マッピングをまとめて回収するため unmap race が原理的に起きない
+- **エンジン読込中の入力握り潰しを解消** (M1.6 T-HOST4): reload 中・初回起動中に打鍵したキーが全部消えていた問題を修正。engine が未 ready の間は `PENDING_KEYS` バッファに積んで composition を保留し、engine 復帰後の最初の `on_input` で一気に replay してから現在のキーを処理する
+- **エンジン読込中の視覚フィードバック** (M1.6 T-HOST3): engine 未 ready のときに打鍵すると、キャレット近傍に `⏳` / `⌛` / `⚠` / `✕` を経過時間に応じて表示（<10s / <30s / <60s / 60s+）。「壊れたわけではなく読込中」とユーザに伝える
+- **reload 時間計測** (M1.6 T-HOST2): `reset_ready_latches` 時刻を記録、`dict ready: X ms since reload reset` / `model ready: X ms` をログ出力。warm / cold の実測を取りやすく
+- **dead code 削除 + 集約リファクタ** (M1 T3-A/T3-B): `engine_get_or_create()`（呼び出し 0 件）を削除。`OnUninitDocumentMgr` から直接呼ばれていた 3 つの cleanup を `dispose_dm_resources()` ヘルパに集約
+- **クラッシュ調査ドキュメント整備** (M1 T1-D): `docs/EXPLORER_CRASH_HISTORY.md`（0.4.3 → 0.6.6 の crash 対策年表と 7 つの教訓）と `docs/INVESTIGATION_GUIDE.md`（WinDbg 解析プロトコル、race 系ログパターン、症状別チェックリスト）を新設
 
 ## 0.7.0 変更点
 

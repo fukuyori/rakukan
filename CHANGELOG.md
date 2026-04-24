@@ -3,6 +3,33 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.1] - 2026-04-24
+
+### Fixed
+
+- **設定反映時の host crash を根絶** (M1.6 T-HOST1) — WinUI 設定保存後や `config.toml` 外部編集時に `rakukan-engine-host.exe` が高確率で crash し変換不能になる問題を修正。原因は `Request::Reload` 経路で engine DLL を drop → 新規 load する間に bg スレッド（conv_cache worker / engine_start_load_model / engine_start_load_dict）が unmapped な命令ポインタを指して `0xc0000005` を発火していたこと。対策として:
+  - `protocol.rs` に `Request::Shutdown` バリアントを追加（後方互換）
+  - `server.rs` が `Shutdown` を受けたら `Response::Unit` を返して 50ms 後に `std::process::exit(0)`
+  - `client.rs` に `shutdown(config_json)` メソッドを追加。応答 read 失敗は想定内としてログのみ
+  - `state.rs::engine_reload()` を旧 Reload 経路から shutdown + 自動 re-spawn 経路に書き換え。次回 `connect_or_spawn` が新 PID を立ち上げ、保持していた `config_json` で `Create` を再送
+  - OS がプロセス終了時に全スレッドと DLL マッピングをまとめて回収するため unmap race が原理的に起きない
+- **エンジン読込中の入力握り潰しを解消** (M1.6 T-HOST4) — reload 中や初回起動中、`on_input` / `on_input_raw` が `guard.as_mut() = None` のときに `return Ok(true)` でキー入力を黙って捨てていた問題を修正。`PENDING_KEYS: Mutex<Vec<(char, InputCharKind, bool)>>` を追加し、None 経路では `push_pending_key` で積むだけに変更。engine 復帰後の最初の呼び出しで `drain_pending_keys()` を先に replay してから現在のキーを処理
+
+### Added
+
+- **エンジン読込中のキャレット近傍視覚フィードバック** (M1.6 T-HOST3) — engine 未 ready の期間に打鍵すると、`mode_indicator` を流用してキャレット近傍に記号を表示。経過時間で段階切替（0〜10s: `⏳`、10〜30s: `⌛`、30〜60s: `⚠`、60s 超: `✕`）。60 秒到達後も自動リトライはせず手動開封を待つ（破損 GGUF 等の永続障害で無限ループ回避）
+- **reload 時間計測** (M1.6 T-HOST2) — `READY_RESET_AT_MS` に `reset_ready_latches` 時刻を記録。`poll_dict_ready_cached` / `poll_model_ready_cached` の false → true 遷移で `dict ready: X ms since reload reset` / `model ready: X ms since reload reset` をログ出力。warm / cold cache の実測値を取りやすくした。`ready_reset_elapsed_ms()` で UI 側から経過時間を参照できる
+
+### Changed
+
+- **dead code 削除 + dispose 集約** (M1 T3-A / T3-B) — `engine_get_or_create()`（実呼び出し 0 件、`#[allow(dead_code)]` 付きで保留されていた）を完全削除。`OnUninitDocumentMgr` から直接呼ばれていた 3 つの cleanup（`doc_mode_remove` / `invalidate_live_context_for_dm` / `invalidate_composition_for_dm`）を `dispose_dm_resources(dm_ptr: usize)` ヘルパに集約。追加漏れによる不整合を防ぐ
+
+### Documentation
+
+- **クラッシュ調査資料を整備** (M1 T1-D) —
+  - `docs/EXPLORER_CRASH_HISTORY.md` 新設: 0.4.3（`msvcp140.dll` クロスロード）から 0.6.6（`DllCanUnloadNow=S_FALSE` 固定）までの Explorer crash 対策年表と 7 つの教訓（TSF DLL を unload させない / engine DLL 内で BG スレッド禁止 / 非同期 EditSession は実行時に再検証 等）
+  - `docs/INVESTIGATION_GUIDE.md` 新設: WerFault フルダンプ設定、WinDbg `!analyze -v` 解析プロトコル、既知の `Failure.Bucket` → 対策対応表、race 系ログパターン一覧、症状別チェックリスト、M5（条件付き）との連携フロー
+
 ## [0.7.0] - 2026-04-24
 
 ### Fixed

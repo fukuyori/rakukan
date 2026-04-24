@@ -61,10 +61,20 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
                 return Ok(());
             }
         };
+        // M1.6 T-HOST1: Shutdown は応答送信後にプロセス exit するため前取り判定。
+        let is_shutdown = matches!(req, Request::Shutdown);
         let resp = dispatch(&engine, req);
         if let Err(e) = write_frame(&mut stream, &resp) {
             tracing::debug!("rpc session: write_frame failed, closing: {e}");
             return Ok(());
+        }
+        if is_shutdown {
+            // OS にパイプ経由の response を配送させるため短時間待ってから exit。
+            // flush は write_frame 内で完了しているが、pipe buffer から相手の read
+            // までの伝播はカーネルスケジューリング依存。50ms で十分安全側に倒れる。
+            std::thread::sleep(Duration::from_millis(50));
+            tracing::info!("rpc: Shutdown requested, exiting host process");
+            std::process::exit(0);
         }
     }
 }
@@ -99,6 +109,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             load_engine_into(&mut g, config_json.as_deref())
         }
         Request::Bye => Response::Unit,
+        Request::Shutdown => Response::Unit,
         other => {
             let mut g = match engine.lock() {
                 Ok(g) => g,
@@ -151,7 +162,7 @@ fn load_engine_into(slot: &mut Option<DynEngine>, config_json: Option<&str>) -> 
 fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
     use Request::*;
     match req {
-        Hello { .. } | Create { .. } | Reload { .. } | Bye => Response::Unit, // handled upstream
+        Hello { .. } | Create { .. } | Reload { .. } | Bye | Shutdown => Response::Unit, // handled upstream
 
         PushChar(c) => {
             if let Some(ch) = char::from_u32(c) {
