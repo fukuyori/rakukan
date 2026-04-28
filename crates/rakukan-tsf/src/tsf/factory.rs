@@ -4001,11 +4001,34 @@ fn update_composition(
     preedit: String,
 ) -> Result<()> {
     let existing = composition_clone()?;
+    // M1.8 T-MID2: stale check 用に外側 snapshot のポインタを記録。
+    // EditSession クロージャは TF_ES_READWRITE で遅延実行されるため、
+    // ここで取った composition が DM 破棄や invalidate_composition_for_dm で
+    // stale 化したまま SetText しないよう、クロージャ先頭で再検査する。
+    let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
+
+        // M1.8 T-MID2: クロージャ実行時点で composition が
+        // 外側 snapshot と同一かを再確認。異なれば SetText せず no-op。
+        // - existing=Some, current=None: invalidate_composition_for_dm で stale 化
+        // - existing=Some(a), current=Some(b) で a != b: composition が置換された
+        // - existing=None, current=Some: 別経路で新規 composition が立った
+        // のいずれも安全側で abort する。
+        let current = composition_clone()
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("comp re-check: {e}")))?;
+        let current_ptr = current.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
+        if current_ptr != existing_ptr {
+            tracing::debug!(
+                "update_composition: stale snapshot, abort SetText (existing={:#x} current={:#x})",
+                existing_ptr,
+                current_ptr
+            );
+            return Ok(());
+        }
 
         let preedit_w: Vec<u16> = preedit.encode_utf16().collect();
         tracing::debug!(
@@ -4038,9 +4061,23 @@ fn update_composition(
             r
         };
 
-        range
-            .SetText(ec, 0, &preedit_w)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        // M1.8 T-MID3: SetText 排他化。Phase1A 経路の SetText と直列化する。
+        // busy なら skip し、上位は no-op として処理する（次回 update_composition
+        // が新しい preedit で再 SetText するので整合は保てる）。
+        {
+            let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::debug!(
+                        "update_composition: COMPOSITION_APPLY_LOCK busy, skip SetText"
+                    );
+                    return Ok(());
+                }
+            };
+            range
+                .SetText(ec, 0, &preedit_w)
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        }
 
         // アンダーライン属性をセット
         // SESSION_SELECTING アトミックで高速判定（クロージャ内なので Mutex は取れない）
@@ -4240,6 +4277,8 @@ fn update_composition_candidate_parts(
     }
 
     let existing = composition_clone()?;
+    // M1.8 T-MID2: update_composition と同じ stale check を入れる
+    let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
     let ctx_req = ctx.clone();
     let full = format!("{prefix}{converted}{suffix}");
     let prefix_utf16: i32 = prefix.encode_utf16().count() as i32;
@@ -4248,6 +4287,19 @@ fn update_composition_candidate_parts(
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
         };
+
+        // M1.8 T-MID2: クロージャ実行時点の stale check
+        let current = composition_clone()
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("comp re-check: {e}")))?;
+        let current_ptr = current.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
+        if current_ptr != existing_ptr {
+            tracing::debug!(
+                "update_composition_candidate_parts: stale snapshot, abort SetText (existing={:#x} current={:#x})",
+                existing_ptr,
+                current_ptr
+            );
+            return Ok(());
+        }
 
         let full_w: Vec<u16> = full.encode_utf16().collect();
 
@@ -4276,9 +4328,21 @@ fn update_composition_candidate_parts(
             r
         };
 
-        range
-            .SetText(ec, 0, &full_w)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        // M1.8 T-MID3: SetText 排他化（candidate_parts 経路）。
+        {
+            let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::debug!(
+                        "update_composition_candidate_parts: COMPOSITION_APPLY_LOCK busy, skip SetText"
+                    );
+                    return Ok(());
+                }
+            };
+            range
+                .SetText(ec, 0, &full_w)
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        }
 
         // ── Step2: 属性セット ──
         // 全体を atom_input（点線）で塗り、選択中ブロックのみ atom_converted（太実線）で上書きする

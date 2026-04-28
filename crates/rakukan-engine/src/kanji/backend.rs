@@ -34,10 +34,14 @@ fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
     // 長めの文でも途中で切れにくいよう、固定値ではなく読み長に応じて伸ばす。
     // jinen 系では 1 文字あたり 1 token 未満になることもあるが、かなり長い文では
     // 15 token では不足しやすいため、余裕を持って 2 倍 + 8 を上限付きで使う。
+    // M1.5 T-BUG1 (a): 上限を 128 → 256 に引き上げ。20 文字超の長文 reading で
+    // budget が頭打ちになる前に EOS が出るパターン (尻切れ) を抑制する。
+    // KV cache は変換時のみ確保するためメモリ圧は無視できる。
     config_max_new_tokens
         .max(reading_chars.saturating_mul(2).saturating_add(8))
-        .min(128)
+        .min(256)
 }
+
 
 /// Build a prompt in jinen format
 pub fn build_jinen_prompt(katakana: &str, context: &str) -> String {
@@ -252,6 +256,13 @@ impl KanaKanjiConverter {
             }
         }
 
+        // M1.5 T-BUG1 (c): 出力が極端に短い候補を捨てる安全網。reading の
+        // 33% 以上の長さを持つ候補だけを残す。0.7.0 で TSF 側 (T-BUG2) にも
+        // 同等の防壁があるが、エンジン側で先に弾けば session に短い preview が
+        // 入らず、後段の sanity check や filter に頼らず済む。
+        let reading_chars = reading.chars().count();
+        candidates.retain(|c| c.chars().count() * 3 >= reading_chars);
+
         // If no candidates, return the original reading
         if candidates.is_empty() {
             candidates.push(reading.to_string());
@@ -279,9 +290,12 @@ mod tests {
 
     #[test]
     fn generation_budget_grows_with_reading_length() {
+        // 短い reading は config_max_new_tokens (15) で頭打ち
         assert_eq!(generation_budget("かな", 15), 15);
-        assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 30);
+        // 15 文字 reading: 15*2+8 = 38。M1.5 T-BUG1 (a) で上限 256 に拡張済。
+        assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 38);
     }
+
 
     #[test]
 

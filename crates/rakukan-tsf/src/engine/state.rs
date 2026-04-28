@@ -717,6 +717,20 @@ pub fn composition_clone() -> anyhow::Result<Option<ITfComposition>> {
     Ok(g.comp.clone())
 }
 
+/// M1.8 T-MID3: composition の `SetText` を直列化するための排他ロック。
+///
+/// Phase1A (`candidate_window.rs` の live preview EditSession) と
+/// `update_composition` / `update_composition_candidate_parts`
+/// (factory.rs の通常 / 候補表示 EditSession) はそれぞれ別経路で
+/// 同じ composition の range に `SetText` する。TSF EditSession は STA で
+/// 直列実行されるが、deferred dispatch の順序が保証されないため、
+/// 古い経路の SetText が新しい経路の SetText を上書きする risk がある。
+///
+/// 各 SetText 直前で `try_lock` を取り、busy なら skip して return。
+/// 取りこぼした apply は次のキー入力 / タイマー発火で最新 gen の SetText が
+/// 走るので整合は保てる（M1.8 T-MID1 の gen 機構と組合せて機能）。
+pub static COMPOSITION_APPLY_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
 /// `OnUninitDocumentMgr` から呼ばれる。
 ///
 /// msctf コールバック中に stale な `ITfComposition` を drop しないよう、

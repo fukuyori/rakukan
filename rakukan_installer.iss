@@ -18,7 +18,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.7.2"
+#define MyAppVersion   "0.7.3"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 

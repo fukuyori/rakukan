@@ -3,6 +3,31 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.3] - 2026-04-28
+
+### Fixed
+
+- **ライブ変換 preview の尻切れをエンジン側で部分抑制** (M1.5 T-BUG1 a + c) — jinen LLM が reading を使い切る前に EOS を出して preview が極端に短くなる現象 (例: `じけいれつでーたのことをさしつづいた…` → `時系列データのことをさ` で停止) に対し、副作用のない 2 段の対策を投入:
+  - **(a) `generation_budget` の上限 128 → 256** ([backend.rs:32-43](crates/rakukan-engine/src/kanji/backend.rs#L32-L43)) — 20 文字超の長文 reading で budget が頭打ちになる前に EOS が出るパターンを抑止。KV cache は変換時のみ確保するためメモリ圧は無視できる
+  - **(c) 出力 candidates のエンジン側フィルタ** ([backend.rs:259-264](crates/rakukan-engine/src/kanji/backend.rs#L259-L264)) — `c.chars().count() * 3 < reading.chars().count()` の候補を破棄。全滅なら reading をそのまま返す。session に短い preview が入らず、後段の sanity check に依存しない
+  - 本命の (b) `min_new_tokens` 機構 (greedy で premature EOS を次点 non-EOS トークンへ差替え / beam search で premature EOS の beam を candidates から落とす) は実装したが、トークン単位の min 判定が char 単位の reading 長と整合せず、適切に EOS した変換でも次点トークン (jinen では多くの場合 `〜`) を強制挿入する regression が観測されたため**同バージョン内で revert**。例:
+
+    ```text
+    reading="がひょうじ"        preview="が表示〜"   ← 〜混入
+    reading="がひょうじされる"  preview="が表示される〜る" ← 〜混入
+    ```
+
+    本命の長文尻切れ修正は、`llama-cpp-2` の logit bias API が整備された段階で再設計する。当面は 0.7.0 の TSF 側 T-BUG2 (preview 30% 未満破棄) と (c) の二重防壁で対応
+- **ライブ変換中の中間文字消失への追加防壁** (M1.8 T-MID2) — `update_composition` / `update_composition_candidate_parts` の EditSession クロージャ先頭で `composition_clone()` を再呼出し、外側 snapshot のポインタと比較。`OnUninitDocumentMgr` などで composition が破棄/置換された後に deferred EditSession が誤書き込みする経路を塞ぐ。不一致なら no-op + log
+- **ライブ変換中の SetText 二重適用の race 対策** (M1.8 T-MID3) — `state.rs` に `COMPOSITION_APPLY_LOCK: LazyLock<Mutex<()>>` を追加し、Phase1A (`candidate_window.rs` の live preview SetText) / `update_composition` / `update_composition_candidate_parts` の `SetText` を `try_lock` で囲む。busy なら skip して `Ok(())` で抜け、最新 gen による次回 SetText が勝つ。0.7.0 の T-MID1 gen 機構と組合せて二重 apply 経路を堅牢化
+
+### Documentation
+
+- **テストの矛盾を解消** — 以下のいずれも v0.7.3 の修正範囲外で v0.6.x 以前から壊れていたものを v0.7.3 リリース時に整合化:
+  - `kanji::model_config::tests::test_all_variant_ids` / `test_iter_variants` が variant 数 2 を仮定していたが、v0.6.x で f16 variant 追加後は xsmall-q5 / small-q5 / xsmall-f16 / small-f16 の計 4 になっていたためアサーションを更新
+  - `engine::text_util::tests::katakana_symbols_fullwidth` / `hiragana_symbols_fullwidth` が `"\\x5C"` を「backslash 1 文字」と書いていたが、Rust の文字列リテラルでは `\`, `x`, `5`, `C` の 4 文字。意図通りの 1 文字 backslash になる `"\x5C"` に修正
+- **`backend::tests::test_env_override_cpu` が並列実行で flaky** — `RAKUKAN_GPU_BACKEND` env 変数を別テストとシェアするため `cargo test --workspace` で稀に失敗する。`cargo test -- --test-threads=1` で確実に通る。本リリースでは未対応 (test-only の問題)
+
 ## [0.7.2] - 2026-04-28
 
 ### Fixed

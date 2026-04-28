@@ -130,21 +130,24 @@ mod tests {
     fn test_all_variant_ids() {
         let reg = registry();
         let ids = reg.all_variant_ids();
+        // v0.6.x で f16 variant が追加され、現在は q5 / f16 の各 small/xsmall 計 4 種
         assert_eq!(
             ids.len(),
-            2,
-            "Expected exactly 2 variants, got {}",
+            4,
+            "Expected exactly 4 variants, got {}",
             ids.len()
         );
         assert!(ids.contains(&"jinen-v1-xsmall-q5"));
         assert!(ids.contains(&"jinen-v1-small-q5"));
+        assert!(ids.contains(&"jinen-v1-xsmall-f16"));
+        assert!(ids.contains(&"jinen-v1-small-f16"));
     }
 
     #[test]
     fn test_iter_variants() {
         let reg = registry();
         let count = reg.iter_variants().count();
-        assert_eq!(count, 2, "Expected exactly 2 variants, got {}", count);
+        assert_eq!(count, 4, "Expected exactly 4 variants, got {}", count);
     }
 
     #[test]

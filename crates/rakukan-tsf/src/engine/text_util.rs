@@ -747,8 +747,11 @@ mod tests {
 
     #[test]
     fn katakana_symbols_fullwidth() {
+        // 入力は `,.[\\]` の 5 文字。`\x5C` は単一の backslash。
+        // 過去 `"\\x5C"` と書かれていたが、それは 4 文字 `\`, `x`, `5`, `C`
+        // を表す Rust 文字列リテラルで意図と異なっていた。
         assert_eq!(
-            to_katakana(",.[\\x5C]"),
+            to_katakana(",.[\x5C]"),
             "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}"
         );
         assert_eq!(
@@ -775,8 +778,9 @@ mod tests {
 
     #[test]
     fn hiragana_symbols_fullwidth() {
+        // katakana_symbols_fullwidth と同じ理由で `\x5C` は単一 backslash。
         assert_eq!(
-            to_hiragana(",.[\\x5C]"),
+            to_hiragana(",.[\x5C]"),
             "\u{3001}\u{3002}\u{300C}\u{FFE5}\u{300D}"
         );
     }

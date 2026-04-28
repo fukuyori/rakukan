@@ -1,4 +1,4 @@
-# rakukan v0.7.2
+# rakukan v0.7.3
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,14 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.3 変更点
+
+- **ライブ変換 preview の尻切れをエンジン側で部分抑制** (M1.5 T-BUG1 a + c): jinen LLM が reading を使い切る前に EOS を出して preview が短く切れる問題に対する 2 段の対策。(a) `generation_budget` の上限 128 → 256 に引き上げ、(c) 出力 candidates のうち `chars() * 3 < reading.chars()` の極端に短いものをエンジン側でフィルタし、全滅なら reading をそのまま返す。長文尻切れの本命修正 (b: `min_new_tokens` 機構) は実装したが「token 単位の min 判定が char 単位の reading 長と整合せず、適切に EOS した変換でも次点の非 EOS トークン (jinen では多くの場合 `〜`) を強制挿入する」regression を引き起こしたため同バージョン内で撤回。長文尻切れは 0.7.0 で入っている TSF 側 T-BUG2 (preview 30% 未満を破棄) と (c) 出力フィルタで暫定対応。本命のエンジン側修正は logit bias API の整備を待って後日再着手
+- **ライブ変換中の中間文字消失への追加防壁** (M1.8 T-MID2 / T-MID3):
+  - **T-MID2** `update_composition` / `update_composition_candidate_parts` の EditSession クロージャ先頭で `composition_clone()` を再呼出し、外側 snapshot とポインタが異なれば SetText せず no-op。`OnUninitDocumentMgr` 等で composition が破棄されたあとに deferred EditSession が誤書き込みする経路を塞ぐ
+  - **T-MID3** `COMPOSITION_APPLY_LOCK: Mutex<()>` を新設し、Phase1A (`candidate_window.rs` の live preview SetText) / `update_composition` / `update_composition_candidate_parts` の SetText を try_lock で囲む。busy なら skip し、最新 gen による次回 SetText が勝つ
+- **テストの矛盾を解消**: `model_config::test_all_variant_ids` / `test_iter_variants` で variant 数 2 を仮定していたが v0.6.x で f16 variant 追加後は 4 になっていた、`text_util::*_symbols_fullwidth` で `"\\x5C"` を backslash 1 文字と勘違いしていた、をそれぞれ修正
 
 ## 0.7.2 変更点
 

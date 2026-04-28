@@ -1344,9 +1344,25 @@ pub fn on_live_timer() {
                 .GetRange()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
             let text_w: Vec<u16> = preview_1a.encode_utf16().collect();
-            range
-                .SetText(ec, 0, &text_w)
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            // M1.8 T-MID3: SetText 排他化。update_composition 系の SetText と
+            // 直列化されないと、deferred dispatch 順序によっては古い preview が
+            // 新しい preedit を上書きする risk がある。busy なら skip して
+            // 次回 timer / key で最新 gen の SetText を走らせる。
+            {
+                let _apply_guard =
+                    match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
+                        Ok(g) => g,
+                        Err(_) => {
+                            tracing::debug!(
+                                "[Live] Phase1A: COMPOSITION_APPLY_LOCK busy, skip SetText"
+                            );
+                            return Ok(());
+                        }
+                    };
+                range
+                    .SetText(ec, 0, &text_w)
+                    .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            }
 
             let atom = crate::tsf::display_attr::atom_input();
             if atom != 0 {
