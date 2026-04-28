@@ -1,4 +1,4 @@
-# rakukan v0.7.1
+# rakukan v0.7.2
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,12 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.2 変更点
+
+- **`engine_reload` 直後の reconnect race による変換中の異常終了を解消**: 設定保存・モード切替・「エンジン再起動」直後にホストとの reconnect が死にゆくパイプに当たり `read length` エラーで詰まり、次のキー入力まで復旧しない問題を修正。`ensure_connected` に 200ms sleep + 1 回リトライ経路を追加し、`engine_reload()` 側でも `eng.shutdown()` 後に mutex を握ったまま 100ms sleep してからハンドルを drop することで race window をほぼ消した
+- **engine-host のサイレント死を捕捉する診断強化**: Rust panic を `PANIC at <loc>: ...` 形式で log に出す panic hook と、Win32 `SetStdHandle` で stderr を log ファイルへ向ける処理を追加。`windows_subsystem = "windows"` でこれまで捨てられていた llama.cpp の `fprintf(stderr)` やデフォルト panic 出力を捕捉
+- **`engine_reload` 呼出元の明示**: `#[track_caller]` で `engine_reload: invoked from <file>:<line>:<col>` をログ、langbar メニュー由来は `langbar menu: ID_MENU_ENGINE_RELOAD selected` を出す。reload_watcher / mode-switch / langbar / その他の 4 経路を即判別できるようになった
 
 ## 0.7.1 変更点
 

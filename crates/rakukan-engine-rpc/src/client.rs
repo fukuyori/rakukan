@@ -429,10 +429,35 @@ impl Connection {
     /// `config_json` は `self.config_json` を使う。これにより、ホストが一度クラッシュして
     /// 新プロセスで立ち上がり直したケースでも、直近の `reload()` で指定された設定で
     /// Create され直すため、古い config に巻き戻ることがない。
+    ///
+    /// ## race condition リトライ
+    /// `engine_reload()` でホストに `Shutdown` を送った直後、ホストが応答後 50ms
+    /// sleep してから `process::exit(0)` する間に新しい client が connect →
+    /// Hello を投げると、host が exit したタイミングで read が "read length"
+    /// で死ぬ。これを 1 回だけリトライする。1 回目の失敗で host_spawn_guard に
+    /// failure が記録されても、2 回目で成功すれば record_success が呼ばれて
+    /// カウンタはリセットされる（仕様: HOST_FAILURE_THRESHOLD=3 なので 1 回の
+    /// 余分な失敗で本物の cooldown に入ることはない）。
     fn ensure_connected(&mut self) -> Result<()> {
         if self.stream.is_some() {
             return Ok(());
         }
+        if let Err(first_err) = self.try_connect_once() {
+            tracing::warn!(
+                "ensure_connected: handshake failed ({first_err}); retrying after 200ms"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+            return self
+                .try_connect_once()
+                .with_context(|| format!("retry after first failure: {first_err}"));
+        }
+        Ok(())
+    }
+
+    /// `ensure_connected` の本体（connect → Hello → Create）。失敗時は
+    /// `self.stream = None` に戻して `host_spawn_guard` に failure を記録する。
+    /// リトライは `ensure_connected` 側で行う。
+    fn try_connect_once(&mut self) -> Result<()> {
         let pipe_name = pipe_name_for_current_user();
 
         // 1. まず接続を試行

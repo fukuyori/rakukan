@@ -195,6 +195,7 @@ fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
             settings_launcher::launch_settings_app();
         }
         ID_MENU_ENGINE_RELOAD => {
+            tracing::info!("langbar menu: ID_MENU_ENGINE_RELOAD selected");
             crate::engine::config::init_config_manager();
             crate::engine::state::engine_reload();
         }

@@ -25,6 +25,11 @@
 - ✅ M1 T3-B: `dispose_dm_resources()` ヘルパに 3 つの cleanup を集約
 - ✅ M1 T1-D: `docs/EXPLORER_CRASH_HISTORY.md` / `docs/INVESTIGATION_GUIDE.md` 新設
 
+**v0.7.2 リリース済み（2026-04-28）**: 以下 2 件の race 修正 + 診断強化を同梱。
+
+- ✅ M1.6 T-HOST5: `engine_reload` 直後の reconnect race を解消（`ensure_connected` を `try_connect_once` + 200ms sleep + 1 回リトライに分離 / `engine_reload` の `eng.shutdown()` 後に mutex を握ったまま 100ms sleep してハンドル drop）
+- ✅ M1.6 T-HOST6: engine-host のサイレント死を捕捉する診断強化（Rust panic hook で `PANIC at <loc>: ...` をログ / Win32 `SetStdHandle` で stderr を log ファイルへ redirect / `engine_reload()` に `#[track_caller]` を付け呼出元 location をログ / langbar メニュー由来の reload に明示ログ追加）
+
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
 関連資料:
@@ -49,10 +54,11 @@
 | --- | --- | --- | --- |
 | **v0.7.0** ✅ 2026-04-24 | ✅ M1.5 T-BUG2 + ✅ M1.7 T-MODE1/2/3 + ✅ M1.8 T-MID1（Phase1A/1B 両経路）+ ✅ 候補ウィンドウ幅の動的計算 | minor | 尻切れ / ブラウザモード喪失 / 中間文字消失の即効対策 + 表示改善 |
 | **v0.7.1** ✅ 2026-04-24 | ✅ M1.6 T-HOST1〜4（host 再起動化 + 読込中 UI + 握り潰し撤去 + 時間計測）+ ✅ M1 T3-A/T3-B/T1-D（基盤整理 + docs 整備） | minor | host crash 根絶 + 読込中体感改善 + dead code 削減 + 調査資料整備 |
-| **v0.7.2** | M1.5 T-BUG1（早期 EOS 抑制、繰り延べ）+ M1.8 T-MID2/3（stale check + SetText 排他、繰り延べ） | patch | engine 品質改善 + race 対策堅牢化 |
-| **v0.7.3** | M3（factory.rs 分割） | patch | 純リファクタ、動作不変 |
-| **v0.7.4** | M2（ライブ変換可読性 + bg_peek/take + session_nonce） | minor | 機能追加含むため minor |
-| **v0.7.5** | M4（LiveConvSession 集約） | minor | ライブ変換中枢の再設計 |
+| **v0.7.2** ✅ 2026-04-28 | ✅ M1.6 T-HOST5（`engine_reload` reconnect race の解消、`ensure_connected` リトライ + `engine_reload` 100ms sleep）+ ✅ M1.6 T-HOST6（engine-host 診断強化: panic hook / stderr→log redirect / `#[track_caller]` ベース呼出元ログ） | patch | 観測済み race の即時修正 + サイレント死診断 |
+| **v0.7.3** | M1.5 T-BUG1（早期 EOS 抑制、繰り延べ）+ M1.8 T-MID2/3（stale check + SetText 排他、繰り延べ） | patch | engine 品質改善 + race 対策堅牢化 |
+| **v0.7.4** | M3（factory.rs 分割） | patch | 純リファクタ、動作不変 |
+| **v0.7.5** | M2（ライブ変換可読性 + bg_peek/take + session_nonce） | minor | 機能追加含むため minor |
+| **v0.7.6** | M4（LiveConvSession 集約） | minor | ライブ変換中枢の再設計 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:
@@ -127,13 +133,15 @@ M5 (着手しない前提): 追加対策    （実機再発時のみ開封）
 | **M1** | ✅ T1-D: docs / コメント cleanup | 1〜2 時間 | なし | 文書のみ | ✓ (M0 と並行可) | **v0.7.1 済** |
 | **M1 合計** | 基盤整理（低リスク先行） | **3〜5 日**（実作業 ≒ 4 時間、レビュー/実機含む） | 小 | リファクタ | — | **v0.7.1 済** |
 | **M1.5** | ✅ T-BUG2: preview 長サニティチェック | 半日 | 小 | bug fix (TSF 側防壁) | ✓ (M1.6 と並行可) | **v0.7.0 済** |
-| **M1.5** | T-BUG1: 早期 EOS 抑制 / budget 拡大 | 1 日 | 中（LLM 品質影響要確認） | bug fix (engine 側本命) | ✓ | v0.7.2（繰り延べ） |
-| **M1.5 合計** | ライブ変換尻切れ修正 | **1〜2 日** | 中 | ★ user-facing bug | — | v0.7.0 + v0.7.2 |
+| **M1.5** | T-BUG1: 早期 EOS 抑制 / budget 拡大 | 1 日 | 中（LLM 品質影響要確認） | bug fix (engine 側本命) | ✓ | v0.7.3（繰り延べ） |
+| **M1.5 合計** | ライブ変換尻切れ修正 | **1〜2 日** | 中 | ★ user-facing bug | — | v0.7.0 + v0.7.3 |
 | **M1.6** | ✅ T-HOST1: Request::Shutdown + restart 経路化 | 半日 | 小 | RPC 設計変更 | ✓ (M1.5 と並行可) | **v0.7.1 済** |
 | **M1.6** | ✅ T-HOST2: 再起動時間計測 | 30 分 | なし | 計測のみ | ✓ | **v0.7.1 済** |
 | **M1.6** | ✅ T-HOST3: 段階表示 UI (10s/30s/60s) | 半日 | 小 | UI 追加（MVP: 記号のみ） | ✓ | **v0.7.1 済** |
 | **M1.6** | ✅ T-HOST4: 読込中の入力握り潰し対策 | 半日 | 中（hot path 触る） | bug fix + UX | ✓ | **v0.7.1 済** |
-| **M1.6 合計** | 設定反映時の host 再起動化 | **2 日前後** | 小〜中 | ★ host crash 根絶 | — | **v0.7.1 済** |
+| **M1.6** | ✅ T-HOST5: reconnect race 解消（ensure_connected リトライ + engine_reload sleep） | 半日 | 小 | race fix | ✓ | **v0.7.2 済** |
+| **M1.6** | ✅ T-HOST6: サイレント死診断（panic hook / stderr→log / `#[track_caller]`） | 半日 | なし | 診断強化 | ✓ | **v0.7.2 済** |
+| **M1.6 合計** | 設定反映時の host 再起動化 + race 修正 | **3 日前後** | 小〜中 | ★ host crash 根絶 | — | **v0.7.1 + v0.7.2 済** |
 | **M1.7** | ✅ T-MODE1: doc_mode_remove で破棄前に HWND へ退避 | 15 分 | 極小 | bug fix（最優先） | ✓ (M1.5/M1.6 と並行可) | **v0.7.0 済** |
 | **M1.7** | ✅ T-MODE2: モード変更ごとに store を即時更新 | 半日 | 小（TL 追加 + 変更経路フック） | bug fix + 設計改善 | ✓ | **v0.7.0 済**（前倒し） |
 | **M1.7** | ✅ T-MODE3: HWND を GA_ROOT へ正規化 | 15 分 | 極小 | bug fix | ✓ | **v0.7.0 済**（前倒し） |
@@ -141,15 +149,15 @@ M5 (着手しない前提): 追加対策    （実機再発時のみ開封）
 | **M1.7** | T-MODE5: mode_store 永続化（任意） | 半日 | 小 | 機能改善 | ✓ | v0.7.2+ 様子見 |
 | **M1.7 合計** | ブラウザ入力モード保持 | **1 日前後**（T-MODE1〜3） | 小 | ★ user-facing bug | — | **v0.7.0 済** |
 | **M1.8** | ✅ T-MID1: Phase1B キューに gen タグを付与 + Phase1A EditSession race fix | 半日 | 小〜中（race 再現確認含む） | bug fix（最優先） | ✓ (M1.5〜M1.7 と並行可) | **v0.7.0 済** |
-| **M1.8** | T-MID2: EditSession 入口で composition stale check | 半日 | 小 | bug fix | ✓ | v0.7.2（繰り延べ） |
-| **M1.8** | T-MID3: Phase1A / Phase1B の SetText 二重適用排他化 | 半日 | 中（ロック/順序設計要） | bug fix | ✓ | v0.7.2（繰り延べ） |
-| **M1.8 合計** | ライブ変換中の中間文字消失 | **1〜2 日** | 中 | ★ user-facing bug | M2 と根本原因共有（先行バックポート） | v0.7.0 + v0.7.2 |
-| **M2** | T1-B: on_live_timer 分解 | 半日 | 中（ロック順保持） | リファクタ | — | v0.7.4 |
-| **M2** | bg_peek/take API 分離 (§18.3) | 1 日 | 中（API 変更 ~10 箇所） | リファクタ + 機能 | — | v0.7.4 |
-| **M2** | session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | v0.7.4 |
-| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | v0.7.4 |
-| **M3** | T1-A: factory.rs 分割 | **1〜2 日** | 小（純粋切り出し） | リファクタ | — | v0.7.3 |
-| **M4** | T2: LiveConvSession 構造体集約 | **3〜5 日** | 中〜大（ライブ変換中枢） | リファクタ | 段階 PR 推奨 | v0.7.5 |
+| **M1.8** | T-MID2: EditSession 入口で composition stale check | 半日 | 小 | bug fix | ✓ | v0.7.3（繰り延べ） |
+| **M1.8** | T-MID3: Phase1A / Phase1B の SetText 二重適用排他化 | 半日 | 中（ロック/順序設計要） | bug fix | ✓ | v0.7.3（繰り延べ） |
+| **M1.8 合計** | ライブ変換中の中間文字消失 | **1〜2 日** | 中 | ★ user-facing bug | M2 と根本原因共有（先行バックポート） | v0.7.0 + v0.7.3 |
+| **M2** | T1-B: on_live_timer 分解 | 半日 | 中（ロック順保持） | リファクタ | — | v0.7.5 |
+| **M2** | bg_peek/take API 分離 (§18.3) | 1 日 | 中（API 変更 ~10 箇所） | リファクタ + 機能 | — | v0.7.5 |
+| **M2** | session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | v0.7.5 |
+| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | v0.7.5 |
+| **M3** | T1-A: factory.rs 分割 | **1〜2 日** | 小（純粋切り出し） | リファクタ | — | v0.7.4 |
+| **M4** | T2: LiveConvSession 構造体集約 | **3〜5 日** | 中〜大（ライブ変換中枢） | リファクタ | 段階 PR 推奨 | v0.7.6 |
 | **M5.1** | WM_TIMER → PostMessage 化（条件付き） | 1〜2 日 | 中 | crash 対策 | 実機再発時のみ | v0.7.x patch |
 | **M5.2** | Explorer シェル分岐（条件付き） | 半日 | 小（UX 劣化あり） | crash 局所回避 | 実機再発時のみ | v0.7.x patch |
 

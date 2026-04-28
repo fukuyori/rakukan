@@ -3,6 +3,22 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.2] - 2026-04-28
+
+### Fixed
+
+- **`engine_reload` 直後の reconnect race による「変換中の異常終了」を解消** — 設定保存・モード切替・langbar の「エンジン再起動」などで `engine_reload()` が走った直後、TSF 側の次のキー処理が `engine_start_bg_init` → `connect_or_spawn` を経由して **死にゆくホストパイプに connect** してしまい、Hello/Create の read で `read length` エラーが発火し、エンジンハンドルが破棄されたまま次のキー入力まで復旧しないことがあった（00:26:51 のログで確認: Shutdown→62ms 後の bg_init→101ms 後に "read length"）。原因はホスト側 `server.rs:73-77` の「応答配送のため 50ms sleep してから `process::exit(0)`」窓と、クライアント側 `ensure_connected` が Hello/Create 失敗時にリトライしないことの組合せ。対策として:
+  - **client.rs**: `ensure_connected` を `try_connect_once` に分離し、1 回失敗時は 200ms sleep してから 1 度だけリトライする経路を追加。死にゆくパイプに当たっても retry 側ではホストが完全 exit 済みなので `spawn_host` 経由で新ホストに繋がる
+  - **state.rs**: `engine_reload()` の `eng.shutdown()` 後に `RAKUKAN_ENGINE` mutex を握ったまま 100ms sleep してからハンドルを drop。サーバ側 50ms sleep より長く待つことで、他スレッドの reconnect が dying pipe に当たる確率を大幅に低減。mutex を握っている間、他スレッドの `engine_try_get`/`_or_create` は busy 短絡されるので副作用なし
+
+### Added
+
+- **engine-host のサイレント死を捕捉するための診断強化**
+  - `install_panic_hook()`: `panic = "abort"` 設定でも abort 前に panic hook が走ることを利用し、Rust panic を `PANIC at <loc>: <msg> (thread=..., pid=...)` 形式で `rakukan-engine-host.log` に出す。engine DLL 内の Rust panic が log に何も残さず process が消えるのを防ぐ
+  - `redirect_stderr_to_log()`: Win32 `SetStdHandle(STD_ERROR_HANDLE)` でホストプロセスの stderr を `rakukan-engine-host.log` へ向ける。`windows_subsystem = "windows"` で console を持たないため stderr が捨てられていた llama.cpp の `fprintf(stderr, ...)` や Rust の `eprintln!` を log と同居させて拾う
+- **`engine_reload` 呼出元トラッキング** — `engine_reload()` に `#[track_caller]` を付け、入口で `engine_reload: invoked from <file>:<line>:<col>` をログ。0.7.x で見えていた「reload event/runtime config 由来でない `engine_reload`」が `factory.rs:200` (langbar menu) なのか `factory.rs:959` (mode switch) なのか `state.rs:443` (reload_watcher) なのか即判別できるようになった
+- **langbar メニュー由来 reload の明示ログ** — `ID_MENU_ENGINE_RELOAD` の入口で `langbar menu: ID_MENU_ENGINE_RELOAD selected` をログ。`#[track_caller]` と合わせて 5 系統（reload_watcher / mode-switch / langbar / 未知 / panic 経由）を切り分け可能
+
 ## [0.7.1] - 2026-04-24
 
 ### Fixed

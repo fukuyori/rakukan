@@ -345,7 +345,17 @@ pub fn engine_force_recreate() {
 /// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** は
 /// 新 PID の `Create { config_json }` で反映される。client 側は `shutdown()` に
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
+#[track_caller]
 pub fn engine_reload() {
+    // 診断: 誰がこの関数を呼んだかをログに残す。0.7.x で調査中の
+    // 「reload event/runtime config 由来でない engine_reload」を切り分けるため。
+    let caller = std::panic::Location::caller();
+    tracing::info!(
+        "engine_reload: invoked from {}:{}:{}",
+        caller.file(),
+        caller.line(),
+        caller.column()
+    );
     // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
     reset_ready_latches();
     // バックグラウンドで shutdown（UI スレッドをブロックしない）
@@ -382,6 +392,14 @@ pub fn engine_reload() {
                         elapsed
                     ),
                 }
+                // ホスト側は応答送信後 50ms sleep してから `process::exit(0)` する
+                // (server.rs:73-77)。ここでハンドルを即 drop すると、次の
+                // `engine_try_get_or_create()` がその 50ms 内に死にゆくパイプへ
+                // connect → Hello で host が exit → "read length" エラーになる
+                // race が発生する。RAKUKAN_ENGINE mutex を握ったまま 100ms 待つ
+                // ことで、他スレッドの reconnect は古いハンドル経由で短絡され、
+                // 本当のホスト exit 完了後に新しい spawn が走る。
+                std::thread::sleep(std::time::Duration::from_millis(100));
                 // 応答の可否に関わらずハンドルは捨てる。次回
                 // `engine_try_get_or_create()` が新 PID へ自動 spawn + 再接続する。
                 guard.0 = None;
