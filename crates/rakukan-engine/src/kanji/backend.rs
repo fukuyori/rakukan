@@ -42,7 +42,6 @@ fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
         .min(256)
 }
 
-
 /// Build a prompt in jinen format
 pub fn build_jinen_prompt(katakana: &str, context: &str) -> String {
     format!(
@@ -295,7 +294,6 @@ mod tests {
         // 15 文字 reading: 15*2+8 = 38。M1.5 T-BUG1 (a) で上限 256 に拡張済。
         assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 38);
     }
-
 
     #[test]
 

@@ -179,6 +179,7 @@ internal sealed class SettingsStore
         default_mode = "alphanumeric"
         remember_last_kana_mode = true
         digit_width = "halfwidth"
+        digit_separator_auto = true
         auto_learn = true
 
         [live_conversion]

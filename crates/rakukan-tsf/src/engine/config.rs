@@ -127,6 +127,9 @@ fn default_input_mode() -> DefaultInputMode {
 fn default_remember_last_kana_mode() -> bool {
     true
 }
+fn default_digit_separator_auto() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -149,6 +152,9 @@ pub struct InputConfig {
     pub remember_last_kana_mode: bool,
     #[serde(default)]
     pub digit_width: DigitWidth,
+    /// 数字直後の `、` / `。` を `,` / `.` として扱う。
+    #[serde(default = "default_digit_separator_auto")]
+    pub digit_separator_auto: bool,
     /// 確定時に学習するか (デフォルト `true`)。
     /// Phase 1: 従来どおり user_dict.toml に追記される (肥大化注意)。
     /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
@@ -166,6 +172,7 @@ impl Default for InputConfig {
             default_mode: default_input_mode(),
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
+            digit_separator_auto: default_digit_separator_auto(),
             auto_learn: default_auto_learn(),
         }
     }
@@ -419,6 +426,8 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
+# 数字直後の 、/。 を ,/. として入力する
+digit_separator_auto = true
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true

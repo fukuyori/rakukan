@@ -128,6 +128,8 @@ pub struct EngineConfig {
     pub main_gpu: i32,
     /// 数字の入力幅: "fullwidth" = 全角 (０１２), "halfwidth" = 半角 (012)
     pub digit_width: DigitWidth,
+    /// 数字直後の句読点を数値区切りとして扱う。
+    pub digit_separator_auto: bool,
     /// ライブ変換時の候補数（beam 幅に影響）。1 = greedy（高速）、3 = beam（高品質）
     pub live_conv_beam_size: usize,
     /// Space 変換時のビーム幅の**上限**（num_candidates と併せて min をとる）。
@@ -144,6 +146,7 @@ impl Default for EngineConfig {
             n_gpu_layers: 0u32,
             main_gpu: 0,
             digit_width: DigitWidth::default(),
+            digit_separator_auto: true,
             live_conv_beam_size: 3,
             convert_beam_size: 30,
         }
@@ -162,6 +165,21 @@ impl PreeditState {
     }
     pub fn is_empty(&self) -> bool {
         self.hiragana.is_empty() && self.pending_romaji.is_empty()
+    }
+}
+
+fn is_numeric_digit(c: char) -> bool {
+    c.is_ascii_digit() || ('０'..='９').contains(&c)
+}
+
+fn numeric_separator_after_digit(prev: Option<char>, c: char) -> Option<char> {
+    if !prev.is_some_and(is_numeric_digit) {
+        return None;
+    }
+    match c {
+        ',' | '、' => Some(','),
+        '.' | '。' => Some('.'),
+        _ => None,
     }
 }
 
@@ -241,6 +259,17 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
+        if self.config.digit_separator_auto && self.pending_romaji_buf.is_empty() {
+            if let Some(separator) =
+                numeric_separator_after_digit(self.hiragana_buf.chars().last(), c)
+            {
+                self.hiragana_buf.push(separator);
+                self.romaji_input_log.push(c.to_string());
+                debug!("engine::push: numeric separator {:?} → {:?}", c, separator);
+                return self.current_preedit();
+            }
+        }
+
         // 数字 0–9（pending_romaji がない場合のみ）
         if self.pending_romaji_buf.is_empty() && c.is_ascii_digit() {
             let out = match self.config.digit_width {
@@ -814,8 +843,32 @@ mod symbol_input_tests {
     }
 
     #[test]
+    fn comma_after_digit_stays_numeric_separator() {
+        assert_eq!(push("2", ','), "2,");
+        assert_eq!(push("２", '、'), "２,");
+    }
+
+    #[test]
     fn period_to_maru() {
         assert!(push("", '.').ends_with('。'));
+    }
+
+    #[test]
+    fn period_after_digit_stays_numeric_separator() {
+        assert_eq!(push("2", '.'), "2.");
+        assert_eq!(push("２", '。'), "２.");
+    }
+
+    #[test]
+    fn digit_separator_auto_can_be_disabled() {
+        let config = crate::EngineConfig {
+            digit_separator_auto: false,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.force_preedit("2".to_string());
+        e.push_char(',');
+        assert_eq!(e.hiragana_text(), "2、");
     }
 
     #[test]

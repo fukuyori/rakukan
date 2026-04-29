@@ -7,9 +7,7 @@ use anyhow::Result;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
-use crate::engine::state::{
-    SessionState, caret_rect_get, engine_try_get_or_create, session_get,
-};
+use crate::engine::state::{SessionState, caret_rect_get, engine_try_get_or_create, session_get};
 use crate::engine::text_util;
 use crate::tsf::candidate_window;
 use crate::tsf::language_bar;
@@ -19,6 +17,21 @@ use super::{
     engine_convert_sync_multi, update_caret_rect, update_composition,
     update_composition_candidate_parts,
 };
+
+fn is_numeric_digit(c: char) -> bool {
+    c.is_ascii_digit() || ('０'..='９').contains(&c)
+}
+
+fn numeric_separator_after_digit(reading: &str, c: char) -> Option<char> {
+    if !reading.chars().last().is_some_and(is_numeric_digit) {
+        return None;
+    }
+    match c {
+        '、' | ',' => Some(','),
+        '。' | '.' => Some('.'),
+        _ => None,
+    }
+}
 
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_kana_convert(
@@ -52,11 +65,7 @@ impl super::TextServiceFactory_Impl {
         let source = if !has_kana {
             // ラテン文字のみ → romaji_log からひらがなを復元
             let hira = engine.hiragana_from_romaji_log();
-            if hira.is_empty() {
-                p.clone()
-            } else {
-                hira
-            }
+            if hira.is_empty() { p.clone() } else { hira }
         } else {
             p.clone()
         };
@@ -603,6 +612,21 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
+        let reading = engine.hiragana_text();
+        if let Some(separator) = numeric_separator_after_digit(&reading, c) {
+            if crate::engine::state::is_digit_separator_auto_enabled() {
+                crate::tsf::live_session::conv_gen_bump();
+                engine.push_raw(separator);
+                let preedit = engine.preedit_display();
+                let live_beam = crate::engine::state::get_live_conv_beam_size();
+                engine.bg_start(live_beam);
+                drop(guard);
+                candidate_window::live_input_notify(&ctx, tid);
+                update_composition(ctx, tid, sink, preedit)?;
+                return Ok(true);
+            }
+        }
+
         // 未変換プリエディットあり → Convert と同じフローで変換ウィンドウを開く
         // punct_pending は activate_selecting 後にセットする
         engine.flush_pending_n();
@@ -946,5 +970,4 @@ impl super::TextServiceFactory_Impl {
 
         Ok(!engine.preedit_is_empty())
     }
-
 }

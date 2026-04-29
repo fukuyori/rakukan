@@ -23,13 +23,13 @@ use windows::{
             BM_GETCHECK, BM_SETCHECK, BS_AUTOCHECKBOX, BS_DEFPUSHBUTTON, BS_GROUPBOX, CB_ADDSTRING,
             CB_GETCURSEL, CB_SETCURSEL, CBS_DROPDOWNLIST, CreateWindowExW, DefWindowProcW,
             DestroyWindow, DispatchMessageW, ES_AUTOHSCROLL, GWLP_USERDATA, GetClientRect,
-            GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU,
-            IDC_ARROW, LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW,
+            GetMessageW, GetWindowLongPtrW, GetWindowTextLengthW, GetWindowTextW, HMENU, IDC_ARROW,
+            LoadCursorW, MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MSG, MessageBoxW,
             PostQuitMessage, RegisterClassW, SW_HIDE, SW_SHOW, SendMessageW, SetWindowLongPtrW,
             SetWindowTextW, ShowWindow, TranslateMessage, WINDOW_EX_STYLE, WINDOW_STYLE,
             WM_COMMAND, WM_CREATE, WM_CTLCOLORSTATIC, WM_DESTROY, WM_NCCREATE, WM_NCDESTROY,
-            WM_NOTIFY, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD,
-            WS_EX_CLIENTEDGE, WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
+            WM_NOTIFY, WM_SETFONT, WNDCLASSW, WS_BORDER, WS_CAPTION, WS_CHILD, WS_EX_CLIENTEDGE,
+            WS_MINIMIZEBOX, WS_OVERLAPPED, WS_SYSMENU, WS_TABSTOP, WS_VISIBLE,
         },
     },
     core::{PCWSTR, w},
@@ -125,6 +125,8 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
+# 数字直後の 、/。 を ,/. として入力する
+digit_separator_auto = true
 
 [live_conversion]
 enabled = false
@@ -1200,11 +1202,7 @@ unsafe fn create_key_capture_row(
         field_w,
         24,
         WINDOW_STYLE(
-            WS_CHILD.0
-                | WS_VISIBLE.0
-                | WS_TABSTOP.0
-                | WS_BORDER.0
-                | ES_AUTOHSCROLL as u32,
+            WS_CHILD.0 | WS_VISIBLE.0 | WS_TABSTOP.0 | WS_BORDER.0 | ES_AUTOHSCROLL as u32,
         ),
         font,
         id,

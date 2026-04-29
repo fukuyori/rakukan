@@ -13,14 +13,14 @@ use super::input_mode::InputMode;
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering as AO};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows::core::{Interface, GUID};
 use windows::Win32::Graphics::Dxgi::{
-    CreateDXGIFactory1, IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
-    DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    CreateDXGIFactory1, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, DXGI_QUERY_VIDEO_MEMORY_INFO,
+    IDXGIAdapter1, IDXGIAdapter3, IDXGIFactory1,
 };
+use windows::core::{GUID, Interface};
 
 // ─── INPUT_MODE_ATOMIC ────────────────────────────────────────────────────────
 // IMEState.input_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
@@ -165,7 +165,13 @@ static PENDING_KEYS: LazyLock<Mutex<Vec<(char, InputCharKind, bool)>>> =
 pub fn push_pending_key(c: char, kind: InputCharKind, raw: bool) {
     if let Ok(mut v) = PENDING_KEYS.lock() {
         v.push((c, kind, raw));
-        tracing::debug!("pending_keys: buffered c={:?} kind={:?} raw={} (total={})", c, kind, raw, v.len());
+        tracing::debug!(
+            "pending_keys: buffered c={:?} kind={:?} raw={} (total={})",
+            c,
+            kind,
+            raw,
+            v.len()
+        );
     }
 }
 
@@ -177,7 +183,10 @@ pub fn drain_pending_keys() -> Vec<(char, InputCharKind, bool)> {
             return Vec::new();
         }
         let out = std::mem::take(&mut *v);
-        tracing::info!("pending_keys: draining {} buffered keys for replay", out.len());
+        tracing::info!(
+            "pending_keys: draining {} buffered keys for replay",
+            out.len()
+        );
         out
     } else {
         Vec::new()
@@ -383,10 +392,9 @@ pub fn engine_reload() {
                 let r = eng.shutdown(Some(cfg));
                 let elapsed = t_start.elapsed();
                 match r {
-                    Ok(()) => tracing::info!(
-                        "engine_reload: host shutdown requested ({:?})",
-                        elapsed
-                    ),
+                    Ok(()) => {
+                        tracing::info!("engine_reload: host shutdown requested ({:?})", elapsed)
+                    }
                     Err(e) => tracing::warn!(
                         "engine_reload: host shutdown call returned error ({:?}): {e}",
                         elapsed
@@ -422,7 +430,7 @@ pub fn start_reload_watcher() {
     std::thread::Builder::new()
         .name("rakukan-reload-watcher".into())
         .spawn(|| {
-            use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject, INFINITE};
+            use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
             let name: Vec<u16> = "Local\\rakukan.engine.reload\0".encode_utf16().collect();
             let evt = unsafe {
                 CreateEventW(
@@ -484,16 +492,17 @@ fn build_engine_config_json() -> String {
     };
     let live_conv_beam_size = cfg.live_conversion.beam_size.clamp(1, 9);
     let convert_beam_size = cfg.conversion.beam_size.clamp(1, 30);
+    let digit_separator_auto = cfg.input.digit_separator_auto;
 
     tracing::info!(
-        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
+        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} digit_separator_auto={digit_separator_auto} live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
     );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
         None => String::new(),
     };
     format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size}{mv_json}}}"#
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","digit_separator_auto":{digit_separator_auto},"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size}{mv_json}}}"#
     )
 }
 
@@ -515,6 +524,10 @@ pub fn get_live_conv_beam_size() -> usize {
 /// 自動登録を止める。ユーザー辞書は設定画面からの手動登録のみで運用する。
 pub fn is_auto_learn_enabled() -> bool {
     super::config::current_config().input.auto_learn
+}
+
+pub fn is_digit_separator_auto_enabled() -> bool {
+    super::config::current_config().input.digit_separator_auto
 }
 
 pub fn maybe_log_gpu_memory(engine: &DynEngine) {
@@ -1082,7 +1095,6 @@ impl SessionState {
         }
     }
 
-
     pub fn current_candidate(&self) -> Option<&str> {
         match self {
             SessionState::Selecting {
@@ -1442,7 +1454,7 @@ pub fn doc_mode_on_focus_change(
     next_dm_ptr: usize,
     next_hwnd: usize,
 ) -> Option<InputMode> {
-    use super::config::{current_config, DefaultInputMode};
+    use super::config::{DefaultInputMode, current_config};
 
     let cfg = current_config();
     let remember = cfg.input.remember_last_kana_mode;
@@ -1551,9 +1563,7 @@ pub fn doc_mode_remember_current(mode: InputMode) {
         if hwnd != 0 {
             store.hwnd_modes.insert(hwnd, mode);
         }
-        tracing::trace!(
-            "doc_mode: remembered mode={mode:?} for dm={dm:#x} hwnd={hwnd:#x}"
-        );
+        tracing::trace!("doc_mode: remembered mode={mode:?} for dm={dm:#x} hwnd={hwnd:#x}");
     }
 }
 
