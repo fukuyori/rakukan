@@ -1,23 +1,30 @@
-# Rakukan 引き継ぎ資料 (v0.7.1)
+# Rakukan 引き継ぎ資料 (v0.7.6)
 
-更新日: 2026-04-24
+更新日: 2026-04-29
 
 ## 現在の状態
 
-- **バージョン:** v0.7.1
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消、v0.6.7 で候補体験 / 変換中レスポンス / 辞書を整理した地点から、**0.7.x シリーズ（安定性向上・user-facing bug fix 集中）** に移行。v0.7.1 は host crash 根絶と基盤整理:
-  - 設定反映時の `rakukan-engine-host.exe` crash を根絶（M1.6 T-HOST1: `Request::Shutdown` 追加 + engine_reload を shutdown + re-spawn 経路化。DLL drop→load 間の unmap race を回避）
+- **バージョン:** v0.7.6
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.6 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換まわりの大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession 集約 Phase 1) を消化。次は **v0.7.7 = M4 Phase 2** (cross-thread 状態の集約 + M2 §5.3 `session_nonce`)
+- **v0.7.6 の内容:** **M4 Phase 1** — TSF スレッドローカルに閉じる 5 種のグローバル状態 (旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` / `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS`) を `LiveConvSession` 構造体に集約。新ファイル `crates/rakukan-tsf/src/tsf/live_session.rs`。8 helper 経由でアクセスする形に書き換え。**動作変更なし** (純粋リファクタ)
+- **v0.7.5 の内容（継続有効）:**
+  - **M3 T1-A:** `factory.rs` (4816 行) を 6 ファイルに分割 (`factory.rs` / `dispatch.rs` / `on_input.rs` / `on_convert.rs` / `on_compose.rs` / `edit_ops.rs`)。動作変更なし
+  - **M2 §5.1 / T1-B:** `on_live_timer` (298 行) を `pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b` の 6 サブ関数に分解
+  - **M2 §5.2:** `bg_peek_top_candidate` 新設で live preview を非破壊化 (conv_cache を進めず user dict マージも行わない)。commit 経路 (`bg_take_candidates`) と干渉しない
+  - WinUI 設定 UI で保存した `config.toml` の改行コード LF → CRLF 統一
+  - Claude Code 用 Stop hook (`.claude/settings.json`) で install/build 順序の誤案内を構造的に block
+- **v0.7.3 の内容（継続有効）:** 早期 EOS 抑制の (a)+(c) 部分採用 (M1.5 T-BUG1)、`update_composition` 系の stale check 強化 (M1.8 T-MID2)、`COMPOSITION_APPLY_LOCK` で SetText 排他化 (M1.8 T-MID3)
+- **v0.7.2 の内容（継続有効）:** `engine_reload` 直後の reconnect race を解消 (`ensure_connected` リトライ + `engine_reload` の 100ms sleep)、engine-host のサイレント死診断強化 (panic hook / stderr→log redirect / `#[track_caller]`)
+- **v0.7.1 の内容（継続有効）:**
+  - 設定反映時の `rakukan-engine-host.exe` crash を根絶（M1.6 T-HOST1: `Request::Shutdown` 追加 + engine_reload を shutdown + re-spawn 経路化）
   - エンジン読込中の入力握り潰しを解消（M1.6 T-HOST4: `PENDING_KEYS` に積んで engine 復帰後 replay）
-  - エンジン読込中のキャレット近傍視覚フィードバック（M1.6 T-HOST3: `⏳` → `⌛` → `⚠` → `✕` の段階表示）
-  - reload 時間計測ログ（M1.6 T-HOST2: `dict ready: X ms` / `model ready: X ms`）
-  - dead code 削除 + dispose 集約（M1 T3-A: `engine_get_or_create()` 削除、M1 T3-B: `dispose_dm_resources()` ヘルパ導入）
-  - クラッシュ調査資料新設（M1 T1-D: `docs/EXPLORER_CRASH_HISTORY.md` / `docs/INVESTIGATION_GUIDE.md`）
+  - エンジン読込中のキャレット近傍視覚フィードバック（M1.6 T-HOST3: `⏳` → `⌛` → `⚠` → `✕`）
+  - reload 時間計測ログ（M1.6 T-HOST2）/ dead code 削除 + dispose 集約（M1 T3-A/T3-B）
 - **v0.7.0 の内容（継続有効）:**
-  - ブラウザ（Chrome / Edge / Firefox）でタブ切替時に入力モードが戻る / 反転する問題を 3 層で修正（M1.7 T-MODE1 / T-MODE2 / T-MODE3）
-  - ライブ変換 preview の尻切れ防壁（char 数比 <30% で破棄 → reading 置換、M1.5 T-BUG2）
-  - ライブ変換中の中間 / 末尾文字消失を修正（Phase1B キュー経路 + Phase1A EditSession 経路の両方に `LIVE_CONV_GEN` による stale discard、M1.8 T-MID1）
-  - 候補ウィンドウ幅を候補内容に応じて動的計算（GDI 実測、260〜900px でクランプ）
-- **旧バージョン（v0.6.7）の目玉:** 辞書スロット配分を dict 優先（`limit*2/3`）、`DICT_LIMIT` 20 → 40、設定画面クローズで内容変更が無ければ engine reload を発火しない、`on_convert` / 範囲変換の同期 LLM 待機を 250ms に短縮、変体仮名 (U+1AFF0–U+1B16F) を dict-builder で恒久除外、絵文字 (`emoji_data.tsv`) を統合
+  - ブラウザでタブ切替時に入力モードが戻る / 反転する問題の 3 層修正（M1.7 T-MODE1〜3）
+  - ライブ変換 preview 尻切れ防壁（char 数比 <30% で破棄、M1.5 T-BUG2）
+  - ライブ変換中の中間/末尾文字消失修正（`LIVE_CONV_GEN` による stale discard、M1.8 T-MID1）
+  - 候補ウィンドウ幅を候補内容に応じて動的計算（GDI 実測、260〜900px）
 - **ソース:** `C:\Users\n_fuk\source\rust\rakukan`
 - **インストール先:** `%LOCALAPPDATA%\rakukan\`
 - **設定:** `%APPDATA%\rakukan\config.toml`

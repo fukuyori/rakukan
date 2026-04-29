@@ -22,7 +22,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering as AO};
+use std::sync::atomic::{AtomicU64, Ordering as AO};
 
 use windows::{
     core::PCWSTR,
@@ -81,15 +81,8 @@ thread_local! {
     /// 最後に `show_inner` で算出したウィンドウ幅。WM_PAINT でも使う。
     static TL_WIN_WIDTH: Cell<i32> = Cell::new(WIN_WIDTH_MIN);
 
-    // ─── [Live] ライブ変換用: 最後の ITfContext と client_id ───────────────────────
-    // on_input から保存し、on_live_timer から RequestEditSession を呼ぶために使う。
-    // thread_local なので Send 不要（常に同一 TSF スレッドからアクセス）。
-    static TL_LIVE_CTX: RefCell<Option<windows::Win32::UI::TextServices::ITfContext>>
-        = RefCell::new(None);
-    static TL_LIVE_TID: Cell<u32> = Cell::new(0);
-    /// `TL_LIVE_CTX` を取得した時点の DocumentMgr ptr。
-    /// Explorer などで DM が再生成されたら stale 判定に使う。
-    static TL_LIVE_DM_PTR: Cell<usize> = Cell::new(0);
+    // ─── [Live] ライブ変換セッション状態は `live_session.rs` の LiveConvSession に集約 (M4 Phase 1)。
+    // 旧 TL_LIVE_CTX / TL_LIVE_TID / TL_LIVE_DM_PTR は削除済み。
 
     // ─── [FocusDefer] OnSetFocus 非同期化用 ─────────────────────────────────────
     // msctf._NotifyCallbacks 内で COM を触ると INVALID_POINTER_READ を誘発する
@@ -670,14 +663,7 @@ pub fn invalidate_live_context_for_dm(dm_ptr: usize) {
         return;
     }
 
-    let matched = TL_LIVE_DM_PTR.with(|c| {
-        if c.get() == dm_ptr {
-            c.set(0);
-            true
-        } else {
-            false
-        }
-    });
+    let matched = crate::tsf::live_session::invalidate_dm_ptr(dm_ptr);
 
     if matched {
         tracing::debug!("[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}");
@@ -801,14 +787,11 @@ const WAITING_POLL_MS: u32 = 80; // 80ms ごとにポーリング
 const LIVE_TIMER_ID: usize = 0x1235;
 const LIVE_POLL_MS: u32 = 50; // 50ms ごとにポーリング
 
-/// タイマーが初回発火したか（bg_not_done ログの重複抑制用）。
-/// 入力サイクルごとに reset される。
-static LIVE_TIMER_FIRED_ONCE_STATIC: AtomicBool = AtomicBool::new(false);
-
-/// 最後のキー入力時刻（Unix ms）。デバウンス用。
-static LIVE_LAST_INPUT_MS: AtomicU64 = AtomicU64::new(0);
+// ─── [Live] タイマー fired_once / last_input_ms は live_session.rs に集約 (M4 Phase 1)。
+// 旧 LIVE_TIMER_FIRED_ONCE_STATIC / LIVE_LAST_INPUT_MS は削除済み。
 
 /// config.live_conversion.debounce_ms の実行時コピー（live_input_notify がセット）。
+/// 設定値なので thread_local には移さず static のまま (spec 通り)。
 static LIVE_DEBOUNCE_CFG_MS: AtomicU64 = AtomicU64::new(80);
 
 /// Waiting状態に入った時に呼ぶ。LLM完了を80msごとに監視するタイマーを起動する。
@@ -1009,21 +992,18 @@ pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid
 
     // デバウンス時刻をリセット
     let now = current_millis();
-    LIVE_LAST_INPUT_MS.store(now, AO::Relaxed);
-    // config の debounce_ms をスレッドローカルにキャッシュ（タイマー側で参照）
+    crate::tsf::live_session::store_last_input_ms(now);
+    // config の debounce_ms をキャッシュ（タイマー側で参照）。設定値なので static のまま。
     LIVE_DEBOUNCE_CFG_MS.store(debounce_ms, AO::Relaxed);
     // 新規入力サイクル開始 → 初回発火フラグをリセット
-    LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
+    crate::tsf::live_session::reset_fired_once();
 
-    // ITfContext を thread_local にキャッシュ（on_live_timer の Phase1A で使用）
-    TL_LIVE_CTX.with(|c| {
-        *c.borrow_mut() = Some(ctx.clone());
-    });
-    TL_LIVE_TID.with(|c| c.set(tid));
+    // ITfContext / tid / DM ptr を thread_local LiveConvSession にキャッシュ
+    // (on_live_timer の Phase1A で使用)
     let live_dm_ptr = unsafe { ctx.GetDocumentMgr().ok() }
         .map(|dm| dm.as_raw() as usize)
         .unwrap_or(0);
-    TL_LIVE_DM_PTR.with(|c| c.set(live_dm_ptr));
+    crate::tsf::live_session::set_context_snapshot(ctx.clone(), tid, live_dm_ptr);
     if live_dm_ptr == 0 {
         tracing::debug!("[Live] live_input_notify: no document manager, Phase1A disabled");
     }
@@ -1086,11 +1066,7 @@ pub fn stop_live_timer() {
             let _ = KillTimer(hwnd, LIVE_TIMER_ID);
         }
     }
-    TL_LIVE_CTX.with(|c| {
-        *c.borrow_mut() = None;
-    });
-    TL_LIVE_TID.with(|c| c.set(0));
-    TL_LIVE_DM_PTR.with(|c| c.set(0));
+    crate::tsf::live_session::clear_context_snapshot();
     tracing::debug!("[Live] stop_live_timer");
 }
 
@@ -1130,7 +1106,7 @@ pub(crate) fn sanity_check_preview(reading: &str, preview: String, site: &str) -
 fn pass_debounce() -> Option<u64> {
     let debounce_ms = LIVE_DEBOUNCE_CFG_MS.load(AO::Relaxed);
     let now = current_millis();
-    let last = LIVE_LAST_INPUT_MS.load(AO::Relaxed);
+    let last = crate::tsf::live_session::load_last_input_ms();
     let elapsed = now.saturating_sub(last);
     if elapsed < debounce_ms {
         None
@@ -1231,7 +1207,7 @@ fn ensure_bg_running(probe: &LiveProbe) -> bool {
         }
     } else {
         // bg=running: まだ変換中
-        if !LIVE_TIMER_FIRED_ONCE_STATIC.swap(true, AO::Relaxed) {
+        if !crate::tsf::live_session::swap_fired_once(true) {
             tracing::info!("[Live] on_live_timer: waiting bg={}", probe.bg_status);
         }
     }
@@ -1253,7 +1229,7 @@ struct LivePreview {
 /// `try_reclaim_done` で converter を回収するので、preview で take する必要はない。
 fn fetch_preview() -> Option<LivePreview> {
     use crate::engine::state::engine_try_get;
-    LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
+    crate::tsf::live_session::reset_fired_once();
 
     let (reading, pending, preview) = {
         let Ok(mut g) = engine_try_get() else {
@@ -1330,9 +1306,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
     use crate::tsf::edit_session::EditSession;
     use windows::Win32::UI::TextServices::TF_ES_READWRITE;
 
-    let ctx_opt = TL_LIVE_CTX.with(|c| c.borrow().clone());
-    let tid = TL_LIVE_TID.with(|c| c.get());
-    let live_dm_ptr = TL_LIVE_DM_PTR.with(|c| c.get());
+    let (ctx_opt, tid, live_dm_ptr) = crate::tsf::live_session::context_snapshot();
     let focused_dm_ptr = current_focus_dm_ptr();
     let dm_matches_focus = live_dm_ptr != 0 && focused_dm_ptr == Some(live_dm_ptr);
 

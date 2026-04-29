@@ -3,6 +3,23 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.6] - 2026-04-29
+
+### Changed
+
+- **ライブ変換セッション状態の集約 — Phase 1** (M4 / T2 段階 c の前半) — TSF スレッドローカルに閉じる 5 種のグローバル状態を `LiveConvSession` 構造体に集約。**動作変更なし** (純粋リファクタ):
+  - 新ファイル `crates/rakukan-tsf/src/tsf/live_session.rs` を追加。`LiveConvSession` 構造体 + `TL_LIVE_SESSION: thread_local RefCell<...>` を定義
+  - 集約対象 5 種:
+    - 旧 `TL_LIVE_CTX` (`RefCell<Option<ITfContext>>`) → `LiveConvSession.ctx`
+    - 旧 `TL_LIVE_TID` (`Cell<u32>`) → `LiveConvSession.tid`
+    - 旧 `TL_LIVE_DM_PTR` (`Cell<usize>`) → `LiveConvSession.composition_dm_ptr`
+    - 旧 `LIVE_TIMER_FIRED_ONCE_STATIC` (static `AtomicBool`) → `LiveConvSession.fired_once`
+    - 旧 `LIVE_LAST_INPUT_MS` (static `AtomicU64`) → `LiveConvSession.last_input_ms`
+  - `LIVE_DEBOUNCE_CFG_MS` は設定値 (live_input_notify から書き込み、on_live_timer から読み込み) のため static のまま残す ([ROADMAP §7](docs/ROADMAP.md#L1191) のスペック通り)
+  - 公開 helper: `set_context_snapshot(ctx, tid, dm_ptr)` / `clear_context_snapshot()` / `context_snapshot() -> (Option<ITfContext>, u32, usize)` / `invalidate_dm_ptr(dm_ptr) -> bool` / `swap_fired_once(new) -> old` / `reset_fired_once()` / `store_last_input_ms(now_ms)` / `load_last_input_ms() -> u64`
+  - candidate_window.rs の callsite (8 箇所) を helper 経由に置換: `live_input_notify` (set_context_snapshot + reset_fired_once + store_last_input_ms) / `stop_live_timer` (clear_context_snapshot) / `pass_debounce` (load_last_input_ms) / `fetch_preview` (reset_fired_once) / `ensure_bg_running` (swap_fired_once) / `try_apply_phase1a` (context_snapshot) / `invalidate_live_context_for_dm` (invalidate_dm_ptr)
+  - **Phase 2 (v0.7.7 で予定)**: cross-thread を含む状態 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を吸収。M2 §5.3 `session_nonce` (composition 開始ごとの identity) も同タイミングで追加
+
 ## [0.7.5] - 2026-04-29
 
 ### Fixed

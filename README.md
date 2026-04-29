@@ -1,4 +1,4 @@
-# rakukan v0.7.5
+# rakukan v0.7.6
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,15 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.6 変更点
+
+- **ライブ変換セッション状態の集約 — Phase 1** (M4 / T2 段階 c の Phase 1): TSF スレッドローカルに閉じる 5 種のグローバル状態を `LiveConvSession` 構造体に集約。`crates/rakukan-tsf/src/tsf/live_session.rs` 新設。**動作変更なし** (純粋リファクタ):
+  - 旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` (thread_local の Cell/RefCell × 3) → `LiveConvSession.{ctx, tid, composition_dm_ptr}`
+  - 旧 `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS` (static AtomicBool / AtomicU64 × 2) → `LiveConvSession.{fired_once, last_input_ms}`
+  - `LIVE_DEBOUNCE_CFG_MS` は設定値なので static のまま (spec 通り)
+  - 公開 helper: `set_context_snapshot` / `clear_context_snapshot` / `context_snapshot` / `invalidate_dm_ptr` / `swap_fired_once` / `reset_fired_once` / `store_last_input_ms` / `load_last_input_ms`
+  - cross-thread を含む状態 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) は v0.7.7 (Phase 2) で吸収予定。M2 §5.3 `session_nonce` も Phase 2 で追加
 
 ## 0.7.5 変更点
 
