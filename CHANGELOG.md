@@ -3,6 +3,16 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.0] - 2026-04-29
+
+### Added
+
+- **M6.2 桁並び漢数字候補** — 数字だけの reading に、既存の半角 / 全角候補に加えて各桁を 1:1 で漢数字化した候補を追加:
+  - `200` → `200` / `２００` / `二〇〇`
+  - `2024` → `2024` / `２０２４` / `二〇二四`
+  - 半角 / 全角どちらの入力でも同じ候補順を返す
+- 数字保護の検証 (`verify_digits_preserved`) が `〇一二三四五六七八九` / `零` を数字として復元できるようになり、漢数字候補も既存の digit-preserve 防壁を通過する。
+
 ## [0.7.7] - 2026-04-29
 
 ### Changed
@@ -45,7 +55,7 @@
   - `LIVE_DEBOUNCE_CFG_MS` は設定値 (live_input_notify から書き込み、on_live_timer から読み込み) のため static のまま残す ([ROADMAP §7](docs/ROADMAP.md#L1191) のスペック通り)
   - 公開 helper: `set_context_snapshot(ctx, tid, dm_ptr)` / `clear_context_snapshot()` / `context_snapshot() -> (Option<ITfContext>, u32, usize)` / `invalidate_dm_ptr(dm_ptr) -> bool` / `swap_fired_once(new) -> old` / `reset_fired_once()` / `store_last_input_ms(now_ms)` / `load_last_input_ms() -> u64`
   - candidate_window.rs の callsite (8 箇所) を helper 経由に置換: `live_input_notify` (set_context_snapshot + reset_fired_once + store_last_input_ms) / `stop_live_timer` (clear_context_snapshot) / `pass_debounce` (load_last_input_ms) / `fetch_preview` (reset_fired_once) / `ensure_bg_running` (swap_fired_once) / `try_apply_phase1a` (context_snapshot) / `invalidate_live_context_for_dm` (invalidate_dm_ptr)
-  - **Phase 2 (v0.7.7 で予定)**: cross-thread を含む状態 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を吸収。M2 §5.3 `session_nonce` (composition 開始ごとの identity) も同タイミングで追加
+  - **Phase 2 (v0.7.7 で実施済み)**: cross-thread を含む状態 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を吸収。M2 §5.3 `session_nonce` (composition 開始ごとの identity) も同タイミングで追加
 
 ## [0.7.5] - 2026-04-29
 

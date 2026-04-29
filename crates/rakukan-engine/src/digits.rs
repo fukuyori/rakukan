@@ -73,40 +73,83 @@ fn to_fullwidth_digits(s: &str) -> String {
         .collect()
 }
 
+fn digit_to_per_digit_kanji(c: char) -> Option<char> {
+    match c {
+        '0' | '０' => Some('〇'),
+        '1' | '１' => Some('一'),
+        '2' | '２' => Some('二'),
+        '3' | '３' => Some('三'),
+        '4' | '４' => Some('四'),
+        '5' | '５' => Some('五'),
+        '6' | '６' => Some('六'),
+        '7' | '７' => Some('七'),
+        '8' | '８' => Some('八'),
+        '9' | '９' => Some('九'),
+        _ => None,
+    }
+}
+
+fn kanji_to_digit(c: char) -> Option<char> {
+    match c {
+        '〇' | '零' => Some('0'),
+        '一' => Some('1'),
+        '二' => Some('2'),
+        '三' => Some('3'),
+        '四' => Some('4'),
+        '五' => Some('5'),
+        '六' => Some('6'),
+        '七' => Some('7'),
+        '八' => Some('8'),
+        '九' => Some('9'),
+        _ => None,
+    }
+}
+
+fn to_per_digit_kanji(s: &str) -> String {
+    s.chars()
+        .map(|c| digit_to_per_digit_kanji(c).unwrap_or(c))
+        .collect()
+}
+
 fn digit_candidates(s: &str) -> Vec<String> {
     let half = to_halfwidth_digits(s);
     let full = to_fullwidth_digits(s);
-    if half == full {
-        vec![half]
-    } else {
-        vec![half, full]
+    let kanji = to_per_digit_kanji(s);
+    let mut candidates = vec![half];
+    if !candidates.contains(&full) {
+        candidates.push(full);
     }
+    if !candidates.contains(&kanji) {
+        candidates.push(kanji);
+    }
+    candidates
 }
 
 #[cfg(test)]
 fn digit_candidate_structs(s: &str) -> Vec<Candidate> {
     let half = to_halfwidth_digits(s);
     let full = to_fullwidth_digits(s);
-    if half == full {
-        vec![Candidate {
-            surface: half,
+    let kanji = to_per_digit_kanji(s);
+    let mut candidates = vec![Candidate {
+        surface: half,
+        source: CandidateSource::Digit,
+        annotation: Some("半角".into()),
+    }];
+    if !candidates.iter().any(|c| c.surface == full) {
+        candidates.push(Candidate {
+            surface: full,
             source: CandidateSource::Digit,
-            annotation: None,
-        }]
-    } else {
-        vec![
-            Candidate {
-                surface: half,
-                source: CandidateSource::Digit,
-                annotation: Some("半角".into()),
-            },
-            Candidate {
-                surface: full,
-                source: CandidateSource::Digit,
-                annotation: Some("全角".into()),
-            },
-        ]
+            annotation: Some("全角".into()),
+        });
     }
+    if !candidates.iter().any(|c| c.surface == kanji) {
+        candidates.push(Candidate {
+            surface: kanji,
+            source: CandidateSource::Digit,
+            annotation: Some("漢数字".into()),
+        });
+    }
+    candidates
 }
 
 fn to_halfwidth_alpha(s: &str) -> String {
@@ -231,6 +274,8 @@ fn extract_digits(s: &str) -> String {
                 Some(c)
             } else if ('０'..='９').contains(&c) {
                 Some(char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c))
+            } else if let Some(digit) = kanji_to_digit(c) {
+                Some(digit)
             } else {
                 None
             }
@@ -455,6 +500,7 @@ mod tests {
     fn verify_preserved_ok() {
         assert!(verify_digits_preserved("２０２４ねん", "２０２４年"));
         assert!(verify_digits_preserved("２０２４ねん", "2024年"));
+        assert!(verify_digits_preserved("２０２４ねん", "二〇二四年"));
     }
 
     #[test]
@@ -478,13 +524,19 @@ mod tests {
     #[test]
     fn combine_digit_and_kana() {
         let runs = vec![
-            vec!["2024".into(), "２０２４".into()],
+            vec!["2024".into(), "２０２４".into(), "二〇二四".into()],
             vec!["年".into(), "ねん".into()],
         ];
         let result = combine_runs(&runs, 5);
         assert_eq!(
             result,
-            vec!["2024年", "2024ねん", "２０２４年", "２０２４ねん"]
+            vec![
+                "2024年",
+                "2024ねん",
+                "２０２４年",
+                "２０２４ねん",
+                "二〇二四年"
+            ]
         );
     }
 
@@ -504,23 +556,25 @@ mod tests {
     #[test]
     fn digit_candidates_halfwidth_input() {
         let cands = digit_candidates("2024");
-        assert_eq!(cands, vec!["2024", "２０２４"]);
+        assert_eq!(cands, vec!["2024", "２０２４", "二〇二四"]);
     }
 
     #[test]
     fn digit_candidates_fullwidth_input() {
         let cands = digit_candidates("２０２４");
-        assert_eq!(cands, vec!["2024", "２０２４"]);
+        assert_eq!(cands, vec!["2024", "２０２４", "二〇二四"]);
     }
 
     #[test]
     fn digit_candidate_structs_has_annotations() {
         let cands = digit_candidate_structs("100");
-        assert_eq!(cands.len(), 2);
+        assert_eq!(cands.len(), 3);
         assert_eq!(cands[0].surface, "100");
         assert_eq!(cands[0].annotation.as_deref(), Some("半角"));
         assert_eq!(cands[1].surface, "１００");
         assert_eq!(cands[1].annotation.as_deref(), Some("全角"));
+        assert_eq!(cands[2].surface, "一〇〇");
+        assert_eq!(cands[2].annotation.as_deref(), Some("漢数字"));
     }
 
     #[test]

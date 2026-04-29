@@ -1,10 +1,10 @@
-# 作業ロードマップ — 0.7.x シリーズ
+# 作業ロードマップ — 0.7.x / 0.8.x シリーズ
 
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: マイルストーンごとに「目的」「作業」「完了条件」「リスク」等を繰り返す構造のため無効化 -->
 
 最終更新: 2026-04-24  
-位置づけ: v0.6.7 までで Explorer crash の unload race と変換中レスポンスを収束させた地点からの次期計画。**本ロードマップの成果物は 0.7.x シリーズとしてリリース**する（0.6.x は patch 枠から卒業）。
+位置づけ: v0.6.7 までで Explorer crash の unload race と変換中レスポンスを収束させた地点からの次期計画。0.7.x で安定性向上・保守性改善を消化し、0.8.x では低リスクなユーザ可視機能から順次追加する。
 
 **v0.7.0 リリース済み（2026-04-24）**: 以下 5 件 + 候補幅の user-facing bug fix を同梱。
 
@@ -65,6 +65,11 @@
   - `dispatch` の Phase1B 消費時に現在値と比較し、不一致ならログ出して破棄。composition が破棄→再生成された後に古い preview がキューに残って次の composition に紛れ込む race を断つ
   - 公開 helper: `session_nonce_advance()` / `session_nonce_snapshot() -> u64`
 
+**v0.8.0 リリース済み（2026-04-29）**: 0.8.x 新機能候補 M6 のうち、低リスクな **M6.2 桁並び漢数字候補** から開始し、実機確認済み。
+
+- ✅ M6.2: 数字だけの reading で半角 / 全角候補に加えて `200` → `二〇〇` のような桁並び漢数字候補を追加
+- ✅ 数字保護検証を `〇一二三四五六七八九` / `零` の復元に対応
+
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
 関連資料:
@@ -95,6 +100,7 @@
 | **v0.7.5** ✅ 2026-04-29 | ✅ M3 T1-A (factory.rs 分割) + ✅ M2 §5.1 (on_live_timer 6 分解) + ✅ M2 §5.2 (bg_peek_top_candidate 新設) + WinUI config.toml CRLF 統一 + Claude Code Stop hook 追加 | minor | リファクタ + preview 経路の非破壊化 |
 | **v0.7.6** ✅ 2026-04-29 | ✅ M4 Phase 1 (LiveConvSession 集約 — TSF スレッドローカルに閉じる 5 種を構造体化) | patch | ライブ変換中枢の再設計 (Phase 1) |
 | **v0.7.7** ✅ 2026-04-29 | ✅ M4 Phase 2 (LiveShared 集約 — cross-thread 状態 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN` を構造体化) + ✅ **M2 §5.3 session_nonce** (Phase 1B キューの stale 判定を gen + reading + session_nonce の三重防壁に強化) | minor | ライブ変換中枢の再設計 (Phase 2) + composition 跨ぎ stale 防壁 |
+| **v0.8.0** ✅ 2026-04-29 | ✅ M6.2 桁並び漢数字候補 (`200` → `二〇〇`) | minor | 0.8.x 新機能候補 M6 の最初の低リスク機能 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:
