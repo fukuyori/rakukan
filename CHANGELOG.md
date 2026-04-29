@@ -3,6 +3,18 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.4] - 2026-04-29
+
+### Added
+
+- **M6.3 大字候補 + 数字候補順設定** — 数字だけの reading に大字候補を追加:
+  - `10` → `壱拾`
+  - `100` → `壱百`
+  - `10000` → `壱万`
+  - `1234` → `壱千弐百参拾四`
+- `[input] digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]` を追加。数字候補の表示順と有効種別を設定できる。
+- TSF の `config.toml` から engine-host の `EngineConfig` JSON へ `digit_candidates_order` を渡し、同期変換とライブ変換キャッシュの候補順を揃える。
+
 ## [0.8.3] - 2026-04-29
 
 ### Added
@@ -28,7 +40,7 @@
 
 ### Deferred
 
-- 大字候補（`壱弐参...`）と `digit_candidates_order` 設定は、設定 UI / 設定ファイル設計と合わせて後続バージョンへ分離。
+- 大字候補（`壱弐参...`）と `digit_candidates_order` 設定は v0.8.4 で追加済み。
 
 ## [0.8.1] - 2026-04-29
 

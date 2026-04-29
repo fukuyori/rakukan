@@ -36,6 +36,7 @@
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 use crate::kanji::KanaKanjiConverter;
+use crate::{DigitCandidateKind, default_digit_candidates_order};
 
 // ─── リクエスト ────────────────────────────────────────────────────────────────
 
@@ -45,6 +46,7 @@ struct Request {
     committed: String,
     converter: KanaKanjiConverter,
     n: usize,
+    digit_candidates_order: Vec<DigitCandidateKind>,
 }
 
 // ─── キャッシュ状態 ────────────────────────────────────────────────────────────
@@ -122,12 +124,19 @@ fn worker_loop(cache: Arc<Cache>) {
         let key = req.hiragana.clone();
         let committed = req.committed.clone();
         let n = req.n;
+        let digit_candidates_order = req.digit_candidates_order.clone();
         let converter = req.converter;
 
         let t = std::time::Instant::now();
         let (converter, candidates) =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                crate::digits::convert_with_digit_protection(&converter, &key, &committed, n)
+                crate::digits::convert_with_digit_protection(
+                    &converter,
+                    &key,
+                    &committed,
+                    n,
+                    &digit_candidates_order,
+                )
             })) {
                 Ok(Ok(cands)) => {
                     tracing::trace!(
@@ -180,6 +189,7 @@ pub fn start(
     committed: String,
     converter: KanaKanjiConverter,
     n: usize,
+    digit_candidates_order: Vec<DigitCandidateKind>,
 ) -> Option<KanaKanjiConverter> {
     if hiragana.is_empty() {
         return Some(converter);
@@ -208,6 +218,11 @@ pub fn start(
         committed,
         converter,
         n,
+        digit_candidates_order: if digit_candidates_order.is_empty() {
+            default_digit_candidates_order()
+        } else {
+            digit_candidates_order
+        },
     });
     cache.cond.notify_one();
     None

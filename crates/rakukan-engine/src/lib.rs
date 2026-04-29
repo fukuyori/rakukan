@@ -116,6 +116,30 @@ impl Default for DigitWidth {
     }
 }
 
+fn default_digit_separator_auto() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigitCandidateKind {
+    Arabic,
+    Fullwidth,
+    Positional,
+    PerDigit,
+    Daiji,
+}
+
+pub fn default_digit_candidates_order() -> Vec<DigitCandidateKind> {
+    vec![
+        DigitCandidateKind::Arabic,
+        DigitCandidateKind::Fullwidth,
+        DigitCandidateKind::Positional,
+        DigitCandidateKind::PerDigit,
+        DigitCandidateKind::Daiji,
+    ]
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct EngineConfig {
@@ -129,7 +153,11 @@ pub struct EngineConfig {
     /// 数字の入力幅: "fullwidth" = 全角 (０１２), "halfwidth" = 半角 (012)
     pub digit_width: DigitWidth,
     /// 数字直後の句読点を数値区切りとして扱う。
+    #[serde(default = "default_digit_separator_auto")]
     pub digit_separator_auto: bool,
+    /// 数字だけの reading に対して提示する候補種別と順序。
+    #[serde(default = "default_digit_candidates_order")]
+    pub digit_candidates_order: Vec<DigitCandidateKind>,
     /// ライブ変換時の候補数（beam 幅に影響）。1 = greedy（高速）、3 = beam（高品質）
     pub live_conv_beam_size: usize,
     /// Space 変換時のビーム幅の**上限**（num_candidates と併せて min をとる）。
@@ -147,6 +175,7 @@ impl Default for EngineConfig {
             main_gpu: 0,
             digit_width: DigitWidth::default(),
             digit_separator_auto: true,
+            digit_candidates_order: default_digit_candidates_order(),
             live_conv_beam_size: 3,
             convert_beam_size: 30,
         }
@@ -401,6 +430,7 @@ impl RakunEngine {
             &self.hiragana_buf,
             &self.committed,
             num_candidates,
+            &self.config.digit_candidates_order,
         )
         .map_err(|e| EngineError::ConversionFailed(e.to_string()))
     }
@@ -644,7 +674,13 @@ impl RakunEngine {
         }
 
         if let Some(conv) = self.kanji.take() {
-            match conv_cache::start(hiragana, committed, conv, n_cands) {
+            match conv_cache::start(
+                hiragana,
+                committed,
+                conv,
+                n_cands,
+                self.config.digit_candidates_order.clone(),
+            ) {
                 Some(returned) => {
                     self.kanji = Some(returned);
                     false
@@ -910,7 +946,7 @@ mod symbol_input_tests {
 
 #[cfg(test)]
 mod digit_width_tests {
-    use super::{DigitWidth, EngineConfig, RakunEngine};
+    use super::{DigitCandidateKind, DigitWidth, EngineConfig, RakunEngine};
 
     fn push_digit(width: DigitWidth, c: char) -> String {
         let config = EngineConfig {
@@ -953,6 +989,22 @@ mod digit_width_tests {
     fn default_is_halfwidth() {
         assert_eq!(DigitWidth::default(), DigitWidth::Halfwidth);
         assert_eq!(push_digit(DigitWidth::default(), '3'), "3");
+    }
+
+    #[test]
+    fn engine_config_deserialize_uses_new_digit_defaults() {
+        let cfg: EngineConfig = serde_json::from_str(r#"{"num_candidates":5}"#).unwrap();
+        assert!(cfg.digit_separator_auto);
+        assert_eq!(
+            cfg.digit_candidates_order,
+            vec![
+                DigitCandidateKind::Arabic,
+                DigitCandidateKind::Fullwidth,
+                DigitCandidateKind::Positional,
+                DigitCandidateKind::PerDigit,
+                DigitCandidateKind::Daiji,
+            ]
+        );
     }
 }
 

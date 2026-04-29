@@ -493,16 +493,29 @@ fn build_engine_config_json() -> String {
     let live_conv_beam_size = cfg.live_conversion.beam_size.clamp(1, 9);
     let convert_beam_size = cfg.conversion.beam_size.clamp(1, 30);
     let digit_separator_auto = cfg.input.digit_separator_auto;
+    let digit_candidates_order = cfg
+        .input
+        .digit_candidates_order
+        .iter()
+        .map(|kind| match kind {
+            super::config::DigitCandidateKind::Arabic => r#""arabic""#,
+            super::config::DigitCandidateKind::Fullwidth => r#""fullwidth""#,
+            super::config::DigitCandidateKind::Positional => r#""positional""#,
+            super::config::DigitCandidateKind::PerDigit => r#""per_digit""#,
+            super::config::DigitCandidateKind::Daiji => r#""daiji""#,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
 
     tracing::info!(
-        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} digit_separator_auto={digit_separator_auto} live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
+        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} digit_separator_auto={digit_separator_auto} digit_candidates_order=[{digit_candidates_order}] live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
     );
     let mv_json = match &model_variant {
         Some(v) => format!(r#","model_variant":"{}""#, v),
         None => String::new(),
     };
     format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","digit_separator_auto":{digit_separator_auto},"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size}{mv_json}}}"#
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","digit_separator_auto":{digit_separator_auto},"digit_candidates_order":[{digit_candidates_order}],"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size}{mv_json}}}"#
     )
 }
 

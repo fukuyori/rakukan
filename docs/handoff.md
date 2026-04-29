@@ -1,13 +1,15 @@
-# Rakukan 引き継ぎ資料 (v0.8.3)
+# Rakukan 引き継ぎ資料 (v0.8.4)
 
 更新日: 2026-04-29
 
 ## 現在の状態
 
-- **バージョン:** v0.8.3
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換** を追加。
+- **バージョン:** v0.8.4
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。
+- **v0.8.4 の内容:** **M6.3 仕上げ** — 数字だけの reading に `1234` → `壱千弐百参拾四` のような大字候補を追加。`[input] digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]` で数字候補の種別と表示順を設定できるようにした。
+- **v0.8.4 の確認:** `cargo test -p rakukan-engine --lib` と `cargo check -p rakukan-tsf` は成功。Space 変換方式の変更はこのリリースには含めない。
 - **v0.8.3 の内容:** **M6.1** — 数字直後の `、` / `。` 入力を `,` / `.` として扱い、`2、4` → `2,4`、`2。5` → `2.5` のような数値入力をプリエディット内で継続できるようにした。`[input] digit_separator_auto = true` を追加（デフォルト true）
-- **v0.8.2 の内容:** **M6.3** — 数字だけの reading に `1234` → `千二百三十四`、`10000` → `一万` のような位取り漢数字候補を追加。`2,400` → `二千四百`、`2.5` → `二点五` にも対応。大字候補と候補順設定は後続へ分離
+- **v0.8.2 の内容:** **M6.3** — 数字だけの reading に `1234` → `千二百三十四`、`10000` → `一万` のような位取り漢数字候補を追加。`2,400` → `二千四百`、`2.5` → `二点五` にも対応。大字候補と候補順設定は v0.8.4 で追加済み
 - **v0.8.1 の内容:** **M6.4** — ASCII 記号 / 全角記号を `Symbol` run として literal 保護レイヤーに追加し、`USB-C` / `A+B` / `(test)` のような reading で記号部分の半角 / 全角候補を提示
 - **v0.8.0 の内容:** **M6.2** — 数字だけの reading で、半角 / 全角候補に加えて `200` → `二〇〇` のような桁並び漢数字候補を追加。数字保護検証も `〇一二三四五六七八九` / `零` を数字として復元できるように拡張
 - **v0.7.7 の内容:** **M4 Phase 2 + M2 §5.3** — cross-thread を含む 4 種のグローバル状態 (旧 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を `LiveShared` 構造体に集約 (個別の sync primitive は据え置き、helper 関数経由)。さらに `session_nonce: AtomicU64` を新設し、`composition_set_with_dm(Some(...), _)` で `fetch_add(1)`。Phase 1B キュー消費時の stale 判定を **gen + reading + session_nonce の三重防壁** に強化、composition 跨ぎの紛れ込みを根本封鎖

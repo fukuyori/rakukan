@@ -130,6 +130,15 @@ fn default_remember_last_kana_mode() -> bool {
 fn default_digit_separator_auto() -> bool {
     true
 }
+fn default_digit_candidates_order() -> Vec<DigitCandidateKind> {
+    vec![
+        DigitCandidateKind::Arabic,
+        DigitCandidateKind::Fullwidth,
+        DigitCandidateKind::Positional,
+        DigitCandidateKind::PerDigit,
+        DigitCandidateKind::Daiji,
+    ]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -144,6 +153,16 @@ impl Default for DigitWidth {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DigitCandidateKind {
+    Arabic,
+    Fullwidth,
+    Positional,
+    PerDigit,
+    Daiji,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
     #[serde(default = "default_input_mode")]
@@ -155,6 +174,9 @@ pub struct InputConfig {
     /// 数字直後の `、` / `。` を `,` / `.` として扱う。
     #[serde(default = "default_digit_separator_auto")]
     pub digit_separator_auto: bool,
+    /// 数字候補の表示順。指定した種別だけを候補に出す。
+    #[serde(default = "default_digit_candidates_order")]
+    pub digit_candidates_order: Vec<DigitCandidateKind>,
     /// 確定時に学習するか (デフォルト `true`)。
     /// Phase 1: 従来どおり user_dict.toml に追記される (肥大化注意)。
     /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
@@ -173,6 +195,7 @@ impl Default for InputConfig {
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
             digit_separator_auto: default_digit_separator_auto(),
+            digit_candidates_order: default_digit_candidates_order(),
             auto_learn: default_auto_learn(),
         }
     }
@@ -428,6 +451,8 @@ remember_last_kana_mode = true
 digit_width = "halfwidth"
 # 数字直後の 、/。 を ,/. として入力する
 digit_separator_auto = true
+# 数字だけの reading に対して提示する候補種別と順序
+digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true

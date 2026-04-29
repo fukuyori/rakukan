@@ -180,6 +180,7 @@ internal sealed class SettingsStore
         remember_last_kana_mode = true
         digit_width = "halfwidth"
         digit_separator_auto = true
+        digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
         auto_learn = true
 
         [live_conversion]

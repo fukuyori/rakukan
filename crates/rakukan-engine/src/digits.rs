@@ -7,6 +7,7 @@
 use crate::kanji::KanaKanjiConverter;
 #[cfg(test)]
 use crate::segments::{Candidate, CandidateSource};
+use crate::{DigitCandidateKind, default_digit_candidates_order};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Run {
@@ -130,15 +131,117 @@ fn digit_to_per_digit_kanji(c: char) -> Option<char> {
 fn kanji_to_digit(c: char) -> Option<char> {
     match c {
         '〇' | '零' => Some('0'),
-        '一' => Some('1'),
-        '二' => Some('2'),
-        '三' => Some('3'),
+        '一' | '壱' => Some('1'),
+        '二' | '弐' => Some('2'),
+        '三' | '参' => Some('3'),
         '四' => Some('4'),
         '五' => Some('5'),
         '六' => Some('6'),
         '七' => Some('7'),
         '八' => Some('8'),
         '九' => Some('9'),
+        _ => None,
+    }
+}
+
+fn kanji_digit_value(c: char) -> Option<u64> {
+    kanji_to_digit(c).and_then(|d| d.to_digit(10).map(u64::from))
+}
+
+fn small_kanji_unit(c: char) -> Option<u64> {
+    match c {
+        '十' | '拾' => Some(10),
+        '百' => Some(100),
+        '千' => Some(1000),
+        _ => None,
+    }
+}
+
+fn large_kanji_unit(c: char) -> Option<u64> {
+    match c {
+        '万' => Some(10_000),
+        '億' => Some(100_000_000),
+        '兆' => Some(1_000_000_000_000),
+        '京' => Some(10_000_000_000_000_000),
+        _ => None,
+    }
+}
+
+fn is_kanji_number_char(c: char) -> bool {
+    kanji_digit_value(c).is_some()
+        || small_kanji_unit(c).is_some()
+        || large_kanji_unit(c).is_some()
+        || c == '点'
+}
+
+fn parse_kanji_integer_digits(s: &str) -> Option<String> {
+    let mut total = 0u64;
+    let mut group = 0u64;
+    let mut pending_digit: Option<u64> = None;
+    let mut saw_unit = false;
+
+    for c in s.chars() {
+        if let Some(digit) = kanji_digit_value(c) {
+            pending_digit = Some(digit);
+        } else if let Some(unit) = small_kanji_unit(c) {
+            saw_unit = true;
+            let digit = pending_digit.take().unwrap_or(1);
+            group = group.checked_add(digit.checked_mul(unit)?)?;
+        } else if let Some(unit) = large_kanji_unit(c) {
+            saw_unit = true;
+            let mut group_value = group;
+            if let Some(digit) = pending_digit.take() {
+                group_value = group_value.checked_add(digit)?;
+            }
+            if group_value == 0 {
+                group_value = 1;
+            }
+            total = total.checked_add(group_value.checked_mul(unit)?)?;
+            group = 0;
+        } else {
+            return None;
+        }
+    }
+
+    if !saw_unit {
+        return Some(s.chars().filter_map(kanji_to_digit).collect());
+    }
+
+    if let Some(digit) = pending_digit {
+        group = group.checked_add(digit)?;
+    }
+    total.checked_add(group).map(|n| n.to_string())
+}
+
+fn parse_kanji_number_digits(s: &str) -> Option<String> {
+    let (integer, decimal) = s.split_once('点').unwrap_or((s, ""));
+    let mut out = parse_kanji_integer_digits(integer)?;
+    if !decimal.is_empty() {
+        if !decimal.chars().all(|c| kanji_digit_value(c).is_some()) {
+            return None;
+        }
+        out.push_str(
+            &decimal
+                .chars()
+                .filter_map(kanji_to_digit)
+                .collect::<String>(),
+        );
+    }
+    Some(out)
+}
+
+fn digit_to_daiji(c: char) -> Option<&'static str> {
+    match c {
+        '0' => Some("零"),
+        '1' => Some("壱"),
+        '2' => Some("弐"),
+        '3' => Some("参"),
+        '4' => Some("四"),
+        '5' => Some("五"),
+        '6' => Some("六"),
+        '7' => Some("七"),
+        '8' => Some("八"),
+        '9' => Some("九"),
         _ => None,
     }
 }
@@ -202,6 +305,26 @@ fn to_kanji_under_10000(n: u16, omit_leading_one: bool) -> String {
     out
 }
 
+fn to_daiji_under_10000(n: u16) -> String {
+    debug_assert!(n < 10_000);
+    if n == 0 {
+        return String::new();
+    }
+    let units = [(1000, "千"), (100, "百"), (10, "拾"), (1, "")];
+    let mut rest = n;
+    let mut out = String::new();
+    for (unit, label) in units {
+        let digit = rest / unit;
+        rest %= unit;
+        if digit == 0 {
+            continue;
+        }
+        out.push_str(digit_to_daiji(char::from_digit(digit as u32, 10).unwrap()).unwrap());
+        out.push_str(label);
+    }
+    out
+}
+
 fn to_kanji_integer(n: u64) -> Option<String> {
     if n == 0 {
         return Some("零".into());
@@ -232,6 +355,36 @@ fn to_kanji_integer(n: u64) -> Option<String> {
     Some(out)
 }
 
+fn to_daiji_integer(n: u64) -> Option<String> {
+    if n == 0 {
+        return Some("零".into());
+    }
+
+    let groups = [
+        (1_0000_0000_0000_0000_u64, "京"),
+        (1_0000_0000_0000_u64, "兆"),
+        (1_0000_0000_u64, "億"),
+        (1_0000_u64, "万"),
+        (1_u64, ""),
+    ];
+    let mut rest = n;
+    let mut out = String::new();
+    for (base, label) in groups {
+        let group = rest / base;
+        rest %= base;
+        if group == 0 {
+            continue;
+        }
+        if base != 1 && group == 1 {
+            out.push('壱');
+        } else {
+            out.push_str(&to_daiji_under_10000(group as u16));
+        }
+        out.push_str(label);
+    }
+    Some(out)
+}
+
 fn to_kanji_positional(s: &str) -> Option<String> {
     let normalized = normalize_numeric_literal(s)?;
     if normalized.matches('.').count() > 1 {
@@ -256,59 +409,96 @@ fn to_kanji_positional(s: &str) -> Option<String> {
     Some(out)
 }
 
-fn digit_candidates(s: &str) -> Vec<String> {
+fn to_daiji_positional(s: &str) -> Option<String> {
+    let normalized = normalize_numeric_literal(s)?;
+    if normalized.matches('.').count() > 1 {
+        return None;
+    }
+
+    let (integer, decimal) = normalized.split_once('.').unwrap_or((&normalized, ""));
+    let integer_digits: String = integer.chars().filter(|c| *c != ',').collect();
+    if integer_digits.is_empty() || !integer_digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+
+    let integer_value = integer_digits.parse::<u64>().ok()?;
+    let mut out = to_daiji_integer(integer_value)?;
+    if !decimal.is_empty() {
+        if !decimal.chars().all(|c| c.is_ascii_digit()) {
+            return None;
+        }
+        out.push('点');
+        for d in decimal.chars() {
+            out.push_str(digit_to_daiji(d)?);
+        }
+    }
+    Some(out)
+}
+
+fn push_unique(candidates: &mut Vec<String>, value: String) {
+    if !candidates.contains(&value) {
+        candidates.push(value);
+    }
+}
+
+fn effective_digit_candidates_order(order: &[DigitCandidateKind]) -> Vec<DigitCandidateKind> {
+    if order.is_empty() {
+        default_digit_candidates_order()
+    } else {
+        order.to_vec()
+    }
+}
+
+fn digit_candidates(s: &str, order: &[DigitCandidateKind]) -> Vec<String> {
     let normalized = normalize_numeric_literal(s).unwrap_or_else(|| s.to_string());
     let half = to_halfwidth_digits(&normalized);
     let full = to_fullwidth_digits(&normalized);
     let kanji = to_per_digit_kanji(&normalized);
-    let mut candidates = vec![half];
-    if !candidates.contains(&full) {
-        candidates.push(full);
-    }
-    if let Some(positional) = to_kanji_positional(&normalized) {
-        if !candidates.contains(&positional) {
-            candidates.push(positional);
+    let mut candidates = Vec::new();
+    for kind in effective_digit_candidates_order(order) {
+        match kind {
+            DigitCandidateKind::Arabic => push_unique(&mut candidates, half.clone()),
+            DigitCandidateKind::Fullwidth => push_unique(&mut candidates, full.clone()),
+            DigitCandidateKind::Positional => {
+                if let Some(positional) = to_kanji_positional(&normalized) {
+                    push_unique(&mut candidates, positional);
+                }
+            }
+            DigitCandidateKind::PerDigit => push_unique(&mut candidates, kanji.clone()),
+            DigitCandidateKind::Daiji => {
+                if let Some(daiji) = to_daiji_positional(&normalized) {
+                    push_unique(&mut candidates, daiji);
+                }
+            }
         }
-    }
-    if !candidates.contains(&kanji) {
-        candidates.push(kanji);
     }
     candidates
 }
 
 #[cfg(test)]
-fn digit_candidate_structs(s: &str) -> Vec<Candidate> {
+fn digit_candidate_structs(s: &str, order: &[DigitCandidateKind]) -> Vec<Candidate> {
     let normalized = normalize_numeric_literal(s).unwrap_or_else(|| s.to_string());
     let half = to_halfwidth_digits(&normalized);
     let full = to_fullwidth_digits(&normalized);
     let kanji = to_per_digit_kanji(&normalized);
-    let mut candidates = vec![Candidate {
-        surface: half,
-        source: CandidateSource::Digit,
-        annotation: Some("半角".into()),
-    }];
-    if !candidates.iter().any(|c| c.surface == full) {
-        candidates.push(Candidate {
-            surface: full,
-            source: CandidateSource::Digit,
-            annotation: Some("全角".into()),
-        });
-    }
-    if let Some(positional) = to_kanji_positional(&normalized) {
-        if !candidates.iter().any(|c| c.surface == positional) {
-            candidates.push(Candidate {
-                surface: positional,
-                source: CandidateSource::Digit,
-                annotation: Some("漢数字".into()),
-            });
+    let mut candidates = Vec::new();
+    for kind in effective_digit_candidates_order(order) {
+        let (surface, annotation) = match kind {
+            DigitCandidateKind::Arabic => (Some(half.clone()), "半角"),
+            DigitCandidateKind::Fullwidth => (Some(full.clone()), "全角"),
+            DigitCandidateKind::Positional => (to_kanji_positional(&normalized), "漢数字"),
+            DigitCandidateKind::PerDigit => (Some(kanji.clone()), "桁並び漢数字"),
+            DigitCandidateKind::Daiji => (to_daiji_positional(&normalized), "大字"),
+        };
+        if let Some(surface) = surface {
+            if !candidates.iter().any(|c: &Candidate| c.surface == surface) {
+                candidates.push(Candidate {
+                    surface,
+                    source: CandidateSource::Digit,
+                    annotation: Some(annotation.into()),
+                });
+            }
         }
-    }
-    if !candidates.iter().any(|c| c.surface == kanji) {
-        candidates.push(Candidate {
-            surface: kanji,
-            source: CandidateSource::Digit,
-            annotation: Some("桁並び漢数字".into()),
-        });
     }
     candidates
 }
@@ -437,9 +627,9 @@ fn symbol_candidate_structs(s: &str) -> Vec<Candidate> {
     }
 }
 
-fn literal_candidates(run: &Run) -> Vec<String> {
+fn literal_candidates(run: &Run, digit_candidates_order: &[DigitCandidateKind]) -> Vec<String> {
     match run {
-        Run::Digit(s) => digit_candidates(s),
+        Run::Digit(s) => digit_candidates(s, digit_candidates_order),
         Run::Alpha(s) => alpha_candidates(s),
         Run::Symbol(s) => symbol_candidates(s),
         Run::Kana(_) => unreachable!(),
@@ -464,7 +654,7 @@ fn half_full_literal_candidates(run: &Run) -> Vec<String> {
 #[allow(dead_code)]
 fn literal_candidate_structs(run: &Run) -> Vec<Candidate> {
     match run {
-        Run::Digit(s) => digit_candidate_structs(s),
+        Run::Digit(s) => digit_candidate_structs(s, &default_digit_candidates_order()),
         Run::Alpha(s) => alpha_candidate_structs(s),
         Run::Symbol(s) => symbol_candidate_structs(s),
         Run::Kana(_) => unreachable!(),
@@ -506,19 +696,34 @@ fn make_run(kind: CharKind, text: String) -> Run {
 }
 
 fn extract_digits(s: &str) -> String {
-    s.chars()
-        .filter_map(|c| {
-            if c.is_ascii_digit() {
-                Some(c)
-            } else if ('０'..='９').contains(&c) {
-                Some(char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c))
-            } else if let Some(digit) = kanji_to_digit(c) {
-                Some(digit)
-            } else {
-                None
-            }
-        })
-        .collect()
+    let mut out = String::new();
+    let mut kanji_run = String::new();
+
+    let flush_kanji_run = |out: &mut String, kanji_run: &mut String| {
+        if kanji_run.is_empty() {
+            return;
+        }
+        if let Some(digits) = parse_kanji_number_digits(kanji_run) {
+            out.push_str(&digits);
+        }
+        kanji_run.clear();
+    };
+
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            flush_kanji_run(&mut out, &mut kanji_run);
+            out.push(c);
+        } else if ('０'..='９').contains(&c) {
+            flush_kanji_run(&mut out, &mut kanji_run);
+            out.push(char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c));
+        } else if is_kanji_number_char(c) {
+            kanji_run.push(c);
+        } else {
+            flush_kanji_run(&mut out, &mut kanji_run);
+        }
+    }
+    flush_kanji_run(&mut out, &mut kanji_run);
+    out
 }
 
 pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
@@ -545,6 +750,7 @@ pub fn convert_with_digit_protection(
     reading: &str,
     context: &str,
     num_candidates: usize,
+    digit_candidates_order: &[DigitCandidateKind],
 ) -> crate::kanji::error::Result<Vec<String>> {
     let runs = split_by_digits(reading);
 
@@ -555,7 +761,7 @@ pub fn convert_with_digit_protection(
     if runs.iter().all(|r| r.is_literal()) {
         let literal_str: String = runs.iter().map(|r| r.text()).collect();
         if runs.iter().all(|r| r.is_digit()) || normalize_numeric_literal(&literal_str).is_some() {
-            return Ok(digit_candidates(&literal_str));
+            return Ok(digit_candidates(&literal_str, digit_candidates_order));
         }
         if runs.iter().all(|r| matches!(r, Run::Alpha(_))) {
             return Ok(alpha_candidates(&literal_str));
@@ -573,7 +779,7 @@ pub fn convert_with_digit_protection(
     let mut run_candidates: Vec<Vec<String>> = Vec::with_capacity(runs.len());
     for (i, run) in runs.iter().enumerate() {
         if run.is_literal() {
-            run_candidates.push(literal_candidates(run));
+            run_candidates.push(literal_candidates(run, digit_candidates_order));
         } else if let Run::Kana(s) = run {
             let local_context = build_local_context(&runs, i, context);
             let cands = converter.convert(s, &local_context, num_candidates)?;
@@ -751,6 +957,10 @@ mod tests {
         assert!(verify_digits_preserved("２０２４ねん", "２０２４年"));
         assert!(verify_digits_preserved("２０２４ねん", "2024年"));
         assert!(verify_digits_preserved("２０２４ねん", "二〇二四年"));
+        assert!(verify_digits_preserved("２０２４ねん", "二千二十四年"));
+        assert!(verify_digits_preserved("２０２４ねん", "弐千弐拾四年"));
+        assert!(verify_digits_preserved("２４００えん", "弐千四百円"));
+        assert!(verify_digits_preserved("２．５", "弐点五"));
     }
 
     #[test]
@@ -805,14 +1015,20 @@ mod tests {
 
     #[test]
     fn digit_candidates_halfwidth_input() {
-        let cands = digit_candidates("2024");
-        assert_eq!(cands, vec!["2024", "２０２４", "二千二十四", "二〇二四"]);
+        let cands = digit_candidates("2024", &default_digit_candidates_order());
+        assert_eq!(
+            cands,
+            vec!["2024", "２０２４", "二千二十四", "二〇二四", "弐千弐拾四"]
+        );
     }
 
     #[test]
     fn digit_candidates_fullwidth_input() {
-        let cands = digit_candidates("２０２４");
-        assert_eq!(cands, vec!["2024", "２０２４", "二千二十四", "二〇二四"]);
+        let cands = digit_candidates("２０２４", &default_digit_candidates_order());
+        assert_eq!(
+            cands,
+            vec!["2024", "２０２４", "二千二十四", "二〇二四", "弐千弐拾四"]
+        );
     }
 
     #[test]
@@ -839,27 +1055,63 @@ mod tests {
     }
 
     #[test]
+    fn daiji_kanji_basic_numbers() {
+        assert_eq!(to_daiji_positional("0").as_deref(), Some("零"));
+        assert_eq!(to_daiji_positional("10").as_deref(), Some("壱拾"));
+        assert_eq!(to_daiji_positional("100").as_deref(), Some("壱百"));
+        assert_eq!(to_daiji_positional("1000").as_deref(), Some("壱千"));
+        assert_eq!(to_daiji_positional("10000").as_deref(), Some("壱万"));
+        assert_eq!(
+            to_daiji_positional("1234").as_deref(),
+            Some("壱千弐百参拾四")
+        );
+    }
+
+    #[test]
+    fn digit_candidates_order_can_be_customized() {
+        let order = [
+            DigitCandidateKind::Daiji,
+            DigitCandidateKind::Arabic,
+            DigitCandidateKind::PerDigit,
+        ];
+        let cands = digit_candidates("1234", &order);
+        assert_eq!(cands, vec!["壱千弐百参拾四", "1234", "一二三四"]);
+    }
+
+    #[test]
     fn numeric_literal_candidates_with_symbols() {
-        let cands = digit_candidates("2,400.5");
+        let cands = digit_candidates("2,400.5", &default_digit_candidates_order());
         assert_eq!(
             cands,
-            vec!["2,400.5", "２,４００.５", "二千四百点五", "二,四〇〇.五"]
+            vec![
+                "2,400.5",
+                "２,４００.５",
+                "二千四百点五",
+                "二,四〇〇.五",
+                "弐千四百点五"
+            ]
         );
     }
 
     #[test]
     fn numeric_literal_candidates_normalize_fullwidth_punctuation() {
-        let cands = digit_candidates("２，４００．５");
+        let cands = digit_candidates("２，４００．５", &default_digit_candidates_order());
         assert_eq!(
             cands,
-            vec!["2,400.5", "２,４００.５", "二千四百点五", "二,四〇〇.五"]
+            vec![
+                "2,400.5",
+                "２,４００.５",
+                "二千四百点五",
+                "二,四〇〇.五",
+                "弐千四百点五"
+            ]
         );
     }
 
     #[test]
     fn digit_candidate_structs_has_annotations() {
-        let cands = digit_candidate_structs("100");
-        assert_eq!(cands.len(), 4);
+        let cands = digit_candidate_structs("100", &default_digit_candidates_order());
+        assert_eq!(cands.len(), 5);
         assert_eq!(cands[0].surface, "100");
         assert_eq!(cands[0].annotation.as_deref(), Some("半角"));
         assert_eq!(cands[1].surface, "１００");
@@ -868,6 +1120,8 @@ mod tests {
         assert_eq!(cands[2].annotation.as_deref(), Some("漢数字"));
         assert_eq!(cands[3].surface, "一〇〇");
         assert_eq!(cands[3].annotation.as_deref(), Some("桁並び漢数字"));
+        assert_eq!(cands[4].surface, "壱百");
+        assert_eq!(cands[4].annotation.as_deref(), Some("大字"));
     }
 
     #[test]

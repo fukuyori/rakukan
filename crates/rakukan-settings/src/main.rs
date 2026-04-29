@@ -127,6 +127,8 @@ remember_last_kana_mode = true
 digit_width = "halfwidth"
 # 数字直後の 、/。 を ,/. として入力する
 digit_separator_auto = true
+# 数字だけの reading に対して提示する候補種別と順序
+digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
 
 [live_conversion]
 enabled = false
