@@ -1333,7 +1333,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
     // 遅延実行されうる。登録時点の reading / gen を捕捉し、実行時に
     // 現在値と比較して stale なら apply を skip する。
     let captured_reading = snapshot.reading.clone();
-    let captured_gen = crate::engine::state::live_conv_gen_snapshot();
+    let captured_gen = crate::tsf::live_session::conv_gen_snapshot();
 
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::Foundation::E_FAIL;
@@ -1351,7 +1351,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
         }
         // Stale 判定（M1.8 T-MID1 Phase1A 側）: EditSession が遅延実行され
         // ている間に reading が進んでいたら apply しない。
-        let current_gen = crate::engine::state::live_conv_gen_snapshot();
+        let current_gen = crate::tsf::live_session::conv_gen_snapshot();
         if current_gen != captured_gen {
             tracing::warn!(
                 "[Live] Phase1A: discarded stale SetText captured_gen={} current_gen={} reading={:?}",
@@ -1427,22 +1427,27 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
 
 /// Phase 1B フォールバック: キューに書き込む。
 /// 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
-/// gen と reading のスナップショットを添えることで、消費側で stale を弾く（M1.8 T-MID1）。
+/// gen / reading / session_nonce のスナップショットを添え、消費側で stale を弾く
+/// (M1.8 T-MID1 + M2 §5.3)。
 fn queue_phase1b(snapshot: &LiveSnapshot) {
-    use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-    if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-        let gen_snapshot = crate::engine::state::live_conv_gen_snapshot();
-        *q = Some(crate::engine::state::PreviewEntry {
-            preview: snapshot.preview.clone(),
-            reading: snapshot.reading.clone(),
-            gen_when_requested: gen_snapshot,
-        });
-        LIVE_PREVIEW_READY.store(true, AO::Release);
+    use crate::tsf::live_session::{
+        conv_gen_snapshot, queue_preview_set, session_nonce_snapshot, PreviewEntry,
+    };
+    let gen_snapshot = conv_gen_snapshot();
+    let nonce_snapshot = session_nonce_snapshot();
+    let entry = PreviewEntry {
+        preview: snapshot.preview.clone(),
+        reading: snapshot.reading.clone(),
+        gen_when_requested: gen_snapshot,
+        session_nonce_at_request: nonce_snapshot,
+    };
+    if queue_preview_set(entry) {
         tracing::debug!(
-            "[Live] Phase1B: queued preview={:?} reading={:?} gen={}",
+            "[Live] Phase1B: queued preview={:?} reading={:?} gen={} nonce={}",
             snapshot.preview,
             snapshot.reading,
-            gen_snapshot
+            gen_snapshot,
+            nonce_snapshot
         );
     } else {
         tracing::warn!("[Live] Phase1B: LIVE_PREVIEW_QUEUE busy, skipping");

@@ -3,6 +3,33 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.7] - 2026-04-29
+
+### Changed
+
+- **ライブ変換セッション状態の集約 — Phase 2** (M4 / T2 段階 c の後半) — TSF cross-thread を含むグローバル状態を `LiveShared` 構造体に集約。**動作変更なし** (純粋リファクタ、既存挙動を完全保持):
+  - 集約対象 4 種:
+    - 旧 `LIVE_PREVIEW_QUEUE` (`LazyLock<Mutex<Option<PreviewEntry>>>`) → `LiveShared.preview_queue`
+    - 旧 `LIVE_PREVIEW_READY` (static `AtomicBool`) → `LiveShared.preview_ready`
+    - 旧 `SUPPRESS_LIVE_COMMIT_ONCE` (static `AtomicBool`) → `LiveShared.suppress_commit_once`
+    - 旧 `LIVE_CONV_GEN` (static `AtomicU32`) → `LiveShared.conv_gen`
+  - 個別の sync primitive (Atomic / 個別 Mutex) は据え置き — `Mutex<LiveShared>` で全状態を一括包むと、`COMPOSITION_APPLY_LOCK` や engine ロックとの順序関係が複雑化し、`try_apply_phase1a` 内で EditSession コールバックが走る間ロックを保持してしまう罠が出るため。構造体は名前空間として機能し、helper 関数で更新を集約 (Phase 1 の thread_local 集約と同じ流儀)
+  - 公開 helper:
+    - キュー: `queue_preview_set(entry) -> bool` / `queue_preview_consume() -> Option<PreviewEntry>` / `queue_preview_clear()`
+    - 抑制: `suppress_commit_arm()` / `suppress_commit_clear()` / `suppress_commit_take() -> bool`
+    - 世代: `conv_gen_bump()` / `conv_gen_snapshot() -> u32`
+  - callsite (14 箇所) を helper 経由に置換: `queue_phase1b` / `dispatch` の Phase1B 消費 / `on_input` x2 (clear) / `on_convert` x4 (clear / commit fallback / cancel) / `edit_ops` x2 (arm) / `on_input` x2 + `on_convert` x1 (gen bump) / `candidate_window` x2 (gen snapshot)
+  - `PreviewEntry` 定義も `tsf::live_session` 配下に移設 (旧 `engine::state::PreviewEntry`)
+
+### Added
+
+- **M2 §5.3 `session_nonce`** (composition 開始ごとの identity 識別子) — Phase 1B キューの stale 判定を世代 (`gen_when_requested`) + reading + **session_nonce** の三重防壁にして、composition が破棄→再生成された後に古い preview がキューに残って次の composition に紛れ込む経路を断つ:
+  - `LiveShared.session_nonce: AtomicU64` 追加。`composition_set_with_dm(Some(...), _)` 経路で `session_nonce.fetch_add(1, Release)` を実行 (3 callsite — `StartComposition` 成功直後)
+  - `PreviewEntry` に `session_nonce_at_request: u64` フィールド追加。`queue_phase1b` で要求時のスナップショットを格納
+  - `dispatch` の Phase1B 消費時に現在 nonce と比較し、不一致なら `discarded stale preview entry_nonce={} cur_nonce={} ...` ログを出して破棄
+  - これまでは `gen` + `reading` の二重防壁だった (M1.8 T-MID1)。`session_nonce` は composition 単位の identity を加え、reading が偶然一致する場合の race も塞ぐ
+  - 公開 helper: `session_nonce_advance()` / `session_nonce_snapshot() -> u64`
+
 ## [0.7.6] - 2026-04-29
 
 ### Changed

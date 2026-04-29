@@ -50,7 +50,20 @@
   - 集約: 旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` (thread_local Cell/RefCell × 3) + 旧 `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS` (static AtomicBool/AtomicU64 × 2) → `LiveConvSession.{ctx, tid, composition_dm_ptr, fired_once, last_input_ms}`
   - `LIVE_DEBOUNCE_CFG_MS` は設定値のため static のまま残す
   - candidate_window.rs の callsite 8 箇所を helper (`set_context_snapshot` / `clear_context_snapshot` / `context_snapshot` / `invalidate_dm_ptr` / `swap_fired_once` / `reset_fired_once` / `store_last_input_ms` / `load_last_input_ms`) 経由に置換
-- **Phase 2 (v0.7.7 で予定)**: cross-thread を含む状態 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を吸収。M2 §5.3 `session_nonce` (composition 開始ごとの identity) も同タイミングで追加
+
+**v0.7.7 リリース済み（2026-04-29）**: M4 LiveConvSession 集約の Phase 2 + M2 §5.3 を同梱。
+
+- ✅ M4 / T2 段階 c の **Phase 2**: cross-thread を含む 4 種のグローバル状態を `LiveShared` 構造体に集約。**動作変更なし** (純粋リファクタ)
+  - 集約: 旧 `LIVE_PREVIEW_QUEUE` (`Mutex<Option<PreviewEntry>>`) + 旧 `LIVE_PREVIEW_READY` (`AtomicBool`) + 旧 `SUPPRESS_LIVE_COMMIT_ONCE` (`AtomicBool`) + 旧 `LIVE_CONV_GEN` (`AtomicU32`) → `LiveShared.{preview_queue, preview_ready, suppress_commit_once, conv_gen}`
+  - 個別の sync primitive は据え置き (`Mutex<LiveShared>` で一括包むと既存 `COMPOSITION_APPLY_LOCK` との順序関係が複雑化するため)。構造体は名前空間として機能、helper 関数で更新を集約
+  - 公開 helper: `queue_preview_set` / `queue_preview_consume` / `queue_preview_clear` / `suppress_commit_arm` / `suppress_commit_clear` / `suppress_commit_take` / `conv_gen_bump` / `conv_gen_snapshot`
+  - callsite 14 箇所を helper 経由に置換 (`queue_phase1b` / `dispatch` Phase1B 消費 / `on_input` x4 / `on_convert` x5 / `edit_ops` x2 / `candidate_window` x2)
+  - `PreviewEntry` 定義も `engine::state` から `tsf::live_session` に移設
+- ✅ **M2 §5.3 `session_nonce`** (composition 開始ごとの identity 識別子): Phase 1B キュー消費時の stale 判定を (gen + reading) 二重から (gen + reading + session_nonce) **三重**防壁に強化
+  - `LiveShared.session_nonce: AtomicU64` 追加。`composition_set_with_dm(Some(...), _)` 経路で `fetch_add(1)` (3 callsite — `StartComposition` 成功直後)
+  - `PreviewEntry.session_nonce_at_request` 追加。`queue_phase1b` で要求時のスナップショットを格納
+  - `dispatch` の Phase1B 消費時に現在値と比較し、不一致ならログ出して破棄。composition が破棄→再生成された後に古い preview がキューに残って次の composition に紛れ込む race を断つ
+  - 公開 helper: `session_nonce_advance()` / `session_nonce_snapshot() -> u64`
 
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
@@ -81,7 +94,7 @@
 | ~~**v0.7.4**~~ | ~~M3（factory.rs 分割）~~ | — | v0.7.5 に統合 (リリース skip) |
 | **v0.7.5** ✅ 2026-04-29 | ✅ M3 T1-A (factory.rs 分割) + ✅ M2 §5.1 (on_live_timer 6 分解) + ✅ M2 §5.2 (bg_peek_top_candidate 新設) + WinUI config.toml CRLF 統一 + Claude Code Stop hook 追加 | minor | リファクタ + preview 経路の非破壊化 |
 | **v0.7.6** ✅ 2026-04-29 | ✅ M4 Phase 1 (LiveConvSession 集約 — TSF スレッドローカルに閉じる 5 種を構造体化) | patch | ライブ変換中枢の再設計 (Phase 1) |
-| **v0.7.7** | M4 Phase 2（cross-thread 状態 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN` を吸収）+ **M2 §5.3 session_nonce を吸収** | minor | ライブ変換中枢の再設計 (Phase 2) |
+| **v0.7.7** ✅ 2026-04-29 | ✅ M4 Phase 2 (LiveShared 集約 — cross-thread 状態 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN` を構造体化) + ✅ **M2 §5.3 session_nonce** (Phase 1B キューの stale 判定を gen + reading + session_nonce の三重防壁に強化) | minor | ライブ変換中枢の再設計 (Phase 2) + composition 跨ぎ stale 防壁 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:
@@ -177,11 +190,11 @@ M5 (着手しない前提): 追加対策    （実機再発時のみ開封）
 | **M1.8 合計** | ライブ変換中の中間文字消失 | **1〜2 日** | 中 | ★ user-facing bug | M2 と根本原因共有（先行バックポート） | v0.7.0 + v0.7.3 |
 | **M2** | ✅ T1-B: on_live_timer 分解 (6 サブ関数) | 半日 | 中（ロック順保持） | リファクタ | — | **v0.7.5 済** |
 | **M2** | ✅ bg_peek/take API 分離 (§18.3) | 1 日 | 中（API 変更 ~10 箇所 → 実際は preview 経路 1 箇所のみ置換） | リファクタ + 機能 | — | **v0.7.5 済** |
-| **M2** | session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | v0.7.7 へ繰り延べ (M4 Phase 2 で吸収) |
-| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | v0.7.5 済 (§5.3 を除く) |
+| **M2** | ✅ session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | **v0.7.7 済** (M4 Phase 2 と同梱) |
+| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | **v0.7.5 + v0.7.7 済** |
 | **M3** | ✅ T1-A: factory.rs 分割 (6 ファイル化) | **1〜2 日** | 小（純粋切り出し） | リファクタ | — | **v0.7.5 済** |
 | **M4** | ✅ T2 Phase 1: LiveConvSession 構造体集約 (TSF スレッドローカル限定の 5 種) | 半日 | 中（純粋リファクタ） | リファクタ | 段階 PR で安全に | **v0.7.6 済** |
-| **M4** | T2 Phase 2: cross-thread 状態の集約 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) + M2 §5.3 `session_nonce` 統合 | 1〜2 日 | 中〜大（ライブ変換中枢） | リファクタ + 機能 | Phase 1 完了後 | v0.7.7 |
+| **M4** | ✅ T2 Phase 2: LiveShared 構造体集約 (cross-thread 状態 4 種) + M2 §5.3 `session_nonce` 統合 | 1〜2 日 | 中〜大（ライブ変換中枢） | リファクタ + 機能 | Phase 1 完了後 | **v0.7.7 済** |
 | **M5.1** | WM_TIMER → PostMessage 化（条件付き） | 1〜2 日 | 中 | crash 対策 | 実機再発時のみ | v0.7.x patch |
 | **M5.2** | Explorer シェル分岐（条件付き） | 半日 | 小（UX 劣化あり） | crash 局所回避 | 実機再発時のみ | v0.7.x patch |
 
@@ -189,9 +202,9 @@ M5 (着手しない前提): 追加対策    （実機再発時のみ開封）
 
 | カテゴリ | 総工数 | 備考 |
 | --- | --- | --- |
-| 必達（M1〜M4） | **12〜20 日**（うち **~7 日消化済**） | v0.7.0〜v0.7.6 で M1 全タスク / M1.5〜M1.8 / M2 §5.1+§5.2 / M3 / M4 Phase 1 を消化。残: M2 §5.3 / M4 Phase 2 (両方 v0.7.7 で吸収) |
+| 必達（M1〜M4） | **12〜20 日**（**全消化済**） | v0.7.0〜v0.7.7 で M1 全タスク / M1.5〜M1.8 / M2 全タスク / M3 / M4 全 Phase を消化 |
 | 必達のうち bug fix 枠（M1.5 + M1.6 + M1.7 + M1.8） | **5〜7 日**（消化済） | M1.5 T-BUG1 と M1.8 T-MID2/3 は v0.7.3 で消化済 |
-| 必達のうち refactor 枠（M1 + M2 + M3 + M4） | **7〜13 日**（うち **~3 日消化済**） | v0.7.5（M3 + M2 §5.1/§5.2）/ v0.7.6（M4 Phase 1）に分配。残: M4 Phase 2 + M2 §5.3 (v0.7.7) |
+| 必達のうち refactor 枠（M1 + M2 + M3 + M4） | **7〜13 日**（**消化済**） | v0.7.5（M3 + M2 §5.1/§5.2）/ v0.7.6（M4 Phase 1）/ v0.7.7（M4 Phase 2 + M2 §5.3）に分配 |
 | 条件付き（M5） | 1.5〜2.5 日 | **着手しない前提**。再発時のみ開封 |
 
 ### 優先度と並行度のヒント

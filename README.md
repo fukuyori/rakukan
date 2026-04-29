@@ -1,4 +1,4 @@
-# rakukan v0.7.6
+# rakukan v0.7.7
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,20 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.7 変更点
+
+- **ライブ変換セッション状態の集約 — Phase 2** (M4 / T2 段階 c の Phase 2): cross-thread を含むグローバル状態 4 種を `LiveShared` 構造体に集約 (Phase 1 の thread_local 集約と兄弟関係)。**動作変更なし** (純粋リファクタ):
+  - 旧 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` (Phase 1B キュー、Mutex + AtomicBool) → `LiveShared.{preview_queue, preview_ready}`
+  - 旧 `SUPPRESS_LIVE_COMMIT_ONCE` (static AtomicBool) → `LiveShared.suppress_commit_once`
+  - 旧 `LIVE_CONV_GEN` (static AtomicU32) → `LiveShared.conv_gen`
+  - 個別の sync primitive (Atomic / 個別 Mutex) は据え置き (`Mutex<LiveShared>` で一括包むと既存 `COMPOSITION_APPLY_LOCK` との順序関係が複雑化するため)。構造体は名前空間として機能し、helper 関数経由でアクセス
+  - 公開 helper: `queue_preview_set` / `queue_preview_consume` / `queue_preview_clear` / `suppress_commit_arm` / `suppress_commit_clear` / `suppress_commit_take` / `conv_gen_bump` / `conv_gen_snapshot`
+  - `PreviewEntry` 定義も `engine::state` から `tsf::live_session` に移設
+- **M2 §5.3 `session_nonce` (composition 開始ごとの identity 識別子) を追加**: Phase 1B キュー消費時の stale 判定を従来の (gen + reading) 二重から **(gen + reading + session_nonce)** の三重防壁に強化:
+  - `LiveShared.session_nonce: AtomicU64` を追加。`composition_set_with_dm(Some(...), _)` 経路で `fetch_add(1)` (3 callsite — `StartComposition` 成功直後)
+  - `PreviewEntry.session_nonce_at_request` 追加。`queue_phase1b` で要求時のスナップショットを格納し、`dispatch` 消費時に現在値と比較
+  - composition が破棄→再生成された後に古い preview がキューに残って次の composition に紛れ込む経路を断つ。reading が偶然一致する場合の race も塞ぐ
 
 ## 0.7.6 変更点
 

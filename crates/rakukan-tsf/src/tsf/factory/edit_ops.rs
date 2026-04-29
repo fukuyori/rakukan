@@ -62,8 +62,7 @@ impl super::TextServiceFactory_Impl {
         };
         let t = convert_fn(&source);
         engine.force_preedit(t.clone());
-        crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
-            .store(true, std::sync::atomic::Ordering::Release);
+        crate::tsf::live_session::suppress_commit_arm();
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_live_conv() {
                 sess.set_preedit(t.clone());
@@ -138,8 +137,7 @@ impl super::TextServiceFactory_Impl {
             }
         };
         engine.force_preedit(t.clone());
-        crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
-            .store(true, std::sync::atomic::Ordering::Release);
+        crate::tsf::live_session::suppress_commit_arm();
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_live_conv() {
                 sess.set_preedit(t.clone());

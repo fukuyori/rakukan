@@ -1,12 +1,13 @@
-# Rakukan 引き継ぎ資料 (v0.7.6)
+# Rakukan 引き継ぎ資料 (v0.7.7)
 
 更新日: 2026-04-29
 
 ## 現在の状態
 
-- **バージョン:** v0.7.6
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.6 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換まわりの大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession 集約 Phase 1) を消化。次は **v0.7.7 = M4 Phase 2** (cross-thread 状態の集約 + M2 §5.3 `session_nonce`)
-- **v0.7.6 の内容:** **M4 Phase 1** — TSF スレッドローカルに閉じる 5 種のグローバル状態 (旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` / `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS`) を `LiveConvSession` 構造体に集約。新ファイル `crates/rakukan-tsf/src/tsf/live_session.rs`。8 helper 経由でアクセスする形に書き換え。**動作変更なし** (純粋リファクタ)
+- **バージョン:** v0.7.7
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。**ROADMAP の必達 (M1〜M4) は全消化**。次は条件付きの M5 (Explorer crash 再発時のみ) と M1.7 任意項目 (T-MODE4/T-MODE5)
+- **v0.7.7 の内容:** **M4 Phase 2 + M2 §5.3** — cross-thread を含む 4 種のグローバル状態 (旧 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を `LiveShared` 構造体に集約 (個別の sync primitive は据え置き、helper 関数経由)。さらに `session_nonce: AtomicU64` を新設し、`composition_set_with_dm(Some(...), _)` で `fetch_add(1)`。Phase 1B キュー消費時の stale 判定を **gen + reading + session_nonce の三重防壁** に強化、composition 跨ぎの紛れ込みを根本封鎖
+- **v0.7.6 の内容（継続有効）:** **M4 Phase 1** — TSF スレッドローカルに閉じる 5 種 (旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` / `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS`) を `LiveConvSession` 構造体に集約。新ファイル `crates/rakukan-tsf/src/tsf/live_session.rs`
 - **v0.7.5 の内容（継続有効）:**
   - **M3 T1-A:** `factory.rs` (4816 行) を 6 ファイルに分割 (`factory.rs` / `dispatch.rs` / `on_input.rs` / `on_convert.rs` / `on_compose.rs` / `edit_ops.rs`)。動作変更なし
   - **M2 §5.1 / T1-B:** `on_live_timer` (298 行) を `pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b` の 6 サブ関数に分解

@@ -72,12 +72,8 @@ impl super::TextServiceFactory_Impl {
                 );
                 sess.set_preedit(reading.clone());
                 drop(sess);
-                // LIVE_PREVIEW_QUEUE をクリア
-                use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-                LIVE_PREVIEW_READY.store(false, std::sync::atomic::Ordering::Release);
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    *q = None;
-                }
+                // Phase 1B キューをクリア
+                crate::tsf::live_session::queue_preview_clear();
                 // タイマーは止めない（変換中は timer が発火しても Preedit でなければスキップ）
             }
         }
@@ -872,9 +868,7 @@ impl super::TextServiceFactory_Impl {
             }
         }
         engine.flush_pending_n();
-        if crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
-            .swap(false, std::sync::atomic::Ordering::AcqRel)
-        {
+        if crate::tsf::live_session::suppress_commit_take() {
             tracing::debug!("[Live] on_commit_raw[fallback]: suppressed once");
         } else if crate::engine::config::current_config()
             .live_conversion
@@ -954,7 +948,7 @@ impl super::TextServiceFactory_Impl {
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
         // M1.8 T-MID1: reading が短くなるので gen を前進させる。
-        crate::engine::state::live_conv_gen_bump();
+        crate::tsf::live_session::conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(false),
@@ -970,11 +964,7 @@ impl super::TextServiceFactory_Impl {
                 sess.set_preedit(reading.clone());
                 drop(sess);
                 candidate_window::stop_live_timer();
-                use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-                LIVE_PREVIEW_READY.store(false, std::sync::atomic::Ordering::Release);
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    *q = None;
-                }
+                crate::tsf::live_session::queue_preview_clear();
                 // ひらがな表示に戻してから通常の backspace 処理へフォールスルー
                 drop(guard);
                 update_composition(ctx.clone(), tid, sink.clone(), reading)?;
@@ -1069,11 +1059,7 @@ impl super::TextServiceFactory_Impl {
                 sess.set_preedit(reading.clone());
                 drop(sess);
                 candidate_window::stop_live_timer();
-                use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-                LIVE_PREVIEW_READY.store(false, std::sync::atomic::Ordering::Release);
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    *q = None;
-                }
+                crate::tsf::live_session::queue_preview_clear();
                 drop(guard);
                 update_composition(ctx, tid, sink, reading)?;
                 return Ok(true);

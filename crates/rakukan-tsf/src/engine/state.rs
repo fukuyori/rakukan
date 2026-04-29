@@ -13,7 +13,7 @@ use super::input_mode::InputMode;
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, Ordering as AO};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
 use windows::core::{Interface, GUID};
@@ -686,6 +686,7 @@ pub fn composition_set(comp: Option<ITfComposition>) -> anyhow::Result<()> {
 
 pub fn composition_set_with_dm(comp: Option<ITfComposition>, dm_ptr: usize) -> anyhow::Result<()> {
     // set はホットパスでもブロックを許容（短い操作のため）
+    let starting = comp.is_some();
     let mut g = COMPOSITION.lock().map_err(|p| {
         let _ = p;
         anyhow::anyhow!("composition poison")
@@ -693,6 +694,13 @@ pub fn composition_set_with_dm(comp: Option<ITfComposition>, dm_ptr: usize) -> a
     g.comp = comp;
     g.dm_ptr = if g.comp.is_some() { dm_ptr } else { 0 };
     g.stale = false;
+    drop(g);
+    // M2 §5.3: 新しい composition が始まったら session_nonce を前進させる。
+    // PreviewEntry に snapshot を添えておき、消費時 (dispatch) に現在値と比較して
+    // composition 跨ぎの stale entry を破棄する。
+    if starting {
+        crate::tsf::live_session::session_nonce_advance();
+    }
     Ok(())
 }
 
@@ -839,49 +847,12 @@ pub static SESSION_STATE: LazyLock<Mutex<SessionState>> =
 pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-// ─── LIVE_PREVIEW キュー（Phase 1B: WM_TIMER → handle_action 橋渡し）─────────
+// ─── Phase 1B キュー / SUPPRESS / LIVE_CONV_GEN / session_nonce ───────────────
 //
-// WM_TIMER コールバック（WndProc）から RequestEditSession が呼べない場合の
-// フォールバック。タイマーが変換結果をここに書き込み、次のキー入力時に
-// handle_action が読み出して composition を更新する。
-//
-// Phase 1A（WM_TIMER から直接 RequestEditSession）が確認できれば使わなくなる。
-//
-// # gen タグ（M1.8 T-MID1）
-// `PreviewEntry.gen_when_requested` は preview 要求時点の `LIVE_CONV_GEN`
-// スナップショット。キュー消費時に現在値と比較し、古ければ apply せず
-// discard する（reading が進んでいるのに古い preview で中間を上書きする race
-// を防ぐ）。reading も保持し、世代一致でも reading 不一致なら破棄する二重安全策。
-
-#[derive(Debug, Clone)]
-pub struct PreviewEntry {
-    pub preview: String,
-    pub reading: String,
-    pub gen_when_requested: u32,
-}
-
-pub static LIVE_PREVIEW_QUEUE: LazyLock<Mutex<Option<PreviewEntry>>> =
-    LazyLock::new(|| Mutex::new(None));
-pub static LIVE_PREVIEW_READY: AtomicBool = AtomicBool::new(false);
-pub static SUPPRESS_LIVE_COMMIT_ONCE: AtomicBool = AtomicBool::new(false);
-
-/// ライブ変換中の reading 世代カウンタ（M1.8 T-MID1）。
-///
-/// reading を変更する経路（キー入力 / backspace / pending flush / commit 等）
-/// で `fetch_add(1, Release)` する。Phase1B キューへの書き込み時点の値と
-/// apply 時点の値を比較し、古ければ stale として discard する。
-pub static LIVE_CONV_GEN: AtomicU32 = AtomicU32::new(0);
-
-/// reading を変更する全経路から呼ぶ。世代カウンタを前進させる。
-#[inline]
-pub fn live_conv_gen_bump() {
-    LIVE_CONV_GEN.fetch_add(1, AO::Release);
-}
-
-#[inline]
-pub fn live_conv_gen_snapshot() -> u32 {
-    LIVE_CONV_GEN.load(AO::Acquire)
-}
+// v0.7.7 で `tsf::live_session::LiveShared` に集約 (M4 Phase 2 + M2 §5.3)。
+// 旧定義 (`LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE`
+// / `LIVE_CONV_GEN` / `live_conv_gen_bump` / `live_conv_gen_snapshot` /
+// `PreviewEntry`) はそちらに移動。
 
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
     SESSION_STATE

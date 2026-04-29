@@ -79,81 +79,84 @@ impl super::TextServiceFactory_Impl {
         // タイマーが書き込んだプレビューをここで拾って composition に反映する。
         // Preedit 状態のみ適用（変換中・選択中には適用しない）。
         //
-        // キューエントリには書き込み時点の gen / reading が添えられており、
-        // 現在の gen / reading と一致しない場合は stale として discard する
-        // （M1.8 T-MID1: 中間文字消失 race の対策）。
+        // キューエントリには書き込み時点の gen / reading / session_nonce が添えられており、
+        // 現在値と一致しない場合は stale として discard する:
+        // - gen 不一致 (M1.8 T-MID1): reading が進んでいるのに古い preview で中間を上書き
+        // - reading 不一致 (M1.8 T-MID1): gen 一致でも reading が違う場合の二重防壁
+        // - session_nonce 不一致 (M2 §5.3): composition が破棄→再生成された後に
+        //   古い preview がキューに残って次の composition に紛れ込む経路を断つ
         {
-            use crate::engine::state::{live_conv_gen_snapshot, LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-            if LIVE_PREVIEW_READY.swap(false, std::sync::atomic::Ordering::AcqRel) {
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    if let Some(entry) = q.take() {
-                        // stale 判定
-                        let current_gen = live_conv_gen_snapshot();
-                        let current_reading = engine.hiragana_text().to_string();
-                        let stale_gen = entry.gen_when_requested != current_gen;
-                        let stale_reading = entry.reading != current_reading;
-                        if stale_gen || stale_reading {
-                            tracing::warn!(
-                                "[Live] Phase1B: discarded stale preview entry_gen={} cur_gen={} entry_reading={:?} cur_reading={:?}",
-                                entry.gen_when_requested,
-                                current_gen,
-                                entry.reading,
-                                current_reading
-                            );
-                            // Preedit 中のみ適用
-                        } else {
-                        let preview = entry.preview;
-                        let apply = if let Ok(sess) = session_get() {
-                            matches!(*sess, SessionState::Preedit { .. })
-                        } else {
-                            false
-                        };
+            use crate::tsf::live_session::{
+                conv_gen_snapshot, queue_preview_consume, session_nonce_snapshot,
+            };
+            if let Some(entry) = queue_preview_consume() {
+                // stale 判定
+                let current_gen = conv_gen_snapshot();
+                let current_nonce = session_nonce_snapshot();
+                let current_reading = engine.hiragana_text().to_string();
+                let stale_gen = entry.gen_when_requested != current_gen;
+                let stale_reading = entry.reading != current_reading;
+                let stale_nonce = entry.session_nonce_at_request != current_nonce;
+                if stale_gen || stale_reading || stale_nonce {
+                    tracing::warn!(
+                        "[Live] Phase1B: discarded stale preview entry_gen={} cur_gen={} entry_nonce={} cur_nonce={} entry_reading={:?} cur_reading={:?}",
+                        entry.gen_when_requested,
+                        current_gen,
+                        entry.session_nonce_at_request,
+                        current_nonce,
+                        entry.reading,
+                        current_reading
+                    );
+                } else {
+                    let preview = entry.preview;
+                    let apply = if let Ok(sess) = session_get() {
+                        matches!(*sess, SessionState::Preedit { .. })
+                    } else {
+                        false
+                    };
 
-                        if apply {
-                            // engine borrow は reading/pending 取得で終わり
-                            // preedit = hiragana + pending_romaji 構成なので、
-                            // BG 変換結果 `preview` に pending を付けて表示する
-                            // ことで「ta」→「た」→「t」押下時の "t" が消えないようにする。
-                            let reading = engine.hiragana_text().to_string();
-                            let preedit_full = engine.preedit_display();
-                            let pending =
-                                text_util::suffix_after_prefix_or_empty(
-                                    &preedit_full,
-                                    &reading,
-                                    "phase1b pending",
-                                )
-                                .to_string();
-                            if !reading.is_empty() {
-                                // 尻切れ防壁（M1.5 T-BUG2）: Phase1B 経路でも同じく
-                                // preview の長さが reading に対して極端に短ければ破棄
-                                let preview = candidate_window::sanity_check_preview(
-                                    &reading,
-                                    preview,
-                                    "Phase1B",
-                                );
-                                tracing::info!(
-                                    "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
-                                    preview,
-                                    reading,
-                                    pending
-                                );
-                                if let Ok(mut sess) = session_get() {
-                                    sess.set_live_conv(reading, preview.clone());
-                                }
-                                // engine の borrow はここで終わり（以降 engine を使わない）
-                                drop(guard);
-                                let ctx2 = ctx.clone();
-                                let display_shown = if pending.is_empty() {
-                                    preview
-                                } else {
-                                    format!("{preview}{pending}")
-                                };
-                                update_composition(ctx2, tid, sink.clone(), display_shown)?;
-                                // guard と engine を再取得
-                                guard = engine_try_get_or_create()?;
+                    if apply {
+                        // engine borrow は reading/pending 取得で終わり
+                        // preedit = hiragana + pending_romaji 構成なので、
+                        // BG 変換結果 `preview` に pending を付けて表示する
+                        // ことで「ta」→「た」→「t」押下時の "t" が消えないようにする。
+                        let reading = engine.hiragana_text().to_string();
+                        let preedit_full = engine.preedit_display();
+                        let pending = text_util::suffix_after_prefix_or_empty(
+                            &preedit_full,
+                            &reading,
+                            "phase1b pending",
+                        )
+                        .to_string();
+                        if !reading.is_empty() {
+                            // 尻切れ防壁（M1.5 T-BUG2）: Phase1B 経路でも同じく
+                            // preview の長さが reading に対して極端に短ければ破棄
+                            let preview = candidate_window::sanity_check_preview(
+                                &reading,
+                                preview,
+                                "Phase1B",
+                            );
+                            tracing::info!(
+                                "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
+                                preview,
+                                reading,
+                                pending
+                            );
+                            if let Ok(mut sess) = session_get() {
+                                sess.set_live_conv(reading, preview.clone());
                             }
+                            // engine の borrow はここで終わり（以降 engine を使わない）
+                            drop(guard);
+                            let ctx2 = ctx.clone();
+                            let display_shown = if pending.is_empty() {
+                                preview
+                            } else {
+                                format!("{preview}{pending}")
+                            };
+                            update_composition(ctx2, tid, sink.clone(), display_shown)?;
+                            // guard と engine を再取得
+                            guard = engine_try_get_or_create()?;
                         }
-                        } // end stale check branch (non-stale)
                     }
                 }
             }

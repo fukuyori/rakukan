@@ -42,7 +42,7 @@ impl super::TextServiceFactory_Impl {
         // M1.8 T-MID1: キー入力は reading を変化させるので、ライブ変換世代を
         // 前進させる。Phase1B キューに残っている古い preview は apply 時に
         // gen 不一致で discard される。
-        crate::engine::state::live_conv_gen_bump();
+        crate::tsf::live_session::conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => {
@@ -82,8 +82,7 @@ impl super::TextServiceFactory_Impl {
         let _t = diag::span("Input");
 
         if let Ok(mut sess) = session_get() {
-            crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
-                .store(false, std::sync::atomic::Ordering::Release);
+            crate::tsf::live_session::suppress_commit_clear();
             if sess.is_live_conv() {
                 let (reading, preview) = sess
                     .live_conv_parts()
@@ -91,11 +90,7 @@ impl super::TextServiceFactory_Impl {
                     .unwrap_or_default();
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
-                use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-                LIVE_PREVIEW_READY.store(false, std::sync::atomic::Ordering::Release);
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    *q = None;
-                }
+                crate::tsf::live_session::queue_preview_clear();
 
                 let kind = if c.is_ascii_uppercase() {
                     crate::engine::state::InputCharKind::FullwidthAlpha
@@ -246,7 +241,7 @@ impl super::TextServiceFactory_Impl {
         mut guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
         // M1.8 T-MID1: reading 変化経路。on_input と同じく gen を前進させる。
-        crate::engine::state::live_conv_gen_bump();
+        crate::tsf::live_session::conv_gen_bump();
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => {
@@ -276,8 +271,7 @@ impl super::TextServiceFactory_Impl {
         }
         crate::engine::state::maybe_log_gpu_memory(engine);
         if let Ok(mut sess) = session_get() {
-            crate::engine::state::SUPPRESS_LIVE_COMMIT_ONCE
-                .store(false, std::sync::atomic::Ordering::Release);
+            crate::tsf::live_session::suppress_commit_clear();
             if sess.is_live_conv() {
                 let (reading, preview) = sess
                     .live_conv_parts()
@@ -285,11 +279,7 @@ impl super::TextServiceFactory_Impl {
                     .unwrap_or_default();
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
-                use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
-                LIVE_PREVIEW_READY.store(false, std::sync::atomic::Ordering::Release);
-                if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
-                    *q = None;
-                }
+                crate::tsf::live_session::queue_preview_clear();
 
                 engine.push_raw(c);
                 let new_reading = engine.hiragana_text().to_string();
