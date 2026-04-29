@@ -1,11 +1,12 @@
-# Rakukan 引き継ぎ資料 (v0.8.0)
+# Rakukan 引き継ぎ資料 (v0.8.1)
 
 更新日: 2026-04-29
 
 ## 現在の状態
 
-- **バージョン:** v0.8.0
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では 0.8.x 新機能候補 M6 のうち、まず低リスクな **M6.2 桁並び漢数字候補** を追加し、実機確認済み。
+- **バージョン:** v0.8.1
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補** を追加。
+- **v0.8.1 の内容:** **M6.4** — ASCII 記号 / 全角記号を `Symbol` run として literal 保護レイヤーに追加し、`USB-C` / `A+B` / `(test)` のような reading で記号部分の半角 / 全角候補を提示
 - **v0.8.0 の内容:** **M6.2** — 数字だけの reading で、半角 / 全角候補に加えて `200` → `二〇〇` のような桁並び漢数字候補を追加。数字保護検証も `〇一二三四五六七八九` / `零` を数字として復元できるように拡張
 - **v0.7.7 の内容:** **M4 Phase 2 + M2 §5.3** — cross-thread を含む 4 種のグローバル状態 (旧 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN`) を `LiveShared` 構造体に集約 (個別の sync primitive は据え置き、helper 関数経由)。さらに `session_nonce: AtomicU64` を新設し、`composition_set_with_dm(Some(...), _)` で `fetch_add(1)`。Phase 1B キュー消費時の stale 判定を **gen + reading + session_nonce の三重防壁** に強化、composition 跨ぎの紛れ込みを根本封鎖
 - **v0.7.6 の内容（継続有効）:** **M4 Phase 1** — TSF スレッドローカルに閉じる 5 種 (旧 `TL_LIVE_CTX` / `TL_LIVE_TID` / `TL_LIVE_DM_PTR` / `LIVE_TIMER_FIRED_ONCE_STATIC` / `LIVE_LAST_INPUT_MS`) を `LiveConvSession` 構造体に集約。新ファイル `crates/rakukan-tsf/src/tsf/live_session.rs`

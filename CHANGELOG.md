@@ -3,6 +3,16 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.1] - 2026-04-29
+
+### Added
+
+- **M6.4 記号の半角 / 全角候補** — 数字・アルファベットと同じ literal 保護レイヤーに `Symbol` run を追加し、ASCII 記号 / 全角記号の半角・全角候補を提示:
+  - `-` → `-` / `－`
+  - `@` → `@` / `＠`
+  - `USB-C` → `USB-C` / `USB－C` / `ＵＳＢ-Ｃ` など
+- 記号 run は LLM を経由しない literal として扱い、既存の `combine_runs` 経路で数字・アルファベット・かな候補と合成する。
+
 ## [0.8.0] - 2026-04-29
 
 ### Added

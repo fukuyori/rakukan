@@ -70,6 +70,11 @@
 - ✅ M6.2: 数字だけの reading で半角 / 全角候補に加えて `200` → `二〇〇` のような桁並び漢数字候補を追加
 - ✅ 数字保護検証を `〇一二三四五六七八九` / `零` の復元に対応
 
+**v0.8.1 リリース済み（2026-04-29）**: 0.8.x 新機能候補 M6 のうち、同じ literal 保護レイヤーで完結する **M6.4 記号の半角 / 全角候補** を追加。
+
+- ✅ M6.4: ASCII 記号 / 全角記号を `Symbol` run として分割し、半角 / 全角候補を追加
+- ✅ `USB-C` / `A+B` / `(test)` のような数字・アルファベット・記号混在 reading を literal として保護し、既存の候補合成経路で提示
+
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
 関連資料:
@@ -101,6 +106,7 @@
 | **v0.7.6** ✅ 2026-04-29 | ✅ M4 Phase 1 (LiveConvSession 集約 — TSF スレッドローカルに閉じる 5 種を構造体化) | patch | ライブ変換中枢の再設計 (Phase 1) |
 | **v0.7.7** ✅ 2026-04-29 | ✅ M4 Phase 2 (LiveShared 集約 — cross-thread 状態 `LIVE_PREVIEW_QUEUE` / `LIVE_PREVIEW_READY` / `SUPPRESS_LIVE_COMMIT_ONCE` / `LIVE_CONV_GEN` を構造体化) + ✅ **M2 §5.3 session_nonce** (Phase 1B キューの stale 判定を gen + reading + session_nonce の三重防壁に強化) | minor | ライブ変換中枢の再設計 (Phase 2) + composition 跨ぎ stale 防壁 |
 | **v0.8.0** ✅ 2026-04-29 | ✅ M6.2 桁並び漢数字候補 (`200` → `二〇〇`) | minor | 0.8.x 新機能候補 M6 の最初の低リスク機能 |
+| **v0.8.1** ✅ 2026-04-29 | ✅ M6.4 記号の半角 / 全角候補 (`USB-C` → `USB－C`) | minor | literal 保護レイヤーの記号対応 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:

@@ -1,7 +1,7 @@
 //! リテラル保護レイヤー
 //!
-//! reading を「数字ラン」「アルファベットラン」「かなラン」に分割し、
-//! LLM にはかな部分だけを渡す。数字・アルファベットは原文を保持し、
+//! reading を「数字ラン」「アルファベットラン」「記号ラン」「かなラン」に分割し、
+//! LLM にはかな部分だけを渡す。数字・アルファベット・記号は原文を保持し、
 //! 半角・全角の両方を候補として提示する。
 
 use crate::kanji::KanaKanjiConverter;
@@ -12,18 +12,19 @@ use crate::segments::{Candidate, CandidateSource};
 pub enum Run {
     Digit(String),
     Alpha(String),
+    Symbol(String),
     Kana(String),
 }
 
 impl Run {
     pub fn text(&self) -> &str {
         match self {
-            Run::Digit(s) | Run::Alpha(s) | Run::Kana(s) => s,
+            Run::Digit(s) | Run::Alpha(s) | Run::Symbol(s) | Run::Kana(s) => s,
         }
     }
 
     pub fn is_literal(&self) -> bool {
-        matches!(self, Run::Digit(_) | Run::Alpha(_))
+        matches!(self, Run::Digit(_) | Run::Alpha(_) | Run::Symbol(_))
     }
 
     pub fn is_digit(&self) -> bool {
@@ -35,6 +36,7 @@ impl Run {
 enum CharKind {
     Digit,
     Alpha,
+    Symbol,
     Kana,
 }
 
@@ -44,9 +46,19 @@ fn classify_char(c: char) -> CharKind {
     } else if c.is_ascii_alphabetic() || ('Ａ'..='Ｚ').contains(&c) || ('ａ'..='ｚ').contains(&c)
     {
         CharKind::Alpha
+    } else if is_convertible_symbol(c) {
+        CharKind::Symbol
     } else {
         CharKind::Kana
     }
+}
+
+fn is_convertible_symbol(c: char) -> bool {
+    (c.is_ascii_graphic() && !c.is_ascii_alphanumeric())
+        || (('\u{ff01}'..='\u{ff5e}').contains(&c)
+            && !('０'..='９').contains(&c)
+            && !('Ａ'..='Ｚ').contains(&c)
+            && !('ａ'..='ｚ').contains(&c))
 }
 
 fn to_halfwidth_digits(s: &str) -> String {
@@ -216,11 +228,86 @@ fn alpha_candidate_structs(s: &str) -> Vec<Candidate> {
     }
 }
 
+fn to_halfwidth_symbol(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if ('\u{ff01}'..='\u{ff5e}').contains(&c) {
+                char::from_u32(c as u32 - 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn to_fullwidth_symbol(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_ascii_graphic() && !c.is_ascii_alphanumeric() {
+                char::from_u32(c as u32 + 0xfee0).unwrap_or(c)
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+fn symbol_candidates(s: &str) -> Vec<String> {
+    let half = to_halfwidth_symbol(s);
+    let full = to_fullwidth_symbol(s);
+    if half == full {
+        vec![half]
+    } else {
+        vec![half, full]
+    }
+}
+
+#[cfg(test)]
+fn symbol_candidate_structs(s: &str) -> Vec<Candidate> {
+    let half = to_halfwidth_symbol(s);
+    let full = to_fullwidth_symbol(s);
+    if half == full {
+        vec![Candidate {
+            surface: half,
+            source: CandidateSource::Literal,
+            annotation: None,
+        }]
+    } else {
+        vec![
+            Candidate {
+                surface: half,
+                source: CandidateSource::Literal,
+                annotation: Some("半角".into()),
+            },
+            Candidate {
+                surface: full,
+                source: CandidateSource::Literal,
+                annotation: Some("全角".into()),
+            },
+        ]
+    }
+}
+
 fn literal_candidates(run: &Run) -> Vec<String> {
     match run {
         Run::Digit(s) => digit_candidates(s),
         Run::Alpha(s) => alpha_candidates(s),
+        Run::Symbol(s) => symbol_candidates(s),
         Run::Kana(_) => unreachable!(),
+    }
+}
+
+fn half_full_literal_candidates(run: &Run) -> Vec<String> {
+    let (half, full) = match run {
+        Run::Digit(s) => (to_halfwidth_digits(s), to_fullwidth_digits(s)),
+        Run::Alpha(s) => (to_halfwidth_alpha(s), to_fullwidth_alpha(s)),
+        Run::Symbol(s) => (to_halfwidth_symbol(s), to_fullwidth_symbol(s)),
+        Run::Kana(_) => unreachable!(),
+    };
+    if half == full {
+        vec![half]
+    } else {
+        vec![half, full]
     }
 }
 
@@ -230,6 +317,7 @@ fn literal_candidate_structs(run: &Run) -> Vec<Candidate> {
     match run {
         Run::Digit(s) => digit_candidate_structs(s),
         Run::Alpha(s) => alpha_candidate_structs(s),
+        Run::Symbol(s) => symbol_candidate_structs(s),
         Run::Kana(_) => unreachable!(),
     }
 }
@@ -263,6 +351,7 @@ fn make_run(kind: CharKind, text: String) -> Run {
     match kind {
         CharKind::Digit => Run::Digit(text),
         CharKind::Alpha => Run::Alpha(text),
+        CharKind::Symbol => Run::Symbol(text),
         CharKind::Kana => Run::Kana(text),
     }
 }
@@ -322,28 +411,14 @@ pub fn convert_with_digit_protection(
         if runs.iter().all(|r| matches!(r, Run::Alpha(_))) {
             return Ok(alpha_candidates(&literal_str));
         }
-        // 数字+アルファベット混在のリテラルのみ
-        let half: String = runs
-            .iter()
-            .map(|r| match r {
-                Run::Digit(s) => to_halfwidth_digits(s),
-                Run::Alpha(s) => to_halfwidth_alpha(s),
-                Run::Kana(s) => s.clone(),
-            })
-            .collect();
-        let full: String = runs
-            .iter()
-            .map(|r| match r {
-                Run::Digit(s) => to_fullwidth_digits(s),
-                Run::Alpha(s) => to_fullwidth_alpha(s),
-                Run::Kana(s) => s.clone(),
-            })
-            .collect();
-        return if half == full {
-            Ok(vec![half])
-        } else {
-            Ok(vec![half, full])
-        };
+        if runs.iter().all(|r| matches!(r, Run::Symbol(_))) {
+            return Ok(symbol_candidates(&literal_str));
+        }
+        // 数字+アルファベット+記号混在のリテラルのみ。
+        // 数字の漢数字化は「数字だけ」の時に限定し、混在時は半角/全角候補を合成する。
+        let run_candidates: Vec<Vec<String>> =
+            runs.iter().map(half_full_literal_candidates).collect();
+        return Ok(combine_runs(&run_candidates, num_candidates));
     }
 
     let mut run_candidates: Vec<Vec<String>> = Vec::with_capacity(runs.len());
@@ -497,6 +572,32 @@ mod tests {
     }
 
     #[test]
+    fn split_alpha_symbol_alpha() {
+        let runs = split_by_digits("USB-C");
+        assert_eq!(
+            runs,
+            vec![
+                Run::Alpha("USB".into()),
+                Run::Symbol("-".into()),
+                Run::Alpha("C".into()),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_fullwidth_symbol() {
+        let runs = split_by_digits("（test）");
+        assert_eq!(
+            runs,
+            vec![
+                Run::Symbol("（".into()),
+                Run::Alpha("test".into()),
+                Run::Symbol("）".into()),
+            ]
+        );
+    }
+
+    #[test]
     fn verify_preserved_ok() {
         assert!(verify_digits_preserved("２０２４ねん", "２０２４年"));
         assert!(verify_digits_preserved("２０２４ねん", "2024年"));
@@ -603,6 +704,62 @@ mod tests {
     fn alpha_lowercase() {
         let cands = alpha_candidates("abc");
         assert_eq!(cands, vec!["abc", "ａｂｃ"]);
+    }
+
+    #[test]
+    fn symbol_candidates_halfwidth() {
+        let cands = symbol_candidates("+-*/");
+        assert_eq!(cands, vec!["+-*/", "＋－＊／"]);
+    }
+
+    #[test]
+    fn symbol_candidates_fullwidth() {
+        let cands = symbol_candidates("（！）");
+        assert_eq!(cands, vec!["(!)", "（！）"]);
+    }
+
+    #[test]
+    fn symbol_candidate_structs_has_annotations() {
+        let cands = symbol_candidate_structs("@");
+        assert_eq!(cands.len(), 2);
+        assert_eq!(cands[0].surface, "@");
+        assert_eq!(cands[0].annotation.as_deref(), Some("半角"));
+        assert_eq!(cands[1].surface, "＠");
+        assert_eq!(cands[1].annotation.as_deref(), Some("全角"));
+    }
+
+    #[test]
+    fn combine_alpha_symbol_runs() {
+        let runs = vec![
+            alpha_candidates("USB"),
+            symbol_candidates("-"),
+            alpha_candidates("C"),
+        ];
+        let result = combine_runs(&runs, 6);
+        assert_eq!(
+            result,
+            vec![
+                "USB-C",
+                "USB-Ｃ",
+                "USB－C",
+                "USB－Ｃ",
+                "ＵＳＢ-C",
+                "ＵＳＢ-Ｃ"
+            ]
+        );
+    }
+
+    #[test]
+    fn combine_mixed_literal_runs_without_kanji_digits() {
+        let runs = split_by_digits("3D-C");
+        let run_candidates: Vec<Vec<String>> =
+            runs.iter().map(half_full_literal_candidates).collect();
+        let result = combine_runs(&run_candidates, 6);
+        assert_eq!(
+            result,
+            vec!["3D-C", "3D-Ｃ", "3D－C", "3D－Ｃ", "3Ｄ-C", "3Ｄ-Ｃ"]
+        );
+        assert!(!result.iter().any(|s| s.contains('三')));
     }
 
     #[test]
