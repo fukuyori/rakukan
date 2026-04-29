@@ -214,6 +214,22 @@ pub extern "C" fn engine_bg_take_candidates(
     }
 }
 
+/// M2 §5.2: ライブ変換 preview 用、トップ候補だけを覗き見る (cache 状態を進めない)。
+/// 戻り値: トップ候補の文字列、または null（未完了/不一致）
+/// 戻り値は `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_peek_top_candidate(
+    handle: *mut c_void,
+    key: *const c_char,
+) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    let key_str = unsafe { from_cstr(key) };
+    match engine.bg_peek_top_candidate(key_str) {
+        Some(s) => unsafe { to_cstr(s) },
+        None => std::ptr::null_mut(),
+    }
+}
+
 /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_bg_reclaim(handle: *mut c_void) {

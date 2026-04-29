@@ -262,16 +262,30 @@ internal sealed class SettingsStore
 
     private static bool WriteIfDifferent(string path, string contents)
     {
+        // Tomlyn の Toml.FromModel は LF 改行のみで出力するため、Windows 既定の
+        // CRLF に揃える。既存ファイルが CRLF の状態で LF を書くと混在 (last
+        // line だけ LF になる等) し、ユーザがエディタで開いたときに改行コード
+        // 不統一の警告が出る。比較も正規化後の文字列で行うことで、CRLF→CRLF
+        // の冪等書き込みを spurious change と誤判定しない。
+        var normalized = NormalizeToCrlf(contents);
         if (File.Exists(path))
         {
             var existing = File.ReadAllText(path);
-            if (string.Equals(existing, contents, StringComparison.Ordinal))
+            if (string.Equals(existing, normalized, StringComparison.Ordinal))
             {
                 return false;
             }
         }
-        File.WriteAllText(path, contents);
+        File.WriteAllText(path, normalized);
         return true;
+    }
+
+    private static string NormalizeToCrlf(string text)
+    {
+        // CRLF / LF / 単独 CR が混在しても最終的に CRLF へ統一する。
+        // Replace の連鎖は: まず CRLF→LF で重複を潰し、CR→LF で残りの CR を吸収、
+        // 最後に LF→CRLF。
+        return text.Replace("\r\n", "\n").Replace("\r", "\n").Replace("\n", "\r\n");
     }
 
     public void OpenConfig() => OpenInNotepad(ConfigPath);
@@ -643,7 +657,7 @@ internal sealed class SettingsStore
         EnsureDirectory(path);
         if (!File.Exists(path))
         {
-            File.WriteAllText(path, defaultText);
+            File.WriteAllText(path, NormalizeToCrlf(defaultText));
         }
     }
 }

@@ -213,6 +213,31 @@ pub fn start(
     None
 }
 
+/// バックグラウンド変換結果のトップ候補だけを覗き見る (M2 §5.2 採用)。
+///
+/// `take_ready` とは異なり、cache の状態を Done のまま保つ:
+///   - converter は cache に残るので engine.kanji を空にしない
+///   - candidates もそのまま、複数回 peek 可能
+///   - ライブ変換 preview 経路で使う想定。dict マージは行わない
+///     (preview はトップ候補だけで十分、user dict は commit で merge する)
+///
+/// 次回 `bg_start` が呼ばれたとき、別キーなら conv_cache::start が
+/// pending を積んで worker が Done を上書きする (`reclaim_nonblocking` 経由で
+/// engine 側で converter を取り戻す経路もある)。
+pub fn peek_top_candidate(key: &str) -> Option<String> {
+    let cache = &**CACHE;
+    let inner = cache.inner.lock().ok()?;
+    if let State::Done {
+        key: k, candidates, ..
+    } = &inner.state
+    {
+        if k == key {
+            return candidates.first().cloned();
+        }
+    }
+    None
+}
+
 /// バックグラウンド変換結果を取り出す。
 ///
 /// `key` が一致する Done 状態であれば `Some((conv, candidates))` を返す。

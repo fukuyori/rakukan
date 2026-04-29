@@ -266,6 +266,14 @@ impl RpcEngine {
             _ => None,
         }
     }
+    /// M2 §5.2: ライブ変換 preview 用、トップ候補だけを peek (cache 状態を進めない)。
+    /// サーバ側 `bg_peek_top_candidate` が空文字列を返した場合は None に正規化する。
+    pub fn bg_peek_top_candidate(&self, key: &str) -> Option<String> {
+        match self.call_string(Request::BgPeekTopCandidate { key: key.into() }) {
+            Ok(s) if !s.is_empty() => Some(s),
+            _ => None,
+        }
+    }
     pub fn bg_reclaim(&self) {
         let _ = self.call_unit(Request::BgReclaim);
     }

@@ -632,6 +632,19 @@ impl RakunEngine {
         conv_cache::status()
     }
 
+    /// ライブ変換 preview 用にトップ候補だけを覗き見する (M2 §5.2)。
+    ///
+    /// `bg_take_candidates` と異なり cache 状態を進めず、converter は cache に
+    /// 残す。dict マージも行わないため、preview の純度が上がり commit 経路と
+    /// 干渉しない。状態を進めない=複数回 peek しても結果は同じ。
+    ///
+    /// 次回 `bg_start` で別キーが来たときは、`bg_start` 内部で
+    /// `conv_cache::reclaim_nonblocking()` が Done state から converter を
+    /// 回収するため、converter を engine.kanji に戻す手間は不要。
+    pub fn bg_peek_top_candidate(&self, key: &str) -> Option<String> {
+        conv_cache::peek_top_candidate(key)
+    }
+
     /// key が一致する BG 変換結果を取得し、converter を engine に戻す。
     /// None = まだ完了していない / キー不一致
     ///

@@ -198,6 +198,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             Some(v) => Response::Strings(v),
             None => Response::Strings(vec![]),
         },
+        BgPeekTopCandidate { key } => match eng.bg_peek_top_candidate(&key) {
+            Some(s) => Response::String(s),
+            None => Response::String(String::new()),
+        },
         #[allow(deprecated)]
         _ReservedBgTakeSegmentedCandidates { .. } => Response::Error("removed".into()),
         BgReclaim => {

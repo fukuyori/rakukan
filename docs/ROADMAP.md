@@ -62,9 +62,9 @@
 | **v0.7.1** ✅ 2026-04-24 | ✅ M1.6 T-HOST1〜4（host 再起動化 + 読込中 UI + 握り潰し撤去 + 時間計測）+ ✅ M1 T3-A/T3-B/T1-D（基盤整理 + docs 整備） | minor | host crash 根絶 + 読込中体感改善 + dead code 削減 + 調査資料整備 |
 | **v0.7.2** ✅ 2026-04-28 | ✅ M1.6 T-HOST5（`engine_reload` reconnect race の解消、`ensure_connected` リトライ + `engine_reload` 100ms sleep）+ ✅ M1.6 T-HOST6（engine-host 診断強化: panic hook / stderr→log redirect / `#[track_caller]` ベース呼出元ログ） | patch | 観測済み race の即時修正 + サイレント死診断 |
 | **v0.7.3** | M1.5 T-BUG1（早期 EOS 抑制、繰り延べ）+ M1.8 T-MID2/3（stale check + SetText 排他、繰り延べ） | patch | engine 品質改善 + race 対策堅牢化 |
-| **v0.7.4** | M3（factory.rs 分割） | patch | 純リファクタ、動作不変 |
-| **v0.7.5** | M2（ライブ変換可読性 + bg_peek/take + session_nonce） | minor | 機能追加含むため minor |
-| **v0.7.6** | M4（LiveConvSession 集約） | minor | ライブ変換中枢の再設計 |
+| ~~**v0.7.4**~~ | ~~M3（factory.rs 分割）~~ | — | v0.7.5 に統合 (リリース skip) |
+| **v0.7.5** ✅ 2026-04-29 | ✅ M3 T1-A (factory.rs 分割) + ✅ M2 §5.1 (on_live_timer 6 分解) + ✅ M2 §5.2 (bg_peek_top_candidate 新設) + WinUI config.toml CRLF 統一 + Claude Code Stop hook 追加 | minor | リファクタ + preview 経路の非破壊化 |
+| **v0.7.6** | M4（LiveConvSession 集約）+ **M2 §5.3 session_nonce を吸収** | minor | ライブ変換中枢の再設計 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:
@@ -158,11 +158,11 @@ M5 (着手しない前提): 追加対策    （実機再発時のみ開封）
 | **M1.8** | T-MID2: EditSession 入口で composition stale check | 半日 | 小 | bug fix | ✓ | v0.7.3（繰り延べ） |
 | **M1.8** | T-MID3: Phase1A / Phase1B の SetText 二重適用排他化 | 半日 | 中（ロック/順序設計要） | bug fix | ✓ | v0.7.3（繰り延べ） |
 | **M1.8 合計** | ライブ変換中の中間文字消失 | **1〜2 日** | 中 | ★ user-facing bug | M2 と根本原因共有（先行バックポート） | v0.7.0 + v0.7.3 |
-| **M2** | T1-B: on_live_timer 分解 | 半日 | 中（ロック順保持） | リファクタ | — | v0.7.5 |
-| **M2** | bg_peek/take API 分離 (§18.3) | 1 日 | 中（API 変更 ~10 箇所） | リファクタ + 機能 | — | v0.7.5 |
-| **M2** | session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | v0.7.5 |
-| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | v0.7.5 |
-| **M3** | T1-A: factory.rs 分割 | **1〜2 日** | 小（純粋切り出し） | リファクタ | — | v0.7.4 |
+| **M2** | ✅ T1-B: on_live_timer 分解 (6 サブ関数) | 半日 | 中（ロック順保持） | リファクタ | — | **v0.7.5 済** |
+| **M2** | ✅ bg_peek/take API 分離 (§18.3) | 1 日 | 中（API 変更 ~10 箇所 → 実際は preview 経路 1 箇所のみ置換） | リファクタ + 機能 | — | **v0.7.5 済** |
+| **M2** | session_nonce + gen (§18.3) | 1 日 | 中 | 機能追加 | — | v0.7.6 へ繰り延べ (M4 で吸収) |
+| **M2 合計** | ライブ変換ロジック可読性向上 | **3〜5 日** | 中 | リファクタ + 機能 | M1.6 後推奨 | v0.7.5 済 (§5.3 を除く) |
+| **M3** | ✅ T1-A: factory.rs 分割 (6 ファイル化) | **1〜2 日** | 小（純粋切り出し） | リファクタ | — | **v0.7.4 済** |
 | **M4** | T2: LiveConvSession 構造体集約 | **3〜5 日** | 中〜大（ライブ変換中枢） | リファクタ | 段階 PR 推奨 | v0.7.6 |
 | **M5.1** | WM_TIMER → PostMessage 化（条件付き） | 1〜2 日 | 中 | crash 対策 | 実機再発時のみ | v0.7.x patch |
 | **M5.2** | Explorer シェル分岐（条件付き） | 半日 | 小（UX 劣化あり） | crash 局所回避 | 実機再発時のみ | v0.7.x patch |

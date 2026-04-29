@@ -33,5 +33,19 @@
     "additionalDirectories": [
       "\\tmp"
     ]
+  },
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "powershell",
+            "command": "pwsh -NoProfile -File scripts/check-install-instruction.ps1",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
   }
 }

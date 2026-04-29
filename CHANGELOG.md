@@ -3,6 +3,45 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.7.5] - 2026-04-29
+
+### Fixed
+
+- **WinUI 設定 UI で保存した `config.toml` の改行コードが LF になっていた** — `Tomlyn.Toml.FromModel(...)` の出力は LF 単独のため、Windows 既定の CRLF にならず、既存 CRLF ファイルへ書き出すと「最初の数行だけ CRLF、それ以降は LF」のような混在状態が発生していた。`SettingsStore.WriteIfDifferent` と `EnsureFile` に `NormalizeToCrlf` ヘルパーを挟み、書き出し前に CRLF に統一。比較も正規化後の文字列で行うため、CRLF→CRLF の冪等書き込みを spurious change と誤判定しない
+
+### Changed
+
+- **`factory.rs` を 6 ファイルに分割** (M3 T1-A) — 4816 行の god file を機能別に切り出し、可読性と保守性を向上。**ロジック変更なし** (純粋切り出し、関数本体は完全に同一)。impl ブロックは inherent impl として子モジュールで `impl super::TextServiceFactory_Impl { pub(super) fn ... }` のスタイルで分割。各メソッドは `pub(super)` で兄弟モジュールから呼び出し可能:
+  - `factory.rs` 1421 行 (核: COM impl / langbar / key event sink / 構造体定義 / Activate/Deactivate / 自由関数ヘルパー)
+  - `factory/dispatch.rs` 375 行 (`handle_action`: ユーザアクションを各 on_* へ振り分ける dispatcher)
+  - `factory/on_input.rs` 396 行 (`on_input` / `on_input_raw` / `on_full_width_space` / `prepare_for_direct_input`)
+  - `factory/on_convert.rs` 1170 行 (`on_convert` / `on_commit_raw` / `on_backspace` / `on_cancel`)
+  - `factory/on_compose.rs` 637 行 (composition の EditSession ヘルパー: `update_composition` / `commit_then_start_composition` / `update_composition_candidate_parts` / `end_composition` / `commit_text` / `update_caret_rect` / キャレット/range 取得 (`get_caret_pos_from_context` / `get_cursor_range` / `get_insert_range_or_end` / `get_document_end_range`) / `set_display_attr_prop`)
+  - `factory/edit_ops.rs` 952 行 (F6-F10 のかな/英数変換 / `on_cycle_kana` / 候補ナビ (`on_candidate_move` / `on_candidate_page` / `on_candidate_select`) / IME トグル (`on_ime_toggle` / `on_ime_off` / `on_ime_on`) / モード切替 (`on_mode_hiragana` / `on_mode_katakana`) / 文節操作 (`on_segment_*`) / `on_punctuate`)
+  - 可視性の調整: `enum CandidateDir`, `loading_indicator_symbol`, `action_name` を `pub(super)` に変更 (子モジュールから参照するため)
+- **`on_live_timer` を 6 サブ関数に分解** (M2 §5.1 / T1-B) — 298 行の god function を機能別に分割し可読性を向上。**動作変更なし** (純粋分解、ロック取得順序も保持):
+  - `pass_debounce()` — `LIVE_DEBOUNCE_CFG_MS` 経過チェック (None なら早期 return)
+  - `probe_engine(elapsed)` — engine ロック取得 + `hiragana_text` / `bg_status` 取得 + 「FIRED ...」ログ。busy=continue / no-preedit=stop_live_timer
+  - `ensure_bg_running(&probe)` — bg=done を確認、idle なら `bg_start` 自己起動 (kanji_ready 判定込み)、running は wait
+  - `fetch_preview()` — `bg_peek_top_candidate` で取得 + `sanity_check_preview` (T-BUG2 防壁)
+  - `build_apply_snapshot(data)` — `display_shown = preview + pending` 組み立て
+  - `try_apply_phase1a(&snapshot)` / `queue_phase1b(&snapshot)` — `RequestEditSession` or `LIVE_PREVIEW_QUEUE` 経由
+  - orchestrator 本体は 16 行に縮小し、各段の責務を `let-else` で素直に並べる
+
+### Added
+
+- **`bg_peek_top_candidate` API を新設** (M2 §5.2) — ライブ変換 preview のために conv_cache を**非破壊**に覗き見る経路を追加。従来 `bg_take_candidates` は preview / commit の両方で使われ、毎回 cache を空にして converter を engine に戻し user dict マージまで実行していた。peek/take 分離後:
+  - **preview** (`fetch_preview`) → `bg_peek_top_candidate(key)` を呼ぶ。Done state はそのまま、user dict マージなし、トップ候補だけ String で返す
+  - **commit / Space 変換** (`bg_take_candidates`) → 従来通り converter を engine に戻し、user dict マージして全候補を返す
+  - **converter の auto-reclaim** — preview で take しなくなる代わりに、次の `bg_start` 内で `conv_cache::try_reclaim_done()` (既存、lib.rs:603) が Done state から converter を回収するため、engine.kanji の空状態は問題にならない
+  - 実装は engine / engine-host / RPC の **out-of-process 構成のため 5 層** に追加: `conv_cache::peek_top_candidate` / `RakunEngine::bg_peek_top_candidate` / `engine_bg_peek_top_candidate` (FFI) / `DynEngine::bg_peek_top_candidate` (engine-abi) / `Request::BgPeekTopCandidate` (RPC) / `RpcEngine::bg_peek_top_candidate` (client)
+  - サーバ側で空文字列を返した場合は `RpcEngine` 側で `None` に正規化し、TSF からは `Option<String>` として扱う
+- **install/build 手順誤案内を防ぐ Stop hook** — Claude Code 用の `.claude/settings.json` に Stop hook を追加し、AI アシスタント (Claude) が `cargo make install` を案内しているのに直前に `cargo make build-tsf` / `cargo make build-engine` の案内が無い場合、または「install 後にサインアウト」のような誤った順序を書いた場合に block して再考を促す。検査スクリプトは `scripts/check-install-instruction.ps1` (PowerShell)。CLAUDE.md に正しい手順 (sign-out → sign-in → build → install) は明記済みだが、案内のたびに見落とすケースがあったため構造的に止める仕組みを入れる
+
+### Deferred
+
+- **M2 §5.3 (`session_nonce` で stale 結果 discard)** を v0.7.6 (M4 LiveConvSession 集約) に繰り延べ — 観測された具体的 bug がなく、M1.8 既存防壁 (T-MID1 gen / T-MID2 stale check / T-MID3 SetText 排他) で race の大半をカバー済み。M4 で `LiveConvSession` 構造体を新設するときに nonce をメンバとして自然に組み込める
+
 ## [0.7.3] - 2026-04-28
 
 ### Fixed

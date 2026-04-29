@@ -107,6 +107,7 @@ struct EngineVTable {
     bg_start: unsafe extern "C" fn(*mut c_void, u32) -> bool,
     bg_status: unsafe extern "C" fn(*mut c_void) -> *const c_char,
     bg_take_candidates: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    bg_peek_top_candidate: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
     bg_reclaim: unsafe extern "C" fn(*mut c_void),
     bg_wait_ms: unsafe extern "C" fn(*mut c_void, u64) -> u8,
 
@@ -200,6 +201,7 @@ impl EngineVTable {
             bg_start: load_sym!(lib, b"engine_bg_start\0"),
             bg_status: load_sym!(lib, b"engine_bg_status\0"),
             bg_take_candidates: load_sym!(lib, b"engine_bg_take_candidates\0"),
+            bg_peek_top_candidate: load_sym!(lib, b"engine_bg_peek_top_candidate\0"),
             bg_reclaim: load_sym!(lib, b"engine_bg_reclaim\0"),
             bg_wait_ms: load_sym!(lib, b"engine_bg_wait_ms\0"),
             commit: load_sym!(lib, b"engine_commit\0"),
@@ -411,6 +413,15 @@ impl DynEngine {
             let ptr = (self.vtable.bg_take_candidates)(self.handle, ckey.as_ptr());
             let json = self.take_cstr(ptr)?;
             serde_json::from_str(&json).ok()
+        }
+    }
+
+    /// M2 §5.2: ライブ変換 preview 用、トップ候補だけを覗き見る (cache を進めない)。
+    pub fn bg_peek_top_candidate(&self, key: &str) -> Option<String> {
+        let ckey = Self::to_cstring(key);
+        unsafe {
+            let ptr = (self.vtable.bg_peek_top_candidate)(self.handle, ckey.as_ptr());
+            self.take_cstr(ptr)
         }
     }
 

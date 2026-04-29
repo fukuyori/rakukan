@@ -1126,52 +1126,49 @@ pub(crate) fn sanity_check_preview(reading: &str, preview: String, site: &str) -
     }
 }
 
-/// WM_TIMER(LIVE_TIMER_ID) コールバック。
-///
-/// # 動作方針
-/// - Phase 1A 試行: WM_TIMER から RequestEditSession を直接呼ぶ（成功すれば即時更新）
-/// - Phase 1B fallback: 失敗時は LIVE_PREVIEW_QUEUE に書き込み → 次キー入力で反映
-pub fn on_live_timer() {
-    use crate::engine::state::{
-        composition_clone, engine_try_get, LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY,
-    };
-    use crate::tsf::edit_session::EditSession;
-    use windows::Win32::UI::TextServices::TF_ES_READWRITE;
-
-    // ── [診断] タイマー発火確認（条件チェック前に必ず出力）──────────────────
+/// debounce 経過時刻を返す。debounce 中なら `None` (caller は早期リターン)。
+fn pass_debounce() -> Option<u64> {
     let debounce_ms = LIVE_DEBOUNCE_CFG_MS.load(AO::Relaxed);
     let now = current_millis();
     let last = LIVE_LAST_INPUT_MS.load(AO::Relaxed);
     let elapsed = now.saturating_sub(last);
     if elapsed < debounce_ms {
-        return; // まだデバウンス中（ログなし）
+        None
+    } else {
+        Some(elapsed)
     }
+}
 
-    // ── エンジンのプリエディットバッファ確認 ─────────────────────────────────
-    // 通常入力中のセッション状態は Idle のまま（SessionState::Preedit へ遷移するのは
-    // Selecting/Waiting から戻るときのみ）。エンジンバッファで直接判定する。
-    //
-    // engine_try_get() が Err を返すのは一時的なロック競合（Space 変換などが保持中）。
-    // このときに stop_live_timer() するとタイマーが死んで次の on_input まで復活しない
-    // ため、busy のときは何もせず次回発火を待つ。
-    let probe = {
-        match engine_try_get() {
-            Ok(g) => g.as_ref().map(|e| {
-                let h = e.hiragana_text().to_string();
-                let bg = e.bg_status();
-                (h, bg)
-            }),
-            Err(_) => {
-                tracing::trace!("[Live] on_live_timer: engine busy, retry next tick");
-                return;
-            }
+/// engine からの probe 結果。`hiragana` は probe_engine 内でログするだけで
+/// 後段では使わないため、struct には保持しない。
+struct LiveProbe {
+    bg_status: &'static str,
+}
+
+/// engine の hiragana / bg_status を取得する。
+///
+/// `None`: 続行不可（caller は return）。
+///   - busy: 一時的ロック競合 → 次 tick で再試行（タイマーは止めない）
+///   - empty preedit: タイマー停止して終了
+///   いずれもこの関数内で `stop_live_timer()` を必要に応じて呼ぶ。
+fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
+    use crate::engine::state::engine_try_get;
+    let probe = match engine_try_get() {
+        Ok(g) => g.as_ref().map(|e| {
+            let h = e.hiragana_text().to_string();
+            let bg = e.bg_status();
+            (h, bg)
+        }),
+        Err(_) => {
+            tracing::trace!("[Live] on_live_timer: engine busy, retry next tick");
+            return None;
         }
     };
     let (hiragana, bg_status_str) = match probe {
         Some(v) => v,
         None => {
             stop_live_timer();
-            return;
+            return None;
         }
     };
     let has_preedit = !hiragana.is_empty();
@@ -1182,82 +1179,106 @@ pub fn on_live_timer() {
         hiragana,
         bg_status_str
     );
-
     if !has_preedit {
         stop_live_timer();
-        return;
+        return None;
     }
-    let bg_done = bg_status_str == "done";
-    if !bg_done {
-        if bg_status_str == "idle" {
-            // bg=idle かつ preedit あり → ライブタイマーから bg_start を自己起動
-            // poll_*_ready() を呼ばないと is_kanji_ready() が false のままになる
-            let started = match engine_try_get() {
-                Ok(mut g) => g
-                    .as_mut()
-                    .map(|e| {
-                        let _ = crate::engine::state::poll_dict_ready_cached(e);
-                        let _ = crate::engine::state::poll_model_ready_cached(e);
-                        let kanji_ready = e.is_kanji_ready();
-                        let dict_ready = e.is_dict_ready();
-                        tracing::info!(
-                            "[Live] on_live_timer: kanji_ready={} dict_ready={}",
-                            kanji_ready,
-                            dict_ready
-                        );
-                        if !kanji_ready {
-                            // モデル未ロード → タイマーを止めてロック競合を防ぐ
-                            // モデルロード完了後、次の on_input で live_input_notify が再起動する
-                            return false;
-                        }
-                        e.bg_start(crate::engine::state::get_live_conv_beam_size())
-                    })
-                    .unwrap_or(false),
-                Err(_) => false,
-            };
-            tracing::info!("[Live] on_live_timer: bg=idle → bg_start={}", started);
-            if !started {
-                stop_live_timer(); // kanji_ready=false の間はタイマーを止める
-                return;
-            }
-        } else {
-            // bg=running: まだ変換中
-            if !LIVE_TIMER_FIRED_ONCE_STATIC.swap(true, AO::Relaxed) {
-                tracing::info!("[Live] on_live_timer: waiting bg={}", bg_status_str);
-            }
+    let _ = hiragana; // (logged above; not stored in LiveProbe)
+    Some(LiveProbe {
+        bg_status: bg_status_str,
+    })
+}
+
+/// bg ワーカーが done で結果取得可能なら `true`、そうでなければ caller は return。
+///
+/// - bg=done: そのまま続行
+/// - bg=idle: kanji_ready を確認して `bg_start`、いずれにせよこの tick は終了
+/// - bg=running: 単に待つ（タイマーは継続）
+fn ensure_bg_running(probe: &LiveProbe) -> bool {
+    use crate::engine::state::engine_try_get;
+    if probe.bg_status == "done" {
+        return true;
+    }
+    if probe.bg_status == "idle" {
+        // bg=idle かつ preedit あり → ライブタイマーから bg_start を自己起動。
+        // poll_*_ready() を呼ばないと is_kanji_ready() が false のままになる。
+        let started = match engine_try_get() {
+            Ok(mut g) => g
+                .as_mut()
+                .map(|e| {
+                    let _ = crate::engine::state::poll_dict_ready_cached(e);
+                    let _ = crate::engine::state::poll_model_ready_cached(e);
+                    let kanji_ready = e.is_kanji_ready();
+                    let dict_ready = e.is_dict_ready();
+                    tracing::info!(
+                        "[Live] on_live_timer: kanji_ready={} dict_ready={}",
+                        kanji_ready,
+                        dict_ready
+                    );
+                    if !kanji_ready {
+                        // モデル未ロード → タイマーを止めてロック競合を防ぐ。
+                        // モデルロード完了後、次の on_input で live_input_notify が再起動する。
+                        return false;
+                    }
+                    e.bg_start(crate::engine::state::get_live_conv_beam_size())
+                })
+                .unwrap_or(false),
+            Err(_) => false,
+        };
+        tracing::info!("[Live] on_live_timer: bg=idle → bg_start={}", started);
+        if !started {
+            stop_live_timer(); // kanji_ready=false の間はタイマーを止める
         }
-        return;
+    } else {
+        // bg=running: まだ変換中
+        if !LIVE_TIMER_FIRED_ONCE_STATIC.swap(true, AO::Relaxed) {
+            tracing::info!("[Live] on_live_timer: waiting bg={}", probe.bg_status);
+        }
     }
+    false
+}
+
+/// preview 取得結果。
+struct LivePreview {
+    reading: String,
+    pending: String,
+    preview: String,
+}
+
+/// engine から preview を取得し、尻切れ防壁を通す。
+///
+/// M2 §5.2: 取得は `bg_peek_top_candidate` を使う (非破壊・dict マージなし)。
+/// `bg_take_candidates` は commit / Space 変換用で converter を engine に戻すが、
+/// preview ではトップ候補を読むだけで十分。次の `bg_start` (新しい reading) は
+/// `try_reclaim_done` で converter を回収するので、preview で take する必要はない。
+fn fetch_preview() -> Option<LivePreview> {
+    use crate::engine::state::engine_try_get;
     LIVE_TIMER_FIRED_ONCE_STATIC.store(false, AO::Relaxed);
 
-    // ── トップ候補を取得 ────────────────────────────────────────────────────
     let (reading, pending, preview) = {
         let Ok(mut g) = engine_try_get() else {
             tracing::warn!("[Live] on_live_timer: engine busy");
-            return;
+            return None;
         };
-        let Some(eng) = g.as_mut() else { return };
+        let Some(eng) = g.as_mut() else { return None };
         let reading = eng.hiragana_text().to_string();
         if reading.is_empty() {
-            return;
+            return None;
         }
         let preedit_full = eng.preedit_display();
-        let pending =
-            crate::engine::text_util::suffix_after_prefix_or_empty(
-                &preedit_full,
-                &reading,
-                "on_live_timer pending",
-            )
-            .to_string();
-        let preview = eng
-            .bg_take_candidates(&reading)
-            .and_then(|c| c.into_iter().next());
+        let pending = crate::engine::text_util::suffix_after_prefix_or_empty(
+            &preedit_full,
+            &reading,
+            "on_live_timer pending",
+        )
+        .to_string();
+        let preview = eng.bg_peek_top_candidate(&reading);
         (reading, pending, preview)
     };
 
     let Some(preview) = preview else {
         tracing::debug!("[Live] on_live_timer: no candidates for {:?}", reading);
-        return;
+        return None;
     };
 
     // 尻切れ防壁: LLM が reading を使い切る前に EOS を出すと preview が極端に
@@ -1265,19 +1286,50 @@ pub fn on_live_timer() {
     // reading をそのまま表示する。RATIO は漢字圧縮の自然下限 (30%) を目安。
     let preview = sanity_check_preview(&reading, preview, "on_live_timer");
 
+    Some(LivePreview {
+        reading,
+        pending,
+        preview,
+    })
+}
+
+/// 取得した preview から composition に書く `display_shown` を組み立てる。
+struct LiveSnapshot {
+    reading: String,
+    preview: String,
+    display_shown: String,
+}
+
+fn build_apply_snapshot(data: LivePreview) -> LiveSnapshot {
+    let LivePreview {
+        reading,
+        pending,
+        preview,
+    } = data;
     let display_shown = if pending.is_empty() {
         preview.clone()
     } else {
         format!("{preview}{pending}")
     };
-
     tracing::info!(
         "[Live] on_live_timer: reading={:?} preview={:?}",
         reading,
         preview
     );
+    LiveSnapshot {
+        reading,
+        preview,
+        display_shown,
+    }
+}
 
-    // ── Phase 1A: RequestEditSession で直接 composition を更新 ───────────
+/// Phase 1A: RequestEditSession で直接 composition に SetText を書く。
+/// 成功したら `true` (caller は完了)、失敗したら `false` (Phase 1B へ落ちる)。
+fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
+    use crate::engine::state::composition_clone;
+    use crate::tsf::edit_session::EditSession;
+    use windows::Win32::UI::TextServices::TF_ES_READWRITE;
+
     let ctx_opt = TL_LIVE_CTX.with(|c| c.borrow().clone());
     let tid = TL_LIVE_TID.with(|c| c.get());
     let live_dm_ptr = TL_LIVE_DM_PTR.with(|c| c.get());
@@ -1296,136 +1348,163 @@ pub fn on_live_timer() {
         );
     }
 
-    if let Some(ctx) = ctx_opt.filter(|_| phase1a_possible) {
-        let ctx_req = ctx.clone();
-        let preview_1a = display_shown.clone();
-        let captured_dm_ptr = live_dm_ptr;
-        // M1.8 T-MID1 Phase1A 側: EditSession は TF_ES_READWRITE（非 SYNC）で
-        // 遅延実行されうる。登録時点の reading / gen を捕捉し、実行時に
-        // 現在値と比較して stale なら apply を skip する。これをしないと
-        // タイマー発火 → EditSession dispatch の間に打鍵された文字が
-        // 古い display_shown で上書きされて消える。
-        let captured_reading = reading.clone();
-        let captured_gen = crate::engine::state::live_conv_gen_snapshot();
+    let Some(ctx) = ctx_opt.filter(|_| phase1a_possible) else {
+        return false;
+    };
 
-        let session = EditSession::new(move |ec| unsafe {
-            use windows::Win32::Foundation::E_FAIL;
-            use windows::Win32::UI::TextServices::{
-                TfActiveSelEnd, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE,
+    let ctx_req = ctx.clone();
+    let preview_1a = snapshot.display_shown.clone();
+    let captured_dm_ptr = live_dm_ptr;
+    // M1.8 T-MID1 Phase1A 側: EditSession は TF_ES_READWRITE（非 SYNC）で
+    // 遅延実行されうる。登録時点の reading / gen を捕捉し、実行時に
+    // 現在値と比較して stale なら apply を skip する。
+    let captured_reading = snapshot.reading.clone();
+    let captured_gen = crate::engine::state::live_conv_gen_snapshot();
+
+    let session = EditSession::new(move |ec| unsafe {
+        use windows::Win32::Foundation::E_FAIL;
+        use windows::Win32::UI::TextServices::{
+            TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+        };
+        let now_focus = current_focus_dm_ptr();
+        if now_focus != Some(captured_dm_ptr) {
+            return Err(windows::core::Error::new(
+                E_FAIL,
+                format!(
+                    "focus DM changed between request and callback execution: expected={captured_dm_ptr:#x} actual={now_focus:?}"
+                ),
+            ));
+        }
+        // Stale 判定（M1.8 T-MID1 Phase1A 側）: EditSession が遅延実行され
+        // ている間に reading が進んでいたら apply しない。
+        let current_gen = crate::engine::state::live_conv_gen_snapshot();
+        if current_gen != captured_gen {
+            tracing::warn!(
+                "[Live] Phase1A: discarded stale SetText captured_gen={} current_gen={} reading={:?}",
+                captured_gen,
+                current_gen,
+                captured_reading
+            );
+            return Err(windows::core::Error::new(E_FAIL, "stale gen in Phase1A"));
+        }
+        let comp = crate::engine::state::composition_clone()
+            .unwrap_or(None)
+            .ok_or_else(|| windows::core::Error::new(E_FAIL, "no composition"))?;
+        let range = comp
+            .GetRange()
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
+        let text_w: Vec<u16> = preview_1a.encode_utf16().collect();
+        // M1.8 T-MID3: SetText 排他化。update_composition 系の SetText と
+        // 直列化されないと、deferred dispatch 順序によっては古い preview が
+        // 新しい preedit を上書きする risk がある。busy なら skip して
+        // 次回 timer / key で最新 gen の SetText を走らせる。
+        {
+            let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::debug!(
+                        "[Live] Phase1A: COMPOSITION_APPLY_LOCK busy, skip SetText"
+                    );
+                    return Ok(());
+                }
             };
-            let now_focus = current_focus_dm_ptr();
-            if now_focus != Some(captured_dm_ptr) {
-                return Err(windows::core::Error::new(
-                    E_FAIL,
-                    format!(
-                        "focus DM changed between request and callback execution: expected={captured_dm_ptr:#x} actual={now_focus:?}"
-                    ),
-                ));
-            }
-            // Stale 判定（M1.8 T-MID1 Phase1A 側）: EditSession が遅延実行され
-            // ている間に reading が進んでいたら apply しない。
-            let current_gen = crate::engine::state::live_conv_gen_snapshot();
-            if current_gen != captured_gen {
-                tracing::warn!(
-                    "[Live] Phase1A: discarded stale SetText captured_gen={} current_gen={} reading={:?}",
-                    captured_gen,
-                    current_gen,
-                    captured_reading
-                );
-                return Err(windows::core::Error::new(
-                    E_FAIL,
-                    "stale gen in Phase1A",
-                ));
-            }
-            let comp = crate::engine::state::composition_clone()
-                .unwrap_or(None)
-                .ok_or_else(|| windows::core::Error::new(E_FAIL, "no composition"))?;
-            let range = comp
-                .GetRange()
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
-            let text_w: Vec<u16> = preview_1a.encode_utf16().collect();
-            // M1.8 T-MID3: SetText 排他化。update_composition 系の SetText と
-            // 直列化されないと、deferred dispatch 順序によっては古い preview が
-            // 新しい preedit を上書きする risk がある。busy なら skip して
-            // 次回 timer / key で最新 gen の SetText を走らせる。
+            range
+                .SetText(ec, 0, &text_w)
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        }
+
+        let atom = crate::tsf::display_attr::atom_input();
+        if atom != 0 {
+            if let Ok(prop) =
+                ctx.GetProperty(&windows::Win32::UI::TextServices::GUID_PROP_ATTRIBUTE)
             {
-                let _apply_guard =
-                    match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
-                        Ok(g) => g,
-                        Err(_) => {
-                            tracing::debug!(
-                                "[Live] Phase1A: COMPOSITION_APPLY_LOCK busy, skip SetText"
-                            );
-                            return Ok(());
-                        }
-                    };
-                range
-                    .SetText(ec, 0, &text_w)
-                    .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
-            }
-
-            let atom = crate::tsf::display_attr::atom_input();
-            if atom != 0 {
-                if let Ok(prop) =
-                    ctx.GetProperty(&windows::Win32::UI::TextServices::GUID_PROP_ATTRIBUTE)
-                {
-                    let _ = prop.Clear(ec, &range);
-                    let var = windows_core::VARIANT::from(atom as i32);
-                    let _ = prop.SetValue(ec, &range, &var);
-                }
-            }
-
-            if let Ok(cursor) = range.Clone() {
-                let _ = cursor.Collapse(ec, TF_ANCHOR_END);
-                let sel = TF_SELECTION {
-                    range: std::mem::ManuallyDrop::new(Some(cursor)),
-                    style: TF_SELECTIONSTYLE {
-                        ase: TfActiveSelEnd(0),
-                        fInterimChar: windows::Win32::Foundation::BOOL(0),
-                    },
-                };
-                let _ = ctx.SetSelection(ec, &[sel]);
-            }
-            Ok(())
-        });
-
-        let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
-
-        match result {
-            Ok(_) => {
-                if let Ok(mut sess) = crate::engine::state::session_get() {
-                    sess.set_live_conv(reading.clone(), preview.clone());
-                }
-                stop_live_timer();
-                return;
-            }
-            Err(_) => {
-                // Phase 1A 失敗 → Phase 1B フォールバック
+                let _ = prop.Clear(ec, &range);
+                let var = windows_core::VARIANT::from(atom as i32);
+                let _ = prop.SetValue(ec, &range, &var);
             }
         }
-    }
 
-    // ── Phase 1B フォールバック: キューに書き込む ────────────────────────────
-    // 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
-    // gen と reading のスナップショットを添えることで、消費側で stale を弾く（M1.8 T-MID1）。
+        if let Ok(cursor) = range.Clone() {
+            let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+            let sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(cursor)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            };
+            let _ = ctx.SetSelection(ec, &[sel]);
+        }
+        Ok(())
+    });
+
+    let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
+    match result {
+        Ok(_) => {
+            if let Ok(mut sess) = crate::engine::state::session_get() {
+                sess.set_live_conv(snapshot.reading.clone(), snapshot.preview.clone());
+            }
+            stop_live_timer();
+            true
+        }
+        Err(_) => false,
+    }
+}
+
+/// Phase 1B フォールバック: キューに書き込む。
+/// 次のキー入力時に handle_action の冒頭ポーリングが拾って composition を更新する。
+/// gen と reading のスナップショットを添えることで、消費側で stale を弾く（M1.8 T-MID1）。
+fn queue_phase1b(snapshot: &LiveSnapshot) {
+    use crate::engine::state::{LIVE_PREVIEW_QUEUE, LIVE_PREVIEW_READY};
     if let Ok(mut q) = LIVE_PREVIEW_QUEUE.try_lock() {
         let gen_snapshot = crate::engine::state::live_conv_gen_snapshot();
         *q = Some(crate::engine::state::PreviewEntry {
-            preview: preview.clone(),
-            reading: reading.clone(),
+            preview: snapshot.preview.clone(),
+            reading: snapshot.reading.clone(),
             gen_when_requested: gen_snapshot,
         });
         LIVE_PREVIEW_READY.store(true, AO::Release);
         tracing::debug!(
             "[Live] Phase1B: queued preview={:?} reading={:?} gen={}",
-            preview,
-            reading,
+            snapshot.preview,
+            snapshot.reading,
             gen_snapshot
         );
     } else {
         tracing::warn!("[Live] Phase1B: LIVE_PREVIEW_QUEUE busy, skipping");
     }
-
     // Phase 1B ではタイマーを停止する（キュー上書きを防ぐ）
     stop_live_timer();
+}
+
+/// WM_TIMER(LIVE_TIMER_ID) コールバック。
+///
+/// # 動作方針
+/// - Phase 1A 試行: WM_TIMER から RequestEditSession を直接呼ぶ（成功すれば即時更新）
+/// - Phase 1B fallback: 失敗時は LIVE_PREVIEW_QUEUE に書き込み → 次キー入力で反映
+///
+/// M2 T1-B で 6 段の処理を 6 つのサブ関数に分解。各段の責務:
+///   1. `pass_debounce` — debounce_ms 経過チェック
+///   2. `probe_engine` — engine ロック取得 + hiragana / bg_status 取得
+///   3. `ensure_bg_running` — bg=done を待つ。idle なら bg_start。
+///   4. `fetch_preview` — bg_take_candidates + 尻切れ防壁
+///   5. `build_apply_snapshot` — display_shown 組み立て
+///   6. `try_apply_phase1a` (RequestEditSession) / `queue_phase1b` (LIVE_PREVIEW_QUEUE)
+pub fn on_live_timer() {
+    let Some(elapsed) = pass_debounce() else {
+        return;
+    };
+    let Some(probe) = probe_engine(elapsed) else {
+        return;
+    };
+    if !ensure_bg_running(&probe) {
+        return;
+    }
+    let Some(data) = fetch_preview() else {
+        return;
+    };
+    let snapshot = build_apply_snapshot(data);
+    if !try_apply_phase1a(&snapshot) {
+        queue_phase1b(&snapshot);
+    }
 }

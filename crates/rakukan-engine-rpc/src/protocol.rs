@@ -70,6 +70,10 @@ pub enum Request {
     BgTakeCandidates {
         key: String,
     },
+    /// M2 §5.2: ライブ変換 preview 用、トップ候補だけを peek (cache 状態を進めない)。
+    BgPeekTopCandidate {
+        key: String,
+    },
     #[deprecated = "removed in ABI v7; do not use"]
     _ReservedBgTakeSegmentedCandidates {
         key: String,

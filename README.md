@@ -1,4 +1,4 @@
-# rakukan v0.7.3
+# rakukan v0.7.5
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,21 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.7.5 変更点
+
+- **WinUI 設定で保存した `config.toml` の改行コードを CRLF に統一** (bug fix): Tomlyn の出力が LF 単独だったため Windows ネイティブの CRLF と混在していた問題を修正。`SettingsStore.WriteIfDifferent` で書き出し前に CRLF 正規化を挟む
+- **`factory.rs` を 6 ファイルに分割** (M3 T1-A): 4816 行の god file を機能別に切り出し、可読性と保守性を向上。**動作変更なし** (純粋切り出し):
+  - `factory.rs` 1421 行 (核: COM impl / langbar / key event sink / 構造体定義)
+  - `factory/dispatch.rs` 375 行 (`handle_action`: ユーザアクションを各 on_* へ振り分ける dispatcher)
+  - `factory/on_input.rs` 396 行 (`on_input` / `on_input_raw` / `on_full_width_space` / `prepare_for_direct_input`)
+  - `factory/on_convert.rs` 1170 行 (`on_convert` / `on_commit_raw` / `on_backspace` / `on_cancel`)
+  - `factory/on_compose.rs` 637 行 (composition の EditSession ヘルパー: `update_composition` 系 / `end_composition` / `commit_text` / キャレット/range 取得)
+  - `factory/edit_ops.rs` 952 行 (F6-F10 のかな/英数変換 / CycleKana / 候補ナビ / IME トグル / モード切替 / 文節操作 / 句読点)
+- **`on_live_timer` を 6 サブ関数に分解** (M2 §5.1 / T1-B): 298 行の god function を `pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b` に分割。orchestrator 本体は 16 行に縮小。**動作変更なし**
+- **`bg_peek_top_candidate` を新設しライブ変換 preview を非破壊化** (M2 §5.2): live preview が `bg_take_candidates` で converter を engine に戻し dict マージまで走らせていたのを、トップ候補だけ覗き見る `bg_peek_top_candidate` に置換。conv_cache 状態を進めず、user dict マージも行わないため、commit 経路 (`bg_take_candidates`) と干渉しない。converter は次回 `bg_start` 内の `try_reclaim_done` (既存) で自動回収。engine / FFI / engine-abi / engine-rpc / TSF の全 5 層に新メソッド追加 (out-of-process アーキテクチャのため)
+- **install/build 手順誤案内を防ぐ Stop hook を追加**: `.claude/settings.json` の Stop hook で、AI アシスタントが `cargo make install` を案内しているのに直前に `cargo make build-tsf` / `cargo make build-engine` の案内が無い場合や「install 後にサインアウト」のような誤った順序を書いた場合に block。検査スクリプトは `scripts/check-install-instruction.ps1`
+- M2 §5.3 (`session_nonce`) は v0.7.6 (M4 LiveConvSession 集約) に繰り延べ
 
 ## 0.7.3 変更点
 
