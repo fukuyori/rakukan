@@ -3,6 +3,7 @@
 //! M3 (T1-A) で factory.rs から純粋切り出し。動作変更なし。
 
 use anyhow::Result;
+use std::time::Instant;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
@@ -15,6 +16,15 @@ use super::{
     commit_text, commit_then_start_composition, end_composition, engine_convert_sync_multi,
     update_caret_rect, update_composition, update_composition_candidate_parts,
 };
+
+#[inline]
+fn convert_mark(stage: &'static str, start: Instant, last: &mut Instant) {
+    let now = Instant::now();
+    let step_us = now.duration_since(*last).as_micros();
+    let total_us = now.duration_since(start).as_micros();
+    *last = now;
+    tracing::info!("convert_timing stage={stage} step_us={step_us} total_us={total_us}");
+}
 
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
@@ -442,15 +452,19 @@ impl super::TextServiceFactory_Impl {
         }
 
         // 新規変換
+        let convert_start = Instant::now();
+        let mut convert_last = convert_start;
         let llm_limit = crate::engine::state::get_num_candidates();
         const DICT_LIMIT: usize = 40;
         let _ = crate::engine::state::poll_dict_ready_cached(engine);
         let _ = crate::engine::state::poll_model_ready_cached(engine);
+        convert_mark("ready_poll", convert_start, &mut convert_last);
         // Done 状態の converter を先に回収する。
         // bg_take_candidates がキー不一致で None を返した場合、converter は Done に残ったまま
         // engine.kanji=None になる。is_kanji_ready() チェックより前に reclaim しないと
         // bg_start が永遠にスキップされ Waiting から抜け出せなくなる。
         engine.bg_reclaim();
+        convert_mark("bg_reclaim", convert_start, &mut convert_last);
         let kanji_ready = engine.is_kanji_ready();
         tracing::debug!(
             "on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
@@ -462,6 +476,7 @@ impl super::TextServiceFactory_Impl {
         if kanji_ready && engine.bg_status() == "idle" {
             tracing::debug!("on_convert: model ready → bg_start");
             engine.bg_start(llm_limit);
+            convert_mark("bg_start", convert_start, &mut convert_last);
         }
         if !kanji_ready {
             let err = engine.last_error();
@@ -502,10 +517,16 @@ impl super::TextServiceFactory_Impl {
                 caret.bottom,
                 Some("⏳ 変換中..."),
             );
+            convert_mark("waiting_show", convert_start, &mut convert_last);
             // LLM完了を待機（短時間のみ）。超えたら WM_TIMER に任せて抜ける。
             let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+            convert_mark("bg_wait_inline", convert_start, &mut convert_last);
             tracing::debug!("on_convert[new]: bg_wait({LLM_WAIT_INLINE_MS}ms) completed={completed}");
             if !completed {
+                tracing::info!(
+                    "convert_timing result=timer_fallback total_us={}",
+                    convert_start.elapsed().as_micros()
+                );
                 drop(guard);
                 candidate_window::start_waiting_timer();
                 return Ok(true);
@@ -529,26 +550,39 @@ impl super::TextServiceFactory_Impl {
                 caret.bottom,
                 Some("⏳ 変換中..."),
             );
+            convert_mark("waiting_show_prev_bg", convert_start, &mut convert_last);
             tracing::debug!(
                 "on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish"
             );
             let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+            convert_mark("prev_bg_wait_inline", convert_start, &mut convert_last);
             tracing::debug!("on_convert[new]: prev bg wait completed={completed}");
             if !completed {
                 // 前の bg が inline 時間で終わらない → WM_TIMER に任せる
+                tracing::info!(
+                    "convert_timing result=prev_bg_timer_fallback total_us={}",
+                    convert_start.elapsed().as_micros()
+                );
                 drop(guard);
                 candidate_window::start_waiting_timer();
                 return Ok(true);
             }
             // 前の bg が完了したら converter を回収して新しいキーで再起動
             engine.bg_reclaim();
+            convert_mark("prev_bg_reclaim", convert_start, &mut convert_last);
             let kanji_ready2 = engine.is_kanji_ready();
             tracing::debug!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
             if kanji_ready2 {
                 engine.bg_start(llm_limit);
+                convert_mark("new_bg_start_after_prev", convert_start, &mut convert_last);
                 let completed2 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+                convert_mark("new_bg_wait_inline", convert_start, &mut convert_last);
                 tracing::debug!("on_convert[new]: new bg wait completed={completed2}");
                 if !completed2 {
+                    tracing::info!(
+                        "convert_timing result=new_bg_timer_fallback total_us={}",
+                        convert_start.elapsed().as_micros()
+                    );
                     drop(guard);
                     candidate_window::start_waiting_timer();
                     return Ok(true);
@@ -556,6 +590,10 @@ impl super::TextServiceFactory_Impl {
                 // kanji_ready を更新して後続の候補取得処理へ続行
             } else {
                 // モデル自体が未ロード → タイマーに任せる
+                tracing::info!(
+                    "convert_timing result=model_not_ready_timer_fallback total_us={}",
+                    convert_start.elapsed().as_micros()
+                );
                 drop(guard);
                 candidate_window::start_waiting_timer();
                 return Ok(true);
@@ -584,6 +622,7 @@ impl super::TextServiceFactory_Impl {
                 None
             }
         });
+        convert_mark("bg_take_candidates", convert_start, &mut convert_last);
         tracing::debug!(
             "on_convert[new]: bg_cands={:?}",
             bg_cands.as_ref().map(|c| c.len())
@@ -597,11 +636,18 @@ impl super::TextServiceFactory_Impl {
                 preedit
             );
             engine.bg_reclaim();
+            convert_mark("retry_bg_reclaim", convert_start, &mut convert_last);
             if engine.is_kanji_ready() {
                 engine.bg_start(llm_limit);
+                convert_mark("retry_bg_start", convert_start, &mut convert_last);
                 let completed3 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+                convert_mark("retry_bg_wait_inline", convert_start, &mut convert_last);
                 tracing::debug!("Convert: retry bg_wait completed={completed3}");
                 if !completed3 {
+                    tracing::info!(
+                        "convert_timing result=retry_timer_fallback total_us={}",
+                        convert_start.elapsed().as_micros()
+                    );
                     drop(guard);
                     candidate_window::start_waiting_timer();
                     return Ok(true);
@@ -634,6 +680,7 @@ impl super::TextServiceFactory_Impl {
                 // bg_take_candidates 成功時に kanji が復元されているため再評価
                 let kanji_ready_now = engine.is_kanji_ready();
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                convert_mark("merge_candidates", convert_start, &mut convert_last);
                 tracing::debug!(
                     "merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
                     kanji_ready_now,
@@ -657,6 +704,7 @@ impl super::TextServiceFactory_Impl {
                 if kanji_ready_now {
                     let dict_cands =
                         engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit);
+                    convert_mark("sync_multi_fallback", convert_start, &mut convert_last);
                     if dict_cands.is_empty() {
                         (vec![preedit.clone()], false)
                     } else {
@@ -674,6 +722,7 @@ impl super::TextServiceFactory_Impl {
             }
         }
         candidate_window::stop_waiting_timer();
+        convert_mark("session_ready", convert_start, &mut convert_last);
         let _ = bg_status2; // suppress unused warning
 
         let first = candidates
@@ -712,12 +761,20 @@ impl super::TextServiceFactory_Impl {
             caret.bottom,
             status,
         );
+        convert_mark("candidate_window_show", convert_start, &mut convert_last);
         tracing::debug!(
             "on_convert[new]: update_composition first={:?} comp_exists={}",
             first,
             composition_clone().map(|g| g.is_some()).unwrap_or(false)
         );
         update_composition(ctx, tid, sink, first)?;
+        convert_mark("update_composition", convert_start, &mut convert_last);
+        tracing::info!(
+            "convert_timing result=shown candidates={} llm_pending={} total_us={}",
+            candidates.len(),
+            llm_pending,
+            convert_start.elapsed().as_micros()
+        );
         Ok(true)
     }
 
