@@ -22,7 +22,8 @@ Windows 向け日本語 IME。
 
 ## 0.8.5 変更点
 
-- リリース表記とパッケージメタデータを 0.8.5 に更新しました。動作変更はありません。
+- **ライブ変換 preview でユーザー辞書・学習履歴を反映**: `bg_peek_top_candidate` で取得した LLM のトップ候補を表示前に `merge_candidates` へ通し、読み完全一致のユーザー辞書と学習履歴を preview にも反映するようにしました。
+- preview は引き続き converter を consume しないため、Space 変換 / 確定経路 (`bg_take_candidates`) との干渉は避けたまま、ライブ変換の表示候補と通常変換の候補優先度が揃います。
 
 ## 0.8.4 変更点
 
