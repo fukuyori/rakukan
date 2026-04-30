@@ -40,7 +40,7 @@
 
 - ✅ M3 T1-A: `factory.rs` (4816 行) を 6 ファイルに分割（`factory.rs` 核 / `dispatch.rs` / `on_input.rs` / `on_convert.rs` / `on_compose.rs` / `edit_ops.rs`）。**動作変更なし** (純粋切り出し)
 - ✅ M2 §5.1 / T1-B: `on_live_timer` (298 行) を 6 サブ関数 (`pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b`) に分解。orchestrator は 16 行に縮小
-- ✅ M2 §5.2: `bg_peek_top_candidate` 新設で live preview を非破壊化。conv_cache を進めず user dict マージも行わないため commit 経路 (`bg_take_candidates`) と干渉しない。engine / FFI / engine-abi / engine-rpc / TSF の 5 層に追加 (out-of-process)
+- ✅ M2 §5.2: `bg_peek_top_candidate` 新設で live preview を非破壊化。conv_cache を進めず、表示前に `merge_candidates` を通してユーザー辞書と学習履歴を反映するため、commit 経路 (`bg_take_candidates`) と干渉しない。engine / FFI / engine-abi / engine-rpc / TSF の 5 層に追加 (out-of-process)
 - ✅ WinUI 設定 UI で保存した `config.toml` の改行コード LF → CRLF 統一 (`SettingsStore.WriteIfDifferent` に `NormalizeToCrlf` 挟む)
 - ✅ Claude Code 用 Stop hook (`.claude/settings.json` + `scripts/check-install-instruction.ps1`) で「`cargo make install` の前に `cargo make build-tsf` 案内が無い」「install 後にサインアウト」のような誤案内を構造的に block
 
@@ -91,6 +91,10 @@
 - ✅ `1234` → `壱千弐百参拾四`、`10000` → `壱万` の大字候補を追加
 - ✅ `[input] digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]` で候補種別と順序を設定可能
 
+**v0.8.5 リリース済み（2026-05-01）**: リリース表記とパッケージメタデータの更新のみ。
+
+- ✅ 動作変更なし
+
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
 関連資料:
@@ -126,6 +130,7 @@
 | **v0.8.2** ✅ 2026-04-29 | ✅ M6.3 位取り漢数字候補の通常漢数字部分 (`1234` → `千二百三十四`) | minor | 数字候補の日本語表記拡張 |
 | **v0.8.3** ✅ 2026-04-29 | ✅ M6.1 数字間の区切り文字自動変換 (`2、4` → `2,4`) | minor | 数値入力の直接編集改善 |
 | **v0.8.4** ✅ 2026-04-29 | ✅ M6.3 大字候補 + `digit_candidates_order` | minor | 数字候補の仕上げ |
+| **v0.8.5** ✅ 2026-05-01 | リリース表記とパッケージメタデータの更新 | patch | 動作変更なし |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:

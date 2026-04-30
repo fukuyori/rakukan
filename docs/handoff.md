@@ -1,11 +1,12 @@
-# Rakukan 引き継ぎ資料 (v0.8.4)
+# Rakukan 引き継ぎ資料 (v0.8.5)
 
-更新日: 2026-04-29
+更新日: 2026-05-01
 
 ## 現在の状態
 
-- **バージョン:** v0.8.4
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。
+- **バージョン:** v0.8.5
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 はリリース表記とパッケージメタデータの更新のみ。
+- **v0.8.5 の内容:** リリース表記とパッケージメタデータを 0.8.5 に更新。動作変更なし。
 - **v0.8.4 の内容:** **M6.3 仕上げ** — 数字だけの reading に `1234` → `壱千弐百参拾四` のような大字候補を追加。`[input] digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]` で数字候補の種別と表示順を設定できるようにした。
 - **v0.8.4 の確認:** `cargo test -p rakukan-engine --lib` と `cargo check -p rakukan-tsf` は成功。Space 変換方式の変更はこのリリースには含めない。
 - **v0.8.3 の内容:** **M6.1** — 数字直後の `、` / `。` 入力を `,` / `.` として扱い、`2、4` → `2,4`、`2。5` → `2.5` のような数値入力をプリエディット内で継続できるようにした。`[input] digit_separator_auto = true` を追加（デフォルト true）
@@ -17,7 +18,7 @@
 - **v0.7.5 の内容（継続有効）:**
   - **M3 T1-A:** `factory.rs` (4816 行) を 6 ファイルに分割 (`factory.rs` / `dispatch.rs` / `on_input.rs` / `on_convert.rs` / `on_compose.rs` / `edit_ops.rs`)。動作変更なし
   - **M2 §5.1 / T1-B:** `on_live_timer` (298 行) を `pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b` の 6 サブ関数に分解
-  - **M2 §5.2:** `bg_peek_top_candidate` 新設で live preview を非破壊化 (conv_cache を進めず user dict マージも行わない)。commit 経路 (`bg_take_candidates`) と干渉しない
+  - **M2 §5.2:** `bg_peek_top_candidate` 新設で live preview を非破壊化 (conv_cache を進めない)。表示前に `merge_candidates` を通すため、ユーザー辞書と学習履歴は live preview にも反映される。commit 経路 (`bg_take_candidates`) と干渉しない
   - WinUI 設定 UI で保存した `config.toml` の改行コード LF → CRLF 統一
   - Claude Code 用 Stop hook (`.claude/settings.json`) で install/build 順序の誤案内を構造的に block
 - **v0.7.3 の内容（継続有効）:** 早期 EOS 抑制の (a)+(c) 部分採用 (M1.5 T-BUG1)、`update_composition` 系の stale check 強化 (M1.8 T-MID2)、`COMPOSITION_APPLY_LOCK` で SetText 排他化 (M1.8 T-MID3)

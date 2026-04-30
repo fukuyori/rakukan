@@ -3,6 +3,12 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.5] - 2026-05-01
+
+### Changed
+
+- リリース表記とパッケージメタデータを 0.8.5 に更新。動作変更なし。
+
 ## [0.8.4] - 2026-04-29
 
 ### Added

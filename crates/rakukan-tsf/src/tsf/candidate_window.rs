@@ -1223,10 +1223,11 @@ struct LivePreview {
 
 /// engine から preview を取得し、尻切れ防壁を通す。
 ///
-/// M2 §5.2: 取得は `bg_peek_top_candidate` を使う (非破壊・dict マージなし)。
+/// M2 §5.2: 取得は `bg_peek_top_candidate` を使う (非破壊)。
 /// `bg_take_candidates` は commit / Space 変換用で converter を engine に戻すが、
 /// preview ではトップ候補を読むだけで十分。次の `bg_start` (新しい reading) は
 /// `try_reclaim_done` で converter を回収するので、preview で take する必要はない。
+/// 表示候補は `merge_candidates` を通して、ユーザー辞書と学習履歴を反映する。
 fn fetch_preview() -> Option<LivePreview> {
     use crate::engine::state::engine_try_get;
     crate::tsf::live_session::reset_fired_once();
@@ -1248,7 +1249,12 @@ fn fetch_preview() -> Option<LivePreview> {
             "on_live_timer pending",
         )
         .to_string();
-        let preview = eng.bg_peek_top_candidate(&reading);
+        let preview = eng.bg_peek_top_candidate(&reading).and_then(|top| {
+            eng.merge_candidates(vec![top], 40)
+                .into_iter()
+                .next()
+                .filter(|s| !s.is_empty())
+        });
         (reading, pending, preview)
     };
 

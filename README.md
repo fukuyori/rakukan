@@ -1,4 +1,4 @@
-# rakukan v0.8.4
+# rakukan v0.8.5
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,10 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.8.5 変更点
+
+- リリース表記とパッケージメタデータを 0.8.5 に更新しました。動作変更はありません。
 
 ## 0.8.4 変更点
 
@@ -81,7 +85,7 @@ Windows 向け日本語 IME。
   - `factory/on_compose.rs` 637 行 (composition の EditSession ヘルパー: `update_composition` 系 / `end_composition` / `commit_text` / キャレット/range 取得)
   - `factory/edit_ops.rs` 952 行 (F6-F10 のかな/英数変換 / CycleKana / 候補ナビ / IME トグル / モード切替 / 文節操作 / 句読点)
 - **`on_live_timer` を 6 サブ関数に分解** (M2 §5.1 / T1-B): 298 行の god function を `pass_debounce` / `probe_engine` / `ensure_bg_running` / `fetch_preview` / `build_apply_snapshot` / `try_apply_phase1a` + `queue_phase1b` に分割。orchestrator 本体は 16 行に縮小。**動作変更なし**
-- **`bg_peek_top_candidate` を新設しライブ変換 preview を非破壊化** (M2 §5.2): live preview が `bg_take_candidates` で converter を engine に戻し dict マージまで走らせていたのを、トップ候補だけ覗き見る `bg_peek_top_candidate` に置換。conv_cache 状態を進めず、user dict マージも行わないため、commit 経路 (`bg_take_candidates`) と干渉しない。converter は次回 `bg_start` 内の `try_reclaim_done` (既存) で自動回収。engine / FFI / engine-abi / engine-rpc / TSF の全 5 層に新メソッド追加 (out-of-process アーキテクチャのため)
+- **`bg_peek_top_candidate` を新設しライブ変換 preview を非破壊化** (M2 §5.2): live preview が `bg_take_candidates` で converter を engine に戻していたのを、トップ候補だけ覗き見る `bg_peek_top_candidate` に置換。conv_cache 状態を進めず、commit 経路 (`bg_take_candidates`) と干渉しない。表示前に `merge_candidates` を通すため、ユーザー辞書と学習履歴はライブ変換 preview にも反映される。converter は次回 `bg_start` 内の `try_reclaim_done` (既存) で自動回収。engine / FFI / engine-abi / engine-rpc / TSF の全 5 層に新メソッド追加 (out-of-process アーキテクチャのため)
 - **install/build 手順誤案内を防ぐ Stop hook を追加**: `.claude/settings.json` の Stop hook で、AI アシスタントが `cargo make install` を案内しているのに直前に `cargo make build-tsf` / `cargo make build-engine` の案内が無い場合や「install 後にサインアウト」のような誤った順序を書いた場合に block。検査スクリプトは `scripts/check-install-instruction.ps1`
 - M2 §5.3 (`session_nonce`) は v0.7.6 (M4 LiveConvSession 集約) に繰り延べ
 
@@ -155,7 +159,7 @@ Windows 向け日本語 IME。
 - **ライブ変換の停止不具合を修正**: `on_live_timer` が engine ロック競合で `stop_live_timer` を呼び、入力の流れによってライブ変換が途中で止まることがあった問題を修正
 - **候補ウィンドウのアプリ切替時残留を修正**: `ITfThreadFocusSink` を登録し、Alt+Tab 等の非 TSF アプリへのフォーカス遷移でも候補ウィンドウと各種タイマーを確実に閉じるよう改善
 - **`num_candidates` がライブ変換を遅延させる回帰を修正**: バッチ RPC 経路の `input_char` が prefetch 用 `bg_start(n)` に `num_candidates`（最大 30）を渡していたのを `live_conv_beam_size` に戻した。Space 変換時は従来どおり `num_candidates` を使用
-- **ライブ変換 preview でユーザー辞書を優先**: `bg_take_candidates` がユーザー辞書候補を LLM 結果の先頭にマージするよう変更（読み完全一致のみ）
+- **ライブ変換 preview でユーザー辞書・学習履歴を優先**: preview 表示時に `merge_candidates` を通し、読み完全一致のユーザー辞書と学習履歴を LLM 結果より優先
 
 ## 0.5.0 変更点
 
