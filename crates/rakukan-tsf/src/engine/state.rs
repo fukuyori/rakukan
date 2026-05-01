@@ -531,6 +531,26 @@ pub fn get_live_conv_beam_size() -> usize {
         .clamp(1, 9)
 }
 
+pub const LIVE_CONVERSION_MIN_READING_CHARS: usize = 3;
+
+pub fn is_live_conversion_reading_ready(reading: &str) -> bool {
+    reading.chars().count() >= LIVE_CONVERSION_MIN_READING_CHARS
+}
+
+pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
+    if is_live_conversion_reading_ready(reading) {
+        Some(get_live_conv_beam_size())
+    } else {
+        None
+    }
+}
+
+pub fn start_live_bg_if_ready(engine: &DynEngine, reading: &str) -> bool {
+    live_bg_start_n_cands(reading)
+        .map(|n| engine.bg_start(n))
+        .unwrap_or(false)
+}
+
 /// `[input] auto_learn` 設定を返す（デフォルト: false）。
 ///
 /// `false` のとき、確定時の `engine.learn()` 呼び出しを抑止してユーザー辞書への
@@ -1648,4 +1668,22 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
         | "VirtualConsoleClass"          // mintty 等
         | "mintty"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn live_conversion_reading_ready_starts_at_three_chars() {
+        assert!(!is_live_conversion_reading_ready(""));
+        assert!(!is_live_conversion_reading_ready("あ"));
+        assert!(!is_live_conversion_reading_ready("あい"));
+        assert!(is_live_conversion_reading_ready("あいう"));
+    }
+
+    #[test]
+    fn live_conversion_reading_ready_counts_chars_not_bytes() {
+        assert!(is_live_conversion_reading_ready("漢字仮"));
+    }
 }

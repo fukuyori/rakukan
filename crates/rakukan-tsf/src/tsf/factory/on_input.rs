@@ -97,8 +97,7 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                let live_beam = crate::engine::state::get_live_conv_beam_size();
-                let (preedit, new_reading, _bg) = engine.input_char(c, kind, Some(live_beam));
+                let (preedit, new_reading, _bg) = engine.input_char(c, kind, None);
                 let suffix = new_reading
                     .strip_prefix(&reading)
                     .unwrap_or(new_reading.as_str())
@@ -120,9 +119,12 @@ impl super::TextServiceFactory_Impl {
                     ch: c,
                     preedit_after: display_shown.clone(),
                 });
+                let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &new_reading);
                 drop(sess);
                 drop(guard);
-                candidate_window::live_input_notify(&ctx, tid);
+                if live_ready {
+                    candidate_window::live_input_notify(&ctx, tid);
+                }
                 update_composition(ctx, tid, sink, display_shown)?;
                 return Ok(true);
             }
@@ -178,10 +180,10 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                // 打鍵時の prefetch は live プレビュー用なので live_conv_beam_size を使う
-                // (num_candidates=30 を渡すと毎打鍵で重い beam=30 変換が走りワーカーが詰まる)
-                let live_beam = crate::engine::state::get_live_conv_beam_size();
-                let (preedit, _hiragana, _bg) = engine2.input_char(c, kind, Some(live_beam));
+                // 打鍵時の prefetch はライブプレビュー用なので、読みが十分長い場合だけ
+                // 後段で live_conv_beam_size を使って起動する。
+                let (preedit, hiragana, _bg) = engine2.input_char(c, kind, None);
+                let _ = crate::engine::state::start_live_bg_if_ready(engine2, &hiragana);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
@@ -197,20 +199,19 @@ impl super::TextServiceFactory_Impl {
         let _ = crate::engine::state::poll_dict_ready_cached(engine);
         let _ = crate::engine::state::poll_model_ready_cached(engine);
 
-        // バッチ RPC: push + preedit + hiragana + bg_status + 条件付き bg_start
-        // を 1 往復で処理する。0.4.5 で 1 打鍵 8〜9 RPC → 1 RPC に短縮。
+        // バッチ RPC: push + preedit + hiragana + bg_status を 1 往復で処理する。
+        // ライブ変換の bg_start は、3文字以上になった場合だけ後段で起動する。
         //
-        // 打鍵時の prefetch は live プレビュー用なので live_conv_beam_size を使う。
-        // ここで num_candidates (最大 30) を渡すと毎打鍵で重い beam=30 変換が走り
-        // ワーカーが詰まってライブプレビューが遅延する。Space 押下時は on_convert 内で
-        // bg_reclaim + bg_start(num_candidates) により fresh に変換し直す。
-        let live_beam = crate::engine::state::get_live_conv_beam_size();
+        // 打鍵時の prefetch はライブプレビュー用なので live_conv_beam_size を使う。
+        // ただし 1〜2文字では起動せず、3文字以上になってから開始する。
+        // Space 押下時は on_convert 内で bg_reclaim + bg_start(num_candidates) により
+        // fresh に変換し直す。
         let kind = if c.is_ascii_uppercase() {
             crate::engine::state::InputCharKind::FullwidthAlpha
         } else {
             crate::engine::state::InputCharKind::Char
         };
-        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, Some(live_beam));
+        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, None);
         diag::event(DiagEvent::InputChar {
             ch: c,
             preedit_after: preedit.clone(),
@@ -218,9 +219,12 @@ impl super::TextServiceFactory_Impl {
         tracing::trace!("Input: hiragana={:?} bg={}", hiragana, bg_status);
 
         if !hiragana.is_empty() {
+            let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &hiragana);
             drop(guard);
             // [Phase0] ライブ変換実験: コンテキストをキャッシュしてタイマーを起動
-            candidate_window::live_input_notify(&ctx, tid);
+            if live_ready {
+                candidate_window::live_input_notify(&ctx, tid);
+            }
             update_composition(ctx, tid, sink, preedit)?;
             return Ok(true);
         }
@@ -289,10 +293,12 @@ impl super::TextServiceFactory_Impl {
                     .to_string();
                 let display = format!("{preview}{suffix}");
                 sess.set_live_conv(new_reading.clone(), display.clone());
-                engine.bg_start(crate::engine::state::get_live_conv_beam_size());
+                let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &new_reading);
                 drop(sess);
                 drop(guard);
-                candidate_window::live_input_notify(&ctx, tid);
+                if live_ready {
+                    candidate_window::live_input_notify(&ctx, tid);
+                }
                 update_composition(ctx, tid, sink, display)?;
                 return Ok(true);
             }
@@ -335,11 +341,10 @@ impl super::TextServiceFactory_Impl {
                 };
                 engine2.push_raw(c);
                 let preedit = engine2.preedit_display();
-                // 打鍵時の prefetch はライブプレビュー用なので beam=live_conv_beam_size
-                // （num_candidates=30 だと毎打鍵で重い beam=30 変換が走り、ワーカーが詰まる）。
+                // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
                 // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
-                let live_beam = crate::engine::state::get_live_conv_beam_size();
-                engine2.bg_start(live_beam);
+                let reading = engine2.hiragana_text();
+                let _ = crate::engine::state::start_live_bg_if_ready(engine2, &reading);
                 drop(guard2);
                 commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
                 return Ok(true);
@@ -347,14 +352,14 @@ impl super::TextServiceFactory_Impl {
         }
         engine.push_raw(c);
         let preedit = engine.preedit_display();
-        // 打鍵時の prefetch はライブプレビュー用なので beam=live_conv_beam_size を使う。
-        // num_candidates (最大 30) を使うと毎打鍵で重い beam=30 変換が走り、ワーカーが
-        // 詰まってライブプレビューが更新されない。Space 押下時は on_convert 内で
-        // bg_reclaim + bg_start(num_candidates) により fresh に変換し直すため、
-        // ここの prefetch 結果は Space には流用されない（キャッシュは捨てられる）。
-        let live_beam = crate::engine::state::get_live_conv_beam_size();
-        engine.bg_start(live_beam);
-        candidate_window::live_input_notify(&ctx, tid);
+        // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
+        // Space 押下時は on_convert 内で bg_reclaim + bg_start(num_candidates) により
+        // fresh に変換し直すため、ここの prefetch 結果は Space には流用されない。
+        let reading = engine.hiragana_text();
+        let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &reading);
+        if live_ready {
+            candidate_window::live_input_notify(&ctx, tid);
+        }
         drop(guard);
         update_composition(ctx, tid, sink, preedit)?;
         Ok(true)

@@ -1,11 +1,12 @@
-# Rakukan 引き継ぎ資料 (v0.8.5)
+# Rakukan 引き継ぎ資料 (v0.8.6)
 
 更新日: 2026-05-01
 
 ## 現在の状態
 
-- **バージョン:** v0.8.5
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。
+- **バージョン:** v0.8.6
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。
+- **v0.8.6 の内容:** ライブ変換 preview は、読みが 3 文字以上になってから BG 変換と timer preview を起動するようにした。1〜2 文字の入力中はプリエディット表示を維持し、Space 変換 / 確定経路は従来どおり個別に処理する。未確定ローマ字子音を確定キーで出力する件は未対応の残課題。
 - **v0.8.5 の内容:** `bg_peek_top_candidate` で取得した preview 候補を表示前に `merge_candidates` へ通し、読み完全一致のユーザー辞書と学習履歴をライブ変換 preview にも反映するようにした。preview は converter を consume しないため、Space 変換 / 確定経路 (`bg_take_candidates`) との干渉は避ける。
 - **v0.8.4 の内容:** **M6.3 仕上げ** — 数字だけの reading に `1234` → `壱千弐百参拾四` のような大字候補を追加。`[input] digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]` で数字候補の種別と表示順を設定できるようにした。
 - **v0.8.4 の確認:** `cargo test -p rakukan-engine --lib` と `cargo check -p rakukan-tsf` は成功。Space 変換方式の変更はこのリリースには含めない。

@@ -317,8 +317,7 @@ impl super::TextServiceFactory_Impl {
             for c in remainder_reading.chars() {
                 engine.push_raw(c);
             }
-            let live_beam = crate::engine::state::get_live_conv_beam_size();
-            engine.bg_start(live_beam);
+            let _ = crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
             let preedit = engine.preedit_display();
             {
                 let mut sess = session_get()?;
@@ -617,11 +616,13 @@ impl super::TextServiceFactory_Impl {
             if crate::engine::state::is_digit_separator_auto_enabled() {
                 crate::tsf::live_session::conv_gen_bump();
                 engine.push_raw(separator);
+                let reading = engine.hiragana_text();
                 let preedit = engine.preedit_display();
-                let live_beam = crate::engine::state::get_live_conv_beam_size();
-                engine.bg_start(live_beam);
+                let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &reading);
                 drop(guard);
-                candidate_window::live_input_notify(&ctx, tid);
+                if live_ready {
+                    candidate_window::live_input_notify(&ctx, tid);
+                }
                 update_composition(ctx, tid, sink, preedit)?;
                 return Ok(true);
             }

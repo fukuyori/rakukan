@@ -845,8 +845,7 @@ impl super::TextServiceFactory_Impl {
                 for c in unselected.chars() {
                     engine.push_raw(c);
                 }
-                let live_beam = crate::engine::state::get_live_conv_beam_size();
-                engine.bg_start(live_beam);
+                let _ = crate::engine::state::start_live_bg_if_ready(engine, &unselected);
                 let preedit = engine.preedit_display();
                 {
                     let mut sess = session_get()?;
@@ -902,8 +901,8 @@ impl super::TextServiceFactory_Impl {
                     for c in remainder_reading.chars() {
                         engine.push_raw(c);
                     }
-                    let live_beam = crate::engine::state::get_live_conv_beam_size();
-                    engine.bg_start(live_beam);
+                    let _ =
+                        crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
                     let preedit = engine.preedit_display();
                     {
                         let mut sess = session_get()?;

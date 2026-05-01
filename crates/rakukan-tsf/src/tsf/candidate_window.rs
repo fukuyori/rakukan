@@ -1115,9 +1115,9 @@ fn pass_debounce() -> Option<u64> {
     }
 }
 
-/// engine からの probe 結果。`hiragana` は probe_engine 内でログするだけで
-/// 後段では使わないため、struct には保持しない。
+/// engine からの probe 結果。
 struct LiveProbe {
+    reading: String,
     bg_status: &'static str,
 }
 
@@ -1148,10 +1148,12 @@ fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
         }
     };
     let has_preedit = !hiragana.is_empty();
+    let ready = crate::engine::state::is_live_conversion_reading_ready(&hiragana);
     tracing::info!(
-        "[Live] on_live_timer: FIRED elapsed={}ms has_preedit={} hira={:?} bg={}",
+        "[Live] on_live_timer: FIRED elapsed={}ms has_preedit={} ready={} hira={:?} bg={}",
         elapsed,
         has_preedit,
+        ready,
         hiragana,
         bg_status_str
     );
@@ -1159,8 +1161,16 @@ fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
         stop_live_timer();
         return None;
     }
-    let _ = hiragana; // (logged above; not stored in LiveProbe)
+    if !ready {
+        tracing::debug!(
+            "[Live] on_live_timer: reading shorter than {} chars, wait for more input",
+            crate::engine::state::LIVE_CONVERSION_MIN_READING_CHARS
+        );
+        stop_live_timer();
+        return None;
+    }
     Some(LiveProbe {
+        reading: hiragana,
         bg_status: bg_status_str,
     })
 }
@@ -1196,7 +1206,7 @@ fn ensure_bg_running(probe: &LiveProbe) -> bool {
                         // モデルロード完了後、次の on_input で live_input_notify が再起動する。
                         return false;
                     }
-                    e.bg_start(crate::engine::state::get_live_conv_beam_size())
+                    crate::engine::state::start_live_bg_if_ready(e, &probe.reading)
                 })
                 .unwrap_or(false),
             Err(_) => false,
