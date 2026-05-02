@@ -371,7 +371,7 @@ static PENDING_CONVERTER: LazyLock<Mutex<Option<KanaKanjiConverter>>> =
 pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if engine.is_kanji_ready() {
-        return false;
+        return true;
     } // already ready
     if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
         if let Some(conv) = g.take() {

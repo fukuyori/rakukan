@@ -503,7 +503,7 @@ impl super::TextServiceFactory_Impl {
         // bg_start が永遠にスキップされ Waiting から抜け出せなくなる。
         engine.bg_reclaim();
         convert_mark("bg_reclaim", convert_start, &mut convert_last);
-        let kanji_ready = engine.is_kanji_ready();
+        let mut kanji_ready = engine.is_kanji_ready();
         tracing::debug!(
             "on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
             preedit,
@@ -519,9 +519,50 @@ impl super::TextServiceFactory_Impl {
         if !kanji_ready {
             let err = engine.last_error();
             tracing::warn!("on_convert: kanji not ready, engine status={:?}", err);
+            if err == "model load complete" && engine.poll_model_ready() {
+                kanji_ready = engine.is_kanji_ready();
+                tracing::info!(
+                    "on_convert: model load complete was pending injection, kanji_ready={}",
+                    kanji_ready
+                );
+            }
         }
 
         let bg_status = engine.bg_status();
+        if !kanji_ready && bg_status == "idle" {
+            phase3_path = "model_not_ready";
+            phase3_candidate_source = "preedit_model_not_ready";
+            let caret = caret_rect_get();
+            let snapshot = activate_selecting_snapshot(
+                vec![preedit.clone()],
+                preedit.clone(),
+                caret.left,
+                caret.bottom,
+                false,
+            )?;
+            drop(guard);
+            candidate_window::stop_waiting_timer();
+            candidate_window::show_with_status(
+                &snapshot.page_candidates,
+                snapshot.page_selected,
+                &snapshot.page_info,
+                caret.left,
+                caret.bottom,
+                Some("⏳ モデル読み込み中..."),
+            );
+            convert_mark("selecting_model_not_ready_show", convert_start, &mut convert_last);
+            tracing::info!(
+                "convert_timing result=shown_model_not_ready path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates=1 llm_pending=false total_us={}",
+                phase3_path,
+                phase3_bg_take,
+                phase3_candidate_source,
+                phase3_retry_attempted,
+                phase3_sync_fallback,
+                convert_start.elapsed().as_micros()
+            );
+            update_composition(ctx, tid, sink, snapshot.first)?;
+            return Ok(true);
+        }
         let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
         tracing::debug!(
             "on_convert[new]: bg_running={} bg={}",

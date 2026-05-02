@@ -12,6 +12,11 @@
 - LLM beam search の結果は finished beam が存在する場合に finished beam を優先し、途中切れ preview がライブ変換表示に入りにくいように変更。
 - リリース表記とパッケージメタデータを 0.8.7 に更新。
 
+### Fixed
+
+- `kanji_ready=false` かつ `bg=idle` の状態で Space 変換したとき、進行しない `Waiting` に入って変換できなくなる問題を修正。
+- engine 側の `poll_model_ready` が、既にモデル ready の場合にも `true` を返すように修正。
+
 ## [0.8.6] - 2026-05-01
 
 ### Changed
