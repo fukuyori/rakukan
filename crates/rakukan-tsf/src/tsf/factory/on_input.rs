@@ -102,11 +102,6 @@ impl super::TextServiceFactory_Impl {
                     .strip_prefix(&reading)
                     .unwrap_or(new_reading.as_str())
                     .to_string();
-                // preedit = hiragana + pending_romaji の構成なので、
-                // hiragana 長を超えた部分が未確定ローマ字。
-                // 表示にはこれを末尾に付けて見えるようにするが、
-                // session に保存する display はひらがなのみの版にする
-                // （次回 suffix 計算や BG preview 更新で汚染されないように）。
                 let pending = text_util::suffix_after_prefix_or_empty(
                     &preedit,
                     &new_reading,

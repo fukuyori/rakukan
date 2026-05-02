@@ -3,6 +3,15 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.7] - 2026-05-02
+
+### Changed
+
+- LiveConv 中に Space を押した場合、Space 押下時点の preview を候補表の第1候補として使い、本文 composition も同じ候補を表示するように変更。
+- 通常 Space 経路で `SessionState::Selecting` の snapshot から候補表のページ候補と本文表示候補を取り出すように整理。
+- LLM beam search の結果は finished beam が存在する場合に finished beam を優先し、途中切れ preview がライブ変換表示に入りにくいように変更。
+- リリース表記とパッケージメタデータを 0.8.7 に更新。
+
 ## [0.8.6] - 2026-05-01
 
 ### Changed

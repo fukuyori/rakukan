@@ -822,6 +822,119 @@ pub fn on_waiting_timer() {
     use crate::engine::state::engine_get;
     use crate::engine::state::{session_get, SessionState};
 
+    // Selecting { llm_pending=true } は、Space 1回目で候補表を即表示した後の
+    // 後追い更新状態。Waiting と同じタイマーで BG 完了を拾い、候補表だけ更新する。
+    let selecting_info = {
+        match session_get() {
+            Ok(sess) => {
+                if let SessionState::Selecting {
+                    original_preedit,
+                    llm_pending,
+                    pos_x,
+                    pos_y,
+                    ..
+                } = &*sess
+                {
+                    if *llm_pending {
+                        Some((original_preedit.clone(), *pos_x, *pos_y))
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            Err(_) => None,
+        }
+    };
+
+    if let Some((preedit_key, pos_x, pos_y)) = selecting_info {
+        let bg_done = match engine_get() {
+            Ok(g) => g.as_ref().map(|e| e.bg_status() == "done").unwrap_or(false),
+            Err(_) => false,
+        };
+        if !bg_done {
+            return;
+        }
+
+        const DICT_LIMIT: usize = 40;
+        let result = (|| -> Option<Vec<String>> {
+            let mut guard = engine_get().ok()?;
+            let engine = guard.as_mut()?;
+            let hira_key = engine.hiragana_text();
+            let llm_cands = engine.bg_take_candidates(&preedit_key).or_else(|| {
+                if hira_key != preedit_key {
+                    tracing::debug!(
+                        "on_waiting_timer(selecting): key mismatch, retry hira={:?}",
+                        hira_key
+                    );
+                    engine.bg_take_candidates(&hira_key)
+                } else {
+                    None
+                }
+            })?;
+            let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+            if merged.is_empty() {
+                None
+            } else {
+                Some(merged)
+            }
+        })();
+
+        let Some(merged) = result else {
+            tracing::warn!(
+                "on_waiting_timer(selecting): bg_take_candidates returned None or empty"
+            );
+            stop_waiting_timer();
+            return;
+        };
+
+        let page_info_str;
+        let page_cands;
+        let page_selected;
+        {
+            let mut sess = match session_get() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            if let SessionState::Selecting {
+                candidates,
+                selected,
+                llm_pending,
+                ..
+            } = &mut *sess
+            {
+                *candidates = merged;
+                if *selected >= candidates.len() {
+                    *selected = candidates.len().saturating_sub(1);
+                }
+                *llm_pending = false;
+            } else {
+                stop_waiting_timer();
+                return;
+            }
+            page_cands = sess.page_candidates().to_vec();
+            page_selected = sess.page_selected();
+            page_info_str = sess.page_info().to_string();
+        }
+
+        stop_waiting_timer();
+        show_with_status(
+            &page_cands,
+            page_selected,
+            &page_info_str,
+            pos_x,
+            pos_y,
+            None,
+        );
+        tracing::debug!(
+            "on_waiting_timer(selecting): updated {} cands for {:?}",
+            page_cands.len(),
+            preedit_key
+        );
+        return;
+    }
+
     // セッションが Waiting 状態かチェック
     let wait_info = {
         match session_get() {

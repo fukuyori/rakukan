@@ -26,6 +26,34 @@ fn convert_mark(stage: &'static str, start: Instant, last: &mut Instant) {
     tracing::info!("convert_timing stage={stage} step_us={step_us} total_us={total_us}");
 }
 
+struct SelectingSnapshot {
+    first: String,
+    page_candidates: Vec<String>,
+    page_selected: usize,
+    page_info: String,
+}
+
+fn activate_selecting_snapshot(
+    mut candidates: Vec<String>,
+    original_preedit: String,
+    x: i32,
+    y: i32,
+    llm_pending: bool,
+) -> Result<SelectingSnapshot> {
+    if candidates.is_empty() {
+        candidates.push(original_preedit.clone());
+    }
+
+    let mut sess = session_get()?;
+    sess.activate_selecting(candidates, original_preedit, x, y, llm_pending);
+    Ok(SelectingSnapshot {
+        first: sess.current_candidate().unwrap_or_default().to_string(),
+        page_candidates: sess.page_candidates().to_vec(),
+        page_selected: sess.page_selected(),
+        page_info: sess.page_info(),
+    })
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
         &self,
@@ -69,16 +97,21 @@ impl super::TextServiceFactory_Impl {
         // ── LiveConv（ライブ変換表示中）: Space → reading で通常変換へ ──────
         // engine の hiragana_buf は LiveConv 遷移後も変化していないため、
         // session を Preedit に戻すだけで通常の on_convert フローに乗れる。
+        let mut space_live_preview: Option<String> = None;
         {
             let mut sess = session_get()?;
             if sess.is_live_conv() {
-                let reading = sess
+                let (reading, preview) = sess
                     .live_conv_parts()
-                    .map(|(r, _)| r.to_string())
+                    .map(|(r, p)| (r.to_string(), p.to_string()))
                     .unwrap_or_default();
+                if !preview.is_empty() {
+                    space_live_preview = Some(preview);
+                }
                 tracing::debug!(
-                    "[Live] on_convert: LiveConv → Preedit reading={:?}",
-                    reading
+                    "[Live] on_convert: LiveConv → Preedit reading={:?} preview={:?}",
+                    reading,
+                    space_live_preview
                 );
                 sess.set_preedit(reading.clone());
                 drop(sess);
@@ -454,6 +487,11 @@ impl super::TextServiceFactory_Impl {
         // 新規変換
         let convert_start = Instant::now();
         let mut convert_last = convert_start;
+        let mut phase3_path: &'static str = "new";
+        let mut phase3_bg_take: &'static str = "not_attempted";
+        let mut phase3_candidate_source: &'static str;
+        let mut phase3_retry_attempted = false;
+        let mut phase3_sync_fallback = false;
         let llm_limit = crate::engine::state::get_num_candidates();
         const DICT_LIMIT: usize = 40;
         let _ = crate::engine::state::poll_dict_ready_cached(engine);
@@ -500,38 +538,46 @@ impl super::TextServiceFactory_Impl {
         const LLM_WAIT_INLINE_MS: u64 = 250;
         tracing::debug!("on_convert[new]: LLM_WAIT_INLINE_MS={LLM_WAIT_INLINE_MS}ms");
         if bg_running && kanji_ready {
+            phase3_path = "bg_running_wait";
             let caret = caret_rect_get();
-            // まず ⏳ を即表示してユーザーに変換中であることを伝える
-            if let Ok(mut sess) = session_get() {
-                if !sess.is_waiting() {
-                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
-                }
-            }
-            let dummy = vec![preedit.clone()];
-            // drop guard の前に ⏳ 表示（RequestEditSession 前）
+            let pending_first = space_live_preview.unwrap_or_else(|| preedit.clone());
+            let pending_candidate_source = if pending_first == preedit {
+                "preedit_pending"
+            } else {
+                "space_live_preview_pending"
+            };
+            let pending_candidates = vec![pending_first.clone()];
+            let snapshot = activate_selecting_snapshot(
+                pending_candidates,
+                preedit.clone(),
+                caret.left,
+                caret.bottom,
+                true,
+            )?;
+            drop(guard);
             candidate_window::show_with_status(
-                &dummy,
-                0,
-                "",
+                &snapshot.page_candidates,
+                snapshot.page_selected,
+                &snapshot.page_info,
                 caret.left,
                 caret.bottom,
                 Some("⏳ 変換中..."),
             );
-            convert_mark("waiting_show", convert_start, &mut convert_last);
-            // LLM完了を待機（短時間のみ）。超えたら WM_TIMER に任せて抜ける。
-            let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
-            convert_mark("bg_wait_inline", convert_start, &mut convert_last);
-            tracing::debug!("on_convert[new]: bg_wait({LLM_WAIT_INLINE_MS}ms) completed={completed}");
-            if !completed {
-                tracing::info!(
-                    "convert_timing result=timer_fallback total_us={}",
-                    convert_start.elapsed().as_micros()
-                );
-                drop(guard);
-                candidate_window::start_waiting_timer();
-                return Ok(true);
-            }
+            candidate_window::start_waiting_timer();
+            convert_mark("selecting_pending_show", convert_start, &mut convert_last);
+            tracing::info!(
+                "convert_timing result=shown_pending path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates=1 llm_pending=true total_us={}",
+                phase3_path,
+                phase3_bg_take,
+                pending_candidate_source,
+                phase3_retry_attempted,
+                phase3_sync_fallback,
+                convert_start.elapsed().as_micros()
+            );
+            update_composition(ctx, tid, sink, snapshot.first)?;
+            return Ok(true);
         } else if bg_running {
+            phase3_path = "prev_bg_running_wait";
             // kanji_ready=false だが bg=running の場合：
             // 前の変換の converter がまだ conv_cache に貸し出されている。
             // 完了を待って reclaim し、新しいキーで bg_start を再試行する。
@@ -560,7 +606,11 @@ impl super::TextServiceFactory_Impl {
             if !completed {
                 // 前の bg が inline 時間で終わらない → WM_TIMER に任せる
                 tracing::info!(
-                    "convert_timing result=prev_bg_timer_fallback total_us={}",
+                    "convert_timing result=prev_bg_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
+                    phase3_path,
+                    phase3_bg_take,
+                    phase3_retry_attempted,
+                    phase3_sync_fallback,
                     convert_start.elapsed().as_micros()
                 );
                 drop(guard);
@@ -580,7 +630,11 @@ impl super::TextServiceFactory_Impl {
                 tracing::debug!("on_convert[new]: new bg wait completed={completed2}");
                 if !completed2 {
                     tracing::info!(
-                        "convert_timing result=new_bg_timer_fallback total_us={}",
+                        "convert_timing result=new_bg_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
+                        phase3_path,
+                        phase3_bg_take,
+                        phase3_retry_attempted,
+                        phase3_sync_fallback,
                         convert_start.elapsed().as_micros()
                     );
                     drop(guard);
@@ -591,7 +645,11 @@ impl super::TextServiceFactory_Impl {
             } else {
                 // モデル自体が未ロード → タイマーに任せる
                 tracing::info!(
-                    "convert_timing result=model_not_ready_timer_fallback total_us={}",
+                    "convert_timing result=model_not_ready_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
+                    phase3_path,
+                    phase3_bg_take,
+                    phase3_retry_attempted,
+                    phase3_sync_fallback,
                     convert_start.elapsed().as_micros()
                 );
                 drop(guard);
@@ -614,14 +672,23 @@ impl super::TextServiceFactory_Impl {
             kanji_ready_now
         );
         // キー不一致で None が返ると Done が復元されるので、両方試した後に reclaim しておく
-        let bg_cands = engine.bg_take_candidates(&hiragana_key2).or_else(|| {
-            if preedit != hiragana_key2 {
-                tracing::debug!("Convert: hira key miss, retry preedit={:?}", preedit);
-                engine.bg_take_candidates(&preedit)
+        let bg_cands_hira = engine.bg_take_candidates(&hiragana_key2);
+        let bg_cands = if bg_cands_hira.is_some() {
+            phase3_bg_take = "hit_hiragana";
+            bg_cands_hira
+        } else if preedit != hiragana_key2 {
+            tracing::debug!("Convert: hira key miss, retry preedit={:?}", preedit);
+            let bg_cands_preedit = engine.bg_take_candidates(&preedit);
+            if bg_cands_preedit.is_some() {
+                phase3_bg_take = "hit_preedit";
             } else {
-                None
+                phase3_bg_take = "miss_hiragana_preedit";
             }
-        });
+            bg_cands_preedit
+        } else {
+            phase3_bg_take = "miss_hiragana";
+            None
+        };
         convert_mark("bg_take_candidates", convert_start, &mut convert_last);
         tracing::debug!(
             "on_convert[new]: bg_cands={:?}",
@@ -630,6 +697,7 @@ impl super::TextServiceFactory_Impl {
         // いずれも None だった場合 → bg_reclaim + bg_start で inline 再試行。
         // 短時間で取れなければ WM_TIMER fallback に委譲して抜ける。
         let bg_cands = if bg_cands.is_none() && kanji_ready_now {
+            phase3_retry_attempted = true;
             tracing::warn!(
                 "Convert: bg_take_candidates None (hira={:?} preedit={:?}) → reclaim+restart",
                 hiragana_key2,
@@ -645,7 +713,11 @@ impl super::TextServiceFactory_Impl {
                 tracing::debug!("Convert: retry bg_wait completed={completed3}");
                 if !completed3 {
                     tracing::info!(
-                        "convert_timing result=retry_timer_fallback total_us={}",
+                        "convert_timing result=retry_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
+                        phase3_path,
+                        phase3_bg_take,
+                        phase3_retry_attempted,
+                        phase3_sync_fallback,
                         convert_start.elapsed().as_micros()
                     );
                     drop(guard);
@@ -653,7 +725,7 @@ impl super::TextServiceFactory_Impl {
                     return Ok(true);
                 }
                 let hira3 = engine.hiragana_text().to_string();
-                engine
+                let retry_cands = engine
                     .bg_take_candidates(&hira3)
                     .or_else(|| {
                         if preedit != hira3 {
@@ -662,7 +734,13 @@ impl super::TextServiceFactory_Impl {
                             None
                         }
                     })
-                    .inspect(|c| tracing::debug!("Convert: retry got {} cands", c.len()))
+                    .inspect(|c| tracing::debug!("Convert: retry got {} cands", c.len()));
+                if retry_cands.is_some() {
+                    phase3_bg_take = "hit_after_retry";
+                } else {
+                    phase3_bg_take = "miss_after_retry";
+                }
+                retry_cands
             } else {
                 engine.bg_reclaim();
                 None
@@ -677,6 +755,11 @@ impl super::TextServiceFactory_Impl {
 
         let (candidates, llm_pending): (Vec<String>, bool) = match bg_cands {
             Some(llm_cands) if !llm_cands.is_empty() => {
+                phase3_candidate_source = if phase3_retry_attempted {
+                    "bg_after_retry"
+                } else {
+                    "bg"
+                };
                 // bg_take_candidates 成功時に kanji が復元されているため再評価
                 let kanji_ready_now = engine.is_kanji_ready();
                 let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
@@ -689,6 +772,8 @@ impl super::TextServiceFactory_Impl {
                 );
                 if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
                     if kanji_ready_now {
+                        phase3_sync_fallback = true;
+                        phase3_candidate_source = "sync_after_weak_merge";
                         (
                             engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit),
                             false,
@@ -702,6 +787,8 @@ impl super::TextServiceFactory_Impl {
             }
             _ => {
                 if kanji_ready_now {
+                    phase3_sync_fallback = true;
+                    phase3_candidate_source = "sync_no_bg";
                     let dict_cands =
                         engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit);
                     convert_mark("sync_multi_fallback", convert_start, &mut convert_last);
@@ -711,6 +798,7 @@ impl super::TextServiceFactory_Impl {
                         (dict_cands, false)
                     }
                 } else {
+                    phase3_candidate_source = "preedit_model_not_ready";
                     (vec![preedit.clone()], false)
                 }
             }
@@ -725,38 +813,29 @@ impl super::TextServiceFactory_Impl {
         convert_mark("session_ready", convert_start, &mut convert_last);
         let _ = bg_status2; // suppress unused warning
 
-        let first = candidates
-            .first()
-            .cloned()
-            .unwrap_or_else(|| preedit.clone());
+        let caret = caret_rect_get();
+        drop(guard);
+        let snapshot = activate_selecting_snapshot(
+            candidates.clone(),
+            preedit.clone(),
+            caret.left,
+            caret.bottom,
+            llm_pending,
+        )?;
         diag::event(DiagEvent::Convert {
             preedit: preedit.clone(),
             kanji_ready: true,
-            result: first.clone(),
+            result: snapshot.first.clone(),
         });
-
-        let caret = caret_rect_get();
-        drop(guard);
-        let (page_cands, page_info) = {
-            let mut sess = session_get()?;
-            sess.activate_selecting(
-                candidates.clone(),
-                preedit.clone(),
-                caret.left,
-                caret.bottom,
-                llm_pending,
-            );
-            (sess.page_candidates().to_vec(), sess.page_info())
-        };
         let status = if llm_pending {
             Some("⏳ 変換中...")
         } else {
             None
         };
         candidate_window::show_with_status(
-            &page_cands,
-            0,
-            &page_info,
+            &snapshot.page_candidates,
+            snapshot.page_selected,
+            &snapshot.page_info,
             caret.left,
             caret.bottom,
             status,
@@ -764,13 +843,18 @@ impl super::TextServiceFactory_Impl {
         convert_mark("candidate_window_show", convert_start, &mut convert_last);
         tracing::debug!(
             "on_convert[new]: update_composition first={:?} comp_exists={}",
-            first,
+            snapshot.first,
             composition_clone().map(|g| g.is_some()).unwrap_or(false)
         );
-        update_composition(ctx, tid, sink, first)?;
+        update_composition(ctx, tid, sink, snapshot.first)?;
         convert_mark("update_composition", convert_start, &mut convert_last);
         tracing::info!(
-            "convert_timing result=shown candidates={} llm_pending={} total_us={}",
+            "convert_timing result=shown path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending={} total_us={}",
+            phase3_path,
+            phase3_bg_take,
+            phase3_candidate_source,
+            phase3_retry_attempted,
+            phase3_sync_fallback,
             candidates.len(),
             llm_pending,
             convert_start.elapsed().as_micros()

@@ -570,10 +570,16 @@ impl LlamaCppModel {
             }
         }
 
-        // Combine all results
-        let mut all_results: Vec<(Vec<LlamaToken>, f32)> = finished_beams
+        // Prefer completed candidates. Active beams are only a last resort when
+        // no beam reached EOS; otherwise a high-scoring unfinished prefix can
+        // surface as a live preview and make the displayed text look truncated.
+        let result_beams = if finished_beams.is_empty() {
+            beams
+        } else {
+            finished_beams
+        };
+        let mut all_results: Vec<(Vec<LlamaToken>, f32)> = result_beams
             .into_iter()
-            .chain(beams)
             .map(|b| (b.tokens, b.score))
             .collect();
 
