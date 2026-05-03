@@ -1,4 +1,4 @@
-# rakukan v0.8.8
+# rakukan v0.8.9
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,11 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.8.9 変更点
+
+- **LiveConv 由来候補の引き継ぎを改善**: LiveConv から Space へ移る pending 初期候補を `CandidateView` として Selecting 第1候補へ渡し、候補表と本文 composition の対応をより直接的にしました。
+- **同期 fallback の観測を追加**: Space 変換の同期 fallback 呼び出しを helper に隔離し、`sync_fallback_probe` で発生理由と所要時間を追えるようにしました。
 
 ## 0.8.8 変更点
 

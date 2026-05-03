@@ -3,6 +3,14 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.9] - 2026-05-03
+
+### Changed
+
+- LiveConv から Space へ移る pending 初期候補を `CandidateView` として Selecting へ渡し、候補表第1候補と本文 composition の対応をより直接的にした。
+- Space 変換の同期 fallback 呼び出しを helper に隔離し、`sync_fallback_probe` で発生理由と所要時間を追えるようにした。
+- リリース表記とパッケージメタデータを 0.8.9 に更新。
+
 ## [0.8.8] - 2026-05-03
 
 ### Added

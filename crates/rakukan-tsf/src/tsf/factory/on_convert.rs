@@ -8,8 +8,8 @@ use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
 use crate::engine::state::{
-    CandidateViewSource, SessionState, caret_rect_get, composition_clone, engine_try_get_or_create,
-    session_get,
+    CandidateView, CandidateViewSource, SessionState, caret_rect_get, composition_clone,
+    engine_try_get_or_create, session_get,
 };
 use crate::tsf::candidate_window;
 
@@ -38,12 +38,32 @@ struct SelectingSnapshot {
 }
 
 fn activate_selecting_snapshot_with_source(
+    candidates: Vec<String>,
+    original_preedit: String,
+    x: i32,
+    y: i32,
+    llm_pending: bool,
+    source: CandidateViewSource,
+) -> Result<SelectingSnapshot> {
+    activate_selecting_snapshot_with_candidate_view(
+        candidates,
+        original_preedit,
+        x,
+        y,
+        llm_pending,
+        source,
+        None,
+    )
+}
+
+fn activate_selecting_snapshot_with_candidate_view(
     mut candidates: Vec<String>,
     original_preedit: String,
     x: i32,
     y: i32,
     llm_pending: bool,
     source: CandidateViewSource,
+    current_candidate_view: Option<CandidateView>,
 ) -> Result<SelectingSnapshot> {
     if candidates.is_empty() {
         candidates.push(original_preedit.clone());
@@ -52,6 +72,9 @@ fn activate_selecting_snapshot_with_source(
     let mut sess = session_get()?;
     sess.activate_selecting(candidates, original_preedit, x, y, llm_pending);
     sess.rebuild_selecting_candidate_views(source);
+    if let Some(view) = current_candidate_view {
+        sess.replace_current_candidate_view(view);
+    }
     let candidate_view = sess.current_candidate_view().cloned();
     Ok(SelectingSnapshot {
         first: sess.current_candidate().unwrap_or_default().to_string(),
@@ -97,6 +120,34 @@ fn log_candidate_display_probe(
     );
 }
 
+fn engine_convert_sync_multi_fallback(
+    engine: &mut crate::engine::state::DynEngine,
+    llm_limit: usize,
+    dict_limit: usize,
+    preedit: &str,
+    reason: &'static str,
+    convert_start: Instant,
+    convert_last: &mut Instant,
+) -> Vec<String> {
+    let start = Instant::now();
+    tracing::info!(
+        "sync_fallback_probe event=start reason={} reading_len={} llm_limit={} dict_limit={}",
+        reason,
+        preedit.chars().count(),
+        llm_limit,
+        dict_limit
+    );
+    let candidates = engine_convert_sync_multi(engine, llm_limit, dict_limit, preedit);
+    convert_mark(reason, convert_start, convert_last);
+    tracing::info!(
+        "sync_fallback_probe event=finish reason={} elapsed_us={} candidates={}",
+        reason,
+        start.elapsed().as_micros(),
+        candidates.len()
+    );
+    candidates
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
         &self,
@@ -140,7 +191,7 @@ impl super::TextServiceFactory_Impl {
         // ── LiveConv（ライブ変換表示中）: Space → reading で通常変換へ ──────
         // engine の hiragana_buf は LiveConv 遷移後も変化していないため、
         // session を Preedit に戻すだけで通常の on_convert フローに乗れる。
-        let mut space_live_preview: Option<String> = None;
+        let mut space_live_candidate: Option<CandidateView> = None;
         {
             let mut sess = session_get()?;
             if sess.is_live_conv() {
@@ -149,12 +200,16 @@ impl super::TextServiceFactory_Impl {
                     .map(|(r, p)| (r.to_string(), p.to_string()))
                     .unwrap_or_default();
                 if !preview.is_empty() {
-                    space_live_preview = Some(preview);
+                    space_live_candidate = Some(CandidateView::compatible(
+                        preview,
+                        reading.chars().count(),
+                        CandidateViewSource::LivePreview,
+                    ));
                 }
                 tracing::debug!(
                     "[Live] on_convert: LiveConv → Preedit reading={:?} preview={:?}",
                     reading,
-                    space_live_preview
+                    space_live_candidate.as_ref().map(|candidate| candidate.text.as_str())
                 );
                 sess.set_preedit(reading.clone());
                 drop(sess);
@@ -669,8 +724,11 @@ impl super::TextServiceFactory_Impl {
         if bg_running && kanji_ready {
             phase3_path = "bg_running_wait";
             let caret = caret_rect_get();
-            let pending_from_live_preview = space_live_preview.is_some();
-            let pending_first = space_live_preview.unwrap_or_else(|| preedit.clone());
+            let pending_from_live_preview = space_live_candidate.is_some();
+            let pending_first = space_live_candidate
+                .as_ref()
+                .map(|candidate| candidate.text.clone())
+                .unwrap_or_else(|| preedit.clone());
             let pending_view_source = if pending_from_live_preview {
                 CandidateViewSource::LivePreview
             } else {
@@ -682,13 +740,14 @@ impl super::TextServiceFactory_Impl {
                 "preedit_pending"
             };
             let pending_candidates = vec![pending_first.clone()];
-            let snapshot = activate_selecting_snapshot_with_source(
+            let snapshot = activate_selecting_snapshot_with_candidate_view(
                 pending_candidates,
                 preedit.clone(),
                 caret.left,
                 caret.bottom,
                 true,
                 pending_view_source,
+                space_live_candidate,
             )?;
             drop(guard);
             candidate_window::show_with_status(
@@ -921,7 +980,15 @@ impl super::TextServiceFactory_Impl {
                         phase3_sync_fallback = true;
                         phase3_candidate_source = "sync_after_weak_merge";
                         (
-                            engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit),
+                            engine_convert_sync_multi_fallback(
+                                engine,
+                                llm_limit,
+                                DICT_LIMIT,
+                                &preedit,
+                                "sync_after_weak_merge",
+                                convert_start,
+                                &mut convert_last,
+                            ),
                             false,
                         )
                     } else {
@@ -935,9 +1002,15 @@ impl super::TextServiceFactory_Impl {
                 if kanji_ready_now {
                     phase3_sync_fallback = true;
                     phase3_candidate_source = "sync_no_bg";
-                    let dict_cands =
-                        engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit);
-                    convert_mark("sync_multi_fallback", convert_start, &mut convert_last);
+                    let dict_cands = engine_convert_sync_multi_fallback(
+                        engine,
+                        llm_limit,
+                        DICT_LIMIT,
+                        &preedit,
+                        "sync_no_bg",
+                        convert_start,
+                        &mut convert_last,
+                    );
                     if dict_cands.is_empty() {
                         (vec![preedit.clone()], false)
                     } else {

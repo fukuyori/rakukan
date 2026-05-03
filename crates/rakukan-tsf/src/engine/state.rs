@@ -1222,6 +1222,23 @@ impl SessionState {
         }
     }
 
+    pub fn replace_current_candidate_view(&mut self, view: CandidateView) {
+        if let SessionState::Selecting {
+            candidates,
+            candidate_views,
+            selected,
+            ..
+        } = self
+        {
+            if let Some(candidate) = candidates.get_mut(*selected) {
+                *candidate = view.text.clone();
+            }
+            if let Some(slot) = candidate_views.get_mut(*selected) {
+                *slot = view;
+            }
+        }
+    }
+
     pub fn original_preedit(&self) -> Option<&str> {
         match self {
             SessionState::Selecting {
