@@ -820,7 +820,7 @@ pub fn stop_waiting_timer() {
 /// bg_status == "done" になったら候補を取り出して表示する。
 pub fn on_waiting_timer() {
     use crate::engine::state::engine_get;
-    use crate::engine::state::{session_get, SessionState};
+    use crate::engine::state::{CandidateViewSource, SessionState, session_get};
 
     // Selecting { llm_pending=true } は、Space 1回目で候補表を即表示した後の
     // 後追い更新状態。Waiting と同じタイマーで BG 完了を拾い、候補表だけ更新する。
@@ -897,21 +897,13 @@ pub fn on_waiting_timer() {
                 Ok(s) => s,
                 Err(_) => return,
             };
-            if let SessionState::Selecting {
-                candidates,
-                selected,
-                llm_pending,
-                ..
-            } = &mut *sess
-            {
-                *candidates = merged;
-                if *selected >= candidates.len() {
-                    *selected = candidates.len().saturating_sub(1);
-                }
-                *llm_pending = false;
-            } else {
+            if !matches!(&*sess, SessionState::Selecting { .. }) {
                 stop_waiting_timer();
                 return;
+            }
+            sess.replace_selecting_candidates(merged, CandidateViewSource::Bg);
+            if let SessionState::Selecting { llm_pending, .. } = &mut *sess {
+                *llm_pending = false;
             }
             page_cands = sess.page_candidates().to_vec();
             page_selected = sess.page_selected();

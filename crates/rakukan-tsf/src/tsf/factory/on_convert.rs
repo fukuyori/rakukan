@@ -8,7 +8,8 @@ use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
 use crate::engine::state::{
-    SessionState, caret_rect_get, composition_clone, engine_try_get_or_create, session_get,
+    CandidateViewSource, SessionState, caret_rect_get, composition_clone, engine_try_get_or_create,
+    session_get,
 };
 use crate::tsf::candidate_window;
 
@@ -31,14 +32,18 @@ struct SelectingSnapshot {
     page_candidates: Vec<String>,
     page_selected: usize,
     page_info: String,
+    candidate_source: CandidateViewSource,
+    corresponding_reading_len: usize,
+    suffix_len: usize,
 }
 
-fn activate_selecting_snapshot(
+fn activate_selecting_snapshot_with_source(
     mut candidates: Vec<String>,
     original_preedit: String,
     x: i32,
     y: i32,
     llm_pending: bool,
+    source: CandidateViewSource,
 ) -> Result<SelectingSnapshot> {
     if candidates.is_empty() {
         candidates.push(original_preedit.clone());
@@ -46,12 +51,50 @@ fn activate_selecting_snapshot(
 
     let mut sess = session_get()?;
     sess.activate_selecting(candidates, original_preedit, x, y, llm_pending);
+    sess.rebuild_selecting_candidate_views(source);
+    let candidate_view = sess.current_candidate_view().cloned();
     Ok(SelectingSnapshot {
         first: sess.current_candidate().unwrap_or_default().to_string(),
         page_candidates: sess.page_candidates().to_vec(),
         page_selected: sess.page_selected(),
         page_info: sess.page_info(),
+        candidate_source: candidate_view
+            .as_ref()
+            .map(|view| view.source)
+            .unwrap_or(source),
+        corresponding_reading_len: candidate_view
+            .as_ref()
+            .map(|view| view.corresponding_reading_len)
+            .unwrap_or_default(),
+        suffix_len: candidate_view
+            .as_ref()
+            .map(|view| view.suffix.chars().count())
+            .unwrap_or_default(),
     })
+}
+
+fn log_candidate_display_probe(
+    event: &'static str,
+    reading: &str,
+    first_candidate: &str,
+    composition_candidate: &str,
+    source: CandidateViewSource,
+    llm_pending: bool,
+    corresponding_reading_len: usize,
+    suffix_len: usize,
+) {
+    tracing::info!(
+        "candidate_display_probe event={} reading_len={} source={} first_candidate={:?} composition_candidate={:?} match={} llm_pending={} corresponding_reading_len={} suffix_len={}",
+        event,
+        reading.chars().count(),
+        source.as_str(),
+        first_candidate,
+        composition_candidate,
+        first_candidate == composition_candidate,
+        llm_pending,
+        corresponding_reading_len,
+        suffix_len
+    );
 }
 
 impl super::TextServiceFactory_Impl {
@@ -314,14 +357,16 @@ impl super::TextServiceFactory_Impl {
                                 );
                                 if !merged.is_empty() {
                                     if let Ok(mut sess2) = session_get() {
+                                        sess2.replace_selecting_candidates(
+                                            merged,
+                                            CandidateViewSource::Bg,
+                                        );
                                         if let SessionState::Selecting {
-                                            ref mut candidates,
                                             ref mut selected,
                                             ref mut llm_pending,
                                             ..
                                         } = *sess2
                                         {
-                                            *candidates = merged;
                                             *selected = 0;
                                             *llm_pending = false;
                                         }
@@ -332,6 +377,7 @@ impl super::TextServiceFactory_Impl {
                                             .or_else(|| sess2.original_preedit())
                                             .unwrap_or("")
                                             .to_string();
+                                        let candidate_view = sess2.current_candidate_view().cloned();
                                         let prefix = sess2.selecting_prefix_clone();
                                         let remainder = sess2.selecting_remainder_clone();
                                         let pos = caret_rect_get();
@@ -344,6 +390,18 @@ impl super::TextServiceFactory_Impl {
                                             pos.left,
                                             pos.bottom,
                                         );
+                                        if let Some(view) = candidate_view {
+                                            log_candidate_display_probe(
+                                                "pending_update",
+                                                &original_preedit,
+                                                page_cands.first().map(String::as_str).unwrap_or(""),
+                                                &cand_text,
+                                                view.source,
+                                                false,
+                                                view.corresponding_reading_len,
+                                                view.suffix.chars().count(),
+                                            );
+                                        }
                                         update_composition_candidate_parts(
                                             ctx, tid, sink, prefix, cand_text, remainder,
                                         )?;
@@ -392,14 +450,16 @@ impl super::TextServiceFactory_Impl {
                                     tracing::debug!("merge_candidates → {:?}", merged);
                                     if !merged.is_empty() {
                                         if let Ok(mut sess2) = session_get() {
+                                            sess2.replace_selecting_candidates(
+                                                merged,
+                                                CandidateViewSource::Bg,
+                                            );
                                             if let SessionState::Selecting {
-                                                ref mut candidates,
                                                 ref mut selected,
                                                 ref mut llm_pending,
                                                 ..
                                             } = *sess2
                                             {
-                                                *candidates = merged;
                                                 *selected = 0;
                                                 *llm_pending = false;
                                             }
@@ -410,6 +470,8 @@ impl super::TextServiceFactory_Impl {
                                                 .or_else(|| sess2.original_preedit())
                                                 .unwrap_or("")
                                                 .to_string();
+                                            let candidate_view =
+                                                sess2.current_candidate_view().cloned();
                                             let prefix = sess2.selecting_prefix_clone();
                                             let remainder = sess2.selecting_remainder_clone();
                                             let pos = caret_rect_get();
@@ -422,6 +484,21 @@ impl super::TextServiceFactory_Impl {
                                                 pos.left,
                                                 pos.bottom,
                                             );
+                                            if let Some(view) = candidate_view {
+                                                log_candidate_display_probe(
+                                                    "pending_update",
+                                                    &original_preedit,
+                                                    page_cands
+                                                        .first()
+                                                        .map(String::as_str)
+                                                        .unwrap_or(""),
+                                                    &cand_text,
+                                                    view.source,
+                                                    false,
+                                                    view.corresponding_reading_len,
+                                                    view.suffix.chars().count(),
+                                                );
+                                            }
                                             update_composition_candidate_parts(
                                                 ctx, tid, sink, prefix, cand_text, remainder,
                                             )?;
@@ -533,12 +610,13 @@ impl super::TextServiceFactory_Impl {
             phase3_path = "model_not_ready";
             phase3_candidate_source = "preedit_model_not_ready";
             let caret = caret_rect_get();
-            let snapshot = activate_selecting_snapshot(
+            let snapshot = activate_selecting_snapshot_with_source(
                 vec![preedit.clone()],
                 preedit.clone(),
                 caret.left,
                 caret.bottom,
                 false,
+                CandidateViewSource::Preedit,
             )?;
             drop(guard);
             candidate_window::stop_waiting_timer();
@@ -559,6 +637,16 @@ impl super::TextServiceFactory_Impl {
                 phase3_retry_attempted,
                 phase3_sync_fallback,
                 convert_start.elapsed().as_micros()
+            );
+            log_candidate_display_probe(
+                "space_initial",
+                &preedit,
+                snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+                &snapshot.first,
+                snapshot.candidate_source,
+                false,
+                snapshot.corresponding_reading_len,
+                snapshot.suffix_len,
             );
             update_composition(ctx, tid, sink, snapshot.first)?;
             return Ok(true);
@@ -581,19 +669,26 @@ impl super::TextServiceFactory_Impl {
         if bg_running && kanji_ready {
             phase3_path = "bg_running_wait";
             let caret = caret_rect_get();
+            let pending_from_live_preview = space_live_preview.is_some();
             let pending_first = space_live_preview.unwrap_or_else(|| preedit.clone());
-            let pending_candidate_source = if pending_first == preedit {
-                "preedit_pending"
+            let pending_view_source = if pending_from_live_preview {
+                CandidateViewSource::LivePreview
             } else {
+                CandidateViewSource::Preedit
+            };
+            let pending_candidate_source = if pending_from_live_preview {
                 "space_live_preview_pending"
+            } else {
+                "preedit_pending"
             };
             let pending_candidates = vec![pending_first.clone()];
-            let snapshot = activate_selecting_snapshot(
+            let snapshot = activate_selecting_snapshot_with_source(
                 pending_candidates,
                 preedit.clone(),
                 caret.left,
                 caret.bottom,
                 true,
+                pending_view_source,
             )?;
             drop(guard);
             candidate_window::show_with_status(
@@ -614,6 +709,16 @@ impl super::TextServiceFactory_Impl {
                 phase3_retry_attempted,
                 phase3_sync_fallback,
                 convert_start.elapsed().as_micros()
+            );
+            log_candidate_display_probe(
+                "space_initial",
+                &preedit,
+                snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+                &snapshot.first,
+                snapshot.candidate_source,
+                true,
+                snapshot.corresponding_reading_len,
+                snapshot.suffix_len,
             );
             update_composition(ctx, tid, sink, snapshot.first)?;
             return Ok(true);
@@ -856,12 +961,18 @@ impl super::TextServiceFactory_Impl {
 
         let caret = caret_rect_get();
         drop(guard);
-        let snapshot = activate_selecting_snapshot(
+        let candidate_view_source = match phase3_candidate_source {
+            "preedit_model_not_ready" => CandidateViewSource::Preedit,
+            "sync_after_weak_merge" | "sync_no_bg" => CandidateViewSource::Fallback,
+            _ => CandidateViewSource::Bg,
+        };
+        let snapshot = activate_selecting_snapshot_with_source(
             candidates.clone(),
             preedit.clone(),
             caret.left,
             caret.bottom,
             llm_pending,
+            candidate_view_source,
         )?;
         diag::event(DiagEvent::Convert {
             preedit: preedit.clone(),
@@ -886,6 +997,16 @@ impl super::TextServiceFactory_Impl {
             "on_convert[new]: update_composition first={:?} comp_exists={}",
             snapshot.first,
             composition_clone().map(|g| g.is_some()).unwrap_or(false)
+        );
+        log_candidate_display_probe(
+            "space_initial",
+            &preedit,
+            snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+            &snapshot.first,
+            snapshot.candidate_source,
+            llm_pending,
+            snapshot.corresponding_reading_len,
+            snapshot.suffix_len,
         );
         update_composition(ctx, tid, sink, snapshot.first)?;
         convert_mark("update_composition", convert_start, &mut convert_last);

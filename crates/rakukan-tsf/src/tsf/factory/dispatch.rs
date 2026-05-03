@@ -7,7 +7,7 @@ use anyhow::Result;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::engine::state::{
-    SessionState, caret_rect_get, engine_try_get_or_create, session_get,
+    CandidateViewSource, SessionState, caret_rect_get, engine_try_get_or_create, session_get,
     session_is_selecting_fast,
 };
 use crate::engine::text_util;
@@ -200,19 +200,19 @@ impl super::TextServiceFactory_Impl {
                             tracing::debug!("poll: merge_candidates → {:?}", merged);
                             if !merged.is_empty() {
                                 let first = merged.first().cloned().unwrap_or_default();
+                                sess.replace_selecting_candidates(merged, CandidateViewSource::Bg);
                                 if let SessionState::Selecting {
-                                    ref mut candidates,
                                     ref mut selected,
                                     ref mut llm_pending,
                                     ..
                                 } = *sess
                                 {
-                                    *candidates = merged;
                                     *selected = 0;
                                     *llm_pending = false;
                                 }
                                 let page_cands = sess.page_candidates().to_vec();
                                 let page_info = sess.page_info();
+                                let candidate_view = sess.current_candidate_view().cloned();
                                 let prefix = sess.selecting_prefix_clone();
                                 let remainder = sess.selecting_remainder_clone();
                                 let pos = caret_rect_get();
@@ -226,6 +226,18 @@ impl super::TextServiceFactory_Impl {
                                     pos.bottom,
                                     None,
                                 );
+                                if let Some(view) = candidate_view {
+                                    tracing::info!(
+                                        "candidate_display_probe event=pending_update reading_len={} source={} first_candidate={:?} composition_candidate={:?} match={} llm_pending=false corresponding_reading_len={} suffix_len={}",
+                                        preedit_key.chars().count(),
+                                        view.source.as_str(),
+                                        page_cands.first().map(String::as_str).unwrap_or(""),
+                                        first,
+                                        page_cands.first().map(String::as_str).unwrap_or("") == first,
+                                        view.corresponding_reading_len,
+                                        view.suffix.chars().count()
+                                    );
+                                }
                                 update_composition_candidate_parts(
                                     ctx, tid, sink, prefix, first, remainder,
                                 )?;

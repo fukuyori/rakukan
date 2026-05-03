@@ -1,11 +1,12 @@
-# Rakukan 引き継ぎ資料 (v0.8.7)
+# Rakukan 引き継ぎ資料 (v0.8.8)
 
-更新日: 2026-05-02
+更新日: 2026-05-03
 
 ## 現在の状態
 
-- **バージョン:** v0.8.7
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。v0.8.7 では Space 候補表示の初動を改善し、LiveConv preview と候補表第1候補、本文 composition の表示を揃えた。
+- **バージョン:** v0.8.8
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。v0.8.7 では Space 候補表示の初動を改善し、LiveConv preview と候補表第1候補、本文 composition の表示を揃えた。v0.8.8 ではログローテーションと azooKey 型候補メタデータ `CandidateView` の TSF 内導入を進めた。
+- **v0.8.8 の内容:** TSF / engine-host のログに起動時サイズベースのローテーションを追加。さらに `SessionState::Selecting` に TSF 内限定の `CandidateView` を導入し、候補表と本文 composition が同じ候補レコードを参照する土台を追加した。`candidate_display_probe` で Space 初期候補と pending update の対応を観測できる。
 - **v0.8.7 の内容:** LiveConv 中に Space を押した場合、Space 押下時点の preview を候補表の第1候補として使い、本文 composition も同じ候補を表示するようにした。通常 Space 経路では `SessionState::Selecting` の snapshot から候補表と本文表示を作る。生成側では finished beam を優先し、途中切れ preview による長文表示欠落のリスクを下げた。
 - **v0.8.6 の内容:** ライブ変換 preview は、読みが 3 文字以上になってから BG 変換と timer preview を起動するようにした。1〜2 文字の入力中はプリエディット表示を維持し、Space 変換 / 確定経路は従来どおり個別に処理する。未確定ローマ字子音を確定キーで出力する件は未対応の残課題。
 - **v0.8.5 の内容:** `bg_peek_top_candidate` で取得した preview 候補を表示前に `merge_candidates` へ通し、読み完全一致のユーザー辞書と学習履歴をライブ変換 preview にも反映するようにした。preview は converter を consume しないため、Space 変換 / 確定経路 (`bg_take_candidates`) との干渉は避ける。

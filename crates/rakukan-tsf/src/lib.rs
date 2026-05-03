@@ -11,6 +11,7 @@ mod tsf;
 
 use globals::{DLL_INSTANCE, DllModule, GUID_TEXT_SERVICE};
 use std::ffi::c_void;
+use std::path::{Path, PathBuf};
 use windows::{
     Win32::{
         Foundation::{BOOL, E_FAIL, HINSTANCE, S_FALSE, S_OK, TRUE},
@@ -22,6 +23,44 @@ use windows::{
 #[allow(overflowing_literals)]
 const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT =
     windows::core::HRESULT(0x80040111u32 as i32);
+
+const LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_ROTATE_GENERATIONS: usize = 5;
+
+fn rotated_log_path(path: &Path, generation: usize) -> Option<PathBuf> {
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(format!(".{generation}"));
+    Some(path.with_file_name(file_name))
+}
+
+fn rotate_log_if_needed(path: &Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= LOG_ROTATE_MAX_BYTES {
+        return;
+    }
+
+    for generation in (1..=LOG_ROTATE_GENERATIONS).rev() {
+        let Some(dst) = rotated_log_path(path, generation) else {
+            return;
+        };
+        if generation == LOG_ROTATE_GENERATIONS {
+            let _ = std::fs::remove_file(&dst);
+        }
+        let src = if generation == 1 {
+            path.to_path_buf()
+        } else {
+            let Some(src) = rotated_log_path(path, generation - 1) else {
+                return;
+            };
+            src
+        };
+        if src.exists() {
+            let _ = std::fs::rename(src, dst);
+        }
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) -> BOOL {
@@ -63,6 +102,7 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
         };
 
         if !log_path.is_empty() {
+            rotate_log_if_needed(Path::new(&log_path));
             if let Ok(f) = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)

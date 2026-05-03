@@ -22,9 +22,48 @@ fn log_path() -> PathBuf {
         .join("rakukan-engine-host.log")
 }
 
+const LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const LOG_ROTATE_GENERATIONS: usize = 5;
+
+fn rotated_log_path(path: &std::path::Path, generation: usize) -> Option<PathBuf> {
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(format!(".{generation}"));
+    Some(path.with_file_name(file_name))
+}
+
+fn rotate_log_if_needed(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= LOG_ROTATE_MAX_BYTES {
+        return;
+    }
+
+    for generation in (1..=LOG_ROTATE_GENERATIONS).rev() {
+        let Some(dst) = rotated_log_path(path, generation) else {
+            return;
+        };
+        if generation == LOG_ROTATE_GENERATIONS {
+            let _ = std::fs::remove_file(&dst);
+        }
+        let src = if generation == 1 {
+            path.to_path_buf()
+        } else {
+            let Some(src) = rotated_log_path(path, generation - 1) else {
+                return;
+            };
+            src
+        };
+        if src.exists() {
+            let _ = std::fs::rename(src, dst);
+        }
+    }
+}
+
 fn init_tracing(log_path: &std::path::Path) {
     // ログは %LOCALAPPDATA%\rakukan\rakukan-engine-host.log に書き出す。
     // ファイル作成に失敗しても最低限 stderr に出す。
+    rotate_log_if_needed(log_path);
     match std::fs::OpenOptions::new()
         .create(true)
         .append(true)

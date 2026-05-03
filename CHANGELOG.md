@@ -3,6 +3,19 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.8] - 2026-05-03
+
+### Added
+
+- TSF / engine-host のログ肥大化を防ぐため、起動時のサイズベースログローテーションを追加。
+- TSF 内の候補表示モデルとして `CandidateView` を追加し、候補表と本文 composition が同じ候補レコードを参照できる土台を追加。
+- `candidate_display_probe` ログを追加し、LiveConv preview、Space 初期候補、pending update の候補対応を追跡できるようにした。
+
+### Changed
+
+- LiveConv 由来の Space 初期候補は、文字列比較ではなく LiveConv 由来であることをもとに `source=live_preview` として扱うように変更。
+- リリース表記とパッケージメタデータを 0.8.8 に更新。
+
 ## [0.8.7] - 2026-05-02
 
 ### Changed

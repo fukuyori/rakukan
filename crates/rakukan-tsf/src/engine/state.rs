@@ -808,6 +808,47 @@ pub fn invalidate_composition_for_dm(dm_ptr: usize) {
 // ─── SessionState ────────────────────────────────────────────────────────────
 // TSF 層の論理状態を 1 か所に集約する。SelectionState は縮退・削除済み。
 
+#[derive(Clone, Debug)]
+pub struct CandidateView {
+    pub text: String,
+    pub suffix: String,
+    pub corresponding_reading_len: usize,
+    pub source: CandidateViewSource,
+}
+
+#[allow(dead_code)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CandidateViewSource {
+    Preedit,
+    LivePreview,
+    Dict,
+    Bg,
+    Fallback,
+}
+
+impl CandidateViewSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CandidateViewSource::Preedit => "preedit",
+            CandidateViewSource::LivePreview => "live_preview",
+            CandidateViewSource::Dict => "dict",
+            CandidateViewSource::Bg => "bg",
+            CandidateViewSource::Fallback => "fallback",
+        }
+    }
+}
+
+impl CandidateView {
+    pub fn compatible(text: String, reading_len: usize, source: CandidateViewSource) -> Self {
+        Self {
+            text,
+            suffix: String::new(),
+            corresponding_reading_len: reading_len,
+            source,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub enum SessionState {
     #[default]
@@ -828,6 +869,7 @@ pub enum SessionState {
     Selecting {
         original_preedit: String,
         candidates: Vec<String>,
+        candidate_views: Vec<CandidateView>,
         selected: usize,
         page_size: usize,
         llm_pending: bool,
@@ -909,6 +951,26 @@ pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
 #[inline]
 pub fn session_is_selecting_fast() -> bool {
     SESSION_SELECTING.load(std::sync::atomic::Ordering::Acquire)
+}
+
+fn candidate_views_from_strings(
+    candidates: &[String],
+    reading_len: usize,
+    source: CandidateViewSource,
+) -> Vec<CandidateView> {
+    candidates
+        .iter()
+        .cloned()
+        .map(|text| CandidateView::compatible(text, reading_len, source))
+        .collect()
+}
+
+fn candidate_view_len(candidate_views: &[CandidateView], candidates: &[String]) -> usize {
+    if candidate_views.is_empty() {
+        candidates.len()
+    } else {
+        candidate_views.len()
+    }
 }
 
 impl SessionState {
@@ -1077,9 +1139,15 @@ impl SessionState {
         remainder: String,
         remainder_reading: String,
     ) {
+        let candidate_views = candidate_views_from_strings(
+            &candidates,
+            original_preedit.chars().count(),
+            CandidateViewSource::Bg,
+        );
         *self = SessionState::Selecting {
             original_preedit,
             candidates,
+            candidate_views,
             selected: 0,
             page_size: 9,
             llm_pending,
@@ -1131,10 +1199,25 @@ impl SessionState {
     pub fn current_candidate(&self) -> Option<&str> {
         match self {
             SessionState::Selecting {
+                candidate_views,
                 candidates,
                 selected,
                 ..
-            } => candidates.get(*selected).map(|s| s.as_str()),
+            } => candidate_views
+                .get(*selected)
+                .map(|c| c.text.as_str())
+                .or_else(|| candidates.get(*selected).map(|s| s.as_str())),
+            _ => None,
+        }
+    }
+
+    pub fn current_candidate_view(&self) -> Option<&CandidateView> {
+        match self {
+            SessionState::Selecting {
+                candidate_views,
+                selected,
+                ..
+            } => candidate_views.get(*selected),
             _ => None,
         }
     }
@@ -1213,13 +1296,15 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 page_size,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     0
                 } else {
-                    (candidates.len() + page_size - 1) / page_size
+                    (len + page_size - 1) / page_size
                 }
             }
             _ => 0,
@@ -1230,18 +1315,67 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     return Vec::new();
                 }
                 let start = (selected / page_size) * page_size;
-                let end = (start + page_size).min(candidates.len());
-                candidates[start..end].to_vec()
+                let end = (start + page_size).min(len);
+                if !candidate_views.is_empty() {
+                    candidate_views[start..end]
+                        .iter()
+                        .map(|candidate| candidate.text.clone())
+                        .collect()
+                } else {
+                    candidates[start..end].to_vec()
+                }
             }
             _ => Vec::new(),
+        }
+    }
+
+    pub fn replace_selecting_candidates(
+        &mut self,
+        new_candidates: Vec<String>,
+        source: CandidateViewSource,
+    ) {
+        if let SessionState::Selecting {
+            original_preedit,
+            candidates,
+            candidate_views,
+            selected,
+            ..
+        } = self
+        {
+            let reading_len = original_preedit.chars().count();
+            *candidate_views = candidate_views_from_strings(&new_candidates, reading_len, source);
+            *candidates = new_candidates;
+            if candidates.is_empty() {
+                *selected = 0;
+            } else if *selected >= candidates.len() {
+                *selected = candidates.len().saturating_sub(1);
+            }
+        }
+    }
+
+    pub fn rebuild_selecting_candidate_views(&mut self, source: CandidateViewSource) {
+        if let SessionState::Selecting {
+            original_preedit,
+            candidates,
+            candidate_views,
+            ..
+        } = self
+        {
+            *candidate_views = candidate_views_from_strings(
+                candidates,
+                original_preedit.chars().count(),
+                source,
+            );
         }
     }
 
@@ -1269,14 +1403,16 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     return;
                 }
-                let next_idx = (*selected + 1) % candidates.len();
+                let next_idx = (*selected + 1) % len;
                 let cur_page = *selected / *page_size;
                 let next_page = next_idx / *page_size;
                 *selected = if next_page != cur_page {
@@ -1293,14 +1429,16 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     return;
                 }
                 *selected = if *selected == 0 {
-                    candidates.len() - 1
+                    len - 1
                 } else {
                     *selected - 1
                 };
@@ -1313,14 +1451,16 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     return;
                 }
-                let total_pages = candidates.len().div_ceil(*page_size);
+                let total_pages = len.div_ceil(*page_size);
                 let cur = *selected / *page_size;
                 let next = (cur + 1) % total_pages;
                 *selected = next * *page_size;
@@ -1333,14 +1473,16 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                if candidates.is_empty() {
+                let len = candidate_view_len(candidate_views, candidates);
+                if len == 0 {
                     return;
                 }
-                let total_pages = candidates.len().div_ceil(*page_size);
+                let total_pages = len.div_ceil(*page_size);
                 let cur = *selected / *page_size;
                 let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
                 *selected = prev * *page_size;
@@ -1356,12 +1498,13 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidates,
+                candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
                 let idx = (*selected / *page_size) * *page_size + (n - 1);
-                if idx < candidates.len() {
+                if idx < candidate_view_len(candidate_views, candidates) {
                     *selected = idx;
                     true
                 } else {
