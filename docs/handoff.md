@@ -1,11 +1,12 @@
-# Rakukan 引き継ぎ資料 (v0.8.10)
+# Rakukan 引き継ぎ資料 (v0.8.11)
 
 更新日: 2026-05-04
 
 ## 現在の状態
 
-- **バージョン:** v0.8.10
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。v0.8.7 では Space 候補表示の初動を改善し、LiveConv preview と候補表第1候補、本文 composition の表示を揃えた。v0.8.8 ではログローテーションと azooKey 型候補メタデータ `CandidateView` の TSF 内導入を進めた。v0.8.9 では LiveConv 由来候補の `CandidateView` 引き継ぎと同期 fallback 観測を追加した。v0.8.10 では長文高速入力ガード、候補数/beam の高速寄り defaults、WinUI 設定一本化、候補数と Space 変換 beam の連動を追加した。
+- **バージョン:** v0.8.11
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。v0.8.7 では Space 候補表示の初動を改善し、LiveConv preview と候補表第1候補、本文 composition の表示を揃えた。v0.8.8 ではログローテーションと azooKey 型候補メタデータ `CandidateView` の TSF 内導入を進めた。v0.8.9 では LiveConv 由来候補の `CandidateView` 引き継ぎと同期 fallback 観測を追加した。v0.8.10 では長文高速入力ガード、候補数/beam の高速寄り defaults、WinUI 設定一本化、候補数と Space 変換 beam の連動を追加した。v0.8.11 では後追い候補更新時の選択位置維持と候補表示ログの観測性を改善した。
+- **v0.8.11 の内容:** Space 再押下 / dispatch poll の pending update で候補配列を差し替える際、選択中 index とページ位置を維持するようにした。候補表と本文 composition は現在選択中の候補から更新し、`candidate_display_probe` には `page_selected` / `selected_candidate` / `selected_match` を追加した。WM_TIMER 経由の pending update は次の観測対象として残す。
 - **v0.8.10 の内容:** LiveConv 継続入力で表示が読みより明らかに短い場合に完全なひらがな preedit 表示へ戻すガードを追加。未指定時の候補数を 6、ライブ変換 beam を 1、Space 変換 beam を 6 に調整し、WinUI 設定から `conversion.beam_size` を編集できるようにした。旧 Win32 設定画面は削除し、設定 UI は WinUI 版に一本化。候補数変更時には Space 変換 beam を追従させ、候補が 1 件足りない場合は元の読みを退避候補として補う。
 - **v0.8.9 の内容:** LiveConv から Space へ移る pending 初期候補を `CandidateView` として Selecting の第1候補へ渡すようにした。さらに Space 変換の同期 fallback 呼び出しを helper に隔離し、`sync_fallback_probe` で発生理由と所要時間を観測できるようにした。
 - **v0.8.8 の内容:** TSF / engine-host のログに起動時サイズベースのローテーションを追加。さらに `SessionState::Selecting` に TSF 内限定の `CandidateView` を導入し、候補表と本文 composition が同じ候補レコードを参照する土台を追加した。`candidate_display_probe` で Space 初期候補と pending update の対応を観測できる。

@@ -100,6 +100,8 @@ fn log_candidate_display_probe(
     event: &'static str,
     reading: &str,
     first_candidate: &str,
+    page_selected: usize,
+    selected_candidate: &str,
     composition_candidate: &str,
     source: CandidateViewSource,
     llm_pending: bool,
@@ -107,13 +109,15 @@ fn log_candidate_display_probe(
     suffix_len: usize,
 ) {
     tracing::info!(
-        "candidate_display_probe event={} reading_len={} source={} first_candidate={:?} composition_candidate={:?} match={} llm_pending={} corresponding_reading_len={} suffix_len={}",
+        "candidate_display_probe event={} reading_len={} source={} first_candidate={:?} page_selected={} selected_candidate={:?} composition_candidate={:?} selected_match={} llm_pending={} corresponding_reading_len={} suffix_len={}",
         event,
         reading.chars().count(),
         source.as_str(),
         first_candidate,
+        page_selected,
+        selected_candidate,
         composition_candidate,
-        first_candidate == composition_candidate,
+        selected_candidate == composition_candidate,
         llm_pending,
         corresponding_reading_len,
         suffix_len
@@ -209,7 +213,9 @@ impl super::TextServiceFactory_Impl {
                 tracing::debug!(
                     "[Live] on_convert: LiveConv → Preedit reading={:?} preview={:?}",
                     reading,
-                    space_live_candidate.as_ref().map(|candidate| candidate.text.as_str())
+                    space_live_candidate
+                        .as_ref()
+                        .map(|candidate| candidate.text.as_str())
                 );
                 sess.set_preedit(reading.clone());
                 drop(sess);
@@ -417,22 +423,22 @@ impl super::TextServiceFactory_Impl {
                                             CandidateViewSource::Bg,
                                         );
                                         if let SessionState::Selecting {
-                                            ref mut selected,
                                             ref mut llm_pending,
                                             ..
                                         } = *sess2
                                         {
-                                            *selected = 0;
                                             *llm_pending = false;
                                         }
                                         let page_cands = sess2.page_candidates().to_vec();
+                                        let page_selected = sess2.page_selected();
                                         let page_info = sess2.page_info();
                                         let cand_text = sess2
                                             .current_candidate()
                                             .or_else(|| sess2.original_preedit())
                                             .unwrap_or("")
                                             .to_string();
-                                        let candidate_view = sess2.current_candidate_view().cloned();
+                                        let candidate_view =
+                                            sess2.current_candidate_view().cloned();
                                         let prefix = sess2.selecting_prefix_clone();
                                         let remainder = sess2.selecting_remainder_clone();
                                         let pos = caret_rect_get();
@@ -440,7 +446,7 @@ impl super::TextServiceFactory_Impl {
                                         drop(guard);
                                         candidate_window::show(
                                             &page_cands,
-                                            0,
+                                            page_selected,
                                             &page_info,
                                             pos.left,
                                             pos.bottom,
@@ -449,7 +455,12 @@ impl super::TextServiceFactory_Impl {
                                             log_candidate_display_probe(
                                                 "pending_update",
                                                 &original_preedit,
-                                                page_cands.first().map(String::as_str).unwrap_or(""),
+                                                page_cands
+                                                    .first()
+                                                    .map(String::as_str)
+                                                    .unwrap_or(""),
+                                                page_selected,
+                                                &cand_text,
                                                 &cand_text,
                                                 view.source,
                                                 false,
@@ -510,15 +521,14 @@ impl super::TextServiceFactory_Impl {
                                                 CandidateViewSource::Bg,
                                             );
                                             if let SessionState::Selecting {
-                                                ref mut selected,
                                                 ref mut llm_pending,
                                                 ..
                                             } = *sess2
                                             {
-                                                *selected = 0;
                                                 *llm_pending = false;
                                             }
                                             let page_cands = sess2.page_candidates().to_vec();
+                                            let page_selected = sess2.page_selected();
                                             let page_info = sess2.page_info();
                                             let cand_text = sess2
                                                 .current_candidate()
@@ -534,7 +544,7 @@ impl super::TextServiceFactory_Impl {
                                             drop(guard);
                                             candidate_window::show(
                                                 &page_cands,
-                                                0,
+                                                page_selected,
                                                 &page_info,
                                                 pos.left,
                                                 pos.bottom,
@@ -547,6 +557,8 @@ impl super::TextServiceFactory_Impl {
                                                         .first()
                                                         .map(String::as_str)
                                                         .unwrap_or(""),
+                                                    page_selected,
+                                                    &cand_text,
                                                     &cand_text,
                                                     view.source,
                                                     false,
@@ -572,13 +584,14 @@ impl super::TextServiceFactory_Impl {
                         // まだ変換中 → 現在の候補ウィンドウをそのまま維持
                         if let Ok(sess2) = session_get() {
                             let page_cands = sess2.page_candidates().to_vec();
+                            let page_selected = sess2.page_selected();
                             let page_info = sess2.page_info();
                             let pos = caret_rect_get();
                             drop(sess2);
                             drop(guard);
                             candidate_window::show_with_status(
                                 &page_cands,
-                                0,
+                                page_selected,
                                 &page_info,
                                 pos.left,
                                 pos.bottom,
@@ -683,7 +696,11 @@ impl super::TextServiceFactory_Impl {
                 caret.bottom,
                 Some("⏳ モデル読み込み中..."),
             );
-            convert_mark("selecting_model_not_ready_show", convert_start, &mut convert_last);
+            convert_mark(
+                "selecting_model_not_ready_show",
+                convert_start,
+                &mut convert_last,
+            );
             tracing::info!(
                 "convert_timing result=shown_model_not_ready path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates=1 llm_pending=false total_us={}",
                 phase3_path,
@@ -696,7 +713,13 @@ impl super::TextServiceFactory_Impl {
             log_candidate_display_probe(
                 "space_initial",
                 &preedit,
-                snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+                snapshot
+                    .page_candidates
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                snapshot.page_selected,
+                &snapshot.first,
                 &snapshot.first,
                 snapshot.candidate_source,
                 false,
@@ -772,7 +795,13 @@ impl super::TextServiceFactory_Impl {
             log_candidate_display_probe(
                 "space_initial",
                 &preedit,
-                snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+                snapshot
+                    .page_candidates
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or(""),
+                snapshot.page_selected,
+                &snapshot.first,
                 &snapshot.first,
                 snapshot.candidate_source,
                 true,
@@ -1074,7 +1103,13 @@ impl super::TextServiceFactory_Impl {
         log_candidate_display_probe(
             "space_initial",
             &preedit,
-            snapshot.page_candidates.first().map(String::as_str).unwrap_or(""),
+            snapshot
+                .page_candidates
+                .first()
+                .map(String::as_str)
+                .unwrap_or(""),
+            snapshot.page_selected,
+            &snapshot.first,
             &snapshot.first,
             snapshot.candidate_source,
             llm_pending,
@@ -1526,6 +1561,4 @@ impl super::TextServiceFactory_Impl {
         end_composition(ctx, tid, String::new())?;
         Ok(true)
     }
-
-
 }

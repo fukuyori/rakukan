@@ -1,4 +1,4 @@
-# rakukan v0.8.10
+# rakukan v0.8.11
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -19,6 +19,12 @@ Windows 向け日本語 IME。
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
 - **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+
+## 0.8.11 変更点
+
+- **後追い候補更新の選択位置を維持**: Space 再押下 / dispatch poll の pending update で、候補配列差し替え時に選択中 index とページ位置を維持するようにしました。
+- **候補表示ログを改善**: `candidate_display_probe` に `page_selected` / `selected_candidate` / `selected_match` を追加し、候補表の選択行と本文 composition の対応を確認しやすくしました。
+- **改修予定ドキュメントを更新**: 現在の主計画を候補表示安定化フェーズとして整理し、WM_TIMER 経由の pending update を次の観測対象として明記しました。
 
 ## 0.8.10 変更点
 
@@ -307,21 +313,27 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 ### 主要設計書
 
 - [DESIGN.md](docs/DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
-- [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md) — **進行中**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A〜F）
+- [CONVERSION_PIPELINE_CLEANUP_PLAN.md](docs/CONVERSION_PIPELINE_CLEANUP_PLAN.md) — **現在の主計画**: Space 変換、ライブ変換、候補表示、後追い候補更新の段階的整理
+- [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md) — **長期案 / 一部保留**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A のみ実装済み、Phase B 以降は再設計が必要）
 - [SEGMENT_EDIT_REDESIGN.md](docs/SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
-- [VIBRATO_PHASE1.md](docs/VIBRATO_PHASE1.md) — Vibrato 形態素解析器の導入メモ
-- [handoff.md](docs/handoff.md) — v0.4.4 引き継ぎ資料 + 残タスクリスト
+- [VIBRATO_PHASE1.md](docs/VIBRATO_PHASE1.md) — 過去の Vibrato 形態素解析器導入メモ（v0.5.1 で削除済み）
+- [handoff.md](docs/handoff.md) — v0.8.10 引き継ぎ資料 + 残タスクリスト
 
 ### 進行中の主要課題
 
-**変換パイプライン再設計**（[CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md)）
+**変換パイプライン整理**（[CONVERSION_PIPELINE_CLEANUP_PLAN.md](docs/CONVERSION_PIPELINE_CLEANUP_PLAN.md)）
 
-- [ ] **Phase A**: 新データモデル（`Segments` / `Segment` / `Candidate`）と engine 基盤、数値保護レイヤー
-- [ ] **Phase B**: ライブ変換を beam=1 (greedy) 化、`Segments` 保持
-- [ ] **Phase C**: `SplitPreedit` を新モデルに置換、文節ごとの候補管理
-- [ ] **Phase D**: 境界伸縮を engine の `resize_segment` に集約、文字列再分節の撤廃
-- [ ] **Phase E**: 部分確定・学習・Selecting 統合・候補一覧 Tab 展開
-- [ ] **Phase F**（独立）: Candidate 注釈（用法辞書） — Mozc `usage_dict.tsv` の取り込み
+- [ ] **Phase 5**: 残っている `Waiting` / `llm_pending` 経路を再監査し、通常 Space で `Waiting` を増やさない。
+- [ ] **Phase 6 / 6b**: `candidate_display_probe` と `CandidateView` で pending update / fallback / RangeSelect の残経路を確認する。
+- [x] **Phase 6b**: Space 再押下 / dispatch poll の後追い LLM 更新で、候補配列差し替え時の選択 index / page / composition を維持する。
+- [ ] **Phase 6b**: WM_TIMER 経由の pending update で、候補表だけが更新され composition が古いまま残る経路を観測する。
+- [ ] **Phase 7**: `sync_fallback_probe` を見ながら、`convert_sync` fallback を候補表示後の補完または最終手段へ縮小する。
+- [ ] **Phase 8**: scope / chunk 化は設計メモに留め、実装しない。
+
+**長期再設計案**（[CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md)）
+
+- [x] **Phase A**: 新データモデル（`Segments` / `Segment` / `Candidate`）と engine 基盤、数値保護レイヤー
+- [ ] **Phase B 以降**: vibrato 削除後の前提に合わせて再設計が必要。現状から大きな修正を入れない方針のため、直近の改修対象にはしない。
 
 **独立した技術課題**（[handoff.md §残タスク](docs/handoff.md#残タスク優先度順)）
 

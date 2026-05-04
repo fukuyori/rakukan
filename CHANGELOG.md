@@ -3,6 +3,16 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.11] - 2026-05-04
+
+### Changed
+
+- Space 再押下 / dispatch poll の pending update で、候補配列差し替え時に選択中 index とページ位置を維持するようにした。
+- pending update 後の候補表と本文 composition を、現在選択中の候補から更新するようにした。
+- `candidate_display_probe` に `page_selected` / `selected_candidate` / `selected_match` を追加し、第1候補ではなく選択中候補と本文 composition の対応を観測できるようにした。
+- 改修予定ドキュメントを更新し、WM_TIMER 経由の pending update を次の観測対象として明記。
+- リリース表記とパッケージメタデータを 0.8.11 に更新。
+
 ## [0.8.10] - 2026-05-04
 
 ### Changed

@@ -1388,11 +1388,8 @@ impl SessionState {
             ..
         } = self
         {
-            *candidate_views = candidate_views_from_strings(
-                candidates,
-                original_preedit.chars().count(),
-                source,
-            );
+            *candidate_views =
+                candidate_views_from_strings(candidates, original_preedit.chars().count(), source);
         }
     }
 
@@ -1845,5 +1842,49 @@ mod tests {
     #[test]
     fn live_conversion_reading_ready_counts_chars_not_bytes() {
         assert!(is_live_conversion_reading_ready("漢字仮"));
+    }
+
+    #[test]
+    fn replace_selecting_candidates_preserves_selected_index() {
+        let mut state = SessionState::Preedit {
+            text: String::new(),
+        };
+        state.activate_selecting(
+            vec!["候補1".into(), "候補2".into(), "候補3".into()],
+            "こうほ".into(),
+            0,
+            0,
+            true,
+        );
+        state.next_with_page_wrap();
+
+        state.replace_selecting_candidates(
+            vec!["更新1".into(), "更新2".into(), "更新3".into()],
+            CandidateViewSource::Bg,
+        );
+
+        assert_eq!(state.current_candidate(), Some("更新2"));
+        assert_eq!(state.page_selected(), 1);
+    }
+
+    #[test]
+    fn replace_selecting_candidates_clamps_selected_index() {
+        let mut state = SessionState::Preedit {
+            text: String::new(),
+        };
+        state.activate_selecting(
+            vec!["候補1".into(), "候補2".into(), "候補3".into()],
+            "こうほ".into(),
+            0,
+            0,
+            true,
+        );
+        state.next_with_page_wrap();
+        state.next_with_page_wrap();
+
+        state.replace_selecting_candidates(vec!["更新1".into()], CandidateViewSource::Bg);
+
+        assert_eq!(state.current_candidate(), Some("更新1"));
+        assert_eq!(state.page_selected(), 0);
     }
 }

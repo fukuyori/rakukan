@@ -14,9 +14,7 @@ use crate::engine::text_util;
 use crate::engine::user_action::UserAction;
 use crate::tsf::candidate_window;
 
-use super::{
-    CandidateDir, action_name, update_composition, update_composition_candidate_parts,
-};
+use super::{CandidateDir, action_name, update_composition, update_composition_candidate_parts};
 
 impl super::TextServiceFactory_Impl {
     pub(super) fn handle_action(
@@ -132,9 +130,7 @@ impl super::TextServiceFactory_Impl {
                             // 尻切れ防壁（M1.5 T-BUG2）: Phase1B 経路でも同じく
                             // preview の長さが reading に対して極端に短ければ破棄
                             let preview = candidate_window::sanity_check_preview(
-                                &reading,
-                                preview,
-                                "Phase1B",
+                                &reading, preview, "Phase1B",
                             );
                             tracing::info!(
                                 "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
@@ -199,19 +195,22 @@ impl super::TextServiceFactory_Impl {
                             let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
                             tracing::debug!("poll: merge_candidates → {:?}", merged);
                             if !merged.is_empty() {
-                                let first = merged.first().cloned().unwrap_or_default();
                                 sess.replace_selecting_candidates(merged, CandidateViewSource::Bg);
                                 if let SessionState::Selecting {
-                                    ref mut selected,
                                     ref mut llm_pending,
                                     ..
                                 } = *sess
                                 {
-                                    *selected = 0;
                                     *llm_pending = false;
                                 }
                                 let page_cands = sess.page_candidates().to_vec();
+                                let page_selected = sess.page_selected();
                                 let page_info = sess.page_info();
+                                let cand_text = sess
+                                    .current_candidate()
+                                    .or_else(|| sess.original_preedit())
+                                    .unwrap_or("")
+                                    .to_string();
                                 let candidate_view = sess.current_candidate_view().cloned();
                                 let prefix = sess.selecting_prefix_clone();
                                 let remainder = sess.selecting_remainder_clone();
@@ -220,7 +219,7 @@ impl super::TextServiceFactory_Impl {
                                 drop(guard);
                                 candidate_window::show_with_status(
                                     &page_cands,
-                                    0,
+                                    page_selected,
                                     &page_info,
                                     pos.left,
                                     pos.bottom,
@@ -228,18 +227,20 @@ impl super::TextServiceFactory_Impl {
                                 );
                                 if let Some(view) = candidate_view {
                                     tracing::info!(
-                                        "candidate_display_probe event=pending_update reading_len={} source={} first_candidate={:?} composition_candidate={:?} match={} llm_pending=false corresponding_reading_len={} suffix_len={}",
+                                        "candidate_display_probe event=pending_update reading_len={} source={} first_candidate={:?} page_selected={} selected_candidate={:?} composition_candidate={:?} selected_match={} llm_pending=false corresponding_reading_len={} suffix_len={}",
                                         preedit_key.chars().count(),
                                         view.source.as_str(),
                                         page_cands.first().map(String::as_str).unwrap_or(""),
-                                        first,
-                                        page_cands.first().map(String::as_str).unwrap_or("") == first,
+                                        page_selected,
+                                        cand_text,
+                                        cand_text,
+                                        true,
                                         view.corresponding_reading_len,
                                         view.suffix.chars().count()
                                     );
                                 }
                                 update_composition_candidate_parts(
-                                    ctx, tid, sink, prefix, first, remainder,
+                                    ctx, tid, sink, prefix, cand_text, remainder,
                                 )?;
                                 return Ok(true);
                             }
@@ -386,5 +387,4 @@ impl super::TextServiceFactory_Impl {
             _ => Ok(false),
         }
     }
-
 }
