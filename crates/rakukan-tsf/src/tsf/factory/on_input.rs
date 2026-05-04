@@ -19,6 +19,35 @@ use super::{
     update_composition,
 };
 
+fn live_continuation_display(
+    reading: &str,
+    preview: &str,
+    new_reading: &str,
+    suffix: &str,
+    pending: &str,
+) -> (String, String) {
+    let display_base = format!("{preview}{suffix}");
+    let display_shown = format!("{display_base}{pending}");
+
+    let new_reading_len = new_reading.chars().count();
+    let display_base_len = display_base.chars().count();
+    if !suffix.is_empty() && new_reading_len >= 12 && display_base_len * 5 < new_reading_len * 3 {
+        tracing::warn!(
+            "live_continuation_guard event=fallback old_reading_len={} new_reading_len={} preview_len={} suffix_len={} pending_len={} display_base_len={}",
+            reading.chars().count(),
+            new_reading_len,
+            preview.chars().count(),
+            suffix.chars().count(),
+            pending.chars().count(),
+            display_base_len
+        );
+        let shown = format!("{new_reading}{pending}");
+        (new_reading.to_string(), shown)
+    } else {
+        (display_base, display_shown)
+    }
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn prepare_for_direct_input(&self) -> Result<()> {
         if let Ok(mut sess) = session_get() {
@@ -107,8 +136,13 @@ impl super::TextServiceFactory_Impl {
                     &new_reading,
                     "live_conv input pending",
                 );
-                let display_hira = format!("{preview}{suffix}");
-                let display_shown = format!("{display_hira}{pending}");
+                let (display_hira, display_shown) = live_continuation_display(
+                    &reading,
+                    &preview,
+                    &new_reading,
+                    &suffix,
+                    pending.as_ref(),
+                );
                 sess.set_live_conv(new_reading.clone(), display_hira);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
@@ -286,7 +320,8 @@ impl super::TextServiceFactory_Impl {
                     .strip_prefix(&reading)
                     .unwrap_or(new_reading.as_str())
                     .to_string();
-                let display = format!("{preview}{suffix}");
+                let (display, display_shown) =
+                    live_continuation_display(&reading, &preview, &new_reading, &suffix, "");
                 sess.set_live_conv(new_reading.clone(), display.clone());
                 let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &new_reading);
                 drop(sess);
@@ -294,7 +329,7 @@ impl super::TextServiceFactory_Impl {
                 if live_ready {
                     candidate_window::live_input_notify(&ctx, tid);
                 }
-                update_composition(ctx, tid, sink, display)?;
+                update_composition(ctx, tid, sink, display_shown)?;
                 return Ok(true);
             }
         }

@@ -18,6 +18,7 @@ public sealed partial class MainWindow : Window
     private readonly SettingsBundle _settings;
     private readonly ObservableCollection<UserDictEntry> _userDictEntries = new();
     private bool _isClosingAfterApply;
+    private bool _isApplyingSettings;
 
     public MainWindow()
     {
@@ -59,54 +60,70 @@ public sealed partial class MainWindow : Window
 
     private void ApplySettingsToUi(SettingsBundle bundle)
     {
-        SelectComboValue(LogLevelCombo, bundle.Config.LogLevel);
-        SelectComboValue(GpuBackendCombo, bundle.Config.GpuBackend ?? "auto");
-        NGpuLayersBox.Value = bundle.Config.NGpuLayers ?? double.NaN;
-        MainGpuBox.Value = bundle.Config.MainGpu;
-        ApplyModelVariantToCombo(bundle.Config.ModelVariant);
-        // null の場合はデフォルト (9) を表示する。NaN だと WinUI NumberBox の
-        // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
-        NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 9;
-
-        SelectComboValue(KeyboardLayoutCombo, bundle.Config.KeyboardLayout);
-        ReloadOnModeSwitchToggle.IsOn = bundle.Config.ReloadOnModeSwitch;
-        SelectComboValue(DefaultModeCombo, bundle.Config.DefaultMode);
-        RememberKanaModeToggle.IsOn = bundle.Config.RememberLastKanaMode;
-        SelectComboValue(DigitWidthCombo, bundle.Config.DigitWidth);
-        AutoLearnToggle.IsOn = bundle.Config.AutoLearn;
-
-        SelectComboValue(KeymapPresetCombo, bundle.Keymap.Preset);
-        KeymapInheritToggle.IsOn = bundle.Keymap.InheritPreset;
-        foreach (var action in ManagedKeyActions.All)
+        _isApplyingSettings = true;
+        try
         {
-            _keyFields[action].Text = bundle.Keymap.GetBinding(action);
-        }
+            SelectComboValue(LogLevelCombo, bundle.Config.LogLevel);
+            SelectComboValue(GpuBackendCombo, bundle.Config.GpuBackend ?? "auto");
+            NGpuLayersBox.Value = bundle.Config.NGpuLayers ?? double.NaN;
+            MainGpuBox.Value = bundle.Config.MainGpu;
+            ApplyModelVariantToCombo(bundle.Config.ModelVariant);
+            // null の場合はデフォルト (6) を表示する。NaN だと WinUI NumberBox の
+            // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
+            NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 6;
+            ConversionBeamSizeBox.Value = Math.Max(bundle.Config.ConversionBeamSize, (uint)NumCandidatesBox.Value);
 
-        LiveEnabledToggle.IsOn = bundle.Config.LiveEnabled;
-        DebounceMsBox.Value = bundle.Config.DebounceMs;
-        BeamSizeBox.Value = bundle.Config.BeamSize;
-        UseLlmToggle.IsOn = bundle.Config.UseLlm;
-        PreferDictionaryFirstToggle.IsOn = bundle.Config.PreferDictionaryFirst;
+            SelectComboValue(KeyboardLayoutCombo, bundle.Config.KeyboardLayout);
+            ReloadOnModeSwitchToggle.IsOn = bundle.Config.ReloadOnModeSwitch;
+            SelectComboValue(DefaultModeCombo, bundle.Config.DefaultMode);
+            RememberKanaModeToggle.IsOn = bundle.Config.RememberLastKanaMode;
+            SelectComboValue(DigitWidthCombo, bundle.Config.DigitWidth);
+            AutoLearnToggle.IsOn = bundle.Config.AutoLearn;
 
-        _userDictEntries.Clear();
-        foreach (var entry in bundle.UserDict)
-        {
-            _userDictEntries.Add(new UserDictEntry
+            SelectComboValue(KeymapPresetCombo, bundle.Keymap.Preset);
+            KeymapInheritToggle.IsOn = bundle.Keymap.InheritPreset;
+            foreach (var action in ManagedKeyActions.All)
             {
-                Reading = entry.Reading,
-                Surfaces = new List<string>(entry.Surfaces),
-            });
+                _keyFields[action].Text = bundle.Keymap.GetBinding(action);
+            }
+
+            LiveEnabledToggle.IsOn = bundle.Config.LiveEnabled;
+            DebounceMsBox.Value = bundle.Config.DebounceMs;
+            BeamSizeBox.Value = bundle.Config.BeamSize;
+            UseLlmToggle.IsOn = bundle.Config.UseLlm;
+            PreferDictionaryFirstToggle.IsOn = bundle.Config.PreferDictionaryFirst;
+
+            _userDictEntries.Clear();
+            foreach (var entry in bundle.UserDict)
+            {
+                _userDictEntries.Add(new UserDictEntry
+                {
+                    Reading = entry.Reading,
+                    Surfaces = new List<string>(entry.Surfaces),
+                });
+            }
+        }
+        finally
+        {
+            _isApplyingSettings = false;
         }
     }
 
     private SettingsBundle CaptureSettingsFromUi()
     {
-        var numCandidates = ParseOptionalUInt(NumCandidatesBox.Value, "候補数", 1, 30);
-        // デフォルト値 (9) のまま保存した場合は config.toml に書き込まない
+        var rawNumCandidates = ParseUInt(NumCandidatesBox.Value, "候補数", 1, 30);
+        var numCandidates = (uint?)rawNumCandidates;
+        // デフォルト値 (6) のまま保存した場合は config.toml に書き込まない
         // （コメントアウト状態を維持して将来のデフォルト変更に追従しやすくする）
-        if (numCandidates == 9)
+        if (numCandidates == 6)
         {
             numCandidates = null;
+        }
+        var conversionBeamSize = ParseUInt(ConversionBeamSizeBox.Value, "Space変換 beam", 1, 30);
+        if (conversionBeamSize < rawNumCandidates)
+        {
+            conversionBeamSize = rawNumCandidates;
+            ConversionBeamSizeBox.Value = conversionBeamSize;
         }
         var beamSize = ParseUInt(BeamSizeBox.Value, "beam_size", 1, 9);
 
@@ -118,6 +135,7 @@ public sealed partial class MainWindow : Window
             MainGpu = ParseInt(MainGpuBox.Value, "使用 GPU インデックス"),
             ModelVariant = NormalizeOptional(ReadModelVariantFromCombo(), string.Empty),
             NumCandidates = numCandidates,
+            ConversionBeamSize = conversionBeamSize,
             KeyboardLayout = SelectedComboValue(KeyboardLayoutCombo),
             ReloadOnModeSwitch = ReloadOnModeSwitchToggle.IsOn,
             DefaultMode = SelectedComboValue(DefaultModeCombo),
@@ -163,6 +181,32 @@ public sealed partial class MainWindow : Window
             Keymap = keymap,
             UserDict = userDict,
         };
+    }
+
+    private void NumCandidatesBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_isApplyingSettings || double.IsNaN(args.NewValue))
+        {
+            return;
+        }
+
+        if (args.NewValue > ConversionBeamSizeBox.Value)
+        {
+            ConversionBeamSizeBox.Value = args.NewValue;
+        }
+    }
+
+    private void ConversionBeamSizeBox_ValueChanged(NumberBox sender, NumberBoxValueChangedEventArgs args)
+    {
+        if (_isApplyingSettings || double.IsNaN(args.NewValue))
+        {
+            return;
+        }
+
+        if (args.NewValue < NumCandidatesBox.Value)
+        {
+            NumCandidatesBox.Value = args.NewValue;
+        }
     }
 
     private void OnNavigationSelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)

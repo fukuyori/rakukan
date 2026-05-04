@@ -140,8 +140,21 @@
                             CornerRadius="16">
                             <StackPanel Spacing="8">
                                 <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="候補表示" />
-                                <TextBlock Opacity="0.7" Text="Space 変換で表示する候補の最大数です。1 から 30 の範囲で設定できます（未設定時は 9）。" />
-                                <NumberBox x:Name="NumCandidatesBox" SmallChange="1" Minimum="1" Maximum="30" SpinButtonPlacementMode="Inline" />
+                                <TextBlock Opacity="0.7" Text="Space 変換で表示する候補数と、LLM 探索の上限を調整します。候補数を増やす場合は Space変換 beam も同じか大きい値にしてください。" />
+                                <Grid ColumnSpacing="20">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="8">
+                                        <TextBlock Text="候補数 (1-30)" />
+                                        <NumberBox x:Name="NumCandidatesBox" SmallChange="1" Minimum="1" Maximum="30" SpinButtonPlacementMode="Inline" ValueChanged="NumCandidatesBox_ValueChanged" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="8">
+                                        <TextBlock Text="Space変換 beam (1-30)" />
+                                        <NumberBox x:Name="ConversionBeamSizeBox" SmallChange="1" Minimum="1" Maximum="30" SpinButtonPlacementMode="Inline" ValueChanged="ConversionBeamSizeBox_ValueChanged" />
+                                    </StackPanel>
+                                </Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>

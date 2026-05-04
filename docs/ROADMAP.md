@@ -113,11 +113,19 @@
 - ✅ `CandidateView` を TSF 内に導入し、候補表と本文 composition が同じ候補レコードを参照する土台を追加
 - ✅ `candidate_display_probe` で Space 初期候補と pending update の対応を観測可能にした
 
-**v0.8.9 リリース候補（2026-05-03）**: LiveConv 由来候補の引き継ぎ改善と同期 fallback 観測。
+**v0.8.9 リリース済み（2026-05-03）**: LiveConv 由来候補の引き継ぎ改善と同期 fallback 観測。
 
 - ✅ LiveConv から Space へ移る pending 初期候補を `CandidateView` として Selecting 第1候補へ引き継ぐ
 - ✅ Space 変換の同期 fallback 呼び出しを helper に隔離
 - ✅ `sync_fallback_probe` で同期 fallback の発生理由と所要時間を観測可能にした
+
+**v0.8.10 リリース済み（2026-05-04）**: 長文入力ガード、候補数/beam 調整、WinUI 設定一本化。
+
+- ✅ LiveConv 継続入力で表示が読みより明らかに短い場合、完全なひらがな preedit 表示へ戻すガードを追加
+- ✅ 未指定時の候補数 6、ライブ変換 beam 1、Space 変換 beam 6 を標準化
+- ✅ WinUI 設定で `conversion.beam_size` を編集可能にし、候補数変更時に Space 変換 beam を追従
+- ✅ 旧 Win32 設定画面を削除し、設定 UI を WinUI 版に一本化
+- ✅ 候補が設定値より 1 件少ない場合、元の読みを退避候補として補完
 
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
@@ -158,7 +166,8 @@
 | **v0.8.6** ✅ 2026-05-01 | ライブ変換 preview の開始を読み 3 文字以上に調整 | patch | 短い読みでの早すぎる preview 起動を抑える |
 | **v0.8.7** ✅ 2026-05-02 | Space 候補表示の初動改善と候補表示状態の整理 | patch | Space 押下時の候補表と本文表示を揃え、候補表示ラグを低減 |
 | **v0.8.8** ✅ 2026-05-03 | ログローテーションと azooKey 型候補メタデータ導入 | patch | ログ肥大化を防ぎ、候補表と本文 composition の候補対応を安定化 |
-| **v0.8.9** 2026-05-03 | LiveConv 由来候補の引き継ぎ改善と同期 fallback 観測 | patch | 安定した候補対応を保ちつつ、同期 fallback 削減の判断材料を増やす |
+| **v0.8.9** ✅ 2026-05-03 | LiveConv 由来候補の引き継ぎ改善と同期 fallback 観測 | patch | 安定した候補対応を保ちつつ、同期 fallback 削減の判断材料を増やす |
+| **v0.8.10** ✅ 2026-05-04 | 長文入力ガード、候補数/beam 調整、WinUI 設定一本化 | patch | 高速入力時の表示欠落を抑え、候補表示設定の食い違いを防ぐ |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:

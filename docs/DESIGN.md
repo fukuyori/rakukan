@@ -552,7 +552,7 @@ debounce_ms = 80
 dump_active_config = true
 warn_on_unknown_key = true
 
-# num_candidates = 9        # 旧互換キー（デフォルト: 9）
+# num_candidates = 6        # 旧互換キー（デフォルト: 6）
 ```
 
 ### keymap.toml

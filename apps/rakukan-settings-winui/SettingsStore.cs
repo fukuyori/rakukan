@@ -28,6 +28,7 @@ internal sealed class SettingsData
     public int MainGpu { get; set; }
     public string? ModelVariant { get; set; }
     public uint? NumCandidates { get; set; }
+    public uint ConversionBeamSize { get; set; } = 6;
     public string KeyboardLayout { get; set; } = "jis";
     public bool ReloadOnModeSwitch { get; set; } = true;
     public string DefaultMode { get; set; } = "alphanumeric";
@@ -38,7 +39,7 @@ internal sealed class SettingsData
     public ulong DebounceMs { get; set; } = 80;
     public bool UseLlm { get; set; }
     public bool PreferDictionaryFirst { get; set; } = true;
-    public uint BeamSize { get; set; } = 3;
+    public uint BeamSize { get; set; } = 1;
 }
 
 internal enum ManagedKeyAction
@@ -188,10 +189,10 @@ internal sealed class SettingsStore
         debounce_ms = 80
         use_llm = false
         prefer_dictionary_first = true
-        beam_size = 3
+        beam_size = 1
 
         [conversion]
-        beam_size = 30
+        beam_size = 6
 
         [diagnostics]
         dump_active_config = true
@@ -418,6 +419,7 @@ internal sealed class SettingsStore
             MainGpu = GetInt(general, "main_gpu") ?? 0,
             ModelVariant = NormalizeOptional(GetString(general, "model_variant")),
             NumCandidates = GetUInt(conversion, "num_candidates") ?? GetUInt(root, "num_candidates"),
+            ConversionBeamSize = GetUInt(conversion, "beam_size") ?? 6,
             KeyboardLayout = GetString(keyboard, "layout") ?? "jis",
             ReloadOnModeSwitch = GetBool(keyboard, "reload_on_mode_switch") ?? true,
             DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
@@ -428,7 +430,7 @@ internal sealed class SettingsStore
             DebounceMs = GetULong(live, "debounce_ms") ?? 80,
             UseLlm = GetBool(live, "use_llm") ?? false,
             PreferDictionaryFirst = GetBool(live, "prefer_dictionary_first") ?? true,
-            BeamSize = GetUInt(live, "beam_size") ?? 3,
+            BeamSize = GetUInt(live, "beam_size") ?? 1,
         };
     }
 
@@ -461,6 +463,7 @@ internal sealed class SettingsStore
         live["beam_size"] = data.BeamSize;
 
         SetOptional(conversion, "num_candidates", data.NumCandidates);
+        conversion["beam_size"] = data.ConversionBeamSize;
         root.Remove("num_candidates");
     }
 

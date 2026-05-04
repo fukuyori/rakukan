@@ -45,7 +45,7 @@ impl AppConfig {
         self.conversion
             .num_candidates
             .or(self.num_candidates)
-            .unwrap_or(9)
+            .unwrap_or(6)
             .clamp(1, 30)
     }
 }
@@ -209,7 +209,7 @@ fn default_prefer_dictionary_first() -> bool {
 }
 
 fn default_live_conv_beam_size() -> usize {
-    3
+    1
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -222,7 +222,7 @@ pub struct LiveConversionConfig {
     pub use_llm: bool,
     #[serde(default = "default_prefer_dictionary_first")]
     pub prefer_dictionary_first: bool,
-    /// ライブ変換の候補数（beam 幅）。1 = greedy（高速）、3 = beam（高品質、デフォルト）
+    /// ライブ変換の候補数（beam 幅）。1 = greedy（高速、デフォルト）、3 = beam（高品質）
     #[serde(default = "default_live_conv_beam_size")]
     pub beam_size: usize,
 }
@@ -234,20 +234,20 @@ impl Default for LiveConversionConfig {
             debounce_ms: 80,
             use_llm: false,
             prefer_dictionary_first: true,
-            beam_size: 3,
+            beam_size: 1,
         }
     }
 }
 
 fn default_convert_beam_size() -> usize {
-    30
+    6
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConversionConfig {
     /// Space 変換時のビーム幅の**上限**。num_candidates と併せて min をとる。
-    /// デフォルト 30 では実質上限なしで、num_candidates がそのまま候補数になる。
-    /// 変換を速くしたい場合は小さく (例: 3) 設定することで beam 幅が抑えられる。
+    /// デフォルト 6 では候補数 6 と揃え、候補表の幅を保つ。
+    /// 体感速度を優先する場合は小さく、候補幅を優先する場合は大きく設定する。
     /// 範囲: 1〜30。
     #[serde(default = "default_convert_beam_size")]
     pub beam_size: usize,
@@ -462,26 +462,26 @@ enabled = false
 debounce_ms = 80
 use_llm = false
 prefer_dictionary_first = true
-# ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
-beam_size = 3
+# ライブ変換の候補数（beam 幅）: 1 = greedy（高速、デフォルト）, 3 = beam search（高品質）
+beam_size = 1
 
 [conversion]
 # Space 変換のビーム幅上限（num_candidates と min をとる）。
-# デフォルト 30 では num_candidates がそのまま候補数になる。
-# 変換を高速化したい場合は小さく設定する（例: beam_size = 3 で最大 3 候補、高速）。
+# デフォルト 6 では候補数 6 と揃え、候補表の幅を保つ。
+# 体感速度を優先する場合は小さく、候補幅を優先する場合は大きく設定する。
 # 範囲: 1〜30。
-beam_size = 30
+beam_size = 6
 
-# Space 変換で表示する候補数（1〜30、デフォルト 9）。
+# Space 変換で表示する候補数（1〜30、デフォルト 6）。
 # 新形式は [conversion].num_candidates。旧形式のルート直下 num_candidates も引き続き読める。
-# num_candidates = 9
+# num_candidates = 6
 
 [diagnostics]
 dump_active_config = false
 warn_on_unknown_key = true
 
 # 旧形式との互換用:
-# num_candidates = 9
+# num_candidates = 6
 "#
 }
 
@@ -507,5 +507,14 @@ num_candidates = 12
         let cfg: AppConfig = toml::from_str("num_candidates = 7").expect("config should parse");
 
         assert_eq!(cfg.effective_num_candidates(), 7);
+    }
+
+    #[test]
+    fn effective_num_candidates_defaults_to_fast_profile() {
+        let cfg = AppConfig::default();
+
+        assert_eq!(cfg.effective_num_candidates(), 6);
+        assert_eq!(cfg.live_conversion.beam_size, 1);
+        assert_eq!(cfg.conversion.beam_size, 6);
     }
 }

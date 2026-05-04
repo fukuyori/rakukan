@@ -3,6 +3,18 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.8.10] - 2026-05-04
+
+### Changed
+
+- 長文高速入力時の後方欠落を抑えるため、LiveConv 継続入力で合成表示が canonical reading に対して明らかに短い場合は完全なひらがな preedit 表示へ戻すガードを追加。
+- 未指定時の標準設定を候補数 6、ライブ変換 beam 1、Space 変換 beam 6 に寄せ、ライブ変換の速度と候補表の幅を両立するようにした。
+- WinUI 設定から `conversion.beam_size` を編集できるようにした。
+- WinUI 設定で候補数と `conversion.beam_size` が食い違わないよう、候補数変更に Space 変換 beam を追従させるようにした。
+- 旧 Win32 設定画面を削除し、設定 UI を WinUI 版に一本化した。
+- Space 変換で候補が設定値より 1 件少ない場合は元の読みを退避候補として補うようにした。
+- リリース表記とパッケージメタデータを 0.8.10 に更新。
+
 ## [0.8.9] - 2026-05-03
 
 ### Changed
@@ -384,7 +396,7 @@
 ### Added
 
 - **ユーザー辞書 管理 UI**（WinUI 設定アプリ）— 「ユーザー辞書」ナビゲーション項目を追加。読みと変換候補の追加・編集・削除、`user_dict.toml` を notepad で開くボタンを提供
-- **候補数の上限拡張** — Space 変換の候補数 (`num_candidates`) の上限を 1-9 → 1-30 に拡張。WinUI 設定 / 従来設定ダイアログ双方の UI バリデーションも追従
+- **候補数の上限拡張** — Space 変換の候補数 (`num_candidates`) の上限を 1-9 → 1-30 に拡張。WinUI 設定の UI バリデーションも追従
 - **`[conversion] beam_size` 設定** — Space 変換の beam 幅上限（`num_candidates` と min をとる）。デフォルト 30（実質無制限）。変換速度を抑えたい場合に小さく設定することで beam 幅を制限できる
 - **`[input] auto_learn` フラグ** — 確定時のユーザー辞書自動登録を制御する設定を追加。デフォルト `false`（`user_dict.toml` の肥大化を抑止、ユーザー辞書は手動登録のみで運用）
 

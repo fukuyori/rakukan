@@ -637,6 +637,14 @@ impl RakunEngine {
             }
         }
 
+        // LLM 出力は重複除去や短すぎる候補の除外で、要求数より 1 件少なくなる
+        // ことがある。候補表の最後に元の読みを置けば、変換せずに確定する退避路
+        // としても自然に使える。
+        let desired_visible = self.config.num_candidates.min(limit);
+        if merged.len() < desired_visible && !merged.contains(hiragana) {
+            merged.push(hiragana.clone());
+        }
+
         if merged.is_empty() {
             vec![hiragana.clone()]
         } else {
@@ -1005,6 +1013,41 @@ mod digit_width_tests {
                 DigitCandidateKind::Daiji,
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod candidate_merge_tests {
+    use super::{EngineConfig, RakunEngine};
+
+    #[test]
+    fn merge_candidates_pads_short_list_with_original_reading() {
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.force_preedit("てすと".to_string());
+
+        let llm_candidates = (1..=8).map(|n| format!("候補{n}")).collect();
+        let merged = engine.merge_candidates(llm_candidates, 40);
+
+        assert_eq!(merged.len(), 9);
+        assert_eq!(merged.last().map(String::as_str), Some("てすと"));
+    }
+
+    #[test]
+    fn merge_candidates_does_not_duplicate_original_reading() {
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.force_preedit("てすと".to_string());
+
+        let mut llm_candidates: Vec<String> = (1..=7).map(|n| format!("候補{n}")).collect();
+        llm_candidates.push("てすと".to_string());
+        let merged = engine.merge_candidates(llm_candidates, 40);
+
+        assert_eq!(merged.iter().filter(|c| c.as_str() == "てすと").count(), 1);
     }
 }
 
