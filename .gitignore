@@ -74,3 +74,6 @@ apps/**/.dotnet-obj/
 # 配布物・ZIPアーカイブ
 *.zip
 dist/
+
+# 外部プロジェクト分析メモ（ローカル調査用）
+docs/azookey-analysis/

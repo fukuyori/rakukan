@@ -333,6 +333,8 @@ impl super::TextServiceFactory_Impl {
         } // if !is_cancel
 
         match action {
+            UserAction::Input(',') => self.on_punctuate('、', ctx, tid, sink, guard),
+            UserAction::Input('.') => self.on_punctuate('。', ctx, tid, sink, guard),
             UserAction::Input(c) => self.on_input(c, ctx, tid, sink, guard),
             UserAction::InputRaw(c) => self.on_input_raw(c, ctx, tid, sink, guard),
             UserAction::FullWidthSpace => self.on_full_width_space(ctx, tid, guard),
