@@ -559,6 +559,10 @@ pub fn is_auto_learn_enabled() -> bool {
     super::config::current_config().input.auto_learn
 }
 
+pub fn is_digit_separator_auto_enabled() -> bool {
+    super::config::current_config().input.digit_separator_auto
+}
+
 pub fn maybe_log_gpu_memory(engine: &DynEngine) {
     if !tracing::enabled!(tracing::Level::DEBUG) {
         return;
@@ -1525,10 +1529,26 @@ impl SessionState {
         }
     }
 
+    /// 句読点保留をセット（確定時に変換テキスト末尾に連結する）
+    pub fn set_punct_pending(&mut self, c: char) {
+        if let SessionState::Selecting { punct_pending, .. } = self {
+            *punct_pending = Some(c);
+        }
+    }
+
     /// 句読点保留を取り出す
     pub fn take_punct_pending(&mut self) -> Option<char> {
         if let SessionState::Selecting { punct_pending, .. } = self {
             punct_pending.take()
+        } else {
+            None
+        }
+    }
+
+    /// Selecting 状態での pos_x, pos_y を返す
+    pub fn selecting_pos(&self) -> Option<(i32, i32)> {
+        if let SessionState::Selecting { pos_x, pos_y, .. } = self {
+            Some((*pos_x, *pos_y))
         } else {
             None
         }

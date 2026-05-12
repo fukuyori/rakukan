@@ -1,4 +1,4 @@
-# rakukan v0.8.12
+# rakukan v0.8.11
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -30,7 +30,7 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.8.12 では、句読点入力時に直前までの変換と句読点自身を即時確定し、句読点を含む長い読みを LLM に問い合わせないようにしました。
+v0.8.11 では、後追い候補更新時の選択位置維持と候補表示ログを改善しました。
 詳細な変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
 
 ## インストール
@@ -129,7 +129,7 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 - [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md) — **長期案 / 一部保留**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A のみ実装済み、Phase B 以降は再設計が必要）
 - [SEGMENT_EDIT_REDESIGN.md](docs/SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
 - [VIBRATO_PHASE1.md](docs/VIBRATO_PHASE1.md) — 過去の Vibrato 形態素解析器導入メモ（v0.5.1 で削除済み）
-- [handoff.md](docs/handoff.md) — v0.8.12 引き継ぎ資料 + 残タスクリスト
+- [handoff.md](docs/handoff.md) — v0.8.11 引き継ぎ資料 + 残タスクリスト
 
 ### 進行中の主要課題
 
