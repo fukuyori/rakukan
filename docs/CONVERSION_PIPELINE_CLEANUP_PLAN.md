@@ -774,6 +774,7 @@ azooKey-Windows の `subtext` / `corresponding_count` に相当する情報を�
 - 2026-05-04 / v0.8.10: LiveConv 継続入力で表示が読みより明らかに短くなる場合、完全なひらがな preedit へ戻すガードを追加。
 - 2026-05-04 / v0.8.10: 候補表 1 画面の表示は最大 9 件のまま維持しつつ、候補生成が 1 件足りない場合は元の読みを補う。
 - 2026-05-04 / v0.8.11: Space 再押下と dispatch poll の pending update で、候補差し替え時に `selected` を 0 へ戻さず、既存の選択 index を維持するようにした。候補数が減った場合は `replace_selecting_candidates` で末尾へ丸める。
+- 2026-05-12: `CandidateView.suffix` を `Selecting.remainder` から populate するように `candidate_views_from_strings` / `activate_selecting_with_affixes` / `replace_selecting_candidates` / `rebuild_selecting_candidate_views` を更新。RangeSelect 由来の Selecting では `suffix` に未変換 hiragana 部分が入り、`candidate_display_probe` の `suffix_len` で識別できる。描画経路は `.text` のみ参照するため動作変化なし（メタデータのみ）。
 
 狙い:
 

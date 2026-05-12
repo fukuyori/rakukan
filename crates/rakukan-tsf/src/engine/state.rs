@@ -956,12 +956,18 @@ pub fn session_is_selecting_fast() -> bool {
 fn candidate_views_from_strings(
     candidates: &[String],
     reading_len: usize,
+    suffix: &str,
     source: CandidateViewSource,
 ) -> Vec<CandidateView> {
     candidates
         .iter()
         .cloned()
-        .map(|text| CandidateView::compatible(text, reading_len, source))
+        .map(|text| CandidateView {
+            text,
+            suffix: suffix.to_owned(),
+            corresponding_reading_len: reading_len,
+            source,
+        })
         .collect()
 }
 
@@ -1142,6 +1148,7 @@ impl SessionState {
         let candidate_views = candidate_views_from_strings(
             &candidates,
             original_preedit.chars().count(),
+            &remainder,
             CandidateViewSource::Bg,
         );
         *self = SessionState::Selecting {
@@ -1366,11 +1373,13 @@ impl SessionState {
             candidates,
             candidate_views,
             selected,
+            remainder,
             ..
         } = self
         {
             let reading_len = original_preedit.chars().count();
-            *candidate_views = candidate_views_from_strings(&new_candidates, reading_len, source);
+            *candidate_views =
+                candidate_views_from_strings(&new_candidates, reading_len, remainder, source);
             *candidates = new_candidates;
             if candidates.is_empty() {
                 *selected = 0;
@@ -1385,11 +1394,16 @@ impl SessionState {
             original_preedit,
             candidates,
             candidate_views,
+            remainder,
             ..
         } = self
         {
-            *candidate_views =
-                candidate_views_from_strings(candidates, original_preedit.chars().count(), source);
+            *candidate_views = candidate_views_from_strings(
+                candidates,
+                original_preedit.chars().count(),
+                remainder,
+                source,
+            );
         }
     }
 
