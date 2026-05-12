@@ -3,6 +3,23 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.0] - 2026-05-12
+
+### Changed
+
+- Phase 6b 第1段: `CandidateView.suffix` を `Selecting.remainder` から populate するように変更。RangeSelect 由来の Selecting では `suffix` に未変換 hiragana 部分が入る。描画経路は `.text` のみ参照するため動作変化なし（メタデータのみ）。
+- Phase 6b 第2段: WM_TIMER (`on_waiting_timer` Selecting 分岐) 経路の pending update に `candidate_display_probe event=wm_timer_pending_update composition_updated=false` ログを追加。WndProc コンテキスト制約により TSF composition を更新できない設計上のラグを観測可能にした。
+- Phase 6b 第3段: `current_candidate()` / `page_candidates()` / `total_pages()` / 候補移動系メソッドの `candidates: Vec<String>` フォールバック分岐を削除し、`candidate_views` を唯一の表示用 source of truth に統一。`candidate_view_len` ヘルパも削除。動作変化なし（dead code 除去のみ）。
+
+### Fixed
+
+- Phase 6b 第4段: RangeSelect → Space 変換の inline 経路（`on_convert.rs` の kanji_not_ready 分岐と inline 完走分岐）で `activate_selecting_with_affixes` 後に `update_composition_candidate_parts` を呼んでいなかった coverage gap を修正。RangeSelect → Space 直後に TSF composition が `[selected_hiragana][remainder_hiragana]` のまま残り、次のキー押下まで focused/unfocused 表示が反映されない問題を解消。
+
+### Notes
+
+- v0.8.12 で導入した「句読点入力時の即時確定」暫定対策は revert 済みで、本リリースには含まれない。同問題の根本対策は Phase 9（分節解析を含む変換方式の見直し）で扱う予定。
+- リリース表記とパッケージメタデータを 0.9.0 に更新。
+
 ## [0.8.11] - 2026-05-04
 
 ### Changed

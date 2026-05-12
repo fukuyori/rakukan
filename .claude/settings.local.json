@@ -11,7 +11,9 @@
       "Bash(grep -E \"\\\\.\\(h|cc\\)$\")",
       "Bash(grep -n \"SegmentWidthExpand\\\\|SegmentWidthShrink\" /c/Users/n_fuk/Dropbox/source/cpp/mozc/src/engine/*.h /c/Users/n_fuk/Dropbox/source/cpp/mozc/src/engine/*.cc)",
       "Bash(find /c/Users/n_fuk/Dropbox/source/cpp/mozc -maxdepth 3 -name README* -o -name ARCHITECTURE*)",
-      "Bash(curl -s https://raw.githubusercontent.com/google/mozc/master/src/renderer/win32/indicator_window.cc)"
+      "Bash(curl -s https://raw.githubusercontent.com/google/mozc/master/src/renderer/win32/indicator_window.cc)",
+      "PowerShell(git -C D:\\\\home\\\\source\\\\rust\\\\rakukan rev-parse HEAD)",
+      "PowerShell(git -C D:\\\\home\\\\source\\\\rust\\\\rakukan rev-parse origin/main)"
     ]
   }
 }

@@ -257,6 +257,11 @@ impl super::TextServiceFactory_Impl {
                 if !kanji_ready {
                     // モデル未ロード → target をそのままプレビューとして Selecting 化
                     let candidates = vec![target.clone()];
+                    // Phase 6b 第4段: RangeSelect → Space inline 経路でも focused/unfocused 表示を
+                    // 揃えるため、composition を即時更新する。target を first として、remainder を
+                    // unfocused 側に表示する。
+                    let composition_first = target.clone();
+                    let composition_remainder = remainder.clone();
                     {
                         let mut sess = session_get()?;
                         sess.activate_selecting_with_affixes(
@@ -273,6 +278,14 @@ impl super::TextServiceFactory_Impl {
                     }
                     drop(guard);
                     candidate_window::show(&candidates, 0, "", caret.left, caret.bottom);
+                    update_composition_candidate_parts(
+                        ctx,
+                        tid,
+                        sink,
+                        String::new(),
+                        composition_first,
+                        composition_remainder,
+                    )?;
                     return Ok(true);
                 }
 
@@ -316,6 +329,14 @@ impl super::TextServiceFactory_Impl {
                     candidates
                 };
 
+                // Phase 6b 第4段: RangeSelect → Space inline 完走経路でも focused/unfocused 表示を
+                // 即時反映する。第1候補（kanji or target fallback）を focused 側、
+                // remainder を unfocused 側として composition に表示する。
+                let composition_first = candidates
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| target.clone());
+                let composition_remainder = remainder.clone();
                 {
                     let mut sess = session_get()?;
                     sess.activate_selecting_with_affixes(
@@ -335,6 +356,14 @@ impl super::TextServiceFactory_Impl {
                 let page_size = 9usize;
                 let page_cands: Vec<String> = candidates.into_iter().take(page_size).collect();
                 candidate_window::show(&page_cands, 0, "", caret.left, caret.bottom);
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    composition_first,
+                    composition_remainder,
+                )?;
                 return Ok(true);
             }
         }

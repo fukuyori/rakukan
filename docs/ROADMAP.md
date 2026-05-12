@@ -133,6 +133,15 @@
 - ✅ pending update 後の候補表と本文 composition を、現在選択中の候補から更新
 - ✅ `candidate_display_probe` に `page_selected` / `selected_candidate` / `selected_match` を追加
 
+**v0.9.0 リリース済み（2026-05-12）**: Phase 6b（azooKey 型候補メタデータ）完結 + RangeSelect → Space inline 経路の composition coverage 修正。
+
+- ✅ **第1段**: `CandidateView.suffix` を `Selecting.remainder` から populate（RangeSelect 由来で未変換 hiragana を suffix に保持、`suffix_len` で識別可能）。描画動作変化なし
+- ✅ **第2段**: WM_TIMER 経路の pending update に `candidate_display_probe event=wm_timer_pending_update composition_updated=false` ログ追加（WndProc コンテキスト制約による composition 遅延更新を可視化）
+- ✅ **第3段**: `current_candidate()` / `page_candidates()` / 候補移動系の `candidates: Vec<String>` フォールバック分岐を削除、`candidate_views` を唯一の表示 source of truth に統一、`candidate_view_len` ヘルパも削除。動作変化なし（dead code 除去）
+- ✅ **第4段**: RangeSelect → Space 変換 inline 経路（kanji_not_ready 分岐 + inline 完走分岐）で `update_composition_candidate_parts` を呼んでいなかった coverage gap を修正。RangeSelect → Space 直後に composition が反映されない問題を解消
+- ⚠ v0.8.12 で導入した「句読点入力時の即時確定」暫定対策は revert 済みで、本リリースには含まれない。根本対策は Phase 9 で扱う
+- ☑ minor bump の根拠: Phase 6b 完結 + RangeSelect→Space 経路の user-visible bug fix
+
 **現状認識（2026-04-23 時点）**: v0.6.6 以降の実機運用で **Explorer の異常終了は 1 度も観測されていない**。crash root cause（DLL unload race）はほぼ収束したと判断し、**0.7.x の主目的を「新機能追加」ではなく「安定性向上 / 保守性改善」** に置く。未発火の crash 対策（M5）に先行投資せず、既に観測されている不具合（M1.5 尻切れ / M1.6 host crash）と、今後の変更を安全に進めるための土台整備（M1 / M2 / M3 / M4）を優先する。
 
 関連資料:
@@ -175,6 +184,7 @@
 | **v0.8.9** ✅ 2026-05-03 | LiveConv 由来候補の引き継ぎ改善と同期 fallback 観測 | patch | 安定した候補対応を保ちつつ、同期 fallback 削減の判断材料を増やす |
 | **v0.8.10** ✅ 2026-05-04 | 長文入力ガード、候補数/beam 調整、WinUI 設定一本化 | patch | 高速入力時の表示欠落を抑え、候補表示設定の食い違いを防ぐ |
 | **v0.8.11** ✅ 2026-05-04 | 後追い候補更新の選択位置維持 | patch | LLM 候補の後追い更新で候補表と本文表示が勝手に先頭へ戻ることを防ぐ |
+| **v0.9.0** ✅ 2026-05-12 | Phase 6b 完結 + RangeSelect→Space inline 経路の composition 修正 | minor | azooKey 型候補メタデータの導入完結 + user-visible bug fix |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:
