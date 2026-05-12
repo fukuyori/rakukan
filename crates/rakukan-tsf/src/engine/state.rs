@@ -971,14 +971,6 @@ fn candidate_views_from_strings(
         .collect()
 }
 
-fn candidate_view_len(candidate_views: &[CandidateView], candidates: &[String]) -> usize {
-    if candidate_views.is_empty() {
-        candidates.len()
-    } else {
-        candidate_views.len()
-    }
-}
-
 impl SessionState {
     pub fn set_idle(&mut self) {
         *self = SessionState::Idle;
@@ -1207,13 +1199,9 @@ impl SessionState {
         match self {
             SessionState::Selecting {
                 candidate_views,
-                candidates,
                 selected,
                 ..
-            } => candidate_views
-                .get(*selected)
-                .map(|c| c.text.as_str())
-                .or_else(|| candidates.get(*selected).map(|s| s.as_str())),
+            } => candidate_views.get(*selected).map(|c| c.text.as_str()),
             _ => None,
         }
     }
@@ -1319,12 +1307,11 @@ impl SessionState {
     pub fn total_pages(&self) -> usize {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 page_size,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     0
                 } else {
@@ -1338,26 +1325,21 @@ impl SessionState {
     pub fn page_candidates(&self) -> Vec<String> {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     return Vec::new();
                 }
                 let start = (selected / page_size) * page_size;
                 let end = (start + page_size).min(len);
-                if !candidate_views.is_empty() {
-                    candidate_views[start..end]
-                        .iter()
-                        .map(|candidate| candidate.text.clone())
-                        .collect()
-                } else {
-                    candidates[start..end].to_vec()
-                }
+                candidate_views[start..end]
+                    .iter()
+                    .map(|candidate| candidate.text.clone())
+                    .collect()
             }
             _ => Vec::new(),
         }
@@ -1381,10 +1363,10 @@ impl SessionState {
             *candidate_views =
                 candidate_views_from_strings(&new_candidates, reading_len, remainder, source);
             *candidates = new_candidates;
-            if candidates.is_empty() {
+            if candidate_views.is_empty() {
                 *selected = 0;
-            } else if *selected >= candidates.len() {
-                *selected = candidates.len().saturating_sub(1);
+            } else if *selected >= candidate_views.len() {
+                *selected = candidate_views.len().saturating_sub(1);
             }
         }
     }
@@ -1430,13 +1412,12 @@ impl SessionState {
     pub fn next_with_page_wrap(&mut self) {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     return;
                 }
@@ -1456,12 +1437,11 @@ impl SessionState {
     pub fn prev(&mut self) {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     return;
                 }
@@ -1478,13 +1458,12 @@ impl SessionState {
     pub fn next_page(&mut self) {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     return;
                 }
@@ -1500,13 +1479,12 @@ impl SessionState {
     pub fn prev_page(&mut self) {
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
-                let len = candidate_view_len(candidate_views, candidates);
+                let len = candidate_views.len();
                 if len == 0 {
                     return;
                 }
@@ -1525,14 +1503,13 @@ impl SessionState {
         }
         match self {
             SessionState::Selecting {
-                candidates,
                 candidate_views,
                 selected,
                 page_size,
                 ..
             } => {
                 let idx = (*selected / *page_size) * *page_size + (n - 1);
-                if idx < candidate_view_len(candidate_views, candidates) {
+                if idx < candidate_views.len() {
                     *selected = idx;
                     true
                 } else {

@@ -775,6 +775,8 @@ azooKey-Windows の `subtext` / `corresponding_count` に相当する情報を�
 - 2026-05-04 / v0.8.10: 候補表 1 画面の表示は最大 9 件のまま維持しつつ、候補生成が 1 件足りない場合は元の読みを補う。
 - 2026-05-04 / v0.8.11: Space 再押下と dispatch poll の pending update で、候補差し替え時に `selected` を 0 へ戻さず、既存の選択 index を維持するようにした。候補数が減った場合は `replace_selecting_candidates` で末尾へ丸める。
 - 2026-05-12: `CandidateView.suffix` を `Selecting.remainder` から populate するように `candidate_views_from_strings` / `activate_selecting_with_affixes` / `replace_selecting_candidates` / `rebuild_selecting_candidate_views` を更新。RangeSelect 由来の Selecting では `suffix` に未変換 hiragana 部分が入り、`candidate_display_probe` の `suffix_len` で識別できる。描画経路は `.text` のみ参照するため動作変化なし（メタデータのみ）。
+- 2026-05-12: WM_TIMER (`on_waiting_timer` Selecting 分岐) 経路の pending update に `candidate_display_probe event=wm_timer_pending_update composition_updated=false` ログを追加。candidate window は更新するが WndProc コンテキストで EditSession を開けないため TSF composition は更新しない（次のキー入力時の poll で拾う）という設計上のラグを観測可能にした。動作変化なし。
+- 2026-05-12: `current_candidate()` / `page_candidates()` / `total_pages()` / `next_with_page_wrap()` / `prev()` / `next_page()` / `prev_page()` / `select_nth_in_page()` の `candidates: Vec<String>` フォールバック分岐を削除し、`candidate_views` を唯一の表示用 source of truth に統一。`candidate_view_len` ヘルパも削除。`candidate_views` は必ず `candidates` と同時に populate される invariant（stage 1 以降）を前提とする。`replace_selecting_candidates` の `selected` clamping も `candidate_views.len()` ベースに変更。動作変化なし（dead code 除去のみ）。
 
 狙い:
 

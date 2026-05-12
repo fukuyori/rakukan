@@ -892,6 +892,8 @@ pub fn on_waiting_timer() {
         let page_info_str;
         let page_cands;
         let page_selected;
+        let probe_view;
+        let probe_selected_text;
         {
             let mut sess = match session_get() {
                 Ok(s) => s,
@@ -908,6 +910,26 @@ pub fn on_waiting_timer() {
             page_cands = sess.page_candidates().to_vec();
             page_selected = sess.page_selected();
             page_info_str = sess.page_info().to_string();
+            probe_view = sess.current_candidate_view().cloned();
+            probe_selected_text = sess.current_candidate().unwrap_or("").to_string();
+        }
+
+        // Phase 6b 第2段: WM_TIMER 経路の pending update を観測する。
+        // この経路では candidate window は更新するが、WndProc コンテキストで
+        // EditSession を開けないため TSF composition は更新しない（次のキー入力時の
+        // poll で拾う）。composition_updated=false でこの設計上のラグを可視化する。
+        if let Some(view) = probe_view {
+            tracing::info!(
+                "candidate_display_probe event=wm_timer_pending_update reading_len={} source={} first_candidate={:?} page_selected={} selected_candidate={:?} composition_candidate={:?} selected_match=false composition_updated=false llm_pending=false corresponding_reading_len={} suffix_len={}",
+                preedit_key.chars().count(),
+                view.source.as_str(),
+                page_cands.first().map(String::as_str).unwrap_or(""),
+                page_selected,
+                probe_selected_text,
+                "",
+                view.corresponding_reading_len,
+                view.suffix.chars().count()
+            );
         }
 
         stop_waiting_timer();
