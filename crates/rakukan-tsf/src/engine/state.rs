@@ -559,6 +559,48 @@ pub fn is_auto_learn_enabled() -> bool {
     super::config::current_config().input.auto_learn
 }
 
+/// `CandidateView.source` を元に、その候補が学習対象かを判定する。
+///
+/// azooKey の `Candidate.isLearningTarget` に対応する。劣化経路や入力等価候補は
+/// 学習対象から外し、学習履歴の汚染を抑える。
+///
+/// - 学習する: `Bg`（LLM 完了）/ `Dict`（辞書直接）/ `LivePreview`（LiveConv 引き継ぎ、信頼度は中だが LLM 由来）
+/// - 学習しない: `Preedit`（`text == reading` のため通常は既存ガードで弾かれる、念のため）/ `Fallback`（sync 経路、品質が安定しない）
+pub fn is_candidate_learning_target(source: CandidateViewSource) -> bool {
+    use CandidateViewSource::*;
+    match source {
+        Bg | Dict | LivePreview => true,
+        Preedit | Fallback => false,
+    }
+}
+
+/// 学習判定の中央ヘルパ。`auto_learn` 設定 / `text == reading` / `source` 判定を一括し、
+/// 観測ログ `learning_decision` を出す。`engine.learn()` を呼ぶ前に必ずこれを通す。
+///
+/// `source = None` の場合（LiveConv 経路など `CandidateView` がない経路）は source 判定を
+/// skip し、従来通り auto_learn + text != reading だけで判断する。
+pub fn should_learn_and_log(
+    reading: &str,
+    text: &str,
+    source: Option<CandidateViewSource>,
+) -> bool {
+    if !is_auto_learn_enabled() {
+        return false;
+    }
+    if text == reading {
+        return false;
+    }
+    let learnable = source.map(is_candidate_learning_target).unwrap_or(true);
+    tracing::info!(
+        "learning_decision learn={} source={} reading_len={} text={:?}",
+        learnable,
+        source.map(|s| s.as_str()).unwrap_or("none"),
+        reading.chars().count(),
+        text
+    );
+    learnable
+}
+
 pub fn is_digit_separator_auto_enabled() -> bool {
     super::config::current_config().input.digit_separator_auto
 }

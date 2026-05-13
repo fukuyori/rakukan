@@ -1264,6 +1264,7 @@ impl super::TextServiceFactory_Impl {
                 let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.take_selecting_remainder();
                 let remainder_reading = sess.selecting_remainder_reading_clone();
+                let candidate_source = sess.current_candidate_view().map(|v| v.source);
                 sess.set_idle();
                 drop(sess);
                 let commit_text = if let Some(p) = punct {
@@ -1271,7 +1272,7 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     text.clone()
                 };
-                if text != reading && crate::engine::state::is_auto_learn_enabled() {
+                if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
                     engine.learn(&reading, &text);
                 }
                 candidate_window::hide();

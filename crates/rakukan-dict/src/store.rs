@@ -21,6 +21,14 @@ use crate::user_dict::UserDict;
 /// これを超える場合は `last_access_time` が最古のエントリから削除する。
 const LEARN_LRU_CAPACITY: usize = 30_000;
 
+/// 学習履歴の stale 判定閾値（日）。最終確定からこの日数を超えたエントリは
+/// 起動時の `load_learn_history_file` で削除される。
+///
+/// azooKey の 128 日（無使用で除外）を参考にしつつ、rakukan の 30 日半減期スコアと
+/// 組み合わせて 180 日を採用。180 日 = 6 半減期 → 元の重みの約 1.6% まで減衰
+/// しており、実質的な可視性はほぼ失われた状態でのハードカット。
+const STALE_ENTRY_MAX_AGE_DAYS: u64 = 180;
+
 /// bincode ファイルのフォーマットバージョン。破壊的変更時にインクリメントする。
 const LEARN_HISTORY_FORMAT_VERSION: u32 = 1;
 
@@ -275,6 +283,43 @@ impl DictStore {
         }
     }
 
+    /// 学習履歴から指定の `(reading, surface)` を明示的に削除する。
+    ///
+    /// 戻り値: 削除されたエントリがあれば `true`、無ければ `false`。
+    /// `reading` キーの最後のエントリだった場合はキー自体も削除する。
+    /// 永続化 (`learn_history.bin` への即時書き込み) を伴う。失敗は警告ログのみ。
+    pub fn forget(&self, reading: &str, surface: &str) -> bool {
+        let (removed, snapshot) = {
+            let Ok(mut hist) = self.inner.learn_history.write() else {
+                warn!("learn_history write lock failed in forget");
+                return false;
+            };
+            let Some(entries) = hist.get_mut(reading) else {
+                return false;
+            };
+            let before = entries.len();
+            entries.retain(|e| e.surface != surface);
+            let removed = before != entries.len();
+            if entries.is_empty() {
+                hist.remove(reading);
+            }
+            (removed, if removed { Some(hist.clone()) } else { None })
+        };
+
+        if removed {
+            info!(
+                "dict::store: forget reading={:?} surface={:?}",
+                reading, surface
+            );
+            if let (Some(snapshot), Some(path)) = (snapshot, &self.inner.learn_history_path) {
+                if let Err(e) = save_learn_history_file(path, &snapshot) {
+                    warn!("learn_history save failed after forget: {e}");
+                }
+            }
+        }
+        removed
+    }
+
     /// 学習履歴から `reading` のエントリを score 降順で並べ、surface のリストを返す。
     ///
     /// `merge_candidates` で「mozc/user 候補のうち最近選ばれたものを先に出す」ために使う。
@@ -454,7 +499,34 @@ fn load_learn_history_file(path: &Path) -> Result<HashMap<String, Vec<LearnEntry
         );
         return Ok(HashMap::new());
     }
-    Ok(file.entries)
+    let mut entries = file.entries;
+    let pruned = prune_stale_entries(&mut entries, STALE_ENTRY_MAX_AGE_DAYS, now_unix_secs());
+    if pruned > 0 {
+        info!(
+            "learn_history: pruned {} stale entries (max_age_days={}) on load",
+            pruned, STALE_ENTRY_MAX_AGE_DAYS
+        );
+    }
+    Ok(entries)
+}
+
+/// `last_access_time` が `now - max_age_days * 86400` より古いエントリを削除する。
+/// 削除後に空になった reading キーも除去する。
+/// 戻り値: 削除されたエントリ数。
+fn prune_stale_entries(
+    hist: &mut HashMap<String, Vec<LearnEntry>>,
+    max_age_days: u64,
+    now: u64,
+) -> usize {
+    let cutoff = now.saturating_sub(max_age_days.saturating_mul(86_400));
+    let mut pruned: usize = 0;
+    hist.retain(|_reading, entries| {
+        let before = entries.len();
+        entries.retain(|e| e.last_access_time >= cutoff);
+        pruned += before - entries.len();
+        !entries.is_empty()
+    });
+    pruned
 }
 
 fn save_learn_history_file(
@@ -606,6 +678,70 @@ mod tests {
     }
 
     #[test]
+    fn test_learn_skips_digit_literal_candidates() {
+        // 数字 reading (`200` 等) は MOZC 辞書に存在しないため、桁並び漢数字や
+        // 位取り漢数字、全角数字といった literal 由来候補は学習されない。
+        // `is_dict_surface` が hiragana reading のみを辞書から探すため自動的にフィルタされる。
+        let store = make_store(&[]);
+        // 数字 reading で起こり得る変換結果を一通り学習試行
+        for (reading, surface) in [
+            ("200", "二百"),
+            ("200", "二〇〇"),
+            ("200", "２００"),
+            ("1234", "千二百三十四"),
+            ("1234", "壱千弐百参拾四"),
+        ] {
+            store.learn(reading, surface);
+            assert!(
+                store.lookup_learn(reading).is_empty(),
+                "literal 由来 reading={:?} surface={:?} は学習されない",
+                reading,
+                surface
+            );
+        }
+    }
+
+    #[test]
+    fn test_learn_skips_alpha_symbol_literal_candidates() {
+        // ASCII / 記号 reading (`USB-C` `(test)` `A+B` 等) も辞書外なので学習されない。
+        let store = make_store(&[]);
+        for (reading, surface) in [
+            ("USB-C", "ＵＳＢ-Ｃ"),
+            ("USB-C", "USB-C"),
+            ("(test)", "（test）"),
+            ("A+B", "Ａ＋Ｂ"),
+        ] {
+            store.learn(reading, surface);
+            assert!(
+                store.lookup_learn(reading).is_empty(),
+                "literal reading={:?} surface={:?} は学習されない",
+                reading,
+                surface
+            );
+        }
+    }
+
+    #[test]
+    fn test_learn_allows_user_dict_override_of_literal_reading() {
+        // ユーザーが意図的に user_dict に登録した場合だけ学習を許す。
+        // 例: 「200」→「200円」を user_dict に登録 → 学習可能。
+        let store = make_store(&[("200", vec!["200円"])]);
+        store.learn("200", "200円");
+        assert_eq!(
+            store.lookup_learn("200"),
+            vec!["200円"],
+            "user_dict 登録ありなら学習される"
+        );
+        // 登録されていない literal surface は依然として学習されない
+        store.learn("200", "二百");
+        let learned = store.lookup_learn("200");
+        assert!(
+            !learned.contains(&"二百".to_string()),
+            "user_dict に無い literal surface は学習されない"
+        );
+    }
+
+    #[test]
     fn test_learn_entry_score_recency() {
         // 同じ freq でも last_access_time が新しいほうが score 高い。
         let old = LearnEntry {
@@ -730,16 +866,19 @@ mod tests {
 
     #[test]
     fn test_learn_history_roundtrip_bincode() {
-        // bincode で書き出した履歴を読み戻せることを確認
+        // bincode で書き出した履歴を読み戻せることを確認。
+        // load 時の prune (STALE_ENTRY_MAX_AGE_DAYS) で消されないよう、
+        // last_access_time は now を使う。
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("learn_history.bin");
 
+        let now = now_unix_secs();
         let mut entries: HashMap<String, Vec<LearnEntry>> = HashMap::new();
         entries.insert(
             "にほんご".into(),
             vec![LearnEntry {
                 surface: "日本語".into(),
-                last_access_time: 1_700_000_000,
+                last_access_time: now,
                 suggestion_freq: 3,
                 shown_freq: 5,
             }],
@@ -751,9 +890,43 @@ mod tests {
         assert_eq!(loaded.len(), 1);
         let e = &loaded["にほんご"][0];
         assert_eq!(e.surface, "日本語");
-        assert_eq!(e.last_access_time, 1_700_000_000);
+        assert_eq!(e.last_access_time, now);
         assert_eq!(e.suggestion_freq, 3);
         assert_eq!(e.shown_freq, 5);
+    }
+
+    #[test]
+    fn test_load_prunes_stale_entries() {
+        // load_learn_history_file は STALE_ENTRY_MAX_AGE_DAYS より古いエントリを除く
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn_history.bin");
+
+        let now = now_unix_secs();
+        let day = 86_400u64;
+        let mut entries: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        entries.insert(
+            "fresh".into(),
+            vec![LearnEntry {
+                surface: "A".into(),
+                last_access_time: now - 10 * day, // 残る
+                suggestion_freq: 1,
+                shown_freq: 0,
+            }],
+        );
+        entries.insert(
+            "stale".into(),
+            vec![LearnEntry {
+                surface: "B".into(),
+                last_access_time: now.saturating_sub(365 * day), // 1 年前: 消える
+                suggestion_freq: 1,
+                shown_freq: 0,
+            }],
+        );
+
+        save_learn_history_file(&path, &entries).unwrap();
+        let loaded = load_learn_history_file(&path).unwrap();
+        assert!(loaded.contains_key("fresh"));
+        assert!(!loaded.contains_key("stale"));
     }
 
     #[test]
@@ -771,5 +944,101 @@ mod tests {
         let path = dir.path().join("corrupt.bin");
         std::fs::write(&path, b"not a valid bincode").unwrap();
         assert!(load_learn_history_file(&path).is_err());
+    }
+
+    #[test]
+    fn test_prune_stale_entries_removes_old() {
+        // 180 日より古い last_access_time を持つエントリは削除される
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        let now: u64 = 1_700_000_000;
+        let day = 86_400u64;
+        hist.insert(
+            "fresh".into(),
+            vec![LearnEntry {
+                surface: "A".into(),
+                last_access_time: now - 30 * day, // 30日前: 残す
+                suggestion_freq: 1,
+                shown_freq: 0,
+            }],
+        );
+        hist.insert(
+            "stale".into(),
+            vec![LearnEntry {
+                surface: "B".into(),
+                last_access_time: now - 200 * day, // 200日前: 消す
+                suggestion_freq: 5,
+                shown_freq: 0,
+            }],
+        );
+        hist.insert(
+            "mixed".into(),
+            vec![
+                LearnEntry {
+                    surface: "C-keep".into(),
+                    last_access_time: now - 10 * day, // 10日前: 残す
+                    suggestion_freq: 2,
+                    shown_freq: 0,
+                },
+                LearnEntry {
+                    surface: "C-drop".into(),
+                    last_access_time: now - 365 * day, // 1年前: 消す
+                    suggestion_freq: 1,
+                    shown_freq: 0,
+                },
+            ],
+        );
+
+        let pruned = prune_stale_entries(&mut hist, 180, now);
+        assert_eq!(pruned, 2, "2 エントリが削除される (stale/B と mixed/C-drop)");
+        assert!(hist.contains_key("fresh"));
+        assert!(!hist.contains_key("stale"), "全エントリが古い reading は削除");
+        assert!(hist.contains_key("mixed"));
+        assert_eq!(hist["mixed"].len(), 1);
+        assert_eq!(hist["mixed"][0].surface, "C-keep");
+    }
+
+    #[test]
+    fn test_prune_stale_entries_no_op_when_all_fresh() {
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        let now: u64 = 1_700_000_000;
+        hist.insert(
+            "fresh".into(),
+            vec![LearnEntry {
+                surface: "X".into(),
+                last_access_time: now,
+                suggestion_freq: 1,
+                shown_freq: 0,
+            }],
+        );
+        let pruned = prune_stale_entries(&mut hist, 180, now);
+        assert_eq!(pruned, 0);
+        assert_eq!(hist.len(), 1);
+    }
+
+    #[test]
+    fn test_forget_removes_specific_surface() {
+        let store = make_store(&[("にほんご", vec!["日本語", "二本語"])]);
+        store.learn("にほんご", "日本語");
+        store.learn("にほんご", "二本語");
+        assert_eq!(store.lookup_learn("にほんご").len(), 2);
+
+        let removed = store.forget("にほんご", "二本語");
+        assert!(removed, "対象 surface を削除した場合 true");
+        let learned = store.lookup_learn("にほんご");
+        assert_eq!(learned, vec!["日本語"]);
+
+        // 全削除でキー自体が消える
+        let removed = store.forget("にほんご", "日本語");
+        assert!(removed);
+        assert!(store.lookup_learn("にほんご").is_empty());
+    }
+
+    #[test]
+    fn test_forget_returns_false_when_missing() {
+        let store = make_store(&[("にほんご", vec!["日本語"])]);
+        let removed = store.forget("にほんご", "見つからない");
+        assert!(!removed);
+        let removed = store.forget("そんざいしない", "X");
+        assert!(!removed);
     }
 }

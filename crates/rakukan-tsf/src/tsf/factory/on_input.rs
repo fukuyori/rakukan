@@ -182,6 +182,7 @@ impl super::TextServiceFactory_Impl {
                 let prefix = sess.selecting_prefix_clone();
                 let punct = sess.take_punct_pending();
                 let remainder = sess.take_selecting_remainder();
+                let candidate_source = sess.current_candidate_view().map(|v| v.source);
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
@@ -192,7 +193,11 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if selected_text != reading && crate::engine::state::is_auto_learn_enabled() {
+                if crate::engine::state::should_learn_and_log(
+                    &reading,
+                    &selected_text,
+                    candidate_source,
+                ) {
                     engine.learn(&reading, &selected_text);
                 }
                 engine.commit(&full_text);
@@ -347,6 +352,7 @@ impl super::TextServiceFactory_Impl {
                 let prefix = sess.selecting_prefix_clone();
                 let punct = sess.take_punct_pending();
                 let remainder = sess.take_selecting_remainder();
+                let candidate_source = sess.current_candidate_view().map(|v| v.source);
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
@@ -357,7 +363,11 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if selected_text != reading && crate::engine::state::is_auto_learn_enabled() {
+                if crate::engine::state::should_learn_and_log(
+                    &reading,
+                    &selected_text,
+                    candidate_source,
+                ) {
                     engine.learn(&reading, &selected_text);
                 }
                 engine.commit(&full_text);
