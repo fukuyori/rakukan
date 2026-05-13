@@ -3,6 +3,24 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.1] - 2026-05-12
+
+### Changed
+
+- 学習履歴に source-based フィルタを導入（azooKey `Candidate.isLearningTarget` 相当）。`CandidateView.source` が `Bg` / `Dict` / `LivePreview` のみ学習対象とし、`Preedit` / `Fallback`（sync 経路）は学習対象外とした。観測ログ `learning_decision learn={true|false} source=... reading_len=... text=...` で各経路の学習判定が grep 可能。
+- 学習履歴に起動時 stale エントリ削除機構を追加（azooKey decay/forget 相当）。`STALE_ENTRY_MAX_AGE_DAYS = 180` で 180 日以上未使用のエントリを `load_learn_history_file` 時に除去。30 日半減期スコア (`0.5^(Δdays/30)`) と組み合わせて 6 半減期 = 約 1.6% まで減衰したエントリのハードカット。ファイル形式変更なし（backward compatible）。
+- `DictStore::forget(reading, surface) -> bool` 公開 API を追加。明示的な学習エントリ削除を可能にした（UI 連携は未配線、将来の拡張ポイント）。
+- literal 候補（`USB-C` / `200` → `二百` 等）が `is_dict_surface` ガードで自動的に学習対象外になることを回帰防止テストで lock（3 件追加）。
+
+### Documentation
+
+- `docs/PHASE9_DESIGN.md` を新規作成。分節解析を含む変換方式の見直し（CONVERTER_REDESIGN.md の Phase B〜E が vibrato 削除で orphan 化した分の代替方針）を Phase 9.1〜9.3 の段階構成で記述。Phase 9.1 = symbolic 境界検出、9.2 = `CandidateView.segments` 拡張、9.3 = `commit_until_boundary` 統合 API。未決事項 8 項目、LLM と segmentation の役割分担の 3 案を整理。
+- `docs/CONVERSION_PIPELINE_CLEANUP_PLAN.md` の Phase 9 セクションから `PHASE9_DESIGN.md` への相互参照を追加。助詞境界の symbolic 検出を明示的検討対象に格上げ。
+
+### Notes
+
+- リリース表記とパッケージメタデータを 0.9.1 に更新。
+
 ## [0.9.0] - 2026-05-12
 
 ### Changed
