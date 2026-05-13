@@ -531,11 +531,13 @@ fn to_fullwidth_alpha(s: &str) -> String {
         .collect()
 }
 
-fn alpha_candidates(s: &str) -> Vec<String> {
+fn alpha_candidates(s: &str, fullwidth_first: bool) -> Vec<String> {
     let half = to_halfwidth_alpha(s);
     let full = to_fullwidth_alpha(s);
     if half == full {
         vec![half]
+    } else if fullwidth_first {
+        vec![full, half]
     } else {
         vec![half, full]
     }
@@ -591,11 +593,13 @@ fn to_fullwidth_symbol(s: &str) -> String {
         .collect()
 }
 
-fn symbol_candidates(s: &str) -> Vec<String> {
+fn symbol_candidates(s: &str, fullwidth_first: bool) -> Vec<String> {
     let half = to_halfwidth_symbol(s);
     let full = to_fullwidth_symbol(s);
     if half == full {
         vec![half]
+    } else if fullwidth_first {
+        vec![full, half]
     } else {
         vec![half, full]
     }
@@ -627,24 +631,43 @@ fn symbol_candidate_structs(s: &str) -> Vec<Candidate> {
     }
 }
 
-fn literal_candidates(run: &Run, digit_candidates_order: &[DigitCandidateKind]) -> Vec<String> {
+fn literal_candidates(
+    run: &Run,
+    digit_candidates_order: &[DigitCandidateKind],
+    alpha_fullwidth_first: bool,
+    symbol_fullwidth_first: bool,
+) -> Vec<String> {
     match run {
         Run::Digit(s) => digit_candidates(s, digit_candidates_order),
-        Run::Alpha(s) => alpha_candidates(s),
-        Run::Symbol(s) => symbol_candidates(s),
+        Run::Alpha(s) => alpha_candidates(s, alpha_fullwidth_first),
+        Run::Symbol(s) => symbol_candidates(s, symbol_fullwidth_first),
         Run::Kana(_) => unreachable!(),
     }
 }
 
-fn half_full_literal_candidates(run: &Run) -> Vec<String> {
-    let (half, full) = match run {
-        Run::Digit(s) => (to_halfwidth_digits(s), to_fullwidth_digits(s)),
-        Run::Alpha(s) => (to_halfwidth_alpha(s), to_fullwidth_alpha(s)),
-        Run::Symbol(s) => (to_halfwidth_symbol(s), to_fullwidth_symbol(s)),
+fn half_full_literal_candidates(
+    run: &Run,
+    alpha_fullwidth_first: bool,
+    symbol_fullwidth_first: bool,
+) -> Vec<String> {
+    let (half, full, fullwidth_first) = match run {
+        Run::Digit(s) => (to_halfwidth_digits(s), to_fullwidth_digits(s), false),
+        Run::Alpha(s) => (
+            to_halfwidth_alpha(s),
+            to_fullwidth_alpha(s),
+            alpha_fullwidth_first,
+        ),
+        Run::Symbol(s) => (
+            to_halfwidth_symbol(s),
+            to_fullwidth_symbol(s),
+            symbol_fullwidth_first,
+        ),
         Run::Kana(_) => unreachable!(),
     };
     if half == full {
         vec![half]
+    } else if fullwidth_first {
+        vec![full, half]
     } else {
         vec![half, full]
     }
@@ -751,6 +774,8 @@ pub fn convert_with_digit_protection(
     context: &str,
     num_candidates: usize,
     digit_candidates_order: &[DigitCandidateKind],
+    alpha_fullwidth_first: bool,
+    symbol_fullwidth_first: bool,
 ) -> crate::kanji::error::Result<Vec<String>> {
     let runs = split_by_digits(reading);
 
@@ -764,22 +789,29 @@ pub fn convert_with_digit_protection(
             return Ok(digit_candidates(&literal_str, digit_candidates_order));
         }
         if runs.iter().all(|r| matches!(r, Run::Alpha(_))) {
-            return Ok(alpha_candidates(&literal_str));
+            return Ok(alpha_candidates(&literal_str, alpha_fullwidth_first));
         }
         if runs.iter().all(|r| matches!(r, Run::Symbol(_))) {
-            return Ok(symbol_candidates(&literal_str));
+            return Ok(symbol_candidates(&literal_str, symbol_fullwidth_first));
         }
         // 数字+アルファベット+記号混在のリテラルのみ。
         // 数字の漢数字化は「数字だけ」の時に限定し、混在時は半角/全角候補を合成する。
-        let run_candidates: Vec<Vec<String>> =
-            runs.iter().map(half_full_literal_candidates).collect();
+        let run_candidates: Vec<Vec<String>> = runs
+            .iter()
+            .map(|r| half_full_literal_candidates(r, alpha_fullwidth_first, symbol_fullwidth_first))
+            .collect();
         return Ok(combine_runs(&run_candidates, num_candidates));
     }
 
     let mut run_candidates: Vec<Vec<String>> = Vec::with_capacity(runs.len());
     for (i, run) in runs.iter().enumerate() {
         if run.is_literal() {
-            run_candidates.push(literal_candidates(run, digit_candidates_order));
+            run_candidates.push(literal_candidates(
+                run,
+                digit_candidates_order,
+                alpha_fullwidth_first,
+                symbol_fullwidth_first,
+            ));
         } else if let Run::Kana(s) = run {
             let local_context = build_local_context(&runs, i, context);
             let cands = converter.convert(s, &local_context, num_candidates)?;
@@ -1125,15 +1157,15 @@ mod tests {
     }
 
     #[test]
-    fn alpha_candidates_halfwidth() {
-        let cands = alpha_candidates("PC");
+    fn alpha_candidates_halfwidth_first() {
+        let cands = alpha_candidates("PC", false);
         assert_eq!(cands, vec!["PC", "ＰＣ"]);
     }
 
     #[test]
-    fn alpha_candidates_fullwidth() {
-        let cands = alpha_candidates("ＰＣ");
-        assert_eq!(cands, vec!["PC", "ＰＣ"]);
+    fn alpha_candidates_fullwidth_first() {
+        let cands = alpha_candidates("PC", true);
+        assert_eq!(cands, vec!["ＰＣ", "PC"]);
     }
 
     #[test]
@@ -1147,21 +1179,27 @@ mod tests {
     }
 
     #[test]
-    fn alpha_lowercase() {
-        let cands = alpha_candidates("abc");
+    fn alpha_lowercase_halfwidth_first() {
+        let cands = alpha_candidates("abc", false);
         assert_eq!(cands, vec!["abc", "ａｂｃ"]);
     }
 
     #[test]
-    fn symbol_candidates_halfwidth() {
-        let cands = symbol_candidates("+-*/");
+    fn alpha_lowercase_fullwidth_first() {
+        let cands = alpha_candidates("abc", true);
+        assert_eq!(cands, vec!["ａｂｃ", "abc"]);
+    }
+
+    #[test]
+    fn symbol_candidates_halfwidth_first() {
+        let cands = symbol_candidates("+-*/", false);
         assert_eq!(cands, vec!["+-*/", "＋－＊／"]);
     }
 
     #[test]
-    fn symbol_candidates_fullwidth() {
-        let cands = symbol_candidates("（！）");
-        assert_eq!(cands, vec!["(!)", "（！）"]);
+    fn symbol_candidates_fullwidth_first() {
+        let cands = symbol_candidates("+-*/", true);
+        assert_eq!(cands, vec!["＋－＊／", "+-*/"]);
     }
 
     #[test]
@@ -1177,9 +1215,9 @@ mod tests {
     #[test]
     fn combine_alpha_symbol_runs() {
         let runs = vec![
-            alpha_candidates("USB"),
-            symbol_candidates("-"),
-            alpha_candidates("C"),
+            alpha_candidates("USB", false),
+            symbol_candidates("-", false),
+            alpha_candidates("C", false),
         ];
         let result = combine_runs(&runs, 6);
         assert_eq!(
@@ -1198,8 +1236,10 @@ mod tests {
     #[test]
     fn combine_mixed_literal_runs_without_kanji_digits() {
         let runs = split_by_digits("3D-C");
-        let run_candidates: Vec<Vec<String>> =
-            runs.iter().map(half_full_literal_candidates).collect();
+        let run_candidates: Vec<Vec<String>> = runs
+            .iter()
+            .map(|r| half_full_literal_candidates(r, false, false))
+            .collect();
         let result = combine_runs(&run_candidates, 6);
         assert_eq!(
             result,

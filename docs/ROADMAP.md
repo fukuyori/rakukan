@@ -142,6 +142,15 @@
 - ⚠ v0.8.12 で導入した「句読点入力時の即時確定」暫定対策は revert 済みで、本リリースには含まれない。根本対策は Phase 9 で扱う
 - ☑ minor bump の根拠: Phase 6b 完結 + RangeSelect→Space 経路の user-visible bug fix
 
+**v0.9.2 リリース済み（2026-05-13）**: 英字・記号の入力幅設定を追加し、第一候補と区切り句読点を幅設定に追従させた。
+
+- ✅ `[input] alpha_width` / `symbol_width` 設定を新規追加（デフォルト `fullwidth`）
+- ✅ WinUI 設定 UI に「英字の入力幅」「記号の入力幅」ComboBox を追加
+- ✅ 英字 / 記号候補の表示順を幅設定に追従（`alpha_candidates` / `symbol_candidates` に `fullwidth_first` 引数を追加）
+- ✅ 英字・記号直後の `,` `.` を Western 句読点（`，` `．` または `,` `.`）に自動変換（`alpha_symbol_separator_auto` 新設）
+- ✅ kana 直後の `,` `.` は従来通り `、` `。`、数字直後は `digit_separator_auto` で半角（不変）
+- ☑ patch bump の根拠: ユーザー可視の新設定 + 軽い動作変化（記号の第一候補がデフォルトで全角になる）
+
 **v0.9.1 リリース済み（2026-05-12）**: 学習履歴の品質改善（azooKey `isLearningTarget` / `decay/forget` 相当）+ Phase 9 設計ドラフト作成。
 
 - ✅ **E (source-based 学習フィルタ):** `is_candidate_learning_target(CandidateViewSource)` + `should_learn_and_log` ヘルパを追加。4 つの Selecting 確定経路（`edit_ops::on_candidate_select` / `on_convert::on_commit_raw` / `on_input` × 2）を新ヘルパ経由に置換。`Bg` / `Dict` / `LivePreview` のみ学習、`Preedit` / `Fallback` は学習対象外。観測ログ `learning_decision`
@@ -194,6 +203,7 @@
 | **v0.8.11** ✅ 2026-05-04 | 後追い候補更新の選択位置維持 | patch | LLM 候補の後追い更新で候補表と本文表示が勝手に先頭へ戻ることを防ぐ |
 | **v0.9.0** ✅ 2026-05-12 | Phase 6b 完結 + RangeSelect→Space inline 経路の composition 修正 | minor | azooKey 型候補メタデータの導入完結 + user-visible bug fix |
 | **v0.9.1** ✅ 2026-05-12 | source-based 学習フィルタ + 起動時 stale prune + Phase 9 設計ドラフト | patch | azooKey `isLearningTarget` / decay/forget 相当の内部品質改善 + 設計準備 |
+| **v0.9.2** ✅ 2026-05-13 | 英字・記号の入力幅設定 + 候補順 + Western 句読点自動変換 | patch | ユーザー可視の新設定 + 軽い動作改善 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:

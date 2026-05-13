@@ -3,6 +3,26 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.2] - 2026-05-13
+
+### Added
+
+- 英字の入力幅設定 `[input] alpha_width` を追加（デフォルト `fullwidth`）。`fullwidth` で英字入力時に `Ａ`、`halfwidth` で `A` のまま保持。
+- 記号の入力幅設定 `[input] symbol_width` を追加（デフォルト `fullwidth`）。`fullwidth` で記号入力時に `＠`、`halfwidth` で `@` のまま保持。
+- WinUI 設定アプリに「英字の入力幅」「記号の入力幅」の ComboBox を追加（「数字の入力幅」と並列）。
+- 英字・記号の直後に入力した `,` `.` を Western 句読点（`，` `．` または `,` `.`）に自動変換する処理を追加。幅設定（`alpha_width` / `symbol_width`）に追従する。
+
+### Changed
+
+- 英字 / 記号候補の表示順を入力幅設定に追従させた。`alpha_width=fullwidth` なら `Ａ` が第一候補、`halfwidth` なら `A` が第一候補。デフォルトでは全角候補が先頭に表示される。
+- `digits::convert_with_digit_protection` / `conv_cache::start` / `Request` のシグネチャに `alpha_fullwidth_first` / `symbol_fullwidth_first` を追加。
+- 直前文字が kana の場合の `,` `.` は従来どおり `、` `。`（不変）。数字直後は既存の `digit_separator_auto` で常に半角（不変）。
+- リリース表記とパッケージメタデータを 0.9.2 に更新。
+
+### Notes
+
+- ユーザー直接編集（`%APPDATA%\rakukan\config.toml`）で `alpha_width = "halfwidth"` / `symbol_width = "halfwidth"` に変更可能。エンジン再ロードで反映。
+
 ## [0.9.1] - 2026-05-12
 
 ### Changed

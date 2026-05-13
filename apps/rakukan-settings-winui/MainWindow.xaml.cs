@@ -78,6 +78,8 @@ public sealed partial class MainWindow : Window
             SelectComboValue(DefaultModeCombo, bundle.Config.DefaultMode);
             RememberKanaModeToggle.IsOn = bundle.Config.RememberLastKanaMode;
             SelectComboValue(DigitWidthCombo, bundle.Config.DigitWidth);
+            SelectComboValue(AlphaWidthCombo, bundle.Config.AlphaWidth);
+            SelectComboValue(SymbolWidthCombo, bundle.Config.SymbolWidth);
             AutoLearnToggle.IsOn = bundle.Config.AutoLearn;
 
             SelectComboValue(KeymapPresetCombo, bundle.Keymap.Preset);
@@ -141,6 +143,8 @@ public sealed partial class MainWindow : Window
             DefaultMode = SelectedComboValue(DefaultModeCombo),
             RememberLastKanaMode = RememberKanaModeToggle.IsOn,
             DigitWidth = SelectedComboValue(DigitWidthCombo),
+            AlphaWidth = SelectedComboValue(AlphaWidthCombo),
+            SymbolWidth = SelectedComboValue(SymbolWidthCombo),
             AutoLearn = AutoLearnToggle.IsOn,
             LiveEnabled = LiveEnabledToggle.IsOn,
             DebounceMs = ParseULong(DebounceMsBox.Value, "デバウンス"),

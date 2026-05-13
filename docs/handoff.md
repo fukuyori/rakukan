@@ -1,10 +1,17 @@
-# Rakukan 引き継ぎ資料 (v0.9.1)
+# Rakukan 引き継ぎ資料 (v0.9.2)
 
-更新日: 2026-05-12
+更新日: 2026-05-13
 
 ## 現在の状態
 
-- **バージョン:** v0.9.1
+- **バージョン:** v0.9.2
+- **v0.9.2 の内容（記号・英字幅設定）:**
+  - `[input] alpha_width` / `symbol_width` 設定を新規追加（デフォルト `fullwidth`）
+  - WinUI 設定 UI に「英字の入力幅」「記号の入力幅」ComboBox を追加
+  - 英字 / 記号候補の表示順を幅設定に追従（fullwidth なら全角先頭、halfwidth なら半角先頭）
+  - 英字・記号直後の `,` `.` を Western 句読点（`，` `．` / `,` `.`）に自動変換、幅設定に追従
+  - kana 直後の `,` `.` と数字直後の separator は従来通り
+- **バージョン (1 つ前):** v0.9.1
 - **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.0 では **M6.2 桁並び漢数字候補**、v0.8.1 では **M6.4 記号の半角 / 全角候補**、v0.8.2 では **M6.3 位取り漢数字候補の通常漢数字部分**、v0.8.3 では **M6.1 数字間の区切り文字自動変換**、v0.8.4 では **M6.3 大字候補 + 数字候補順設定** を追加。v0.8.5 ではライブ変換 preview にユーザー辞書・学習履歴の優先を反映。v0.8.6 ではライブ変換 preview の開始を読み 3 文字以上に調整。v0.8.7 では Space 候補表示の初動を改善し、LiveConv preview と候補表第1候補、本文 composition の表示を揃えた。v0.8.8 ではログローテーションと azooKey 型候補メタデータ `CandidateView` の TSF 内導入を進めた。v0.8.9 では LiveConv 由来候補の `CandidateView` 引き継ぎと同期 fallback 観測を追加した。v0.8.10 では長文高速入力ガード、候補数/beam の高速寄り defaults、WinUI 設定一本化、候補数と Space 変換 beam の連動を追加した。v0.8.11 では後追い候補更新時の選択位置維持と候補表示ログの観測性を改善した。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結。`CandidateView.suffix` を `Selecting.remainder` から populate、`candidate_views` を唯一の表示 source of truth に統一、WM_TIMER 経路の pending update に観測ログを追加、RangeSelect → Space inline 経路の composition 更新 coverage gap を修正。**v0.9.1 では azooKey の `isLearningTarget` 相当の source-based 学習フィルタ、decay/forget 相当の起動時 stale prune（180 日）+ `DictStore::forget` API、literal 候補回帰テストを追加。さらに Phase 9 設計ドラフト `docs/PHASE9_DESIGN.md` を作成し、vibrato 削除で orphan 化した CONVERTER_REDESIGN Phase B〜E に対する代替方針を Phase 9.1〜9.3 で具体化した。**
 - **v0.9.1 の内容:**
   - **学習フィルタ (E):** `is_candidate_learning_target(CandidateViewSource)` + `should_learn_and_log` ヘルパで 4 つの Selecting 確定経路を統合。`Bg` / `Dict` / `LivePreview` は学習、`Preedit` / `Fallback` は学習対象外。

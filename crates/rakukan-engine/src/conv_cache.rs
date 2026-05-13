@@ -47,6 +47,8 @@ struct Request {
     converter: KanaKanjiConverter,
     n: usize,
     digit_candidates_order: Vec<DigitCandidateKind>,
+    alpha_fullwidth_first: bool,
+    symbol_fullwidth_first: bool,
 }
 
 // ─── キャッシュ状態 ────────────────────────────────────────────────────────────
@@ -125,6 +127,8 @@ fn worker_loop(cache: Arc<Cache>) {
         let committed = req.committed.clone();
         let n = req.n;
         let digit_candidates_order = req.digit_candidates_order.clone();
+        let alpha_fullwidth_first = req.alpha_fullwidth_first;
+        let symbol_fullwidth_first = req.symbol_fullwidth_first;
         let converter = req.converter;
 
         let t = std::time::Instant::now();
@@ -136,6 +140,8 @@ fn worker_loop(cache: Arc<Cache>) {
                     &committed,
                     n,
                     &digit_candidates_order,
+                    alpha_fullwidth_first,
+                    symbol_fullwidth_first,
                 )
             })) {
                 Ok(Ok(cands)) => {
@@ -190,6 +196,8 @@ pub fn start(
     converter: KanaKanjiConverter,
     n: usize,
     digit_candidates_order: Vec<DigitCandidateKind>,
+    alpha_fullwidth_first: bool,
+    symbol_fullwidth_first: bool,
 ) -> Option<KanaKanjiConverter> {
     if hiragana.is_empty() {
         return Some(converter);
@@ -223,6 +231,8 @@ pub fn start(
         } else {
             digit_candidates_order
         },
+        alpha_fullwidth_first,
+        symbol_fullwidth_first,
     });
     cache.cond.notify_one();
     None

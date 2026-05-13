@@ -205,6 +205,26 @@
                                         </ComboBox>
                                     </StackPanel>
                                 </Grid>
+                                <Grid ColumnSpacing="16">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="8">
+                                        <TextBlock Text="英字の入力幅" />
+                                        <ComboBox x:Name="AlphaWidthCombo">
+                                            <x:String>fullwidth</x:String>
+                                            <x:String>halfwidth</x:String>
+                                        </ComboBox>
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="8">
+                                        <TextBlock Text="記号の入力幅" />
+                                        <ComboBox x:Name="SymbolWidthCombo">
+                                            <x:String>fullwidth</x:String>
+                                            <x:String>halfwidth</x:String>
+                                        </ComboBox>
+                                    </StackPanel>
+                                </Grid>
                                 <ToggleSwitch x:Name="RememberKanaModeToggle" Header="前回のかなモードをアプリごとに記憶する" />
                             </StackPanel>
                         </Border>

@@ -34,6 +34,8 @@ internal sealed class SettingsData
     public string DefaultMode { get; set; } = "alphanumeric";
     public bool RememberLastKanaMode { get; set; } = true;
     public string DigitWidth { get; set; } = "halfwidth";
+    public string AlphaWidth { get; set; } = "fullwidth";
+    public string SymbolWidth { get; set; } = "fullwidth";
     public bool AutoLearn { get; set; } = true;
     public bool LiveEnabled { get; set; }
     public ulong DebounceMs { get; set; } = 80;
@@ -180,6 +182,8 @@ internal sealed class SettingsStore
         default_mode = "alphanumeric"
         remember_last_kana_mode = true
         digit_width = "halfwidth"
+        alpha_width = "fullwidth"
+        symbol_width = "fullwidth"
         digit_separator_auto = true
         digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
         auto_learn = true
@@ -425,6 +429,8 @@ internal sealed class SettingsStore
             DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
             RememberLastKanaMode = GetBool(input, "remember_last_kana_mode") ?? true,
             DigitWidth = GetString(input, "digit_width") ?? "halfwidth",
+            AlphaWidth = GetString(input, "alpha_width") ?? "fullwidth",
+            SymbolWidth = GetString(input, "symbol_width") ?? "fullwidth",
             AutoLearn = GetBool(input, "auto_learn") ?? true,
             LiveEnabled = GetBool(live, "enabled") ?? false,
             DebounceMs = GetULong(live, "debounce_ms") ?? 80,
@@ -454,6 +460,8 @@ internal sealed class SettingsStore
         input["default_mode"] = data.DefaultMode;
         input["remember_last_kana_mode"] = data.RememberLastKanaMode;
         input["digit_width"] = data.DigitWidth;
+        input["alpha_width"] = data.AlphaWidth;
+        input["symbol_width"] = data.SymbolWidth;
         input["auto_learn"] = data.AutoLearn;
 
         live["enabled"] = data.LiveEnabled;

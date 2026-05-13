@@ -116,6 +116,32 @@ impl Default for DigitWidth {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlphaWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for AlphaWidth {
+    fn default() -> Self {
+        AlphaWidth::Fullwidth
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for SymbolWidth {
+    fn default() -> Self {
+        SymbolWidth::Fullwidth
+    }
+}
+
 fn default_digit_separator_auto() -> bool {
     true
 }
@@ -152,6 +178,12 @@ pub struct EngineConfig {
     pub main_gpu: i32,
     /// 数字の入力幅: "fullwidth" = 全角 (０１２), "halfwidth" = 半角 (012)
     pub digit_width: DigitWidth,
+    /// 英字の入力幅: "fullwidth" = 全角 (ＡＢＣ), "halfwidth" = 半角 (ABC)
+    #[serde(default)]
+    pub alpha_width: AlphaWidth,
+    /// 記号の入力幅: "fullwidth" = 全角 (＠＃), "halfwidth" = 半角 (@#)
+    #[serde(default)]
+    pub symbol_width: SymbolWidth,
     /// 数字直後の句読点を数値区切りとして扱う。
     #[serde(default = "default_digit_separator_auto")]
     pub digit_separator_auto: bool,
@@ -174,6 +206,8 @@ impl Default for EngineConfig {
             n_gpu_layers: 0u32,
             main_gpu: 0,
             digit_width: DigitWidth::default(),
+            alpha_width: AlphaWidth::default(),
+            symbol_width: SymbolWidth::default(),
             digit_separator_auto: true,
             digit_candidates_order: default_digit_candidates_order(),
             live_conv_beam_size: 3,
@@ -208,6 +242,53 @@ fn numeric_separator_after_digit(prev: Option<char>, c: char) -> Option<char> {
     match c {
         ',' | '、' => Some(','),
         '.' | '。' => Some('.'),
+        _ => None,
+    }
+}
+
+fn is_alpha_char(c: char) -> bool {
+    c.is_ascii_alphabetic() || ('Ａ'..='Ｚ').contains(&c) || ('ａ'..='ｚ').contains(&c)
+}
+
+fn is_symbol_char(c: char) -> bool {
+    let n = c as u32;
+    // ASCII printable 記号（英数字除く）
+    if (0x21..=0x7E).contains(&n) && !c.is_ascii_alphanumeric() {
+        return true;
+    }
+    // 全角記号 (U+FF01..=U+FF5E)、ただし全角英数字を除く
+    if (0xFF01..=0xFF5E).contains(&n)
+        && !('０'..='９').contains(&c)
+        && !('Ａ'..='Ｚ').contains(&c)
+        && !('ａ'..='ｚ').contains(&c)
+    {
+        return true;
+    }
+    false
+}
+
+/// `,` / `.` / `、` / `。` を、直前文字の種類と幅設定に応じて
+/// Western 句読点（全角 ， ． or 半角 , .）として返す。
+/// 直前が英字でも記号でもなければ `None`（変換せず trie に委ねる）。
+fn alpha_symbol_separator_auto(
+    prev: Option<char>,
+    c: char,
+    alpha_width: AlphaWidth,
+    symbol_width: SymbolWidth,
+) -> Option<char> {
+    let prev = prev?;
+    let fullwidth = if is_alpha_char(prev) {
+        matches!(alpha_width, AlphaWidth::Fullwidth)
+    } else if is_symbol_char(prev) {
+        matches!(symbol_width, SymbolWidth::Fullwidth)
+    } else {
+        return None;
+    };
+    match (c, fullwidth) {
+        (',' | '、', true) => Some('，'),  // U+FF0C 全角コンマ
+        (',' | '、', false) => Some(','),
+        ('.' | '。', true) => Some('．'),  // U+FF0E 全角ピリオド
+        ('.' | '。', false) => Some('.'),
         _ => None,
     }
 }
@@ -299,6 +380,25 @@ impl RakunEngine {
             }
         }
 
+        // 英字・記号後の `,` / `.` を Western 句読点 (， / ． or , / .) へ自動置換
+        // 幅設定 (alpha_width / symbol_width) に追従する。
+        if self.pending_romaji_buf.is_empty() {
+            if let Some(separator) = alpha_symbol_separator_auto(
+                self.hiragana_buf.chars().last(),
+                c,
+                self.config.alpha_width,
+                self.config.symbol_width,
+            ) {
+                self.hiragana_buf.push(separator);
+                self.romaji_input_log.push(c.to_string());
+                debug!(
+                    "engine::push: alpha/symbol separator {:?} → {:?}",
+                    c, separator
+                );
+                return self.current_preedit();
+            }
+        }
+
         // 数字 0–9（pending_romaji がない場合のみ）
         if self.pending_romaji_buf.is_empty() && c.is_ascii_digit() {
             let out = match self.config.digit_width {
@@ -314,16 +414,19 @@ impl RakunEngine {
         // ASCII 記号の処理（pending_romaji がない場合のみ）
         // ,./[]\- はトライのルール（、。・「」￥ー等）に委ねる。
         // それ以外の印字可能 ASCII 記号（@#$%^&*()+=_:"~!? 等）は
-        // 全角に変換して即確定する（以前の symbol_fixed catch-all と同等）。
+        // symbol_width に従って全角 or 半角で即確定する。
         if self.pending_romaji_buf.is_empty() {
             let n = c as u32;
             let is_ascii_printable = (0x21..=0x7E).contains(&n);
             let is_trie_symbol = matches!(c, ',' | '.' | '/' | '[' | ']' | '\\' | '-');
             if is_ascii_printable && !is_trie_symbol && !c.is_ascii_alphanumeric() {
-                let fw = char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c);
-                self.hiragana_buf.push(fw);
+                let out = match self.config.symbol_width {
+                    SymbolWidth::Fullwidth => char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c),
+                    SymbolWidth::Halfwidth => c,
+                };
+                self.hiragana_buf.push(out);
                 self.romaji_input_log.push(c.to_string());
-                debug!("engine::push: symbol {:?} → {:?}", c, fw);
+                debug!("engine::push: symbol {:?} → {:?}", c, out);
                 return self.current_preedit();
             }
         }
@@ -378,15 +481,19 @@ impl RakunEngine {
         self.romaji_input_log.push(c.to_string());
     }
 
-    /// Shift+アルファベット用: hiragana_buf に全角大文字を、romaji_input_log に ASCII 大文字を記録する。
+    /// Shift+アルファベット用: alpha_width 設定に従って全角 or 半角の大文字を hiragana_buf に追加。
+    /// `romaji_input_log` には ASCII 大文字を記録する。
     ///
     /// F9/F10 のサイクル変換は romaji_input_log の ASCII 文字を元に動作するため、
     /// log には元の ASCII 文字（'A'–'Z'）を保持する必要がある。
     /// `c` には ASCII 大文字（'A'–'Z'）を渡すこと。
     pub fn push_fullwidth_alpha(&mut self, c: char) {
         debug_assert!(c.is_ascii_uppercase());
-        let fw = char::from_u32(c as u32 - 0x41 + 0xFF21).unwrap_or(c);
-        self.hiragana_buf.push(fw);
+        let out = match self.config.alpha_width {
+            AlphaWidth::Fullwidth => char::from_u32(c as u32 - 0x41 + 0xFF21).unwrap_or(c),
+            AlphaWidth::Halfwidth => c,
+        };
+        self.hiragana_buf.push(out);
         self.romaji_input_log.push(c.to_string());
     }
 
@@ -431,6 +538,8 @@ impl RakunEngine {
             &self.committed,
             num_candidates,
             &self.config.digit_candidates_order,
+            matches!(self.config.alpha_width, AlphaWidth::Fullwidth),
+            matches!(self.config.symbol_width, SymbolWidth::Fullwidth),
         )
         .map_err(|e| EngineError::ConversionFailed(e.to_string()))
     }
@@ -688,6 +797,8 @@ impl RakunEngine {
                 conv,
                 n_cands,
                 self.config.digit_candidates_order.clone(),
+                matches!(self.config.alpha_width, AlphaWidth::Fullwidth),
+                matches!(self.config.symbol_width, SymbolWidth::Fullwidth),
             ) {
                 Some(returned) => {
                     self.kanji = Some(returned);
@@ -949,6 +1060,105 @@ mod symbol_input_tests {
         assert!(push("", '@').ends_with('＠'));
         assert!(push("", '(').ends_with('（'));
         assert!(push("", ')').ends_with('）'));
+    }
+
+    #[test]
+    fn symbol_width_halfwidth_keeps_ascii() {
+        let config = crate::EngineConfig {
+            symbol_width: crate::SymbolWidth::Halfwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_char('@');
+        assert_eq!(e.hiragana_text(), "@");
+    }
+
+    #[test]
+    fn alpha_width_halfwidth_keeps_ascii() {
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Halfwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_fullwidth_alpha('U');
+        e.push_fullwidth_alpha('S');
+        e.push_fullwidth_alpha('B');
+        assert_eq!(e.hiragana_text(), "USB");
+    }
+
+    #[test]
+    fn alpha_width_fullwidth_converts() {
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Fullwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_fullwidth_alpha('U');
+        e.push_fullwidth_alpha('S');
+        e.push_fullwidth_alpha('B');
+        assert_eq!(e.hiragana_text(), "ＵＳＢ");
+    }
+
+    #[test]
+    fn comma_after_alpha_with_fullwidth_uses_zenkaku_comma() {
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Fullwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_fullwidth_alpha('A');
+        e.push_char(',');
+        assert_eq!(e.hiragana_text(), "Ａ，");
+    }
+
+    #[test]
+    fn comma_after_alpha_with_halfwidth_uses_ascii_comma() {
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Halfwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_fullwidth_alpha('A');
+        e.push_char(',');
+        assert_eq!(e.hiragana_text(), "A,");
+    }
+
+    #[test]
+    fn period_after_symbol_with_fullwidth_uses_zenkaku_period() {
+        let config = crate::EngineConfig {
+            symbol_width: crate::SymbolWidth::Fullwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_char('@');
+        e.push_char('.');
+        assert_eq!(e.hiragana_text(), "＠．");
+    }
+
+    #[test]
+    fn period_after_symbol_with_halfwidth_uses_ascii_period() {
+        let config = crate::EngineConfig {
+            symbol_width: crate::SymbolWidth::Halfwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_char('@');
+        e.push_char('.');
+        assert_eq!(e.hiragana_text(), "@.");
+    }
+
+    #[test]
+    fn comma_after_kana_stays_touten() {
+        // 直前が kana のときは従来通り `、` になる
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Fullwidth,
+            symbol_width: crate::SymbolWidth::Fullwidth,
+            ..Default::default()
+        };
+        let mut e = RakunEngine::new(config);
+        e.force_preedit("あ".to_string());
+        e.push_char(',');
+        assert_eq!(e.hiragana_text(), "あ、");
     }
 }
 

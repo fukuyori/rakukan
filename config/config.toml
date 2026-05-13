@@ -40,6 +40,11 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
+# 英字の入力幅: "fullwidth" = 全角 (ＡＢＣ), "halfwidth" = 半角 (ABC)
+alpha_width = "fullwidth"
+# 記号の入力幅: "fullwidth" = 全角 (＠＃), "halfwidth" = 半角 (@#)
+# 英字・記号の後に入力した `,` `.` は、これらの幅設定に追従して全角/半角の Western 句読点になる
+symbol_width = "fullwidth"
 
 [live_conversion]
 enabled = false

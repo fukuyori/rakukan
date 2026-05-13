@@ -155,6 +155,32 @@ impl Default for DigitWidth {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum AlphaWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for AlphaWidth {
+    fn default() -> Self {
+        AlphaWidth::Fullwidth
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SymbolWidth {
+    Fullwidth,
+    Halfwidth,
+}
+
+impl Default for SymbolWidth {
+    fn default() -> Self {
+        SymbolWidth::Fullwidth
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum DigitCandidateKind {
     Arabic,
     Fullwidth,
@@ -171,6 +197,14 @@ pub struct InputConfig {
     pub remember_last_kana_mode: bool,
     #[serde(default)]
     pub digit_width: DigitWidth,
+    /// 英字の入力幅。デフォルトは全角。
+    /// `halfwidth` にすると入力時の英字を半角のまま保持し、候補も半角先頭。
+    #[serde(default)]
+    pub alpha_width: AlphaWidth,
+    /// 記号の入力幅。デフォルトは全角。
+    /// `halfwidth` にすると入力時の記号を半角のまま保持し、候補も半角先頭。
+    #[serde(default)]
+    pub symbol_width: SymbolWidth,
     /// 数字直後の `、` / `。` を `,` / `.` として扱う。
     #[serde(default = "default_digit_separator_auto")]
     pub digit_separator_auto: bool,
@@ -194,6 +228,8 @@ impl Default for InputConfig {
             default_mode: default_input_mode(),
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
+            alpha_width: AlphaWidth::default(),
+            symbol_width: SymbolWidth::default(),
             digit_separator_auto: default_digit_separator_auto(),
             digit_candidates_order: default_digit_candidates_order(),
             auto_learn: default_auto_learn(),
@@ -449,6 +485,10 @@ default_mode = "alphanumeric"
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"
+# 英字の入力幅: "fullwidth" = 全角 (ＡＢＣ), "halfwidth" = 半角 (ABC)
+alpha_width = "fullwidth"
+# 記号の入力幅: "fullwidth" = 全角 (＠＃＆), "halfwidth" = 半角 (@#&)
+symbol_width = "fullwidth"
 # 数字直後の 、/。 を ,/. として入力する
 digit_separator_auto = true
 # 数字だけの reading に対して提示する候補種別と順序
