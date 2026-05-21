@@ -203,6 +203,26 @@ impl super::TextServiceFactory_Impl {
         if !sess.is_candidate_list_active() {
             return Ok(has_pre);
         }
+        // BlockSelecting: 現在ブロックの候補をサイクル
+        if sess.is_block_selecting() {
+            match dir {
+                CandidateDir::Next => sess.block_selecting_next(),
+                CandidateDir::Prev => sess.block_selecting_prev(),
+            }
+            let page_cands = sess.block_selecting_page_candidates();
+            let page_sel = sess.block_selecting_page_selected();
+            let (prefix, cand_text, remainder) =
+                sess.block_selecting_composition_parts().unwrap_or_default();
+            // caret_rect_get() は commit_then_start_composition セッション内で
+            // 更新されるため、Enter 確定後も現在ブロックの正確な位置を返す。
+            let caret = caret_rect_get();
+            drop(sess);
+            candidate_window::update_selection(page_sel, "");
+            candidate_window::show(&page_cands, page_sel, "", caret.left, caret.bottom);
+            update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+            return Ok(true);
+        }
+        // 通常 Selecting
         match dir {
             CandidateDir::Next => sess.next_with_page_wrap(),
             CandidateDir::Prev => sess.prev(),
@@ -246,6 +266,23 @@ impl super::TextServiceFactory_Impl {
         let mut sess = session_get()?;
         if !sess.is_candidate_list_active() {
             return Ok(has_pre);
+        }
+        // BlockSelecting: ページ切り替えは候補サイクルと同じ扱い（1ページのみ）
+        if sess.is_block_selecting() {
+            match dir {
+                CandidateDir::Next => sess.block_selecting_next(),
+                CandidateDir::Prev => sess.block_selecting_prev(),
+            }
+            let page_cands = sess.block_selecting_page_candidates();
+            let page_sel = sess.block_selecting_page_selected();
+            let (prefix, cand_text, remainder) =
+                sess.block_selecting_composition_parts().unwrap_or_default();
+            let caret = caret_rect_get();
+            drop(sess);
+            candidate_window::update_selection(page_sel, "");
+            candidate_window::show(&page_cands, page_sel, "", caret.left, caret.bottom);
+            update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+            return Ok(true);
         }
         match dir {
             CandidateDir::Next => sess.next_page(),
@@ -588,6 +625,29 @@ impl super::TextServiceFactory_Impl {
             return Ok(true);
         }
 
+        // BlockSelecting 中に区読点 → 全ブロック確定して区読点をコミット
+        {
+            let mut sess = session_get()?;
+            if sess.is_block_selecting() {
+                let full_text = sess.block_selecting_full_text().unwrap_or_default();
+                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                if crate::engine::state::is_auto_learn_enabled()
+                    && full_text != full_reading
+                    && !full_reading.is_empty()
+                {
+                    engine.learn(&full_reading, &full_text);
+                }
+                let commit = format!("{full_text}{c}");
+                engine.commit(&commit);
+                engine.reset_preedit();
+                drop(guard);
+                end_composition(ctx, tid, commit)?;
+                return Ok(true);
+            }
+        }
         // 候補選択中に句読点 → 現在の punct_pending を上書きしてウィンドウを更新
         {
             let mut sess = session_get()?;

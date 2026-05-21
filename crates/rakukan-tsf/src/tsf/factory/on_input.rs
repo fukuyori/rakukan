@@ -172,6 +172,47 @@ impl super::TextServiceFactory_Impl {
 
         if session_is_selecting_fast() {
             let mut sess = session_get()?;
+            // BlockSelecting 中の文字入力 → 全ブロック確定してから文字を入力
+            if sess.is_block_selecting() {
+                let full_text = sess.block_selecting_full_text().unwrap_or_default();
+                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                if crate::engine::state::is_auto_learn_enabled()
+                    && full_text != full_reading
+                    && !full_reading.is_empty()
+                {
+                    engine.learn(&full_reading, &full_text);
+                }
+                engine.commit(&full_text);
+                engine.reset_preedit();
+                drop(guard);
+                let mut guard2 = engine_try_get_or_create()?;
+                let engine2 = match guard2.as_mut() {
+                    Some(e) => e,
+                    None => return Ok(true),
+                };
+                let kind = if c.is_ascii_uppercase() {
+                    crate::engine::state::InputCharKind::FullwidthAlpha
+                } else {
+                    crate::engine::state::InputCharKind::Char
+                };
+                let (preedit2, new_reading2, _) = engine2.input_char(c, kind, None);
+                if let Ok(mut sess2) = session_get() {
+                    sess2.set_preedit(new_reading2.clone());
+                }
+                let live_ready =
+                    crate::engine::state::start_live_bg_if_ready(engine2, &new_reading2);
+                drop(guard2);
+                if live_ready {
+                    candidate_window::live_input_notify(&ctx, tid);
+                }
+                // 確定テキスト + 新規入力プリエディットを表示
+                use super::commit_then_start_composition;
+                commit_then_start_composition(ctx, tid, sink, full_text, preedit2)?;
+                return Ok(true);
+            }
             if sess.is_selecting() {
                 let selected_text = sess
                     .current_candidate()

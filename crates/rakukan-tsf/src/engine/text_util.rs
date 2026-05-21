@@ -733,6 +733,61 @@ pub fn to_half_katakana(s: &str) -> String {
     result
 }
 
+// ─── 区読点ヘルパー ──────────────────────────────────────────────────────────
+
+/// 区読点（変換ブロックの区切り記号）か判定する。
+///
+/// 対象: `、` `。` `！` `？`
+/// これらは LLM に渡さない delimiter として扱う。
+#[inline]
+pub fn is_kuten(c: char) -> bool {
+    matches!(c, '、' | '。' | '！' | '？')
+}
+
+/// ひらがな文字列を区読点で分割する。
+///
+/// 戻り値は `Vec<(reading, trailing_punct)>`:
+/// - `reading`: 区読点を除いた読み文字列（空文字になる場合もある）
+/// - `trailing_punct`: ブロック末尾の区読点（末尾のブロックは `None`）
+///
+/// 空文字列を渡すと空の Vec を返す。
+///
+/// # 例
+/// ```
+/// use rakukan_tsf::engine::text_util::split_by_punctuation;
+/// assert_eq!(
+///     split_by_punctuation("きのう、あめがふった。"),
+///     vec![
+///         ("きのう".to_string(), Some('、')),
+///         ("あめがふった".to_string(), Some('。')),
+///     ]
+/// );
+/// ```
+pub fn split_by_punctuation(s: &str) -> Vec<(String, Option<char>)> {
+    if s.is_empty() {
+        return Vec::new();
+    }
+    let mut blocks: Vec<(String, Option<char>)> = Vec::new();
+    let mut current = String::new();
+    for c in s.chars() {
+        if is_kuten(c) {
+            blocks.push((std::mem::take(&mut current), Some(c)));
+        } else {
+            current.push(c);
+        }
+    }
+    if !current.is_empty() {
+        blocks.push((current, None));
+    }
+    blocks
+}
+
+/// 文字列が区読点を含むかどうか。
+#[inline]
+pub fn contains_kuten(s: &str) -> bool {
+    s.chars().any(is_kuten)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -897,5 +952,113 @@ mod tests {
     fn romaji_to_half() {
         assert_eq!(romaji_to_halfwidth_latin("tesuto"), "tesuto");
         assert_eq!(romaji_to_halfwidth_latin("SCHEDULE"), "schedule");
+    }
+
+    // ─── split_by_punctuation ─────────────────────────────────────────────────
+
+    #[test]
+    fn split_no_punctuation() {
+        assert_eq!(
+            split_by_punctuation("きのう"),
+            vec![("きのう".to_string(), None)]
+        );
+    }
+
+    #[test]
+    fn split_empty_string() {
+        let result: Vec<(String, Option<char>)> = split_by_punctuation("");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn split_single_punct_middle() {
+        assert_eq!(
+            split_by_punctuation("きのう、あめがふった"),
+            vec![
+                ("きのう".to_string(), Some('、')),
+                ("あめがふった".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_trailing_punct() {
+        assert_eq!(
+            split_by_punctuation("きのう、あめがふった。"),
+            vec![
+                ("きのう".to_string(), Some('、')),
+                ("あめがふった".to_string(), Some('。')),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_multiple_puncts() {
+        assert_eq!(
+            split_by_punctuation("あ、い。う"),
+            vec![
+                ("あ".to_string(), Some('、')),
+                ("い".to_string(), Some('。')),
+                ("う".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_leading_punct() {
+        // 文頭の区読点 → 空 reading のブロックが先頭に来る
+        assert_eq!(
+            split_by_punctuation("、あめがふった"),
+            vec![
+                ("".to_string(), Some('、')),
+                ("あめがふった".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_punct_only() {
+        assert_eq!(
+            split_by_punctuation("。"),
+            vec![("".to_string(), Some('。'))]
+        );
+    }
+
+    #[test]
+    fn split_consecutive_puncts() {
+        assert_eq!(
+            split_by_punctuation("あ、、い"),
+            vec![
+                ("あ".to_string(), Some('、')),
+                ("".to_string(), Some('、')),
+                ("い".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_exclamation_question() {
+        assert_eq!(
+            split_by_punctuation("ほんとう！そうだ？"),
+            vec![
+                ("ほんとう".to_string(), Some('！')),
+                ("そうだ".to_string(), Some('？')),
+            ]
+        );
+    }
+
+    #[test]
+    fn contains_kuten_true() {
+        assert!(contains_kuten("きのう、あめ"));
+        assert!(contains_kuten("おわり。"));
+        assert!(contains_kuten("！"));
+        assert!(contains_kuten("？"));
+    }
+
+    #[test]
+    fn contains_kuten_false() {
+        assert!(!contains_kuten("きのう"));
+        assert!(!contains_kuten(""));
+        assert!(!contains_kuten("hello world"));
     }
 }

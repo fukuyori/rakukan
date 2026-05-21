@@ -59,6 +59,13 @@ impl super::TextServiceFactory_Impl {
                     } => {
                         format!("RangeSelect(r={:?} end={})", full_reading, select_end)
                     }
+                    SessionState::BlockSelecting {
+                        current_index,
+                        blocks,
+                        ..
+                    } => {
+                        format!("BlockSelecting(idx={} nblocks={})", current_index, blocks.len())
+                    }
                 }
             } else {
                 "lock_err".to_string()

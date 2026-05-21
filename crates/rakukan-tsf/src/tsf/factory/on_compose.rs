@@ -346,6 +346,22 @@ pub(super) fn commit_then_start_composition(
             };
             let _ = ctx.SetSelection(ec, &[sel]);
         }
+
+        // BlockSelecting 位置追従:
+        // 新 composition の先頭位置を CARET_RECT に記録し、候補ウィンドウを即時移動する。
+        // RequestEditSession は非同期のため、次のキー入力より先にここで更新しないと
+        // Space キーハンドラが caret_rect_get() を読む時点でまだ旧値になってしまう。
+        if let Ok(view) = ctx.GetActiveView() {
+            use windows::Win32::Foundation::RECT;
+            let mut rect = RECT::default();
+            let mut clipped = windows::Win32::Foundation::BOOL(0);
+            if view.GetTextExt(ec, &new_range, &mut rect, &mut clipped).is_ok() {
+                caret_rect_set(rect);
+                // 候補ウィンドウが表示中であれば位置を更新（非表示なら何もしない）
+                crate::tsf::candidate_window::reposition(rect.left, rect.bottom);
+            }
+        }
+
         Ok(())
     });
     unsafe {

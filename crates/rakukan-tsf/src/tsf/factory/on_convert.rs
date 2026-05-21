@@ -8,8 +8,8 @@ use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
 use crate::engine::state::{
-    CandidateView, CandidateViewSource, SessionState, caret_rect_get, composition_clone,
-    engine_try_get_or_create, session_get,
+    CandidateView, CandidateViewSource, ConversionBlock, SessionState, caret_rect_get,
+    composition_clone, engine_try_get_or_create, session_get,
 };
 use crate::tsf::candidate_window;
 
@@ -658,6 +658,92 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
+        // ── BlockSelecting（区読点分割変換）中: Space → 現在ブロックの次候補へ ──
+        {
+            let mut sess = session_get()?;
+            if sess.is_block_selecting() {
+                sess.block_selecting_next();
+                let page_cands = sess.block_selecting_page_candidates();
+                let page_sel = sess.block_selecting_page_selected();
+                let (prefix, cand_text, remainder) =
+                    sess.block_selecting_composition_parts().unwrap_or_default();
+                // caret_rect_get() は commit_then_start_composition セッション内で
+                // 更新されるため、Enter 確定後も現在ブロックの正確な位置を返す。
+                let caret = caret_rect_get();
+                drop(sess);
+                drop(guard);
+                candidate_window::update_selection(page_sel, "");
+                candidate_window::show(&page_cands, page_sel, "", caret.left, caret.bottom);
+                update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+                return Ok(true);
+            }
+        }
+
+        // ── 区読点分割変換（BlockSelecting 遷移） ─────────────────────────────
+        // preedit が区読点を含む場合、ブロック分割してそれぞれを sync 変換し
+        // BlockSelecting 状態へ遷移する。
+        if crate::engine::text_util::contains_kuten(&preedit) {
+            // ライブ変換などで bg_start が走っていると converter が conv_cache に
+            // 貸し出されて engine.kanji = None になる。
+            // sync 変換の前に必ず回収しないと convert_sync が ModelNotInitialized を
+            // 返してフォールバック（読みをそのまま）になる。
+            engine.bg_reclaim();
+            if !engine.is_kanji_ready() {
+                // Running 中 → 完了を待ってから回収（最大 500ms）
+                if engine.bg_status() == "running" {
+                    engine.bg_wait_ms(500);
+                }
+                engine.bg_reclaim();
+            }
+            let blocks_raw = crate::engine::text_util::split_by_punctuation(&preedit);
+            const BLOCK_DICT_LIMIT: usize = 9; // 1ブロックあたり最大候補数
+            let llm_limit_b = crate::engine::state::get_num_candidates();
+            let mut blocks: Vec<ConversionBlock> = Vec::new();
+            for (reading, trailing_punct) in blocks_raw {
+                if reading.is_empty() {
+                    // 区読点のみのブロック（文頭の区読点など）は候補なしで残す
+                    blocks.push(ConversionBlock {
+                        reading: String::new(),
+                        trailing_punct,
+                        candidates: Vec::new(),
+                        selected: 0,
+                    });
+                    continue;
+                }
+                // engine のプリエディットをこのブロックの読みに差し替えて sync 変換
+                engine.force_preedit(reading.clone());
+                let candidates = engine_convert_sync_multi(engine, llm_limit_b, BLOCK_DICT_LIMIT, &reading);
+                blocks.push(ConversionBlock {
+                    reading,
+                    trailing_punct,
+                    candidates,
+                    selected: 0,
+                });
+            }
+            // engine のプリエディットを最初の（非空）ブロックの読みに戻す
+            if let Some(first_non_empty) = blocks.iter().find(|b| !b.reading.is_empty()) {
+                engine.force_preedit(first_non_empty.reading.clone());
+            }
+            let caret = caret_rect_get();
+            let full_reading = preedit.clone();
+            let page_cands: Vec<String>;
+            let page_sel: usize;
+            let comp_parts: (String, String, String);
+            {
+                let mut sess = session_get()?;
+                sess.set_block_selecting(blocks, full_reading, caret.left, caret.bottom);
+                page_cands = sess.block_selecting_page_candidates();
+                page_sel = sess.block_selecting_page_selected();
+                comp_parts = sess.block_selecting_composition_parts().unwrap_or_default();
+            }
+            drop(guard);
+            candidate_window::stop_waiting_timer();
+            candidate_window::show(&page_cands, page_sel, "", caret.left, caret.bottom);
+            let (prefix, cand_text, remainder) = comp_parts;
+            update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+            return Ok(true);
+        }
+
         // 新規変換
         let convert_start = Instant::now();
         let mut convert_last = convert_start;
@@ -1238,6 +1324,58 @@ impl super::TextServiceFactory_Impl {
                 commit_then_start_composition(ctx, tid, sink, selected, preedit)?;
                 return Ok(true);
             }
+            // ── BlockSelecting（区読点分割変換）: Enter → 現在ブロック確定、次へ ──
+            if sess.is_block_selecting() {
+                // advance() の前に現在ブロックのテキストを取得・積算する
+                let just_committed = sess.block_selecting_commit_current().unwrap_or_default();
+                let can_advance = sess.block_selecting_advance();
+                if can_advance {
+                    // まだ次のブロックがある:
+                    //   1. 確定したブロックをドキュメントへコミット（1 EditSession）
+                    //   2. 残りブロックで新しい composition を開始
+                    // NOTE: commit_then_start_composition + update_composition_candidate_parts の
+                    //       二段呼び出しは、二つ目のセッションが古い composition range に
+                    //       SetText を走らせてテキストを消す競合を起こす場合があるため、
+                    //       commit_then_start_composition 一発で完結させる。
+                    //       新 composition は uniform input underline で表示される。
+                    let page_cands = sess.block_selecting_page_candidates();
+                    let page_sel = sess.block_selecting_page_selected();
+                    // advance後の残りテキスト (prefix は無視して cand + rem のみ)
+                    let (_, new_cand, new_rem) =
+                        sess.block_selecting_composition_parts().unwrap_or_default();
+                    let (px, py) = sess.block_selecting_pos().unwrap_or_default();
+                    drop(sess);
+                    drop(guard);
+                    candidate_window::show(&page_cands, page_sel, "", px, py);
+                    // 確定済みブロックをコミットし、残りで新 composition 開始（1セッション）
+                    let new_full = format!("{new_cand}{new_rem}");
+                    commit_then_start_composition(ctx, tid, sink, just_committed, new_full)?;
+                } else {
+                    // 最終ブロック: commit_current で accumulated_text が完成している
+                    let full_text = sess.block_selecting_accumulated_text().unwrap_or_default();
+                    let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                    sess.set_idle();
+                    drop(sess);
+                    candidate_window::hide();
+                    if crate::engine::state::is_auto_learn_enabled()
+                        && full_text != full_reading
+                        && !full_reading.is_empty()
+                    {
+                        engine.learn(&full_reading, &full_text);
+                    }
+                    engine.commit(&full_text);
+                    engine.reset_preedit();
+                    drop(guard);
+                    tracing::info!(
+                        "on_commit_raw[BlockSelecting]: commit last={:?} full={:?}",
+                        just_committed,
+                        full_text
+                    );
+                    // 最終ブロックは composition に残っているテキスト (just_committed) を確定
+                    end_composition(ctx, tid, just_committed)?;
+                }
+                return Ok(true);
+            }
             // ── Waiting（⏳変換中）: ひらがなのままコミット ──
             if sess.is_waiting() {
                 let text = sess.preedit_text().unwrap_or("").to_string();
@@ -1444,6 +1582,18 @@ impl super::TextServiceFactory_Impl {
                     return Ok(true);
                 }
             }
+            // BlockSelecting → Backspace → ESC と同様、元のひらがなに戻す
+            if sess.is_block_selecting() {
+                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                sess.set_preedit(full_reading.clone());
+                drop(sess);
+                candidate_window::hide();
+                engine.bg_reclaim();
+                engine.force_preedit(full_reading.clone());
+                drop(guard);
+                update_composition(ctx, tid, sink, full_reading)?;
+                return Ok(true);
+            }
             if sess.is_selecting() {
                 let original = sess.original_preedit().unwrap_or("").to_string();
                 sess.set_preedit(original.clone());
@@ -1502,6 +1652,19 @@ impl super::TextServiceFactory_Impl {
                 crate::tsf::live_session::queue_preview_clear();
                 drop(guard);
                 update_composition(ctx, tid, sink, reading)?;
+                return Ok(true);
+            }
+            // BlockSelecting → ESC → 元のひらがなに戻す
+            if sess.is_block_selecting() {
+                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                sess.set_preedit(full_reading.clone());
+                drop(sess);
+                candidate_window::hide();
+                engine.bg_reclaim();
+                // engine のプリエディットを元の全体読みに復元
+                engine.force_preedit(full_reading.clone());
+                drop(guard);
+                update_composition(ctx, tid, sink, full_reading)?;
                 return Ok(true);
             }
             // RangeSelect → ESC → LiveConv に戻る（元の preview を復元）

@@ -855,6 +855,33 @@ pub fn invalidate_composition_for_dm(dm_ptr: usize) {
     }
 }
 
+// ─── ConversionBlock ─────────────────────────────────────────────────────────
+
+/// 区読点分割変換の 1 ブロック。
+///
+/// `split_by_punctuation` で分割した各セグメントに対応する。
+/// - `reading`: 区読点を含まない読み文字列
+/// - `trailing_punct`: ブロック末尾の区読点（末尾ブロックは `None`）
+/// - `candidates`: 変換候補一覧
+/// - `selected`: 選択中の候補インデックス
+#[derive(Debug, Clone)]
+pub struct ConversionBlock {
+    pub reading: String,
+    pub trailing_punct: Option<char>,
+    pub candidates: Vec<String>,
+    pub selected: usize,
+}
+
+impl ConversionBlock {
+    /// 選択中の候補テキストを返す（候補が空なら reading を返す）。
+    pub fn current_candidate(&self) -> &str {
+        self.candidates
+            .get(self.selected)
+            .map(String::as_str)
+            .unwrap_or(self.reading.as_str())
+    }
+}
+
 // ─── SessionState ────────────────────────────────────────────────────────────
 // TSF 層の論理状態を 1 か所に集約する。SelectionState は縮退・削除済み。
 
@@ -959,6 +986,32 @@ pub enum SessionState {
         /// ESC で戻るための元の preview
         original_preview: String,
     },
+    /// 区読点分割変換モード。
+    ///
+    /// Space 押下時に読みが区読点（、。！？）を含む場合に遷移する。
+    /// 全ブロックを事前に変換し、Enter キーで 1 ブロックずつ確定する。
+    ///
+    /// - `blocks`: 分割・変換済みブロック一覧
+    /// - `current_index`: 現在フォーカス中のブロックインデックス
+    /// - `full_reading`: ESC で戻るための元の全体読み
+    /// - `pos_x`, `pos_y`: 候補ウィンドウ表示位置
+    ///
+    /// 遷移:
+    ///   Space / CandidateNext → 現在ブロックの次候補へ
+    ///   CandidatePrev         → 現在ブロックの前候補へ
+    ///   Enter  → 現在ブロック確定。次ブロックへ移行。最終ブロックなら全確定。
+    ///   ESC    → 全ブロック解除、full_reading をプリエディットへ復元。
+    ///   Input  → 現在状態を確定してから文字を通常入力（Selecting 相当）。
+    BlockSelecting {
+        blocks: Vec<ConversionBlock>,
+        current_index: usize,
+        full_reading: String,
+        /// Enter で1ブロックずつ確定した際に積算するコミット済みテキスト。
+        /// 学習・最終コミット時に全体テキストとして使う。
+        committed_prefix: String,
+        pos_x: i32,
+        pos_y: i32,
+    },
     /// ライブ変換表示中。
     ///
     /// BG 変換が完了しトップ候補を composition に表示している状態。
@@ -1022,6 +1075,282 @@ fn candidate_views_from_strings(
 }
 
 impl SessionState {
+    // ── BlockSelecting ──────────────────────────────────────────────────────
+
+    pub fn set_block_selecting(
+        &mut self,
+        blocks: Vec<ConversionBlock>,
+        full_reading: String,
+        pos_x: i32,
+        pos_y: i32,
+    ) {
+        *self = SessionState::BlockSelecting {
+            blocks,
+            current_index: 0,
+            full_reading,
+            committed_prefix: String::new(),
+            pos_x,
+            pos_y,
+        };
+        SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn is_block_selecting(&self) -> bool {
+        matches!(self, SessionState::BlockSelecting { .. })
+    }
+
+    /// BlockSelecting: 現在ブロックの候補テキストを返す。
+    #[allow(dead_code)]
+    pub fn block_selecting_current_candidate(&self) -> Option<&str> {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            blocks.get(*current_index).map(|b| b.current_candidate())
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックの候補一覧（最大 9 件）を返す。
+    pub fn block_selecting_page_candidates(&self) -> Vec<String> {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            blocks
+                .get(*current_index)
+                .map(|b| b.candidates.iter().take(9).cloned().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックの選択インデックスをページ内位置として返す。
+    pub fn block_selecting_page_selected(&self) -> usize {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            blocks
+                .get(*current_index)
+                .map(|b| b.selected.min(8))
+                .unwrap_or(0)
+        } else {
+            0
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックの次候補へ進む。
+    pub fn block_selecting_next(&mut self) {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            if let Some(block) = blocks.get_mut(*current_index) {
+                let len = block.candidates.len();
+                if len > 0 {
+                    block.selected = (block.selected + 1) % len;
+                }
+            }
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックの前候補へ進む。
+    pub fn block_selecting_prev(&mut self) {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            if let Some(block) = blocks.get_mut(*current_index) {
+                let len = block.candidates.len();
+                if len > 0 {
+                    block.selected = if block.selected == 0 {
+                        len - 1
+                    } else {
+                        block.selected - 1
+                    };
+                }
+            }
+        }
+    }
+
+    /// BlockSelecting: composition 表示用の (prefix, cand_text, remainder) を返す。
+    ///
+    /// - `prefix`   : current_index より前のブロックのテキスト（確定済みイメージ）
+    /// - `cand_text`: 現在ブロックの選択候補
+    /// - `remainder`: current_index より後のブロックのテキスト（区読点含む）+ 現在の区読点
+    pub fn block_selecting_composition_parts(&self) -> Option<(String, String, String)> {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            let mut prefix = String::new();
+            let mut cand_text = String::new();
+            let mut remainder = String::new();
+            for (i, block) in blocks.iter().enumerate() {
+                let cand = block.current_candidate();
+                let punct = block
+                    .trailing_punct
+                    .map(|c| c.to_string())
+                    .unwrap_or_default();
+                if i < *current_index {
+                    prefix.push_str(cand);
+                    prefix.push_str(&punct);
+                } else if i == *current_index {
+                    cand_text = cand.to_string();
+                    // 現在ブロックの区読点は remainder の先頭に
+                    remainder.push_str(&punct);
+                } else {
+                    remainder.push_str(cand);
+                    remainder.push_str(&punct);
+                }
+            }
+            Some((prefix, cand_text, remainder))
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: 全ブロックを確定した場合のテキストを返す。
+    pub fn block_selecting_full_text(&self) -> Option<String> {
+        if let SessionState::BlockSelecting { blocks, .. } = self {
+            let mut text = String::new();
+            for block in blocks {
+                text.push_str(block.current_candidate());
+                if let Some(p) = block.trailing_punct {
+                    text.push(p);
+                }
+            }
+            Some(text)
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックのインデックスと総ブロック数を返す。
+    #[allow(dead_code)]
+    pub fn block_selecting_index_of(&self) -> Option<(usize, usize)> {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            Some((*current_index, blocks.len()))
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: pos_x, pos_y を返す。
+    pub fn block_selecting_pos(&self) -> Option<(i32, i32)> {
+        if let SessionState::BlockSelecting { pos_x, pos_y, .. } = self {
+            Some((*pos_x, *pos_y))
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: full_reading を返す（ESC 用）。
+    pub fn block_selecting_full_reading(&self) -> Option<String> {
+        if let SessionState::BlockSelecting { full_reading, .. } = self {
+            Some(full_reading.clone())
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: 現在ブロックを n 番目（1-origin）の候補に変更する。
+    #[allow(dead_code)]
+    pub fn block_selecting_select_nth(&mut self, n: usize) -> bool {
+        if n < 1 {
+            return false;
+        }
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            if let Some(block) = blocks.get_mut(*current_index) {
+                let idx = n - 1;
+                if idx < block.candidates.len() {
+                    block.selected = idx;
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    /// BlockSelecting: 次のブロックへ進む（Enter 押下時）。
+    /// 最終ブロックの場合は false を返す（呼び出し元は全確定処理を行う）。
+    pub fn block_selecting_advance(&mut self) -> bool {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            ..
+        } = self
+        {
+            if *current_index + 1 < blocks.len() {
+                *current_index += 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// BlockSelecting: 現在ブロックのコミットテキスト（candidate + trailing_punct）を
+    /// `committed_prefix` に積算し、そのテキストを返す。
+    ///
+    /// Enter でブロックを1つずつ確定する際に呼ぶ。`advance()` の前に呼ぶこと。
+    pub fn block_selecting_commit_current(&mut self) -> Option<String> {
+        if let SessionState::BlockSelecting {
+            blocks,
+            current_index,
+            committed_prefix,
+            ..
+        } = self
+        {
+            let block = blocks.get(*current_index)?;
+            let cand = block.current_candidate().to_string();
+            let punct = block.trailing_punct.map(|c| c.to_string()).unwrap_or_default();
+            let text = format!("{cand}{punct}");
+            committed_prefix.push_str(&text);
+            Some(text)
+        } else {
+            None
+        }
+    }
+
+    /// BlockSelecting: 積算済みコミット済みテキスト（`committed_prefix`）を返す。
+    ///
+    /// 最終ブロック確定時に `block_selecting_commit_current()` を呼んだ後に参照すると
+    /// 全ブロックのテキストが得られる（学習・engine.commit 用）。
+    pub fn block_selecting_accumulated_text(&self) -> Option<String> {
+        if let SessionState::BlockSelecting { committed_prefix, .. } = self {
+            Some(committed_prefix.clone())
+        } else {
+            None
+        }
+    }
+
+    // ── 共通 ────────────────────────────────────────────────────────────────
+
     pub fn set_idle(&mut self) {
         *self = SessionState::Idle;
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
@@ -1216,7 +1545,7 @@ impl SessionState {
     }
 
     pub fn is_candidate_list_active(&self) -> bool {
-        self.is_selecting()
+        self.is_selecting() || self.is_block_selecting()
     }
 
     pub fn is_waiting(&self) -> bool {
@@ -1232,6 +1561,7 @@ impl SessionState {
             } => Some(original_preedit.as_str()),
             SessionState::LiveConv { preview, .. } => Some(preview.as_str()),
             SessionState::RangeSelect { full_reading, .. } => Some(full_reading.as_str()),
+            SessionState::BlockSelecting { full_reading, .. } => Some(full_reading.as_str()),
             SessionState::Idle => None,
         }
     }
@@ -1293,6 +1623,7 @@ impl SessionState {
             SessionState::Waiting { text, .. } => Some(text.as_str()),
             SessionState::LiveConv { reading, .. } => Some(reading.as_str()),
             SessionState::RangeSelect { full_reading, .. } => Some(full_reading.as_str()),
+            SessionState::BlockSelecting { full_reading, .. } => Some(full_reading.as_str()),
             SessionState::Idle => None,
         }
     }

@@ -3,6 +3,26 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.3] - 2026-05-21
+
+### Added
+
+- **区読点分割変換（Stage 1）**: 読みが `、` `。` `！` `？` を含む場合に Space を押すと、区読点を区切りとしてブロック分割し、各ブロックを独立変換する `BlockSelecting` モードに遷移する。Enter で 1 ブロックずつ確定、ESC で全ブロック解除（元のひらがなに復元）。
+  - `text_util::split_by_punctuation` ヘルパー追加（区読点で文字列を分割して `Vec<(reading, trailing_punct)>` を返す）。
+  - `text_util::contains_kuten` / `text_util::is_kuten` ヘルパー追加。
+  - `ConversionBlock` 構造体追加（reading / trailing_punct / candidates / selected）。
+  - `SessionState::BlockSelecting` バリアント追加。各種ヘルパーメソッドを実装。
+  - `CandidateNext` / `CandidatePrev` / `CandidatePageDown` / `CandidatePageUp` が `BlockSelecting` 中の現在ブロック候補をサイクルするよう対応。
+  - 文字入力 / 区読点入力時、`BlockSelecting` 状態なら全ブロックを確定してから続きの入力を処理。
+  - unit test 11 件追加（split_by_punctuation / contains_kuten / is_kuten）。
+- **BlockSelecting: Enter 確定時の逐次コミット**: Enter でブロックを確定するたびに、確定済みテキストを通常テキストとしてドキュメントへ送出し（下線なし）、残りブロックのみを新しい composition として継続する。`committed_prefix` フィールドを `BlockSelecting` バリアントに追加し、`block_selecting_commit_current` / `block_selecting_accumulated_text` メソッドで積算・取得。全ブロック確定時は `committed_prefix` を使って学習・engine commit を行う。
+- **BlockSelecting: 候補ウィンドウの位置追従**: Enter でブロックを確定するたびに、候補ウィンドウが次のブロック（現在の変換対象）の直下へ移動する。`commit_then_start_composition` の TSF セッション内で `GetTextExt` → `caret_rect_set` + `candidate_window::reposition` を呼び出すことで非同期遅延なく実現。`candidate_window::reposition(x, y)` 関数追加（候補・選択を変えず位置のみ更新）。
+
+### Fixed
+
+- **BlockSelecting: LLM が変換を返さない問題**: ライブ変換などで `bg_start` が走っている場合に `KanaKanjiConverter` が `conv_cache` に貸し出されて `engine.kanji = None` になる。`contains_kuten` 分岐に入る前に `bg_reclaim` → 必要なら `bg_wait_ms(500)` → 再 `bg_reclaim` を追加し、`convert_sync` が `ModelNotInitialized` を返してひらがなにフォールバックする問題を解消。
+- **BlockSelecting: Enter 確定後にテキストが消える問題**: `commit_then_start_composition` の後に `update_composition_candidate_parts` を別セッションで呼ぶと、二つ目のセッションが古い composition range に `SetText` を走らせる競合が起きていた。`commit_then_start_composition` 一発で commit と新 composition 開始を完結させる方式に変更。
+
 ## [0.9.2] - 2026-05-13
 
 ### Added

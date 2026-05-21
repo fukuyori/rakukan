@@ -549,6 +549,30 @@ unsafe fn calc_window_y(x: i32, caret_bottom: i32, win_h: i32) -> i32 {
     caret_bottom + 1
 }
 
+/// 候補ウィンドウを新しい位置 (x, caret_bottom) に移動する（候補・選択は変えない）。
+///
+/// BlockSelecting でブロックを確定した際に、候補ウィンドウを次ブロックの
+/// 直下へ追従させるために使用する。ウィンドウが非表示の場合は何もしない。
+pub fn reposition(x: i32, y: i32) {
+    let hwnd = get_hwnd();
+    if !is_valid(hwnd) {
+        return;
+    }
+    let (n, has_pager, has_status) = TL_CAND.with(|c| {
+        let d = c.borrow();
+        (d.candidates.len(), !d.page_info.is_empty(), d.status_line.is_some())
+    });
+    if n == 0 {
+        return;
+    }
+    let win_h = window_height(n, has_pager, has_status);
+    let win_w = TL_WIN_WIDTH.with(|c| c.get());
+    let win_y = unsafe { calc_window_y(x, y, win_h) };
+    unsafe {
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, win_y, win_w, win_h, SWP_NOACTIVATE);
+    }
+}
+
 /// 選択インデックスとページ情報だけ更新して再描画する（位置は変えない）。
 pub fn update_selection(page_selected: usize, page_info: &str) {
     TL_CAND.with(|c| {
