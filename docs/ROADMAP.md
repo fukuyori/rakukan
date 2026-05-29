@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: マイルストーンごとに「目的」「作業」「完了条件」「リスク」等を繰り返す構造のため無効化 -->
 
-最終更新: 2026-04-24  
+最終更新: 2026-05-28  
 位置づけ: v0.6.7 までで Explorer crash の unload race と変換中レスポンスを収束させた地点からの次期計画。0.7.x で安定性向上・保守性改善を消化し、0.8.x では低リスクなユーザ可視機能から順次追加する。
 
 **v0.7.0 リリース済み（2026-04-24）**: 以下 5 件 + 候補幅の user-facing bug fix を同梱。
@@ -142,6 +142,14 @@
 - ⚠ v0.8.12 で導入した「句読点入力時の即時確定」暫定対策は revert 済みで、本リリースには含まれない。根本対策は Phase 9 で扱う
 - ☑ minor bump の根拠: Phase 6b 完結 + RangeSelect→Space 経路の user-visible bug fix
 
+**v0.9.3 リリース済み（2026-05-28）**: 区読点分割変換（BlockSelecting）を追加。
+
+- ✅ **BlockSelecting: 自動ブロック分割**: 読みに `、` `。` `！` `？` が含まれると自動的に句読点位置でブロックへ分割し、ブロックごとに独立して変換できる `BlockSelecting` 状態へ移行
+- ✅ **BlockSelecting: Enter 逐次コミット**: Enter でブロックを確定するたびに確定済みテキストをドキュメントへ送出（下線なし）し、残りブロックのみを新しい composition として継続。全ブロック確定時に学習・engine commit を実行
+- ✅ **BlockSelecting: 候補ウィンドウ位置追従**: Enter でブロックを確定するたびに、候補ウィンドウが次のブロック（現在の変換対象）の直下へ移動。`commit_then_start_composition` の TSF セッション内で `GetTextExt` → `caret_rect_set` + `candidate_window::reposition` を呼び出すことで非同期遅延なく実現
+- ✅ `candidate_window::reposition(x, y)` 関数追加（候補・選択を変えず位置のみ更新）
+- ☑ minor bump の根拠: ユーザー可視の新機能（句読点を含む長文の変換体験を改善）
+
 **v0.9.2 リリース済み（2026-05-13）**: 英字・記号の入力幅設定を追加し、第一候補と区切り句読点を幅設定に追従させた。
 
 - ✅ `[input] alpha_width` / `symbol_width` 設定を新規追加（デフォルト `fullwidth`）
@@ -204,6 +212,7 @@
 | **v0.9.0** ✅ 2026-05-12 | Phase 6b 完結 + RangeSelect→Space inline 経路の composition 修正 | minor | azooKey 型候補メタデータの導入完結 + user-visible bug fix |
 | **v0.9.1** ✅ 2026-05-12 | source-based 学習フィルタ + 起動時 stale prune + Phase 9 設計ドラフト | patch | azooKey `isLearningTarget` / decay/forget 相当の内部品質改善 + 設計準備 |
 | **v0.9.2** ✅ 2026-05-13 | 英字・記号の入力幅設定 + 候補順 + Western 句読点自動変換 | patch | ユーザー可視の新設定 + 軽い動作改善 |
+| **v0.9.3** ✅ 2026-05-28 | 区読点分割変換（BlockSelecting）: 句読点ごとのブロック分割変換 + Enter 逐次コミット + 候補ウィンドウ位置追従 | minor | 句読点を含む長文の変換体験を改善するユーザー可視新機能 |
 | **v0.7.x patch** | M5（再発時のみ） | patch | 条件付き |
 
 原則:

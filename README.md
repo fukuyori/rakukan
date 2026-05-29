@@ -1,4 +1,4 @@
-# rakukan v0.8.11
+# rakukan v0.9.3
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -21,6 +21,7 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 - **ライブ変換**: ひらがな入力後、短い停止でトップ候補を自動表示
 - **範囲指定変換**: `Shift+Right/Left` で先頭から変換範囲を指定 → `Space` で変換 → `Enter` で確定、残りで LiveConv 再開
+- **区読点分割変換**: `、` `。` `！` `？` を含む読みを入力すると句読点ごとのブロックへ自動分割。`Space` で各ブロックを変換 → `Enter` でブロックを順番に確定。候補ウィンドウは確定のたびに次のブロック直下へ追従
 - **数値保護**: LLM が数字を改変しない（`2024ねん → 2024年`）。数字・アルファベットは半角/全角の両方を候補として提示
 - **LLM + 辞書変換**: jinen モデルと Mozc 系辞書を併用
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
@@ -30,7 +31,7 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.8.11 では、後追い候補更新時の選択位置維持と候補表示ログを改善しました。
+v0.9.3 では、`、` `。` `！` `？` を含む読みを句読点ごとのブロックへ自動分割して変換する **区読点分割変換（BlockSelecting）** を追加しました。`Space` でブロックを変換し、`Enter` でブロックを順番に確定できます。候補ウィンドウは確定のたびに次のブロック直下へ移動します。
 詳細な変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
 
 ## インストール
@@ -92,7 +93,7 @@ cargo make quick-install
 | キー | 動作 |
 | ---- | ---- |
 | Space / 変換 | 変換開始 / 次候補 / 選択中分節の再変換 |
-| Enter | 表示中の内容を確定 |
+| Enter | 表示中の内容を確定（区読点分割変換中はブロックを順番に確定） |
 | ESC | 変換キャンセル |
 | Backspace | 1文字削除 |
 | Left / Right | 分節選択の移動 |
@@ -107,6 +108,8 @@ cargo make quick-install
 | F9 | 全角英数 |
 | F10 | 半角英数 |
 
+> **区読点分割変換について**: 読みに `、` `。` `！` `？` が含まれると自動的にブロック分割変換へ移行します。Space でブロック内の候補を選択し、Enter でそのブロックを確定して次のブロックへ進みます。全ブロック確定時に学習が行われます。
+
 ## 開発メモ
 
 - TSF 層だけの変更確認: `cargo make quick-install` (= `build-tsf` + `install`)
@@ -120,39 +123,16 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 
 ## 課題リスト
 
-現在進行中の設計書・残タスクは以下の資料にまとめています。
-
 ### 主要設計書
 
 - [DESIGN.md](docs/DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
-- [CONVERSION_PIPELINE_CLEANUP_PLAN.md](docs/CONVERSION_PIPELINE_CLEANUP_PLAN.md) — **現在の主計画**: Space 変換、ライブ変換、候補表示、後追い候補更新の段階的整理
-- [CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md) — **長期案 / 一部保留**: ライブ変換・文節再変換・境界伸縮・数値保護・用法辞書の全面改修設計（Phase A のみ実装済み、Phase B 以降は再設計が必要）
-- [SEGMENT_EDIT_REDESIGN.md](docs/SEGMENT_EDIT_REDESIGN.md) — 分節編集モデルの基礎設計（`CONVERTER_REDESIGN.md` に継承済み）
-- [VIBRATO_PHASE1.md](docs/VIBRATO_PHASE1.md) — 過去の Vibrato 形態素解析器導入メモ（v0.5.1 で削除済み）
-- [handoff.md](docs/handoff.md) — v0.8.11 引き継ぎ資料 + 残タスクリスト
+- [handoff.md](docs/handoff.md) — v0.9.3 引き継ぎ資料 + 残タスクリスト
 
-### 進行中の主要課題
-
-**変換パイプライン整理**（[CONVERSION_PIPELINE_CLEANUP_PLAN.md](docs/CONVERSION_PIPELINE_CLEANUP_PLAN.md)）
-
-- [ ] **Phase 5**: 残っている `Waiting` / `llm_pending` 経路を再監査し、通常 Space で `Waiting` を増やさない。
-- [ ] **Phase 6 / 6b**: `candidate_display_probe` と `CandidateView` で pending update / fallback / RangeSelect の残経路を確認する。
-- [x] **Phase 6b**: Space 再押下 / dispatch poll の後追い LLM 更新で、候補配列差し替え時の選択 index / page / composition を維持する。
-- [ ] **Phase 6b**: WM_TIMER 経由の pending update で、候補表だけが更新され composition が古いまま残る経路を観測する。
-- [ ] **Phase 7**: `sync_fallback_probe` を見ながら、`convert_sync` fallback を候補表示後の補完または最終手段へ縮小する。
-- [ ] **Phase 8**: scope / chunk 化は設計メモに留め、実装しない。
-
-**長期再設計案**（[CONVERTER_REDESIGN.md](docs/CONVERTER_REDESIGN.md)）
-
-- [x] **Phase A**: 新データモデル（`Segments` / `Segment` / `Candidate`）と engine 基盤、数値保護レイヤー
-- [ ] **Phase B 以降**: vibrato 削除後の前提に合わせて再設計が必要。現状から大きな修正を入れない方針のため、直近の改修対象にはしない。
-
-**独立した技術課題**（[handoff.md §残タスク](docs/handoff.md#残タスク優先度順)）
+### 独立した技術課題
 
 - [ ] `rakukan-engine-host.exe` の idle 自死（長時間アイドル時のメモリ解放）
 - [ ] ホストプロセスのヘルスチェックとクラッシュカウント
 - [ ] Preedit / LiveConv / Selecting の display_attr 拡張
-- [ ] RPC レイテンシの実測（0.4.5 バッチ化後の計測）
 
 ### 過去のスナップショット
 
