@@ -13,7 +13,9 @@
       "Bash(find /c/Users/n_fuk/Dropbox/source/cpp/mozc -maxdepth 3 -name README* -o -name ARCHITECTURE*)",
       "Bash(curl -s https://raw.githubusercontent.com/google/mozc/master/src/renderer/win32/indicator_window.cc)",
       "PowerShell(git -C D:\\\\home\\\\source\\\\rust\\\\rakukan rev-parse HEAD)",
-      "PowerShell(git -C D:\\\\home\\\\source\\\\rust\\\\rakukan rev-parse origin/main)"
+      "PowerShell(git -C D:\\\\home\\\\source\\\\rust\\\\rakukan rev-parse origin/main)",
+      "PowerShell(\\(Get-Command pwsh -ErrorAction SilentlyContinue\\).Source; $PSVersionTable.PSVersion.ToString\\(\\))",
+      "Bash(findstr /n \"convert_sync\\\\|is_kanji_ready\\\\|fn bg_start\\\\|self.kanji\")"
     ]
   }
 }

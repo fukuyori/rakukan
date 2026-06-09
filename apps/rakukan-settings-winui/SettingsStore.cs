@@ -1,5 +1,7 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
+using System.Runtime.CompilerServices;
 using Tomlyn;
 using Tomlyn.Model;
 
@@ -12,12 +14,44 @@ internal sealed class SettingsBundle
     public required List<UserDictEntry> UserDict { get; init; }
 }
 
-internal sealed class UserDictEntry
+internal sealed class UserDictEntry : INotifyPropertyChanged
 {
-    public string Reading { get; set; } = string.Empty;
-    public List<string> Surfaces { get; set; } = new();
+    private string _reading = string.Empty;
+    private List<string> _surfaces = new();
+
+    public string Reading
+    {
+        get => _reading;
+        set
+        {
+            if (_reading == value)
+            {
+                return;
+            }
+            _reading = value;
+            OnPropertyChanged();
+        }
+    }
+
+    public List<string> Surfaces
+    {
+        get => _surfaces;
+        set
+        {
+            _surfaces = value;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(SurfacesJoined));
+        }
+    }
 
     public string SurfacesJoined => string.Join("、", Surfaces);
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
+    {
+        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+    }
 }
 
 internal sealed class SettingsData

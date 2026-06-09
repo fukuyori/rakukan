@@ -3,6 +3,12 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.5] - 2026-06-10
+
+### Fixed
+
+- **ユーザー辞書エディターの複数候補表示**: 複数の変換候補を登録したエントリを編集ダイアログで開くと、1 番目の候補しか表示されなかった問題を修正。`TextBox` オブジェクト初期化子で `Text` プロパティを `AcceptsReturn = true` よりも前に設定していたことが原因。WinUI 3 の `TextBox` はシングルラインモード（`AcceptsReturn = false`）で `Text` を設定すると改行文字を除去するため、複数行テキストが最初の行のみになっていた。`AcceptsReturn = true` と `TextWrapping = Wrap` を `Text` の設定より前に移動することで修正。合わせて行区切りを `Environment.NewLine`（`\r\n`）から WinUI 3 TextBox の内部形式である `\r` に変更。
+
 ## [0.9.4] - 2026-06-09
 
 ### Added
@@ -11,6 +17,8 @@
 - **エンジン未準備時の言語バーインジケーター**: 辞書ロード完了前（エンジン未接続・起動中）は言語バーアイコン・GetText テキスト・モード切替ポップアップに「ー」を表示し、変換停止中であることを視覚的に示す。辞書ロード完了後、次のキー入力で「あ」/「ア」に自動更新される。
   - `state.rs` に `is_conversion_ready()` 追加（`DICT_READY_LATCH` を参照、RPC 不要）。
   - `poll_dict_ready_cached` の false→true 遷移時に `langbar_update_set()` を呼び、言語バーを自動更新。
+- **設定画面バージョン表示**: WinUI 設定アプリの NavigationView ペイン下部にバージョン番号を表示。`Assembly.GetEntryAssembly()?.GetName().Version` でアセンブリバージョンを取得し、`rakukan vX.Y.Z` 形式で表示。
+- **辞書外 surface の学習許可**: `DictStore::learn` の `is_dict_surface` ガードを拡張し、ひらがな・CJK 漢字以外（カタカナ・英数字・記号・`『』`・`《》` など）の surface は辞書に登録がなくても学習対象とした。`is_learnable_without_dict` ヘルパー追加。`merge_candidates` の learn_cands に対する辞書二重チェックも撤廃し、学習履歴をそのまま信頼するよう変更。
 
 ### Changed
 

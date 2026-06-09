@@ -440,13 +440,7 @@ public sealed partial class MainWindow : Window
         }
         current.Reading = edited.Reading;
         current.Surfaces = edited.Surfaces;
-        var index = _userDictEntries.IndexOf(current);
-        if (index >= 0)
-        {
-            _userDictEntries.RemoveAt(index);
-            _userDictEntries.Insert(index, current);
-            UserDictList.SelectedItem = current;
-        }
+        UserDictList.SelectedItem = current;
     }
 
     private async Task<UserDictEntry?> ShowUserDictEditorAsync(UserDictEntry? existing)
@@ -461,10 +455,10 @@ public sealed partial class MainWindow : Window
         {
             Header = "変換候補 (1 行に 1 つ、先頭行が最優先)",
             PlaceholderText = "例:\n木村\n金村",
-            Text = existing is null ? string.Empty : string.Join(Environment.NewLine, existing.Surfaces),
             AcceptsReturn = true,
             TextWrapping = Microsoft.UI.Xaml.TextWrapping.Wrap,
             MinHeight = 120,
+            Text = existing is null ? string.Empty : string.Join("\r", existing.Surfaces),
         };
 
         var panel = new StackPanel { Spacing = 12 };
