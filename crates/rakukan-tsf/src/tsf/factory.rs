@@ -937,9 +937,10 @@ impl TextServiceFactory_Impl {
         use crate::tsf::edit_session::EditSession;
         use crate::tsf::mode_indicator;
 
+        let ready = crate::engine::state::is_conversion_ready();
         let mode_char: &'static str = match mode_name {
-            "Hiragana" => "あ",
-            "Katakana" => "ア",
+            "Hiragana" => if ready { "あ" } else { "ー" },
+            "Katakana" => if ready { "ア" } else { "ー" },
             _ => "A",
         };
 
@@ -1239,15 +1240,20 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
         let mode_char = if !open {
             "A"
         } else {
-            use crate::engine::state::ime_state_get;
+            use crate::engine::state::{ime_state_get, is_conversion_ready};
+            let ready = is_conversion_ready();
             ime_state_get()
                 .ok()
                 .map(|s| match s.input_mode {
-                    crate::engine::input_mode::InputMode::Hiragana => "あ",
-                    crate::engine::input_mode::InputMode::Katakana => "ア",
+                    crate::engine::input_mode::InputMode::Hiragana => {
+                        if ready { "あ" } else { "ー" }
+                    }
+                    crate::engine::input_mode::InputMode::Katakana => {
+                        if ready { "ア" } else { "ー" }
+                    }
                     crate::engine::input_mode::InputMode::Alphanumeric => "A",
                 })
-                .unwrap_or("あ")
+                .unwrap_or(if ready { "あ" } else { "ー" })
         };
         language_bar::create_mode_icon(mode_char)
             .or_else(|_| unsafe { language_bar::load_tray_icon() })
@@ -1264,15 +1270,20 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
         let mode_char = if !open {
             "A"
         } else {
-            use crate::engine::state::ime_state_get;
+            use crate::engine::state::{ime_state_get, is_conversion_ready};
+            let ready = is_conversion_ready();
             ime_state_get()
                 .ok()
                 .map(|s| match s.input_mode {
-                    crate::engine::input_mode::InputMode::Hiragana => "あ",
-                    crate::engine::input_mode::InputMode::Katakana => "ア",
+                    crate::engine::input_mode::InputMode::Hiragana => {
+                        if ready { "あ" } else { "ー" }
+                    }
+                    crate::engine::input_mode::InputMode::Katakana => {
+                        if ready { "ア" } else { "ー" }
+                    }
                     crate::engine::input_mode::InputMode::Alphanumeric => "A",
                 })
-                .unwrap_or("あ")
+                .unwrap_or(if ready { "あ" } else { "ー" })
         };
         Ok(BSTR::from(mode_char))
     }

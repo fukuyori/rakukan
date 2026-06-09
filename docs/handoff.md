@@ -1,17 +1,22 @@
-# Rakukan 引き継ぎ資料 (v0.9.3)
+# Rakukan 引き継ぎ資料 (v0.9.4)
 
-更新日: 2026-05-28
+更新日: 2026-06-09
 
 ## 現在の状態
 
-- **バージョン:** v0.9.3
+- **バージョン:** v0.9.4
+- **v0.9.4 の内容:**
+  - **区読点分割変換の対象記号を拡張**: `is_kuten` の対象を全角記号 (U+FF01–FF5E)・ASCII 印字可能記号・`「」・` まで拡大。記号を含む読みで `Space` を押すと、記号ごとにブロックが独立して変換される。ライブ変換バックグラウンドも `contains_kuten` 検査で停止し、BlockSelecting フローに委ねる。`digits.rs` の `is_convertible_symbol` に `「」・` を追加し LLM へ混入しない保護も追加。
+  - **候補順序変更**: `merge_candidates` の優先順位を「user_dict → 学習 → LLM → mozc_dict」から「user_dict → 学習 → mozc_dict → LLM」に変更。辞書候補が LLM 候補より先に表示される。`dict_slots` / `llm_limit` キャップ廃止。
+  - **ライブ変換開始文字数の設定化**: `[live_conversion] min_chars`（デフォルト 3）を `config.toml` と WinUI 設定 UI で変更可能に。`get_live_conv_min_chars()` 関数を追加し、`LIVE_CONVERSION_MIN_READING_CHARS` 定数を廃止。
+  - **エンジン未準備時の「ー」表示**: 辞書ロード完了前は言語バーアイコン・GetText テキスト・モード切替ポップアップに「ー」を表示。辞書ロード完了（`DICT_READY_LATCH` false→true）で `langbar_update_set()` を呼び、次キー入力で「あ」/「ア」に自動更新。`is_conversion_ready()` ヘルパを追加。
+- **バージョン (1 つ前):** v0.9.3
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加、v0.9.3 では区読点分割変換（BlockSelecting）を追加した。**v0.9.4 では区読点の対象記号を全角記号・ASCII 記号・`「」・` まで拡張し、候補順序・ライブ変換 min_chars・エンジン未準備インジケーターも改善した。**
 - **v0.9.3 の内容（区読点分割変換）:**
   - 読みに `、` `。` `！` `？` が含まれると自動的に句読点位置でブロックへ分割し、`BlockSelecting` 状態へ移行
   - `Space` で各ブロックを変換、`Enter` でブロックを逐次コミット（確定済みテキストをドキュメントへ送出し、残りブロックのみ composition として継続）
   - 候補ウィンドウが Enter のたびに次のブロック直下へ移動（`commit_then_start_composition` セッション内で `GetTextExt` → `caret_rect_set` + `candidate_window::reposition`）
   - 全ブロック確定時に `committed_prefix` を使って学習・engine commit を実行
-- **バージョン (1 つ前):** v0.9.2
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加。**v0.9.3 では、`、` `。` `！` `？` を含む読みをブロックごとに分割して逐次変換・確定する区読点分割変換（BlockSelecting）を追加した。**
 - **v0.9.2 の内容（記号・英字幅設定）:**
   - `[input] alpha_width` / `symbol_width` 設定を新規追加（デフォルト `fullwidth`）
   - WinUI 設定 UI に「英字の入力幅」「記号の入力幅」ComboBox を追加

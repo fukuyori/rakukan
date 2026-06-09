@@ -88,6 +88,38 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+/// `surface` の各文字が辞書ガードなしで学習を許可してよいかを判定するヘルパー。
+///
+/// **ひらがな**は読み相当なので surface としての学習を許可しない。
+/// **CJK 漢字**は LLM 誤変換リスクがあるため辞書ガードが必要。
+/// 上記以外（カタカナ・英数字・記号・半角カタカナ等）は誤変換リスクが低いため、
+/// 辞書に存在しなくても学習を許可する。
+///
+/// これにより以下のケースが学習対象になる:
+/// - F7 カタカナ変換: `はろー → ハロー`
+/// - F8 半角カタカナ変換: `はろー → ﾊﾛｰ`
+/// - F9 全角英数変換: `abc → ａｂｃ`
+/// - F10 半角英数変換: `ＡＢＣ → ABC`
+/// - 括弧・記号ペア: `『』` `《》` `«»` `【】` 等
+#[inline]
+fn is_learnable_without_dict(c: char) -> bool {
+    let n = c as u32;
+    // ひらがな (U+3041–U+309F): reading 相当のため surface として学習しない
+    if (0x3041..=0x309F).contains(&n) {
+        return false;
+    }
+    // CJK 統合漢字 (U+4E00–U+9FFF): LLM 誤変換リスクあり
+    if (0x4E00..=0x9FFF).contains(&n) {
+        return false;
+    }
+    // CJK 統合漢字拡張 A (U+3400–U+4DBF): 同上
+    if (0x3400..=0x4DBF).contains(&n) {
+        return false;
+    }
+    // 上記以外（カタカナ・英数・記号・半角カタカナ・全角英数等）は学習許可
+    true
+}
+
 struct DictStoreInner {
     /// ユーザー辞書（手動登録のみ）。Phase 2b 以降は `learn()` で更新しない。
     user: RwLock<HashMap<String, Vec<String>>>,
@@ -345,6 +377,9 @@ impl DictStore {
     ///
     /// 学習対象を「辞書由来の候補のみ」に絞るためのガード。
     /// LLM 生成の surface は辞書外なのでここで false になり、確定時の学習がスキップされる。
+    ///
+    /// ただし、括弧ペア（`『』` `《》` `«»` など）のような**記号のみからなる surface** は
+    /// LLM 由来であっても誤学習リスクが低いため、辞書外でも学習を許可する。
     fn is_dict_surface(&self, reading: &str, surface: &str) -> bool {
         if let Ok(user) = self.inner.user.read() {
             if user
@@ -364,7 +399,9 @@ impl DictStore {
                 return true;
             }
         }
-        false
+        // ひらがな・CJK漢字を含まない surface（カタカナ・英数・記号等）は辞書外でも学習を許可する。
+        // F7カタカナ変換・F9全角英数変換・括弧ペア等が対象。漢字誤変換の学習リスクは生じない。
+        !surface.is_empty() && surface.chars().all(is_learnable_without_dict)
     }
 
     /// ひらがな読みからユーザー辞書候補のみを返す（merge_candidates 用）
@@ -678,32 +715,41 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_skips_digit_literal_candidates() {
-        // 数字 reading (`200` 等) は MOZC 辞書に存在しないため、桁並び漢数字や
-        // 位取り漢数字、全角数字といった literal 由来候補は学習されない。
-        // `is_dict_surface` が hiragana reading のみを辞書から探すため自動的にフィルタされる。
+    fn test_learn_skips_kanji_digit_literal_candidates() {
+        // 数字 reading (`200` 等) から生成される漢数字 surface は CJK漢字を含むため
+        // 辞書ガードが効き、学習されない（LLM誤変換防止）。
         let store = make_store(&[]);
-        // 数字 reading で起こり得る変換結果を一通り学習試行
         for (reading, surface) in [
             ("200", "二百"),
             ("200", "二〇〇"),
-            ("200", "２００"),
             ("1234", "千二百三十四"),
             ("1234", "壱千弐百参拾四"),
         ] {
             store.learn(reading, surface);
             assert!(
                 store.lookup_learn(reading).is_empty(),
-                "literal 由来 reading={:?} surface={:?} は学習されない",
+                "漢数字 surface {:?} は辞書がなければ学習されない",
                 reading,
-                surface
             );
         }
     }
 
     #[test]
-    fn test_learn_skips_alpha_symbol_literal_candidates() {
-        // ASCII / 記号 reading (`USB-C` `(test)` `A+B` 等) も辞書外なので学習されない。
+    fn test_learn_allows_fullwidth_digit_literal() {
+        // 全角数字 (`２００`) はひらがな・漢字を含まないため学習対象。
+        // F9 変換由来の数字表記が学習されることを確認。
+        let store = make_store(&[]);
+        store.learn("200", "２００");
+        assert!(
+            store.lookup_learn("200").contains(&"２００".to_string()),
+            "全角数字 surface は学習される"
+        );
+    }
+
+    #[test]
+    fn test_learn_allows_alpha_symbol_via_fkey_transform() {
+        // F9全角英数変換・F10半角英数変換など「変化で表示させた記号」は
+        // 辞書外でも学習対象。ひらがな・CJK漢字を含まなければ許可。
         let store = make_store(&[]);
         for (reading, surface) in [
             ("USB-C", "ＵＳＢ-Ｃ"),
@@ -713,9 +759,60 @@ mod tests {
         ] {
             store.learn(reading, surface);
             assert!(
+                store.lookup_learn(reading).contains(&surface.to_string()),
+                "変換由来の英数 surface {:?} は学習される",
+                surface
+            );
+        }
+    }
+
+    #[test]
+    fn test_learn_allows_pure_symbol_surface() {
+        // 記号のみからなる surface（括弧ペア等）は辞書外でも学習できる。
+        // 何度も選択した『』が昇格しない問題への対処。
+        let store = make_store(&[]);
+        for surface in ["『』", "《》", "«»", "\u{201c}\u{201d}", "<>", "【】", "（）"] {
+            store.learn("かっこ", surface);
+            let learned = store.lookup_learn("かっこ");
+            assert!(
+                learned.contains(&surface.to_string()),
+                "記号 surface {:?} は辞書外でも学習される",
+                surface
+            );
+        }
+    }
+
+    #[test]
+    fn test_learn_allows_katakana_surface() {
+        // F7カタカナ変換・F8半角カタカナ変換の結果は辞書外でも学習対象。
+        let store = make_store(&[]);
+        for (reading, surface) in [
+            ("かっこ", "カッコ"),
+            ("てすと", "テスト"),
+            ("はろー", "ﾊﾛｰ"),
+        ] {
+            store.learn(reading, surface);
+            assert!(
+                store.lookup_learn(reading).contains(&surface.to_string()),
+                "カタカナ surface {:?} は辞書外でも学習される",
+                surface
+            );
+        }
+    }
+
+    #[test]
+    fn test_learn_still_skips_kanji_not_in_dict() {
+        // CJK漢字を含む surface は辞書ガードが必要（LLM誤変換防止）。
+        // 辞書に存在しない漢字 surface は学習されない。
+        let store = make_store(&[]);
+        for (reading, surface) in [
+            ("かっこ", "括弧"),
+            ("あいうえお", "未登録"),
+        ] {
+            store.learn(reading, surface);
+            assert!(
                 store.lookup_learn(reading).is_empty(),
-                "literal reading={:?} surface={:?} は学習されない",
-                reading,
+                "漢字含み surface {:?} は辞書がなければ学習されない",
                 surface
             );
         }

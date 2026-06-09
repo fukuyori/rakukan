@@ -91,12 +91,20 @@ fn now_ms() -> u64 {
 /// 辞書 ready 状態を取得。未 ready のうちだけ RPC で poll する。
 ///
 /// ホットパス（`on_input` 等）から 1 キーストロークごとに呼ばれる前提。
+///
+/// `poll_dict_ready()` は「PENDING にある辞書を今回注入した」ときだけ `true` を返す設計。
+/// ホストが既起動で辞書がすでに注入済みの場合は常に `false` を返すため、
+/// フォールバックとして `is_dict_ready()` も確認する。
 #[inline]
 pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
     if DICT_READY_LATCH.load(AO::Acquire) {
         return true;
     }
-    let r = eng.poll_dict_ready();
+    // poll_dict_ready: 「今この呼び出しで PENDING → engine に注入した」なら true。
+    // is_dict_ready: ホスト側で辞書がすでに利用可能なら true（注入済みかどうか問わず）。
+    // ホスト既起動時は poll が false を返し続けるため、is_dict_ready を併用する。
+    let just_injected = eng.poll_dict_ready();
+    let r = just_injected || eng.is_dict_ready();
     if r {
         // M1.6 T-HOST2: false → true の遷移で計測
         if !DICT_READY_LATCH.swap(true, AO::AcqRel) {
@@ -105,6 +113,8 @@ pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
                 let elapsed = now_ms().saturating_sub(reset_at);
                 tracing::info!("dict ready: {} ms since reload reset", elapsed);
             }
+            // 辞書ロード完了 → 言語バーアイコンを "ー" から "あ" へ更新する
+            langbar_update_set();
         }
     }
     r
@@ -353,6 +363,40 @@ pub fn engine_force_recreate() {
 ///
 /// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** は
 /// 新 PID の `Create { config_json }` で反映される。client 側は `shutdown()` に
+/// BG 変換ワーカーが Running 状態で長時間詰まっていた場合に自動で engine_reload を起動する。
+///
+/// `is_stuck=true` → 詰まり開始時刻を記録し、30 秒超で engine_reload を自動起動。
+/// `is_stuck=false` → タイマーをリセット（正常完了・回復時に呼ぶ）。
+///
+/// このウォッチドッグは「LLM が EOS なしに max_new_tokens まで走り切る」より
+/// 長い時間かかるケース（GPU ハング等）への最終防衛線。
+/// 通常の生成遅延は engine 側の GEN_TIMEOUT_SECS (15 秒) でカバーする。
+static BG_WATCHDOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+
+pub fn bg_timeout_watchdog(is_stuck: bool) {
+    let Ok(mut guard) = BG_WATCHDOG.try_lock() else {
+        return;
+    };
+    if !is_stuck {
+        if guard.is_some() {
+            tracing::debug!("bg_timeout_watchdog: reset (recovered)");
+            *guard = None;
+        }
+        return;
+    }
+    let since = guard.get_or_insert_with(std::time::Instant::now);
+    let elapsed_secs = since.elapsed().as_secs();
+    tracing::debug!("bg_timeout_watchdog: conv worker stuck {elapsed_secs}s");
+    if elapsed_secs >= 30 {
+        tracing::warn!(
+            "bg_timeout_watchdog: conv worker stuck {elapsed_secs}s, auto engine_reload"
+        );
+        *guard = None;
+        drop(guard);
+        engine_reload();
+    }
+}
+
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
 #[track_caller]
 pub fn engine_reload() {
@@ -539,14 +583,24 @@ pub fn get_live_conv_beam_size() -> usize {
         .clamp(1, 9)
 }
 
-pub const LIVE_CONVERSION_MIN_READING_CHARS: usize = 3;
+/// `[live_conversion] min_chars` 設定を返す（デフォルト: 3）。
+pub fn get_live_conv_min_chars() -> usize {
+    super::config::current_config()
+        .live_conversion
+        .min_chars
+        .max(1)
+}
 
 pub fn is_live_conversion_reading_ready(reading: &str) -> bool {
-    reading.chars().count() >= LIVE_CONVERSION_MIN_READING_CHARS
+    reading.chars().count() >= get_live_conv_min_chars()
 }
 
 pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
-    if is_live_conversion_reading_ready(reading) {
+    // 記号（区読点）が含まれる場合はライブ変換しない。
+    // Space 押下時に BlockSelecting フローで変換する。
+    if is_live_conversion_reading_ready(reading)
+        && !super::text_util::contains_kuten(reading)
+    {
         Some(get_live_conv_beam_size())
     } else {
         None
@@ -1967,6 +2021,14 @@ pub fn langbar_update_take() -> bool {
     LANGBAR_UPDATE_PENDING.swap(false, AtomicOrdering::AcqRel)
 }
 
+/// 辞書ロードが完了し、基本的な変換が利用可能かを返す（RPC 不要）。
+///
+/// `DICT_READY_LATCH` が立っていない間（エンジン未接続・辞書ロード中）は `false`。
+/// `false` の間は言語バーアイコンに "ー" を表示して変換停止中を示す。
+pub fn is_conversion_ready() -> bool {
+    DICT_READY_LATCH.load(AO::Acquire)
+}
+
 // ─── DocumentManager モードストア ────────────────────────────────────────────
 //
 // MS-IME準拠: アプリ（DocumentManager）ごとに InputMode を記憶する。
@@ -2204,7 +2266,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_conversion_reading_ready_starts_at_three_chars() {
+    fn live_conversion_reading_ready_starts_at_default_min_chars() {
+        // デフォルト min_chars = 3（config 未初期化時は Default::default() が使われる）
         assert!(!is_live_conversion_reading_ready(""));
         assert!(!is_live_conversion_reading_ready("あ"));
         assert!(!is_live_conversion_reading_ready("あい"));

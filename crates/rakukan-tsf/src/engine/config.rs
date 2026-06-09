@@ -248,6 +248,10 @@ fn default_live_conv_beam_size() -> usize {
     1
 }
 
+fn default_live_conv_min_chars() -> usize {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveConversionConfig {
     #[serde(default)]
@@ -261,6 +265,11 @@ pub struct LiveConversionConfig {
     /// ライブ変換の候補数（beam 幅）。1 = greedy（高速、デフォルト）、3 = beam（高品質）
     #[serde(default = "default_live_conv_beam_size")]
     pub beam_size: usize,
+    /// ライブ変換を開始する最小文字数（デフォルト 3）。
+    /// 1 にすると 1 文字から変換を試みる（より積極的、負荷増）。
+    /// 2 以上を推奨。0 は 1 と同じ扱い。
+    #[serde(default = "default_live_conv_min_chars")]
+    pub min_chars: usize,
 }
 
 impl Default for LiveConversionConfig {
@@ -271,6 +280,7 @@ impl Default for LiveConversionConfig {
             use_llm: false,
             prefer_dictionary_first: true,
             beam_size: 1,
+            min_chars: default_live_conv_min_chars(),
         }
     }
 }
@@ -504,6 +514,10 @@ use_llm = false
 prefer_dictionary_first = true
 # ライブ変換の候補数（beam 幅）: 1 = greedy（高速、デフォルト）, 3 = beam search（高品質）
 beam_size = 1
+# ライブ変換を開始する最小文字数（デフォルト 3）。
+# 2 にすると 2 文字から変換を開始する（より積極的、変換負荷増）。
+# 1 は 2 以上を推奨するが設定可能。
+min_chars = 3
 
 [conversion]
 # Space 変換のビーム幅上限（num_candidates と min をとる）。
@@ -556,5 +570,37 @@ num_candidates = 12
         assert_eq!(cfg.effective_num_candidates(), 6);
         assert_eq!(cfg.live_conversion.beam_size, 1);
         assert_eq!(cfg.conversion.beam_size, 6);
+    }
+
+    #[test]
+    fn live_conversion_min_chars_defaults_to_three() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.live_conversion.min_chars, 3);
+    }
+
+    #[test]
+    fn live_conversion_min_chars_parses_from_toml() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[live_conversion]
+enabled = true
+min_chars = 2
+"#,
+        )
+        .expect("config should parse");
+        assert_eq!(cfg.live_conversion.min_chars, 2);
+        assert!(cfg.live_conversion.enabled);
+    }
+
+    #[test]
+    fn live_conversion_min_chars_falls_back_to_default_when_omitted() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[live_conversion]
+enabled = true
+"#,
+        )
+        .expect("config should parse");
+        assert_eq!(cfg.live_conversion.min_chars, 3);
     }
 }

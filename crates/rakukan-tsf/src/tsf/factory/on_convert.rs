@@ -8,8 +8,8 @@ use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
 use crate::engine::state::{
-    CandidateView, CandidateViewSource, ConversionBlock, SessionState, caret_rect_get,
-    composition_clone, engine_try_get_or_create, session_get,
+    CandidateView, CandidateViewSource, ConversionBlock, SessionState, bg_timeout_watchdog,
+    caret_rect_get, composition_clone, engine_try_get_or_create, session_get,
 };
 use crate::tsf::candidate_window;
 
@@ -954,6 +954,8 @@ impl super::TextServiceFactory_Impl {
             tracing::debug!("on_convert[new]: prev bg wait completed={completed}");
             if !completed {
                 // 前の bg が inline 時間で終わらない → WM_TIMER に任せる
+                // ウォッチドッグ: !kanji_ready && bg=running が 30 秒続いたら auto reload
+                bg_timeout_watchdog(!kanji_ready && bg_status == "running");
                 tracing::info!(
                     "convert_timing result=prev_bg_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
                     phase3_path,
@@ -966,7 +968,8 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::start_waiting_timer();
                 return Ok(true);
             }
-            // 前の bg が完了したら converter を回収して新しいキーで再起動
+            // 前の bg が完了したらウォッチドッグをリセットして converter を回収
+            bg_timeout_watchdog(false);
             engine.bg_reclaim();
             convert_mark("prev_bg_reclaim", convert_start, &mut convert_last);
             let kanji_ready2 = engine.is_kanji_ready();

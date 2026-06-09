@@ -14,6 +14,7 @@
     <ApplicationIcon>..\..\crates\rakukan-tsf\rakukan.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <Version>0.9.4</Version>
   </PropertyGroup>
 
   <ItemGroup>

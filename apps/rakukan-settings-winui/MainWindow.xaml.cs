@@ -3,6 +3,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Reflection;
 using System.Threading;
 using Windows.Graphics;
 
@@ -26,6 +27,9 @@ public sealed partial class MainWindow : Window
         SetWindowIcon();
         AppWindow.Resize(new SizeInt32(1080, 760));
         AppWindow.Closing += AppWindow_Closing;
+
+        var ver = Assembly.GetEntryAssembly()?.GetName().Version;
+        VersionText.Text = ver is { } v ? $"rakukan v{v.Major}.{v.Minor}.{v.Build}" : "rakukan";
 
         _keyFields = new Dictionary<ManagedKeyAction, TextBox>
         {
@@ -92,6 +96,7 @@ public sealed partial class MainWindow : Window
             LiveEnabledToggle.IsOn = bundle.Config.LiveEnabled;
             DebounceMsBox.Value = bundle.Config.DebounceMs;
             BeamSizeBox.Value = bundle.Config.BeamSize;
+            MinCharsBox.Value = bundle.Config.MinChars;
             UseLlmToggle.IsOn = bundle.Config.UseLlm;
             PreferDictionaryFirstToggle.IsOn = bundle.Config.PreferDictionaryFirst;
 
@@ -128,6 +133,7 @@ public sealed partial class MainWindow : Window
             ConversionBeamSizeBox.Value = conversionBeamSize;
         }
         var beamSize = ParseUInt(BeamSizeBox.Value, "beam_size", 1, 9);
+        var minChars = ParseUInt(MinCharsBox.Value, "開始文字数", 1, 9);
 
         var config = new SettingsData
         {
@@ -151,6 +157,7 @@ public sealed partial class MainWindow : Window
             UseLlm = UseLlmToggle.IsOn,
             PreferDictionaryFirst = PreferDictionaryFirstToggle.IsOn,
             BeamSize = beamSize,
+            MinChars = minChars,
         };
 
         var keymap = new KeymapSettings

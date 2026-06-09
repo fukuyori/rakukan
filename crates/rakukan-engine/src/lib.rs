@@ -656,7 +656,8 @@ impl RakunEngine {
     pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
         let hiragana = &self.hiragana_buf;
 
-        // 優先順位: ユーザー辞書 → 学習履歴 (mozc 候補の押し上げ) → LLM → mozc
+        // 優先順位: ユーザー辞書 → 学習済み辞書候補（スコア順） → 残り辞書候補 → LLM
+        // 学習スコアで上位に来た辞書候補を先に表示し、LLM は空きスロットを埋める。
         let user_cands: Vec<String> = self
             .dict_store
             .as_ref()
@@ -678,11 +679,7 @@ impl RakunEngine {
         debug!(
             "engine::merge: reading={:?} dict_store={} dict_cands={:?} learn_cands={:?} llm_cands={:?}",
             hiragana,
-            if self.dict_store.is_some() {
-                "Some"
-            } else {
-                "None"
-            },
+            if self.dict_store.is_some() { "Some" } else { "None" },
             dict_cands,
             learn_cands,
             llm_candidates
@@ -700,44 +697,31 @@ impl RakunEngine {
             }
         }
 
-        // 2. 学習履歴: mozc/user に既にある surface のうち、最近/よく選ばれたものを前に出す。
-        //    学習履歴にしかない surface (辞書ガードで弾かれているはずだが防御的に確認) は追加しない。
+        // 2. 学習履歴: スコア順（最近・頻繁に選んだもの優先）で前に出す。
+        //    DictStore::learn 側で「ひらがな・CJK漢字を含む surface は辞書ガード必須」と
+        //    制御しているため、ここでの二重チェックは不要。辞書外の surface（記号・カタカナ等）
+        //    も学習対象になったので、dict_cands チェックは外す。
         for c in &learn_cands {
             if merged.len() >= limit {
                 break;
             }
-            if merged.contains(c) {
-                continue;
-            }
-            if dict_cands.contains(c) || user_cands.contains(c) {
+            if !merged.contains(c) {
                 merged.push(c.clone());
             }
         }
 
-        // 辞書候補に確保するスロット数（limit の約 2/3、最低 5 件）。
-        // 辞書ルックアップは binary search + 固定バイト読みで LLM より圧倒的に軽いため、
-        // 性能を落とさずに候補数を増やす第一の手段として dict 優先の配分にしている。
-        let dict_slots = (limit * 2 / 3).max(5);
-        // LLM は残りのスロットを使用
-        let llm_limit = limit.saturating_sub(dict_slots).max(1);
+        // 3. 残りの辞書候補（学習で上昇済みのものは既に merged に含まれる）
+        for c in &dict_cands {
+            if merged.len() >= limit {
+                break;
+            }
+            if !merged.contains(c) {
+                merged.push(c.clone());
+            }
+        }
 
-        // 3. LLM候補（文脈考慮、上限 llm_limit）
-        let mut llm_count = 0;
+        // 4. LLM候補（残りスロット、文脈考慮）
         for c in llm_candidates {
-            if llm_count >= llm_limit {
-                break;
-            }
-            if merged.len() >= limit {
-                break;
-            }
-            if !merged.contains(&c) {
-                merged.push(c);
-                llm_count += 1;
-            }
-        }
-
-        // 4. mozc候補（残りスロットを全て使用）
-        for c in dict_cands {
             if merged.len() >= limit {
                 break;
             }
@@ -746,9 +730,7 @@ impl RakunEngine {
             }
         }
 
-        // LLM 出力は重複除去や短すぎる候補の除外で、要求数より 1 件少なくなる
-        // ことがある。候補表の最後に元の読みを置けば、変換せずに確定する退避路
-        // としても自然に使える。
+        // 候補不足時は元の読みを末尾に追加（変換せず確定する退避路）
         let desired_visible = self.config.num_candidates.min(limit);
         if merged.len() < desired_visible && !merged.contains(hiragana) {
             merged.push(hiragana.clone());

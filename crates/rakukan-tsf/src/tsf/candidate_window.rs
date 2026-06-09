@@ -1315,7 +1315,7 @@ fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
     if !ready {
         tracing::debug!(
             "[Live] on_live_timer: reading shorter than {} chars, wait for more input",
-            crate::engine::state::LIVE_CONVERSION_MIN_READING_CHARS
+            crate::engine::state::get_live_conv_min_chars()
         );
         stop_live_timer();
         return None;

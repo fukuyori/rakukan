@@ -42,6 +42,7 @@ internal sealed class SettingsData
     public bool UseLlm { get; set; }
     public bool PreferDictionaryFirst { get; set; } = true;
     public uint BeamSize { get; set; } = 1;
+    public uint MinChars { get; set; } = 3;
 }
 
 internal enum ManagedKeyAction
@@ -194,6 +195,7 @@ internal sealed class SettingsStore
         use_llm = false
         prefer_dictionary_first = true
         beam_size = 1
+        min_chars = 3
 
         [conversion]
         beam_size = 6
@@ -437,6 +439,7 @@ internal sealed class SettingsStore
             UseLlm = GetBool(live, "use_llm") ?? false,
             PreferDictionaryFirst = GetBool(live, "prefer_dictionary_first") ?? true,
             BeamSize = GetUInt(live, "beam_size") ?? 1,
+            MinChars = GetUInt(live, "min_chars") ?? 3,
         };
     }
 
@@ -469,6 +472,7 @@ internal sealed class SettingsStore
         live["use_llm"] = data.UseLlm;
         live["prefer_dictionary_first"] = data.PreferDictionaryFirst;
         live["beam_size"] = data.BeamSize;
+        live["min_chars"] = data.MinChars;
 
         SetOptional(conversion, "num_candidates", data.NumCandidates);
         conversion["beam_size"] = data.ConversionBeamSize;

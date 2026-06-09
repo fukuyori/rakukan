@@ -737,11 +737,35 @@ pub fn to_half_katakana(s: &str) -> String {
 
 /// 区読点（変換ブロックの区切り記号）か判定する。
 ///
-/// 対象: `、` `。` `！` `？`
+/// 対象:
+/// - 日本語区読点: `、` `。`
+/// - 全角記号 (U+FF01–U+FF5E、全角数字・英字を除く):
+///   `！` `？` `～` `（` `）` `｛` `｝` `；` `：` `＠` `＃` `＄` `％` 等
+/// - ASCII 印字可能記号（数字・英字を除く）: `@` `#` `(` `)` `?` `~` 等
+/// - 和文記号（かなルール由来）: `「` `」` `・`
+///
 /// これらは LLM に渡さない delimiter として扱う。
 #[inline]
 pub fn is_kuten(c: char) -> bool {
-    matches!(c, '、' | '。' | '！' | '？')
+    // 日本語区読点（FF01-FF5E 外）
+    if matches!(c, '、' | '。') {
+        return true;
+    }
+    let n = c as u32;
+    // 全角記号（U+FF01–U+FF5E、全角数字・英字を除く）
+    if (0xFF01..=0xFF5E).contains(&n)
+        && !('０'..='９').contains(&c)
+        && !('Ａ'..='Ｚ').contains(&c)
+        && !('ａ'..='ｚ').contains(&c)
+    {
+        return true;
+    }
+    // ASCII 印字可能記号（数字・英字を除く）
+    if c.is_ascii_graphic() && !c.is_ascii_alphanumeric() {
+        return true;
+    }
+    // 和文記号（かなルール由来: 「」・）
+    matches!(c, '「' | '」' | '・')
 }
 
 /// ひらがな文字列を区読点で分割する。
@@ -1053,6 +1077,16 @@ mod tests {
         assert!(contains_kuten("おわり。"));
         assert!(contains_kuten("！"));
         assert!(contains_kuten("？"));
+        // 全角記号
+        assert!(contains_kuten("きょう（はれ）"));
+        assert!(contains_kuten("タイトル～サブタイトル"));
+        assert!(contains_kuten("メール；おわり"));
+        // 和文記号（かなルール由来）
+        assert!(contains_kuten("「にほんご」"));
+        assert!(contains_kuten("なかぐろ・てすと"));
+        // ASCII 印字可能記号
+        assert!(contains_kuten("user@example"));
+        assert!(contains_kuten("a(b)c"));
     }
 
     #[test]
@@ -1060,5 +1094,45 @@ mod tests {
         assert!(!contains_kuten("きのう"));
         assert!(!contains_kuten(""));
         assert!(!contains_kuten("hello world"));
+        // 全角数字・英字は区切りではない
+        assert!(!contains_kuten("２０２４"));
+        assert!(!contains_kuten("Ａｂｃ"));
+    }
+
+    #[test]
+    fn split_with_fullwidth_symbol() {
+        // 全角括弧が区切りとして機能するかテスト
+        assert_eq!(
+            split_by_punctuation("きょう（てんき）よい"),
+            vec![
+                ("きょう".to_string(), Some('（')),
+                ("てんき".to_string(), Some('）')),
+                ("よい".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_with_kana_rule_symbol() {
+        // かなルール由来の記号が区切りとして機能するかテスト
+        assert_eq!(
+            split_by_punctuation("いろは「にほんご」まとめ"),
+            vec![
+                ("いろは".to_string(), Some('「')),
+                ("にほんご".to_string(), Some('」')),
+                ("まとめ".to_string(), None),
+            ]
+        );
+    }
+
+    #[test]
+    fn split_with_middle_dot() {
+        assert_eq!(
+            split_by_punctuation("とうきょう・おおさか"),
+            vec![
+                ("とうきょう".to_string(), Some('・')),
+                ("おおさか".to_string(), None),
+            ]
+        );
     }
 }

@@ -60,6 +60,9 @@ fn is_convertible_symbol(c: char) -> bool {
             && !('０'..='９').contains(&c)
             && !('Ａ'..='Ｚ').contains(&c)
             && !('ａ'..='ｚ').contains(&c))
+        // かなルール由来の和文記号（「 」 ・）は FF01-FF5E 範囲外だが
+        // 変換対象外の記号として扱う
+        || matches!(c, '「' | '」' | '・')
 }
 
 fn to_halfwidth_digits(s: &str) -> String {

@@ -28,6 +28,13 @@
             IsSettingsVisible="False"
             PaneDisplayMode="Left"
             SelectionChanged="OnNavigationSelectionChanged">
+            <NavigationView.PaneFooter>
+                <TextBlock
+                    x:Name="VersionText"
+                    Margin="12,8,12,16"
+                    FontSize="12"
+                    Opacity="0.5" />
+            </NavigationView.PaneFooter>
             <NavigationView.MenuItems>
                 <NavigationViewItem Tag="General" Content="基本">
                     <NavigationViewItem.Icon>
@@ -344,6 +351,7 @@
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
                                         <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Spacing="8">
                                         <TextBlock Text="デバウンス (ms)" />
@@ -352,6 +360,10 @@
                                     <StackPanel Grid.Column="1" Spacing="8">
                                         <TextBlock Text="beam_size (1-9)" />
                                         <NumberBox x:Name="BeamSizeBox" SmallChange="1" Minimum="1" Maximum="9" SpinButtonPlacementMode="Compact" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="2" Spacing="8">
+                                        <TextBlock Text="開始文字数 (1-9)" />
+                                        <NumberBox x:Name="MinCharsBox" SmallChange="1" Minimum="1" Maximum="9" SpinButtonPlacementMode="Compact" />
                                     </StackPanel>
                                 </Grid>
                                 <ToggleSwitch x:Name="UseLlmToggle" Header="LLM をライブ変換に使う" />

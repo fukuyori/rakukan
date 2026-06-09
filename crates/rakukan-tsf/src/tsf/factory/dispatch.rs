@@ -7,8 +7,8 @@ use anyhow::Result;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::engine::state::{
-    CandidateViewSource, SessionState, caret_rect_get, engine_try_get_or_create, session_get,
-    session_is_selecting_fast,
+    CandidateViewSource, SessionState, bg_timeout_watchdog, caret_rect_get,
+    engine_try_get_or_create, session_get, session_is_selecting_fast,
 };
 use crate::engine::text_util;
 use crate::engine::user_action::UserAction;
@@ -281,6 +281,8 @@ impl super::TextServiceFactory_Impl {
                         wait_preedit,
                         bg_now
                     );
+                    // ウォッチドッグ: Running 状態が 30 秒続いたら auto engine_reload
+                    bg_timeout_watchdog(bg_now == "running");
                     if bg_now == "done" {
                         tracing::debug!(
                             "waiting-poll: calling bg_take_candidates({:?})",
@@ -289,6 +291,7 @@ impl super::TextServiceFactory_Impl {
                         match engine.bg_take_candidates(&wait_preedit) {
                             Some(llm_cands) => {
                                 tracing::debug!("waiting-poll: got {} LLM cands", llm_cands.len());
+                                bg_timeout_watchdog(false); // 回復 → ウォッチドッグリセット
                                 // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
                                 let merged = if llm_cands.is_empty() {
                                     engine.merge_candidates(vec![], DICT_LIMIT_WAIT)

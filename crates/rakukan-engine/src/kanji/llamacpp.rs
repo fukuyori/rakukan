@@ -691,8 +691,23 @@ impl LlamaCppModel {
         // Get model's EOS token for comparison
         let model_eos = self.model.token_eos();
 
+        // ウォールクロック制限: 生成全体の上限時間。
+        // GPU ハング以外の「EOS が出ずに max_new_tokens まで走り続ける」ケースを防ぐ。
+        // GPU ハング（ctx.decode がブロッキングになる）はここでは防げないが、
+        // その場合は TSF 側のウォッチドッグ (bg_timeout_watchdog) が engine_reload で対処する。
+        const GEN_TIMEOUT_SECS: u64 = 15;
+        let gen_start = std::time::Instant::now();
+
         // Generate new tokens
         for _ in 0..max_new_tokens {
+            if gen_start.elapsed().as_secs() >= GEN_TIMEOUT_SECS {
+                tracing::warn!(
+                    "generate_with_sampler: wall-clock timeout ({:.1}s), stopping generation early",
+                    gen_start.elapsed().as_secs_f32()
+                );
+                break;
+            }
+
             let new_token = sampler.sample(&ctx, -1);
 
             // Check for EOS using the provided token ID
