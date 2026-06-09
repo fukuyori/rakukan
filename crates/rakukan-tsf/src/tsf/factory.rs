@@ -937,10 +937,21 @@ impl TextServiceFactory_Impl {
         use crate::tsf::edit_session::EditSession;
         use crate::tsf::mode_indicator;
 
+        // ラッチが立っていない場合はエンジンに直接問い合わせてラッチを更新する。
+        // モード切替はキー入力前にも発生するため、初回切替時にラッチが false のまま
+        // 「ー」がカーソル位置に表示されるのを防ぐ。
+        if !crate::engine::state::is_conversion_ready() {
+            if let Ok(g) = crate::engine::state::engine_try_get() {
+                if let Some(eng) = g.as_ref() {
+                    crate::engine::state::poll_dict_ready_cached(eng);
+                }
+            }
+        }
+
         let ready = crate::engine::state::is_conversion_ready();
         let mode_char: &'static str = match mode_name {
-            "Hiragana" => if ready { "あ" } else { "ー" },
-            "Katakana" => if ready { "ア" } else { "ー" },
+            "Hiragana" => if ready { "あ" } else { return; },
+            "Katakana" => if ready { "ア" } else { return; },
             _ => "A",
         };
 
