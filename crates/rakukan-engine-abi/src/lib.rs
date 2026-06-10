@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 7;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 8;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
 
@@ -140,6 +140,7 @@ struct EngineVTable {
 
     // 学習
     learn: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
+    learn_force: unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char),
 
     // 診断
     last_error: unsafe extern "C" fn() -> *mut c_char,
@@ -222,6 +223,7 @@ impl EngineVTable {
             main_gpu: load_sym!(lib, b"engine_main_gpu\0"),
             available_models_json: load_sym!(lib, b"engine_available_models_json\0"),
             learn: load_sym!(lib, b"engine_learn\0"),
+            learn_force: load_sym!(lib, b"engine_learn_force\0"),
             last_error: load_sym!(lib, b"engine_last_error\0"),
             dict_status: load_sym!(lib, b"engine_dict_status\0"),
         })
@@ -557,6 +559,14 @@ impl DynEngine {
         let s = Self::to_cstring(surface);
         unsafe {
             (self.vtable.learn)(self.handle, r.as_ptr(), s.as_ptr());
+        }
+    }
+
+    pub fn learn_force(&mut self, reading: &str, surface: &str) {
+        let r = Self::to_cstring(reading);
+        let s = Self::to_cstring(surface);
+        unsafe {
+            (self.vtable.learn_force)(self.handle, r.as_ptr(), s.as_ptr());
         }
     }
 

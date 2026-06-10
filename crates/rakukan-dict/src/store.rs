@@ -277,9 +277,17 @@ impl DictStore {
             );
             return;
         }
+        self.learn_inner(reading, surface);
+    }
 
+    /// 辞書ガードなしで学習する。候補ウィンドウからの明示選択（案C）専用。
+    /// `is_dict_surface` チェックをスキップし、LLM 由来の surface も記録する。
+    pub fn learn_force(&self, reading: &str, surface: &str) {
+        self.learn_inner(reading, surface);
+    }
+
+    fn learn_inner(&self, reading: &str, surface: &str) {
         let now = now_unix_secs();
-        // メモリ更新。write lock はこのブロック内でのみ保持し、save では read lock を使う。
         let snapshot = {
             let Ok(mut hist) = self.inner.learn_history.write() else {
                 warn!("learn_history write lock failed");
@@ -298,16 +306,12 @@ impl DictStore {
                 });
             }
             trim_learn_history_to_capacity(&mut hist, LEARN_LRU_CAPACITY);
-            // 書き込み用にスナップショットを取って即 write lock を解放する
             hist.clone()
         };
-
         debug!(
             "dict::store: learned reading={:?} surface={:?}",
             reading, surface
         );
-
-        // 永続化（learn_history_path が設定されているときのみ）。失敗は警告ログのみ。
         if let Some(path) = &self.inner.learn_history_path {
             if let Err(e) = save_learn_history_file(path, &snapshot) {
                 warn!("learn_history save failed: {e}");

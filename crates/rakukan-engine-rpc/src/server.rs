@@ -273,6 +273,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             eng.learn(&reading, &surface);
             Response::Unit
         }
+        LearnForce { reading, surface } => {
+            eng.learn_force(&reading, &surface);
+            Response::Unit
+        }
         LastError => Response::String(eng.last_error()),
         DictStatus => Response::String(eng.dict_status()),
 

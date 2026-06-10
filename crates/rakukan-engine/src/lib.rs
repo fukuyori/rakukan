@@ -645,6 +645,14 @@ impl RakunEngine {
         }
     }
 
+    pub fn learn_force(&mut self, reading: &str, surface: &str) {
+        if let Some(store) = &self.dict_store {
+            store.learn_force(reading, surface);
+        } else {
+            tracing::warn!("learn_force: dict_store not initialized");
+        }
+    }
+
     pub fn is_dict_ready(&self) -> bool {
         self.dict_store.is_some()
     }

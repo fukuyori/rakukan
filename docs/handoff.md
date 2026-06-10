@@ -1,21 +1,19 @@
-# Rakukan 引き継ぎ資料 (v0.9.5)
+# Rakukan 引き継ぎ資料 (v0.9.7)
 
-更新日: 2026-06-10
+更新日: 2026-06-11
 
 ## 現在の状態
 
-- **バージョン:** v0.9.5
+- **バージョン:** v0.9.7
+- **v0.9.7 の内容:**
+  - **LLM 候補の学習対応（案C）**: 候補ウィンドウから明示的に選択した LLM 候補（`CandidateViewSource::Bg`）を `learn_history` に記録するようにした。`DictStore::learn_force` を追加し、辞書外 CJK surface でも学習可能にした。Selecting 状態の確定経路 4 箇所（`on_input.rs` × 2、`on_convert.rs` × 1、`edit_ops.rs` × 1）で source が `Bg` のときガードをバイパス。LiveConv Enter 自動確定は従来通りガードあり。Engine ABI バージョン 7 → 8、RPC に `LearnForce` バリアント追加。
+- **バージョン (1 つ前):** v0.9.6
+- **v0.9.6 の内容:**
+  - **モード切替時のカーソル位置「ー」表示修正**: かな入力モードへの切替時、エンジンが準備完了していてもカーソルに「ー」が表示される問題を修正。`DICT_READY_LATCH` はキー入力時にのみセットされるため、最初のキー入力前のモード切替では false のまま「ー」が表示されていた。`show_mode_indicator` 内でラッチが false の場合に `engine_try_get()` → `poll_dict_ready_cached()` でエンジンへ直接問い合わせラッチを更新。それでも未準備なら表示をスキップ（カーソル位置には何も出さず、言語バーの「ー」のみで通知）。
+- **バージョン (2 つ前):** v0.9.5
 - **v0.9.5 の内容:**
   - **ユーザー辞書エディターの複数候補表示バグ修正**: 複数の変換候補を登録したエントリを編集ダイアログで開くと 1 番目しか表示されなかった問題を修正。`TextBox` オブジェクト初期化子で `AcceptsReturn = true` より前に `Text` を設定していたため、WinUI 3 TextBox がシングルラインモードで改行文字を除去していた。`AcceptsReturn = true` と `TextWrapping = Wrap` を `Text` より前に移動。行区切りも `Environment.NewLine`（`\r\n`）から WinUI 3 TextBox の内部形式 `\r` に変更。
-- **バージョン (1 つ前):** v0.9.4
-- **v0.9.4 の内容:**
-  - **区読点分割変換の対象記号を拡張**: `is_kuten` の対象を全角記号 (U+FF01–FF5E)・ASCII 印字可能記号・`「」・` まで拡大。記号を含む読みで `Space` を押すと、記号ごとにブロックが独立して変換される。ライブ変換バックグラウンドも `contains_kuten` 検査で停止し、BlockSelecting フローに委ねる。`digits.rs` の `is_convertible_symbol` に `「」・` を追加し LLM へ混入しない保護も追加。
-  - **候補順序変更**: `merge_candidates` の優先順位を「user_dict → 学習 → LLM → mozc_dict」から「user_dict → 学習 → mozc_dict → LLM」に変更。辞書候補が LLM 候補より先に表示される。`dict_slots` / `llm_limit` キャップ廃止。
-  - **ライブ変換開始文字数の設定化**: `[live_conversion] min_chars`（デフォルト 3）を `config.toml` と WinUI 設定 UI で変更可能に。`get_live_conv_min_chars()` 関数を追加し、`LIVE_CONVERSION_MIN_READING_CHARS` 定数を廃止。
-  - **エンジン未準備時の「ー」表示**: 辞書ロード完了前は言語バーアイコン・GetText テキスト・モード切替ポップアップに「ー」を表示。辞書ロード完了（`DICT_READY_LATCH` false→true）で `langbar_update_set()` を呼び、次キー入力で「あ」/「ア」に自動更新。`is_conversion_ready()` ヘルパを追加。
-  - **設定画面バージョン表示**: WinUI 設定アプリの NavigationView ペイン下部にバージョン番号を表示（`rakukan vX.Y.Z` 形式）。
-  - **辞書外 surface の学習許可**: `is_learnable_without_dict` ヘルパ追加。ひらがな・CJK 漢字以外（カタカナ・英数字・記号・`『』`・`《》` など）の surface は辞書登録がなくても学習対象に。`merge_candidates` の learn_cands 二重チェックも撤廃。
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加、v0.9.3 では区読点分割変換（BlockSelecting）を追加した。v0.9.4 では区読点の対象記号拡張・候補順序・min_chars・エンジン未準備インジケーター・辞書外学習・設定画面バージョン表示を追加。**v0.9.5 ではユーザー辞書エディターの複数候補表示バグを修正した。**
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加、v0.9.3 では区読点分割変換（BlockSelecting）を追加した。v0.9.4 では区読点の対象記号拡張・候補順序・min_chars・エンジン未準備インジケーター・辞書外学習・設定画面バージョン表示を追加。v0.9.5 ではユーザー辞書エディターの複数候補表示バグを修正。v0.9.6 ではモード切替時のカーソル位置「ー」表示を修正。**v0.9.7 では LLM 候補の明示選択による学習（案C）を追加した。**
 - **v0.9.3 の内容（区読点分割変換）:**
   - 読みに `、` `。` `！` `？` が含まれると自動的に句読点位置でブロックへ分割し、`BlockSelecting` 状態へ移行
   - `Space` で各ブロックを変換、`Enter` でブロックを逐次コミット（確定済みテキストをドキュメントへ送出し、残りブロックのみ composition として継続）

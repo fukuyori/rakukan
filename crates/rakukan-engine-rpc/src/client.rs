@@ -395,6 +395,13 @@ impl RpcEngine {
             surface: surface.into(),
         });
     }
+
+    pub fn learn_force(&self, reading: &str, surface: &str) {
+        let _ = self.call_unit(Request::LearnForce {
+            reading: reading.into(),
+            surface: surface.into(),
+        });
+    }
     pub fn last_error(&self) -> String {
         self.call_string(Request::LastError).unwrap_or_default()
     }

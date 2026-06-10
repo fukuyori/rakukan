@@ -3,6 +3,18 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.7] - 2026-06-11
+
+### Changed
+
+- **LLM 候補の学習対応（案C）**: 候補ウィンドウから明示的に選択した LLM 候補（`CandidateViewSource::Bg`）を `learn_history` に記録するようにした。これまでは `DictStore::learn` の辞書ガード（`is_dict_surface`）により、MOZC 辞書に存在しない CJK surface は学習されなかった。`DictStore::learn_force` を追加し、Selecting 状態の確定経路 4 箇所（`on_input.rs` × 2、`on_convert.rs` × 1、`edit_ops.rs` × 1）で source が `Bg` のときガードをバイパスして学習する。LiveConv の Enter 自動確定経路は従来通りガードあり。学習スコアの 30 日半減期による自然減衰は既存のまま機能する。Engine ABI バージョンを 7 → 8 に更新し、RPC に `LearnForce` バリアントを追加。
+
+## [0.9.6] - 2026-06-10
+
+### Fixed
+
+- **モード切替時のカーソル位置「ー」表示を修正**: かな入力モードに切替えたとき、エンジンが実際には準備完了していてもカーソル位置に「ー」が表示される問題を修正。`DICT_READY_LATCH` はキー入力時にのみセットされる設計のため、最初のキー入力前のモード切替ではラッチが false のまま「ー」が表示されていた。`show_mode_indicator` 内でラッチが false の場合に `engine_try_get()` → `poll_dict_ready_cached()` でエンジンへ直接問い合わせラッチを更新するよう修正。それでも未準備の場合はカーソル位置への表示自体をスキップする（言語バーの「ー」のみで通知）。
+
 ## [0.9.5] - 2026-06-10
 
 ### Fixed

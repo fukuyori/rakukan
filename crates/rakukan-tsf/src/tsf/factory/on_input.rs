@@ -239,7 +239,11 @@ impl super::TextServiceFactory_Impl {
                     &selected_text,
                     candidate_source,
                 ) {
-                    engine.learn(&reading, &selected_text);
+                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                        engine.learn_force(&reading, &selected_text);
+                    } else {
+                        engine.learn(&reading, &selected_text);
+                    }
                 }
                 engine.commit(&full_text);
                 engine.reset_preedit();
@@ -409,7 +413,11 @@ impl super::TextServiceFactory_Impl {
                     &selected_text,
                     candidate_source,
                 ) {
-                    engine.learn(&reading, &selected_text);
+                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                        engine.learn_force(&reading, &selected_text);
+                    } else {
+                        engine.learn(&reading, &selected_text);
+                    }
                 }
                 engine.commit(&full_text);
                 engine.reset_preedit();

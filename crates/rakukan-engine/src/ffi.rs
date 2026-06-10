@@ -11,7 +11,7 @@
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 
-pub const ENGINE_ABI_VERSION: u32 = 7;
+pub const ENGINE_ABI_VERSION: u32 = 8;
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -507,6 +507,22 @@ pub extern "C" fn engine_learn(
         return;
     }
     engine.learn(&reading, &surface);
+}
+
+/// 辞書ガードなしで学習する（候補ウィンドウからの明示選択、案C）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_learn_force(
+    handle: *mut c_void,
+    reading: *const c_char,
+    surface: *const c_char,
+) {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    let reading = unsafe { from_cstr(reading) }.to_string();
+    let surface = unsafe { from_cstr(surface) }.to_string();
+    if reading.is_empty() || surface.is_empty() {
+        return;
+    }
+    engine.learn_force(&reading, &surface);
 }
 
 // ─── 最後のエラーメッセージ（診断用）────────────────────────────────────────

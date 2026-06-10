@@ -188,6 +188,13 @@ pub enum Request {
     /// `connect_or_spawn` で自動的にホストを再 spawn する経路が既にあるため、
     /// TSF 側コードはほぼ無変更で済む。
     Shutdown,
+
+    // ─── 学習（追加） ─────────────────────────────────────────
+    /// 辞書ガードなしで学習する（候補ウィンドウからの明示選択、案C）。
+    LearnForce {
+        reading: String,
+        surface: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

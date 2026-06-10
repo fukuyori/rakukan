@@ -1414,7 +1414,11 @@ impl super::TextServiceFactory_Impl {
                     text.clone()
                 };
                 if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
-                    engine.learn(&reading, &text);
+                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                        engine.learn_force(&reading, &text);
+                    } else {
+                        engine.learn(&reading, &text);
+                    }
                 }
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
