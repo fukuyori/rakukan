@@ -285,9 +285,9 @@ fn alpha_symbol_separator_auto(
         return None;
     };
     match (c, fullwidth) {
-        (',' | '、', true) => Some('，'),  // U+FF0C 全角コンマ
+        (',' | '、', true) => Some('，'), // U+FF0C 全角コンマ
         (',' | '、', false) => Some(','),
-        ('.' | '。', true) => Some('．'),  // U+FF0E 全角ピリオド
+        ('.' | '。', true) => Some('．'), // U+FF0E 全角ピリオド
         ('.' | '。', false) => Some('.'),
         _ => None,
     }
@@ -687,7 +687,11 @@ impl RakunEngine {
         debug!(
             "engine::merge: reading={:?} dict_store={} dict_cands={:?} learn_cands={:?} llm_cands={:?}",
             hiragana,
-            if self.dict_store.is_some() { "Some" } else { "None" },
+            if self.dict_store.is_some() {
+                "Some"
+            } else {
+                "None"
+            },
             dict_cands,
             learn_cands,
             llm_candidates

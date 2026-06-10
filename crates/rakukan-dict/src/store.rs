@@ -75,8 +75,7 @@ impl LearnEntry {
         let dt_days = dt_secs / 86_400.0;
         let decay = 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
         let chars_penalty = self.surface.chars().count() as f64;
-        self.last_access_time as f64
-            + LEARN_W_FREQ * (self.suggestion_freq as f64) * decay
+        self.last_access_time as f64 + LEARN_W_FREQ * (self.suggestion_freq as f64) * decay
             - chars_penalty
     }
 }
@@ -395,11 +394,7 @@ impl DictStore {
         }
         if let Some(mozc) = &self.inner.mozc {
             // 1 読みあたり 1024 候補を超えることはまず無いので、この範囲を走査すれば十分。
-            if mozc
-                .lookup(reading, 1024)
-                .iter()
-                .any(|(s, _)| s == surface)
-            {
+            if mozc.lookup(reading, 1024).iter().any(|(s, _)| s == surface) {
                 return true;
             }
         }
@@ -570,10 +565,7 @@ fn prune_stale_entries(
     pruned
 }
 
-fn save_learn_history_file(
-    path: &Path,
-    entries: &HashMap<String, Vec<LearnEntry>>,
-) -> Result<()> {
+fn save_learn_history_file(path: &Path, entries: &HashMap<String, Vec<LearnEntry>>) -> Result<()> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -581,8 +573,7 @@ fn save_learn_history_file(
         version: LEARN_HISTORY_FORMAT_VERSION,
         entries,
     };
-    let bytes =
-        bincode::serialize(&file).map_err(|e| anyhow::anyhow!("bincode encode: {e}"))?;
+    let bytes = bincode::serialize(&file).map_err(|e| anyhow::anyhow!("bincode encode: {e}"))?;
     // アトミック書き込み: .tmp に書いてからリネーム。crash で破損ファイルを残さない。
     let tmp = path.with_extension("bin.tmp");
     std::fs::write(&tmp, &bytes)?;
@@ -592,10 +583,7 @@ fn save_learn_history_file(
 
 /// 学習履歴の LRU 圧縮。合計エントリ数が `cap` を超えている場合、
 /// `last_access_time` が最古のエントリから `excess` 件を削除する。
-fn trim_learn_history_to_capacity(
-    hist: &mut HashMap<String, Vec<LearnEntry>>,
-    cap: usize,
-) {
+fn trim_learn_history_to_capacity(hist: &mut HashMap<String, Vec<LearnEntry>>, cap: usize) {
     let total: usize = hist.values().map(|v| v.len()).sum();
     if total <= cap {
         return;
@@ -703,7 +691,10 @@ mod tests {
         let store = make_store(&[("あいうえお", vec!["登録済み"])]);
         store.learn("あいうえお", "未登録");
         let learned = store.lookup_learn("あいうえお");
-        assert!(learned.is_empty(), "未登録 surface は learn_history に入らない");
+        assert!(
+            learned.is_empty(),
+            "未登録 surface は learn_history に入らない"
+        );
         // user_dict も変化しない
         let user = store.lookup_user("あいうえお");
         assert_eq!(user, vec!["登録済み"]);
@@ -775,7 +766,15 @@ mod tests {
         // 記号のみからなる surface（括弧ペア等）は辞書外でも学習できる。
         // 何度も選択した『』が昇格しない問題への対処。
         let store = make_store(&[]);
-        for surface in ["『』", "《》", "«»", "\u{201c}\u{201d}", "<>", "【】", "（）"] {
+        for surface in [
+            "『』",
+            "《》",
+            "«»",
+            "\u{201c}\u{201d}",
+            "<>",
+            "【】",
+            "（）",
+        ] {
             store.learn("かっこ", surface);
             let learned = store.lookup_learn("かっこ");
             assert!(
@@ -809,10 +808,7 @@ mod tests {
         // CJK漢字を含む surface は辞書ガードが必要（LLM誤変換防止）。
         // 辞書に存在しない漢字 surface は学習されない。
         let store = make_store(&[]);
-        for (reading, surface) in [
-            ("かっこ", "括弧"),
-            ("あいうえお", "未登録"),
-        ] {
+        for (reading, surface) in [("かっこ", "括弧"), ("あいうえお", "未登録")] {
             store.learn(reading, surface);
             assert!(
                 store.lookup_learn(reading).is_empty(),
@@ -1090,9 +1086,15 @@ mod tests {
         );
 
         let pruned = prune_stale_entries(&mut hist, 180, now);
-        assert_eq!(pruned, 2, "2 エントリが削除される (stale/B と mixed/C-drop)");
+        assert_eq!(
+            pruned, 2,
+            "2 エントリが削除される (stale/B と mixed/C-drop)"
+        );
         assert!(hist.contains_key("fresh"));
-        assert!(!hist.contains_key("stale"), "全エントリが古い reading は削除");
+        assert!(
+            !hist.contains_key("stale"),
+            "全エントリが古い reading は削除"
+        );
         assert!(hist.contains_key("mixed"));
         assert_eq!(hist["mixed"].len(), 1);
         assert_eq!(hist["mixed"][0].surface, "C-keep");

@@ -344,7 +344,10 @@ impl super::TextServiceFactory_Impl {
             text.clone()
         };
         if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
-            if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+            if matches!(
+                candidate_source,
+                Some(crate::engine::state::CandidateViewSource::Bg)
+            ) {
                 engine.learn_force(&reading, &text);
             } else {
                 engine.learn(&reading, &text);

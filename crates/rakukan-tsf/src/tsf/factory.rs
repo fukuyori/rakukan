@@ -32,12 +32,11 @@ use std::cell::RefCell;
 
 use anyhow::Result;
 use windows::{
-    core::{implement, IUnknown, Interface, BSTR, GUID},
     Win32::{
         Foundation::{BOOL, E_FAIL, E_INVALIDARG, FALSE, LPARAM, POINT, RECT, TRUE, WPARAM},
         Graphics::Gdi::HBITMAP,
         System::{
-            Com::{CoCreateInstance, IClassFactory, IClassFactory_Impl, CLSCTX_INPROC_SERVER},
+            Com::{CLSCTX_INPROC_SERVER, CoCreateInstance, IClassFactory, IClassFactory_Impl},
             Ole::CONNECT_E_CANNOTCONNECT,
         },
         UI::{
@@ -47,19 +46,20 @@ use windows::{
                 ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfDisplayAttributeInfo,
                 ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr,
                 ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
-                ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink,
-                ITfLangBarItem_Impl, ITfMenu, ITfSource, ITfSource_Impl, ITfTextInputProcessor,
+                ITfLangBarItem_Impl, ITfLangBarItemButton, ITfLangBarItemButton_Impl,
+                ITfLangBarItemSink, ITfMenu, ITfSource, ITfSource_Impl, ITfTextInputProcessor,
                 ITfTextInputProcessor_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl,
-                ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TfLBIClick,
-                TF_ES_READWRITE, TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED,
-                TF_LBMENUF_SEPARATOR,
+                ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
+                TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
             },
             WindowsAndMessaging::{
-                AppendMenuW, CreatePopupMenu, DestroyMenu, GA_ROOT, GetAncestor, GetForegroundWindow,
-                HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
+                AppendMenuW, CreatePopupMenu, DestroyMenu, GA_ROOT, GetAncestor,
+                GetForegroundWindow, HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD,
+                TPM_RIGHTBUTTON, TrackPopupMenu,
             },
         },
     },
+    core::{BSTR, GUID, IUnknown, Interface, implement},
 };
 
 use crate::{
@@ -75,7 +75,7 @@ use crate::{
     globals::{GUID_DISPLAY_ATTRIBUTE, GUID_DISPLAY_ATTRIBUTE_INPUT},
     tsf::{
         candidate_window, display_attr,
-        language_bar::{self, get_open_close, LANGBAR_SINK_COOKIE},
+        language_bar::{self, LANGBAR_SINK_COOKIE, get_open_close},
         settings_launcher, tray_ipc,
     },
 };
@@ -950,8 +950,20 @@ impl TextServiceFactory_Impl {
 
         let ready = crate::engine::state::is_conversion_ready();
         let mode_char: &'static str = match mode_name {
-            "Hiragana" => if ready { "あ" } else { return; },
-            "Katakana" => if ready { "ア" } else { return; },
+            "Hiragana" => {
+                if ready {
+                    "あ"
+                } else {
+                    return;
+                }
+            }
+            "Katakana" => {
+                if ready {
+                    "ア"
+                } else {
+                    return;
+                }
+            }
             _ => "A",
         };
 
@@ -979,7 +991,6 @@ impl TextServiceFactory_Impl {
             crate::engine::state::engine_reload();
         }
     }
-
 }
 
 // ─── CandidateDir ─────────────────────────────────────────────────────────────
@@ -1257,10 +1268,18 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
                 .ok()
                 .map(|s| match s.input_mode {
                     crate::engine::input_mode::InputMode::Hiragana => {
-                        if ready { "あ" } else { "ー" }
+                        if ready {
+                            "あ"
+                        } else {
+                            "ー"
+                        }
                     }
                     crate::engine::input_mode::InputMode::Katakana => {
-                        if ready { "ア" } else { "ー" }
+                        if ready {
+                            "ア"
+                        } else {
+                            "ー"
+                        }
                     }
                     crate::engine::input_mode::InputMode::Alphanumeric => "A",
                 })
@@ -1287,10 +1306,18 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
                 .ok()
                 .map(|s| match s.input_mode {
                     crate::engine::input_mode::InputMode::Hiragana => {
-                        if ready { "あ" } else { "ー" }
+                        if ready {
+                            "あ"
+                        } else {
+                            "ー"
+                        }
                     }
                     crate::engine::input_mode::InputMode::Katakana => {
-                        if ready { "ア" } else { "ー" }
+                        if ready {
+                            "ア"
+                        } else {
+                            "ー"
+                        }
                     }
                     crate::engine::input_mode::InputMode::Alphanumeric => "A",
                 })
@@ -1436,8 +1463,3 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
         display_attr::get_by_guid(unsafe { &*guid })
     }
 }
-
-
-
-
-

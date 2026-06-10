@@ -712,7 +712,8 @@ impl super::TextServiceFactory_Impl {
                 }
                 // engine のプリエディットをこのブロックの読みに差し替えて sync 変換
                 engine.force_preedit(reading.clone());
-                let candidates = engine_convert_sync_multi(engine, llm_limit_b, BLOCK_DICT_LIMIT, &reading);
+                let candidates =
+                    engine_convert_sync_multi(engine, llm_limit_b, BLOCK_DICT_LIMIT, &reading);
                 blocks.push(ConversionBlock {
                     reading,
                     trailing_punct,
@@ -1414,7 +1415,10 @@ impl super::TextServiceFactory_Impl {
                     text.clone()
                 };
                 if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
-                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                    if matches!(
+                        candidate_source,
+                        Some(crate::engine::state::CandidateViewSource::Bg)
+                    ) {
                         engine.learn_force(&reading, &text);
                     } else {
                         engine.learn(&reading, &text);

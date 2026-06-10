@@ -64,7 +64,11 @@ impl super::TextServiceFactory_Impl {
                         blocks,
                         ..
                     } => {
-                        format!("BlockSelecting(idx={} nblocks={})", current_index, blocks.len())
+                        format!(
+                            "BlockSelecting(idx={} nblocks={})",
+                            current_index,
+                            blocks.len()
+                        )
                     }
                 }
             } else {

@@ -239,7 +239,10 @@ impl super::TextServiceFactory_Impl {
                     &selected_text,
                     candidate_source,
                 ) {
-                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                    if matches!(
+                        candidate_source,
+                        Some(crate::engine::state::CandidateViewSource::Bg)
+                    ) {
                         engine.learn_force(&reading, &selected_text);
                     } else {
                         engine.learn(&reading, &selected_text);
@@ -413,7 +416,10 @@ impl super::TextServiceFactory_Impl {
                     &selected_text,
                     candidate_source,
                 ) {
-                    if matches!(candidate_source, Some(crate::engine::state::CandidateViewSource::Bg)) {
+                    if matches!(
+                        candidate_source,
+                        Some(crate::engine::state::CandidateViewSource::Bg)
+                    ) {
                         engine.learn_force(&reading, &selected_text);
                     } else {
                         engine.learn(&reading, &selected_text);
@@ -476,5 +482,4 @@ impl super::TextServiceFactory_Impl {
         commit_text(ctx, tid, "　".into())?;
         Ok(true)
     }
-
 }

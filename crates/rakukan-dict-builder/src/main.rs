@@ -580,23 +580,23 @@ mod tests {
     #[test]
     fn test_has_unrenderable_kana() {
         // ── 描画不可（フィルタ対象）──
-        assert!(has_unrenderable_kana("\u{1B0B3}"));       // HENTAIGANA LETTER HU-1
-        assert!(has_unrenderable_kana("\u{1B0B5}"));       // HENTAIGANA LETTER HU-3
-        assert!(has_unrenderable_kana("\u{1B000}"));       // Kana Supplement 先頭
-        assert!(has_unrenderable_kana("\u{1B16F}"));       // Small Kana Extension 末尾
-        assert!(has_unrenderable_kana("\u{1AFF0}"));       // Kana Extended-B 先頭
-        assert!(has_unrenderable_kana("ふ\u{1B0B3}る"));   // 混在していても hit
+        assert!(has_unrenderable_kana("\u{1B0B3}")); // HENTAIGANA LETTER HU-1
+        assert!(has_unrenderable_kana("\u{1B0B5}")); // HENTAIGANA LETTER HU-3
+        assert!(has_unrenderable_kana("\u{1B000}")); // Kana Supplement 先頭
+        assert!(has_unrenderable_kana("\u{1B16F}")); // Small Kana Extension 末尾
+        assert!(has_unrenderable_kana("\u{1AFF0}")); // Kana Extended-B 先頭
+        assert!(has_unrenderable_kana("ふ\u{1B0B3}る")); // 混在していても hit
 
         // ── 描画可（フィルタ対象外、絵文字・漢字・通常仮名）──
-        assert!(!has_unrenderable_kana("日本"));           // CJK 基本
-        assert!(!has_unrenderable_kana("にほん"));          // ひらがな
-        assert!(!has_unrenderable_kana("ニホン"));          // カタカナ
-        assert!(!has_unrenderable_kana("\u{23E9}"));       // ⏩ Misc Technical
-        assert!(!has_unrenderable_kana("\u{1F389}"));      // 🎉 絵文字
-        assert!(!has_unrenderable_kana("\u{1F680}"));      // 🚀 絵文字
-        assert!(!has_unrenderable_kana("\u{20000}"));      // CJK Ext B 先頭（保持）
-        assert!(!has_unrenderable_kana("\u{1AFEF}"));      // フィルタ範囲の 1 つ下
-        assert!(!has_unrenderable_kana("\u{1B170}"));      // フィルタ範囲の 1 つ上
+        assert!(!has_unrenderable_kana("日本")); // CJK 基本
+        assert!(!has_unrenderable_kana("にほん")); // ひらがな
+        assert!(!has_unrenderable_kana("ニホン")); // カタカナ
+        assert!(!has_unrenderable_kana("\u{23E9}")); // ⏩ Misc Technical
+        assert!(!has_unrenderable_kana("\u{1F389}")); // 🎉 絵文字
+        assert!(!has_unrenderable_kana("\u{1F680}")); // 🚀 絵文字
+        assert!(!has_unrenderable_kana("\u{20000}")); // CJK Ext B 先頭（保持）
+        assert!(!has_unrenderable_kana("\u{1AFEF}")); // フィルタ範囲の 1 つ下
+        assert!(!has_unrenderable_kana("\u{1B170}")); // フィルタ範囲の 1 つ上
     }
 
     #[test]
@@ -632,7 +632,10 @@ mod tests {
         assert!(entries.iter().all(|e| e.cost == 6000));
 
         // ⏩ が hiragana 読みで引けること
-        let hayaokuri: Vec<&Entry> = entries.iter().filter(|e| e.reading == "はやおくり").collect();
+        let hayaokuri: Vec<&Entry> = entries
+            .iter()
+            .filter(|e| e.reading == "はやおくり")
+            .collect();
         assert_eq!(hayaokuri.len(), 1);
         assert_eq!(hayaokuri[0].surface, "\u{23E9}\u{FE0F}");
 
@@ -646,7 +649,7 @@ mod tests {
         // 通常エントリ 2 + 変体仮名 surface 1 → 2 件のみ残る
         let content = make_tsv(&[
             "にほん\t1849\t1849\t3394\t日本",
-            "ふ\t1234\t1234\t5000\t\u{1B0B3}",       // surface = HENTAIGANA HU-1
+            "ふ\t1234\t1234\t5000\t\u{1B0B3}", // surface = HENTAIGANA HU-1
             "にほんご\t1849\t1849\t4000\t日本語",
         ]);
         let tmp = tempfile::NamedTempFile::new().unwrap();
@@ -656,7 +659,7 @@ mod tests {
         assert!(entries.iter().all(|e| !has_unrenderable_kana(&e.surface)));
         // 絵文字・通常漢字は残る確認
         let content2 = make_tsv(&[
-            "はやおくり\t1849\t1849\t3000\t\u{23E9}",  // ⏩
+            "はやおくり\t1849\t1849\t3000\t\u{23E9}", // ⏩
             "にほん\t1849\t1849\t3394\t日本",
         ]);
         std::fs::write(tmp.path(), &content2).unwrap();

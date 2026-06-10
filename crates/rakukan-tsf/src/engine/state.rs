@@ -596,11 +596,21 @@ pub fn is_live_conversion_reading_ready(reading: &str) -> bool {
 }
 
 pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
-    // 記号（区読点）が含まれる場合はライブ変換しない。
-    // Space 押下時に BlockSelecting フローで変換する。
-    if is_live_conversion_reading_ready(reading)
-        && !super::text_util::contains_kuten(reading)
-    {
+    // 区読点が含まれる場合: 最後の区読点以降のサフィックスが min_chars 以上あれば許可する。
+    // 「きょうは、」のように区読点で終わっている（続きがない）場合は起動しない。
+    // 「きょうは、またあした」のように続きがある場合はフル reading を BG 変換に渡す。
+    let check = if super::text_util::contains_kuten(reading) {
+        let suffix_start = reading
+            .char_indices()
+            .rev()
+            .find(|(_, c)| super::text_util::is_kuten(*c))
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(0);
+        &reading[suffix_start..]
+    } else {
+        reading
+    };
+    if is_live_conversion_reading_ready(check) {
         Some(get_live_conv_beam_size())
     } else {
         None
@@ -1382,7 +1392,10 @@ impl SessionState {
         {
             let block = blocks.get(*current_index)?;
             let cand = block.current_candidate().to_string();
-            let punct = block.trailing_punct.map(|c| c.to_string()).unwrap_or_default();
+            let punct = block
+                .trailing_punct
+                .map(|c| c.to_string())
+                .unwrap_or_default();
             let text = format!("{cand}{punct}");
             committed_prefix.push_str(&text);
             Some(text)
@@ -1396,7 +1409,10 @@ impl SessionState {
     /// 最終ブロック確定時に `block_selecting_commit_current()` を呼んだ後に参照すると
     /// 全ブロックのテキストが得られる（学習・engine.commit 用）。
     pub fn block_selecting_accumulated_text(&self) -> Option<String> {
-        if let SessionState::BlockSelecting { committed_prefix, .. } = self {
+        if let SessionState::BlockSelecting {
+            committed_prefix, ..
+        } = self
+        {
             Some(committed_prefix.clone())
         } else {
             None

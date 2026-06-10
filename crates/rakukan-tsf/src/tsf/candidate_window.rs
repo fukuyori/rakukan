@@ -25,26 +25,27 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering as AO};
 
 use windows::{
-    core::PCWSTR,
     Win32::{
         Foundation::{BOOL, COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, CreateCompatibleDC, CreateFontW, CreateSolidBrush, DeleteDC, DeleteObject,
-            EndPaint, FillRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, InvalidateRect,
-            MonitorFromPoint, ReleaseDC, SelectObject, SetBkMode, SetTextColor, TextOutW,
-            BACKGROUND_MODE, HDC, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT,
+            BACKGROUND_MODE, BeginPaint, CreateCompatibleDC, CreateFontW, CreateSolidBrush,
+            DeleteDC, DeleteObject, EndPaint, FillRect, GetDC, GetMonitorInfoW,
+            GetTextExtentPoint32W, HDC, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+            MonitorFromPoint, PAINTSTRUCT, ReleaseDC, SelectObject, SetBkMode, SetTextColor,
+            TextOutW,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             TextServices::ITfThreadMgr,
             WindowsAndMessaging::{
-                CreateWindowExW, DefWindowProcW, DestroyWindow, KillTimer, PostMessageW,
-                RegisterClassW, SetTimer, SetWindowPos, ShowWindow, HMENU, HWND_TOPMOST,
-                SWP_NOACTIVATE, SW_HIDE, SW_SHOWNOACTIVATE, WM_APP, WM_ERASEBKGND, WM_PAINT,
-                WM_TIMER, WNDCLASSW, WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+                CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, HWND_TOPMOST, KillTimer,
+                PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer,
+                SetWindowPos, ShowWindow, WM_APP, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW,
+                WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
+    core::PCWSTR,
 };
 
 // ─── レイアウト定数 ───────────────────────────────────────────────────────────
@@ -248,7 +249,19 @@ unsafe fn compute_needed_width(
 
     let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        FONT_HEIGHT, 0, 0, 0, 400, 0, 0, 0, 1, 0, 0, 0, 0,
+        FONT_HEIGHT,
+        0,
+        0,
+        0,
+        400,
+        0,
+        0,
+        0,
+        1,
+        0,
+        0,
+        0,
+        0,
         PCWSTR(face.as_ptr()),
     );
     let old_font = SelectObject(mem_dc, font);
@@ -260,9 +273,13 @@ unsafe fn compute_needed_width(
             size.cx
         } else {
             // フォールバック: ASCII 9px / その他 18px の概算
-            let (ascii, other) = text.chars().fold((0, 0), |(a, o), c| {
-                if c.is_ascii() { (a + 1, o) } else { (a, o + 1) }
-            });
+            let (ascii, other) =
+                text.chars().fold(
+                    (0, 0),
+                    |(a, o), c| {
+                        if c.is_ascii() { (a + 1, o) } else { (a, o + 1) }
+                    },
+                );
             ascii * 9 + other * 18
         }
     };
@@ -560,7 +577,11 @@ pub fn reposition(x: i32, y: i32) {
     }
     let (n, has_pager, has_status) = TL_CAND.with(|c| {
         let d = c.borrow();
-        (d.candidates.len(), !d.page_info.is_empty(), d.status_line.is_some())
+        (
+            d.candidates.len(),
+            !d.page_info.is_empty(),
+            d.status_line.is_some(),
+        )
     });
     if n == 0 {
         return;
@@ -1543,9 +1564,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
             let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
                 Ok(g) => g,
                 Err(_) => {
-                    tracing::debug!(
-                        "[Live] Phase1A: COMPOSITION_APPLY_LOCK busy, skip SetText"
-                    );
+                    tracing::debug!("[Live] Phase1A: COMPOSITION_APPLY_LOCK busy, skip SetText");
                     return Ok(());
                 }
             };
@@ -1598,7 +1617,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
 /// (M1.8 T-MID1 + M2 §5.3)。
 fn queue_phase1b(snapshot: &LiveSnapshot) {
     use crate::tsf::live_session::{
-        conv_gen_snapshot, queue_preview_set, session_nonce_snapshot, PreviewEntry,
+        PreviewEntry, conv_gen_snapshot, queue_preview_set, session_nonce_snapshot,
     };
     let gen_snapshot = conv_gen_snapshot();
     let nonce_snapshot = session_nonce_snapshot();

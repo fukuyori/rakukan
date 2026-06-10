@@ -35,8 +35,7 @@ pub(super) unsafe fn get_caret_pos_from_context(
     let mut rect = windows::Win32::Foundation::RECT::default();
     let mut clipped = windows::Win32::Foundation::BOOL(0);
     unsafe {
-        view.GetTextExt(ec, &range, &mut rect, &mut clipped)
-            .ok()?;
+        view.GetTextExt(ec, &range, &mut rect, &mut clipped).ok()?;
     }
     // rect はスクリーン座標。left = x, bottom = キャレット下端。
     Some((rect.left, rect.bottom))
@@ -355,7 +354,10 @@ pub(super) fn commit_then_start_composition(
             use windows::Win32::Foundation::RECT;
             let mut rect = RECT::default();
             let mut clipped = windows::Win32::Foundation::BOOL(0);
-            if view.GetTextExt(ec, &new_range, &mut rect, &mut clipped).is_ok() {
+            if view
+                .GetTextExt(ec, &new_range, &mut rect, &mut clipped)
+                .is_ok()
+            {
                 caret_rect_set(rect);
                 // 候補ウィンドウが表示中であれば位置を更新（非表示なら何もしない）
                 crate::tsf::candidate_window::reposition(rect.left, rect.bottom);

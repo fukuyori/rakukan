@@ -78,3 +78,6 @@ dist/
 # ローカル研究メモ（リポジトリに含めない）
 docs/azookey-analysis/
 docs/japanese-understanding/
+
+# Claude Code ワークツリー（ローカル専用）
+.claude/worktrees/
