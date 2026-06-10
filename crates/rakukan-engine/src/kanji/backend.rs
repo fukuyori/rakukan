@@ -317,7 +317,7 @@ mod tests {
     }
 
     #[test]
-
+    #[ignore = "requires network access to download GGUF model"]
     fn test_xsmall_special_tokens() {
         use super::super::hf_download::{get_path_by_id, get_tokenizer_path_by_id};
         use super::super::{CONTEXT_TOKEN, INPUT_START_TOKEN, OUTPUT_START_TOKEN};
