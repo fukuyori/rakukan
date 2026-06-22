@@ -138,11 +138,6 @@ impl super::TextServiceFactory_Impl {
                         )
                         .to_string();
                         if !reading.is_empty() {
-                            // 尻切れ防壁（M1.5 T-BUG2）: Phase1B 経路でも同じく
-                            // preview の長さが reading に対して極端に短ければ破棄
-                            let preview = candidate_window::sanity_check_preview(
-                                &reading, preview, "Phase1B",
-                            );
                             tracing::info!(
                                 "[Live] Phase1B: applying preview={:?} reading={:?} pending={:?}",
                                 preview,
@@ -347,8 +342,20 @@ impl super::TextServiceFactory_Impl {
         } // if !is_cancel
 
         match action {
-            UserAction::Input(c) => self.on_input(c, ctx, tid, sink, guard),
-            UserAction::InputRaw(c) => self.on_input_raw(c, ctx, tid, sink, guard),
+            UserAction::Input(c) => {
+                if let Some(symbol) = text_util::direct_input_symbol(c) {
+                    self.on_punctuate(symbol, ctx, tid, sink, guard)
+                } else {
+                    self.on_input(c, ctx, tid, sink, guard)
+                }
+            }
+            UserAction::InputRaw(c) => {
+                if let Some(symbol) = text_util::direct_input_symbol(c) {
+                    self.on_punctuate(symbol, ctx, tid, sink, guard)
+                } else {
+                    self.on_input_raw(c, ctx, tid, sink, guard)
+                }
+            }
             UserAction::FullWidthSpace => self.on_full_width_space(ctx, tid, guard),
             UserAction::Convert => self.on_convert(ctx, tid, sink, guard),
             UserAction::CommitRaw => self.on_commit_raw(ctx, tid, sink, guard),

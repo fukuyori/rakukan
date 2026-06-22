@@ -1,19 +1,24 @@
-# Rakukan 引き継ぎ資料 (v0.9.8)
+# Rakukan 引き継ぎ資料 (v0.9.9)
 
-更新日: 2026-06-11
+更新日: 2026-06-22
 
 ## 現在の状態
 
-- **バージョン:** v0.9.8
+- **バージョン:** v0.9.9
+- **v0.9.9 の内容:**
+  - **ユーザー辞書候補のライブ変換反映**: `かっことじ` など、ユーザー辞書に登録した読みがライブ変換で候補化されない問題を修正。ライブ変換 preview 生成時に現在の読みを明示してユーザー辞書・学習履歴・MOZC 辞書候補をマージする経路を追加。
+  - **未入力状態の記号入力**: 未入力状態で記号を入力した場合に即時確定せず、未変換文字列として保持するよう修正。変換対象は記号以降の読みを優先して扱う。
+  - **長文ライブ変換 preview の急縮小ガード**: 入力が伸びているにもかかわらず前回 preview より極端に短い変換結果が返った場合、直前 preview に新規入力分を足した表示へフォールバックするようにした。辞書候補として確認できる短い変換（例: `せんちめーとる` → `糎`、`ほねとかわとがはなれるおと` → `砉`）はガード対象外。
+- **バージョン (1 つ前):** v0.9.8
 - **v0.9.8 の内容:**
   - **記号入力後のライブ変換再開**: ライブ変換中に `、` `。` などの区読点を入力した後、続けてひらがなを入力するとライブ変換が再開するようになった。`live_bg_start_n_cands`（`state.rs`）の `contains_kuten` ガードを緩和し、最後の区読点以降のサフィックスが `min_chars`（デフォルト 3）以上ある場合はフル reading を BG 変換に渡すよう変更。区読点のみで終わる場合は従来通り抑制。
-- **バージョン (1 つ前):** v0.9.7
+- **バージョン (2 つ前):** v0.9.7
 - **v0.9.7 の内容:**
   - **LLM 候補の学習対応（案C）**: 候補ウィンドウから明示的に選択した LLM 候補（`CandidateViewSource::Bg`）を `learn_history` に記録するようにした。`DictStore::learn_force` を追加し、辞書外 CJK surface でも学習可能にした。Selecting 状態の確定経路 4 箇所（`on_input.rs` × 2、`on_convert.rs` × 1、`edit_ops.rs` × 1）で source が `Bg` のときガードをバイパス。LiveConv Enter 自動確定は従来通りガードあり。Engine ABI バージョン 7 → 8、RPC に `LearnForce` バリアント追加。
-- **バージョン (2 つ前):** v0.9.6
+- **バージョン (3 つ前):** v0.9.6
 - **v0.9.6 の内容:**
   - **モード切替時のカーソル位置「ー」表示修正**: かな入力モードへの切替時、エンジンが準備完了していてもカーソルに「ー」が表示される問題を修正。`DICT_READY_LATCH` はキー入力時にのみセットされるため、最初のキー入力前のモード切替では false のまま「ー」が表示されていた。`show_mode_indicator` 内でラッチが false の場合に `engine_try_get()` → `poll_dict_ready_cached()` でエンジンへ直接問い合わせラッチを更新。それでも未準備なら表示をスキップ（カーソル位置には何も出さず、言語バーの「ー」のみで通知）。
-- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加、v0.9.3 では区読点分割変換（BlockSelecting）を追加した。v0.9.4 では区読点の対象記号拡張・候補順序・min_chars・エンジン未準備インジケーター・辞書外学習・設定画面バージョン表示を追加。v0.9.5 ではユーザー辞書エディターの複数候補表示バグを修正。v0.9.6 ではモード切替時のカーソル位置「ー」表示を修正。v0.9.7 では LLM 候補の明示選択による学習（案C）を追加した。**v0.9.8 では区読点入力後のライブ変換再開を修正した。**
+- **位置づけ:** v0.6.6 で Explorer crash の unload race を解消し、**0.7.x シリーズ（安定性向上・保守性改善）** に移行した後、v0.7.0〜v0.7.7 でユーザ可視 bug fix 4 件 + host crash 根絶 + ライブ変換中枢の大規模リファクタ (factory.rs 分割 / on_live_timer 分解 / LiveConvSession + LiveShared 集約 / session_nonce 三重防壁) を消化。v0.8.x では数字・記号・英字の候補拡張とライブ変換 preview 改善、候補メタデータ統一を段階的に進めた。v0.9.0 では Phase 6b（azooKey 型候補メタデータの導入）を完結、v0.9.1 では source-based 学習フィルタと起動時 stale prune を追加、v0.9.2 では英字・記号の入力幅設定と Western 句読点自動変換を追加、v0.9.3 では区読点分割変換（BlockSelecting）を追加した。v0.9.4 では区読点の対象記号拡張・候補順序・min_chars・エンジン未準備インジケーター・辞書外学習・設定画面バージョン表示を追加。v0.9.5 ではユーザー辞書エディターの複数候補表示バグを修正。v0.9.6 ではモード切替時のカーソル位置「ー」表示を修正。v0.9.7 では LLM 候補の明示選択による学習（案C）を追加し、v0.9.8 では区読点入力後のライブ変換再開を修正した。**v0.9.9 ではユーザー辞書候補のライブ変換反映、未入力記号の未変換保持、長文 preview 急縮小ガードを追加した。**
 - **v0.9.3 の内容（区読点分割変換）:**
   - 読みに `、` `。` `！` `？` が含まれると自動的に句読点位置でブロックへ分割し、`BlockSelecting` 状態へ移行
   - `Space` で各ブロックを変換、`Enter` でブロックを逐次コミット（確定済みテキストをドキュメントへ送出し、残りブロックのみ composition として継続）
@@ -142,11 +147,11 @@ crates/
 - **パイプ名:** `\\.\pipe\rakukan-engine-<USERNAME-sanitized>`
 - **フレーミング:** `[u32 LE payload-length][postcard payload]`
 - **エンコード:** postcard（forward-compat、小サイズ）
-- **ハンドシェイク:** 接続直後に `Hello { protocol_version }` を交換（現在 v1）
+- **ハンドシェイク:** 接続直後に `Hello { protocol_version }` を交換（現在 v4）
 - **主なリクエスト:** DynEngine の全メソッドを 1:1 でマップ
   - `Create { config_json }`: 初回のみ DynEngine を生成（idempotent）
   - `Reload { config_json }`: 既存 DynEngine を drop して新 config で再生成（config.toml 編集後の反映に使用）
-  - `PushChar / Backspace / BgStart / BgTakeCandidates / Commit / ResetAll / …`
+  - `PushChar / Backspace / BgStart / BgTakeCandidates / MergeCandidatesForReading / Commit / ResetAll / …`
 - **エンジン状態共有:** ホスト内で 1 つの `Mutex<DynEngine>` を共有（llama 推論は逐次なので問題なし）
 
 ## ホストプロセスのライフサイクル
@@ -194,7 +199,7 @@ IME モード切替で `reload_if_changed()` が mtime チェックを行い、�
 
 ### 開発運用
 
-- engine ABI バージョンチェックあり
+- engine ABI バージョンチェックあり（現在 v9）
 - 古い engine DLL を読んだ場合、更新漏れがログで分かる
 
 ## 主な変更ファイル (0.4.4)

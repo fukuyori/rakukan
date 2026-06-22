@@ -618,9 +618,16 @@ pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
 }
 
 pub fn start_live_bg_if_ready(engine: &DynEngine, reading: &str) -> bool {
-    live_bg_start_n_cands(reading)
-        .map(|n| engine.bg_start(n))
-        .unwrap_or(false)
+    let Some(n) = live_bg_start_n_cands(reading) else {
+        return false;
+    };
+    if engine.bg_start(n) {
+        return true;
+    }
+    engine
+        .merge_candidates_for_reading(reading, vec![], 40)
+        .into_iter()
+        .any(|candidate| !candidate.is_empty() && candidate != reading)
 }
 
 /// `[input] auto_learn` 設定を返す（デフォルト: false）。
@@ -1971,26 +1978,10 @@ impl SessionState {
         }
     }
 
-    /// 句読点保留をセット（確定時に変換テキスト末尾に連結する）
-    pub fn set_punct_pending(&mut self, c: char) {
-        if let SessionState::Selecting { punct_pending, .. } = self {
-            *punct_pending = Some(c);
-        }
-    }
-
     /// 句読点保留を取り出す
     pub fn take_punct_pending(&mut self) -> Option<char> {
         if let SessionState::Selecting { punct_pending, .. } = self {
             punct_pending.take()
-        } else {
-            None
-        }
-    }
-
-    /// Selecting 状態での pos_x, pos_y を返す
-    pub fn selecting_pos(&self) -> Option<(i32, i32)> {
-        if let SessionState::Selecting { pos_x, pos_y, .. } = self {
-            Some((*pos_x, *pos_y))
         } else {
             None
         }

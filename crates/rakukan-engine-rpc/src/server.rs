@@ -277,6 +277,13 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             eng.learn_force(&reading, &surface);
             Response::Unit
         }
+        MergeCandidatesForReading {
+            reading,
+            llm_cands,
+            limit,
+        } => {
+            Response::Strings(eng.merge_candidates_for_reading(&reading, llm_cands, limit as usize))
+        }
         LastError => Response::String(eng.last_error()),
         DictStatus => Response::String(eng.dict_status()),
 

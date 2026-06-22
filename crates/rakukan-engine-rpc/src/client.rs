@@ -308,6 +308,19 @@ impl RpcEngine {
         })
         .unwrap_or_default()
     }
+    pub fn merge_candidates_for_reading(
+        &self,
+        reading: &str,
+        llm_cands: Vec<String>,
+        limit: usize,
+    ) -> Vec<String> {
+        self.call_strings(Request::MergeCandidatesForReading {
+            reading: reading.into(),
+            llm_cands,
+            limit: limit as u32,
+        })
+        .unwrap_or_default()
+    }
     pub fn start_load_model(&self) {
         let _ = self.call_unit(Request::StartLoadModel);
     }

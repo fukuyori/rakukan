@@ -189,7 +189,7 @@ Preedit { text }          ─ ひらがな入力中
   │ BG タイマー発火
   ▼
 LiveConv {                ─ ライブ変換表示中
-  reading, preview          preview = LLM トップ候補
+  reading, preview          preview = 辞書/学習/LLM をマージしたトップ候補
 }
   │ Space（Convert）
   ▼
@@ -398,11 +398,17 @@ State::Idle
 merge_candidates(llm_cands, limit)
   │
   ├─ ユーザー辞書候補（lookup_user）       最優先
-  ├─ LLM 候補（llm_cands）
-  └─ mozc/SKK 辞書候補（lookup_dict）    最大 limit 件
+  ├─ 学習履歴候補（learn_history）
+  ├─ mozc/SKK 辞書候補（lookup_dict）
+  └─ LLM 候補（llm_cands）
   
   重複除去して返却（先着順）
 ```
+
+`merge_candidates(llm_cands, limit)` は engine が保持している現在の `hiragana_buf` を読みとして使う。
+ライブ変換 preview や TSF 側の即時辞書候補では、呼び出し時点の読みを明示する
+`merge_candidates_for_reading(reading, llm_cands, limit)` を使う。これにより、`かっことじ`
+→ `』` のようなユーザー辞書候補を、LLM 結果がまだ無い段階でも preview に反映できる。
 
 ### 5.6 コンテキスト管理（committed）
 
@@ -471,6 +477,8 @@ RpcEngine (client)                          serve() (server)
 
 ### プロトコル
 
+現在の `PROTOCOL_VERSION` は **4**。
+
 `rakukan-engine-rpc/src/protocol.rs` の `Request` enum は DynEngine の全メソッドを
 1 対 1 でマップしている。代表的なバリアント:
 
@@ -481,6 +489,7 @@ RpcEngine (client)                          serve() (server)
 | `Reload { config_json }` | 既存 DynEngine を drop して新 config で再生成 |
 | `PushChar(u32) / Backspace / ResetAll / ...` | 入力操作 |
 | `BgStart / BgWaitMs / BgTakeCandidates / ...` | BG 変換 |
+| `MergeCandidates / MergeCandidatesForReading` | 候補マージ。後者は TSF 側が reading を明示する |
 | `ConvertSync / SegmentSurface / ...` | 同期変換 |
 | `Bye` | クライアント切断宣言 |
 

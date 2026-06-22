@@ -164,7 +164,8 @@ composition updater
 | `bg_reclaim()` | Done converter を回収し、候補は破棄 | 安全回収と候補破棄が同じ操作になっている |
 | `bg_wait_ms(ms)` | BG 完了を短時間待つ | Space hot path に待機を持ち込む |
 | `convert_sync()` | 同期変換 | fallback として残っており、体感ラグの原因になりうる |
-| `merge_candidates(llm, limit)` | user/learn/LLM/dict を統合 | 辞書即時候補生成と LLM 結果のマージを兼ねる |
+| `merge_candidates(llm, limit)` | user/learn/dict/LLM を統合 | engine の現在 `hiragana_buf` を reading として使う |
+| `merge_candidates_for_reading(reading, llm, limit)` | 指定した reading で user/learn/dict/LLM を統合 | live preview / 記号以降の変換対象など、TSF 側が現在の変換対象を明示したい経路で使う |
 
 #### イベント別経路監査
 
@@ -581,6 +582,13 @@ active beam を候補に混ぜない。これにより、LiveConv の `previous_
 `live_continuation_guard` を追加する。これは候補生成方式を変えず、表示欠落を避けるための
 局所的な安全策とする。
 
+2026-06-22 追記: 単純な「入力長に対して短いか」では、`せんちめーとる` → `糎` や
+`ほねとかわとがはなれるおと` → `砉` のような正しい辞書候補まで弾いてしまう。
+このため v0.9.9 では、現在 preview の長さを入力長ではなく前回 preview の長さと比較する
+`guard_preview_shrink` に変更した。入力が伸び、かつ前回 preview から今回 preview が急に縮んだ場合だけ、
+`previous_preview + suffix` へフォールバックする。さらに、`merge_candidates_for_reading` で
+辞書/ユーザー辞書/学習履歴由来と確認できる短い候補はガード対象外にする。
+
 表示の原則は以下のとおり。
 
 ```text
@@ -589,10 +597,12 @@ active beam を候補に混ぜない。これにより、LiveConv の `previous_
 3. 表示は変換後 preview が得られた時だけ、current reading 全体に対応する preview へ更新する
 4. 1-2 文字目は未変換 preedit をそのまま表示し、3 文字目からライブ変換を開始する
 5. 未完了 beam 由来の preview はできるだけ LiveConv に入れない
+6. 入力が伸びている最中の急縮小 preview は前回 preview と比較して防ぐ
+7. 辞書で確認できる短い surface は正しい候補として許可する
 ```
 
 これにより、長文で後方が消える問題と、最後の文字が表示合成から漏れる問題を、
-表示側の文字数推定ではなく生成候補の完了性で抑える。
+表示側の絶対的な文字数推定ではなく、生成候補の完了性と前回 preview からの変化量で抑える。
 
 方針:
 

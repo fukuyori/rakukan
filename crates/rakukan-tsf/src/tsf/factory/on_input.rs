@@ -19,6 +19,8 @@ use super::{
     update_composition,
 };
 
+const LIVE_CONTINUATION_GUARD_MIN_READING_LEN: usize = 12;
+
 fn live_continuation_display(
     reading: &str,
     preview: &str,
@@ -31,7 +33,10 @@ fn live_continuation_display(
 
     let new_reading_len = new_reading.chars().count();
     let display_base_len = display_base.chars().count();
-    if !suffix.is_empty() && new_reading_len >= 12 && display_base_len * 5 < new_reading_len * 3 {
+    if !suffix.is_empty()
+        && new_reading_len >= LIVE_CONTINUATION_GUARD_MIN_READING_LEN
+        && display_base_len * 5 < new_reading_len * 3
+    {
         tracing::warn!(
             "live_continuation_guard event=fallback old_reading_len={} new_reading_len={} preview_len={} suffix_len={} pending_len={} display_base_len={}",
             reading.chars().count(),
@@ -45,6 +50,38 @@ fn live_continuation_display(
         (new_reading.to_string(), shown)
     } else {
         (display_base, display_shown)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_continuation_display;
+
+    #[test]
+    fn live_continuation_falls_back_when_long_display_gets_too_short() {
+        let (display_hira, display_shown) =
+            live_continuation_display("abcdefghijkl", "ABC", "abcdefghijklm", "m", "");
+
+        assert_eq!(display_hira, "abcdefghijklm");
+        assert_eq!(display_shown, "abcdefghijklm");
+    }
+
+    #[test]
+    fn live_continuation_keeps_short_compact_preview() {
+        let (display_hira, display_shown) =
+            live_continuation_display("かっこ", "『", "かっこと", "と", "");
+
+        assert_eq!(display_hira, "『と");
+        assert_eq!(display_shown, "『と");
+    }
+
+    #[test]
+    fn live_continuation_keeps_reasonable_preview() {
+        let (display_hira, display_shown) =
+            live_continuation_display("ろぐを", "ログを", "ろぐをか", "か", "");
+
+        assert_eq!(display_hira, "ログをか");
+        assert_eq!(display_shown, "ログをか");
     }
 }
 

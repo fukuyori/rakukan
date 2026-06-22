@@ -1251,27 +1251,62 @@ fn current_millis() -> u64 {
         .unwrap_or(0)
 }
 
-/// Preview の長さが reading に対して極端に短い場合、LLM が早期 EOS を出して
-/// 尻切れを起こしたと判定し、preview を破棄して reading をそのまま返す（M1.5 T-BUG2）。
+const LIVE_SHRINK_GUARD_MIN_READING_LEN: usize = 12;
+const LIVE_SHRINK_GUARD_MIN_DROP: usize = 4;
+
+/// 入力が伸びているのに今回 preview が前回 preview より急に短くなった場合、
+/// LLM が早期 EOS を出して尻切れを起こしたとみなし、前回 preview + 追加読みで表示する。
 ///
-/// RATIO は 30% (3/10) で、漢字圧縮の自然下限を残しつつ尻切れを弾く目安。
-/// 閾値に達する preview はそのまま返す。
-pub(crate) fn sanity_check_preview(reading: &str, preview: String, site: &str) -> String {
-    const RATIO_NUM: usize = 3;
-    const RATIO_DEN: usize = 10;
-    let reading_len = reading.chars().count();
-    let preview_len = preview.chars().count();
-    if preview_len * RATIO_DEN < reading_len * RATIO_NUM {
-        tracing::warn!(
-            "[Live] {site}: preview discarded (too short) reading_len={} preview_len={} preview={:?}",
-            reading_len,
-            preview_len,
-            preview
-        );
-        reading.to_string()
-    } else {
-        preview
+/// 「読み全体に対して短いか」は見ない。`せんちめーとる -> 糎` のような
+/// 短い語の正しい圧縮を誤って捨てないため、長めの継続入力だけを対象にする。
+pub(crate) fn guard_preview_shrink(
+    previous: Option<(&str, &str)>,
+    reading: &str,
+    preview: String,
+    keep_short_preview: bool,
+    site: &str,
+) -> String {
+    let Some((prev_reading, prev_preview)) = previous else {
+        return preview;
+    };
+    if keep_short_preview || is_symbol_only_preview(&preview) {
+        return preview;
     }
+    if prev_reading.is_empty() || !reading.starts_with(prev_reading) || reading == prev_reading {
+        return preview;
+    }
+
+    let reading_len = reading.chars().count();
+    if reading_len < LIVE_SHRINK_GUARD_MIN_READING_LEN {
+        return preview;
+    }
+
+    let prev_preview_len = prev_preview.chars().count();
+    let preview_len = preview.chars().count();
+    let drop = prev_preview_len.saturating_sub(preview_len);
+    if drop < LIVE_SHRINK_GUARD_MIN_DROP || preview_len * 2 > prev_preview_len {
+        return preview;
+    }
+
+    let suffix = reading.strip_prefix(prev_reading).unwrap_or("");
+    let fallback = format!("{prev_preview}{suffix}");
+    tracing::warn!(
+        "[Live] {site}: preview shrink guarded prev_reading_len={} reading_len={} prev_preview_len={} preview_len={} suffix_len={} preview={:?} fallback={:?}",
+        prev_reading.chars().count(),
+        reading_len,
+        prev_preview_len,
+        preview_len,
+        suffix.chars().count(),
+        preview,
+        fallback
+    );
+    fallback
+}
+
+fn is_symbol_only_preview(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| !c.is_alphanumeric() && !c.is_whitespace())
 }
 
 /// debounce 経過時刻を返す。debounce 中なら `None` (caller は早期リターン)。
@@ -1347,6 +1382,20 @@ fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
     })
 }
 
+fn has_immediate_live_preview_candidate(
+    engine: &crate::engine::state::DynEngine,
+    reading: &str,
+) -> bool {
+    engine
+        .merge_candidates_for_reading(reading, vec![], 40)
+        .into_iter()
+        .any(|candidate| !candidate.is_empty() && candidate != reading)
+}
+
+fn is_dict_like_preview_candidate(candidates: &[String], reading: &str, preview: &str) -> bool {
+    preview != reading && candidates.iter().any(|candidate| candidate == preview)
+}
+
 /// bg ワーカーが done で結果取得可能なら `true`、そうでなければ caller は return。
 ///
 /// - bg=done: そのまま続行
@@ -1373,21 +1422,33 @@ fn ensure_bg_running(probe: &LiveProbe) -> bool {
                         kanji_ready,
                         dict_ready
                     );
+                    if has_immediate_live_preview_candidate(e, &probe.reading) {
+                        tracing::info!("[Live] on_live_timer: immediate dict preview available");
+                        return true;
+                    }
                     if !kanji_ready {
                         // モデル未ロード → タイマーを止めてロック競合を防ぐ。
                         // モデルロード完了後、次の on_input で live_input_notify が再起動する。
                         return false;
                     }
-                    crate::engine::state::start_live_bg_if_ready(e, &probe.reading)
+                    let _ = crate::engine::state::start_live_bg_if_ready(e, &probe.reading);
+                    false
                 })
                 .unwrap_or(false),
             Err(_) => false,
         };
-        tracing::info!("[Live] on_live_timer: bg=idle → bg_start={}", started);
+        tracing::info!("[Live] on_live_timer: bg=idle → ready={}", started);
         if !started {
             stop_live_timer(); // kanji_ready=false の間はタイマーを止める
         }
     } else {
+        if let Ok(g) = engine_try_get()
+            && let Some(e) = g.as_ref()
+            && has_immediate_live_preview_candidate(e, &probe.reading)
+        {
+            tracing::info!("[Live] on_live_timer: immediate dict preview while bg=running");
+            return true;
+        }
         // bg=running: まだ変換中
         if !crate::tsf::live_session::swap_fired_once(true) {
             tracing::info!("[Live] on_live_timer: waiting bg={}", probe.bg_status);
@@ -1403,7 +1464,7 @@ struct LivePreview {
     preview: String,
 }
 
-/// engine から preview を取得し、尻切れ防壁を通す。
+/// engine から preview を取得し、前回 preview との急縮小防壁を通す。
 ///
 /// M2 §5.2: 取得は `bg_peek_top_candidate` を使う (非破壊)。
 /// `bg_take_candidates` は commit / Space 変換用で converter を engine に戻すが、
@@ -1414,7 +1475,7 @@ fn fetch_preview() -> Option<LivePreview> {
     use crate::engine::state::engine_try_get;
     crate::tsf::live_session::reset_fired_once();
 
-    let (reading, pending, preview) = {
+    let (reading, pending, preview, previous, keep_short_preview) = {
         let Ok(mut g) = engine_try_get() else {
             tracing::warn!("[Live] on_live_timer: engine busy");
             return None;
@@ -1431,13 +1492,27 @@ fn fetch_preview() -> Option<LivePreview> {
             "on_live_timer pending",
         )
         .to_string();
-        let preview = eng.bg_peek_top_candidate(&reading).and_then(|top| {
-            eng.merge_candidates(vec![top], 40)
+        let dict_like_candidates = eng.merge_candidates_for_reading(&reading, vec![], 40);
+        let preview = if let Some(top) = eng.bg_peek_top_candidate(&reading) {
+            eng.merge_candidates_for_reading(&reading, vec![top], 40)
                 .into_iter()
                 .next()
                 .filter(|s| !s.is_empty())
+        } else {
+            dict_like_candidates
+                .iter()
+                .cloned()
+                .into_iter()
+                .find(|s| !s.is_empty() && s != &reading)
+        };
+        let keep_short_preview = preview
+            .as_ref()
+            .is_some_and(|p| is_dict_like_preview_candidate(&dict_like_candidates, &reading, p));
+        let previous = crate::engine::state::session_get().ok().and_then(|sess| {
+            sess.live_conv_parts()
+                .map(|(reading, preview)| (reading.to_string(), preview.to_string()))
         });
-        (reading, pending, preview)
+        (reading, pending, preview, previous, keep_short_preview)
     };
 
     let Some(preview) = preview else {
@@ -1445,10 +1520,16 @@ fn fetch_preview() -> Option<LivePreview> {
         return None;
     };
 
-    // 尻切れ防壁: LLM が reading を使い切る前に EOS を出すと preview が極端に
-    // 短くなる（M1.5 T-BUG2）。char 数比が閾値未満なら preview を破棄して
-    // reading をそのまま表示する。RATIO は漢字圧縮の自然下限 (30%) を目安。
-    let preview = sanity_check_preview(&reading, preview, "on_live_timer");
+    let previous_ref = previous
+        .as_ref()
+        .map(|(reading, preview)| (reading.as_str(), preview.as_str()));
+    let preview = guard_preview_shrink(
+        previous_ref,
+        &reading,
+        preview,
+        keep_short_preview,
+        "on_live_timer",
+    );
 
     Some(LivePreview {
         reading,
@@ -1671,5 +1752,66 @@ pub fn on_live_timer() {
     let snapshot = build_apply_snapshot(data);
     if !try_apply_phase1a(&snapshot) {
         queue_phase1b(&snapshot);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::guard_preview_shrink;
+
+    #[test]
+    fn guard_preview_shrink_keeps_short_symbol_candidate() {
+        assert_eq!(
+            guard_preview_shrink(
+                Some(("かっこと", "確固と")),
+                "かっことじ",
+                "』".to_string(),
+                false,
+                "test"
+            ),
+            "』"
+        );
+    }
+
+    #[test]
+    fn guard_preview_shrink_keeps_short_compact_word_candidate() {
+        assert_eq!(
+            guard_preview_shrink(
+                Some(("せんちめーと", "センチメート")),
+                "せんちめーとる",
+                "糎".to_string(),
+                false,
+                "test"
+            ),
+            "糎"
+        );
+    }
+
+    #[test]
+    fn guard_preview_shrink_falls_back_on_long_sudden_shrink() {
+        assert_eq!(
+            guard_preview_shrink(
+                Some(("abcdefghijkl", "ABCDEFGHIJKL")),
+                "abcdefghijklm",
+                "ABC".to_string(),
+                false,
+                "test"
+            ),
+            "ABCDEFGHIJKLm"
+        );
+    }
+
+    #[test]
+    fn guard_preview_shrink_keeps_long_dictionary_candidate() {
+        assert_eq!(
+            guard_preview_shrink(
+                Some(("ほねとかわとがはなれる", "骨と皮とが離れる")),
+                "ほねとかわとがはなれるおと",
+                "砉".to_string(),
+                true,
+                "test"
+            ),
+            "砉"
+        );
     }
 }

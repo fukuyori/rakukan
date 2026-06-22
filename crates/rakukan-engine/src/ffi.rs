@@ -11,7 +11,7 @@
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 
-pub const ENGINE_ABI_VERSION: u32 = 8;
+pub const ENGINE_ABI_VERSION: u32 = 9;
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -329,6 +329,32 @@ pub extern "C" fn engine_merge_candidates(
     };
     set_dict_status(dict_debug);
     let merged = engine.merge_candidates(llm_cands, limit as usize);
+    let json = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into());
+    unsafe { to_cstr(json) }
+}
+
+/// 指定 reading で dict + LLM 候補をマージして返す。
+/// 戻り値: JSON `["候補1","候補2",...]`
+/// `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_merge_candidates_for_reading(
+    handle: *mut c_void,
+    reading: *const c_char,
+    llm_json: *const c_char,
+    limit: u32,
+) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    let reading = unsafe { from_cstr(reading) };
+    let s = unsafe { from_cstr(llm_json) };
+    let llm_cands: Vec<String> = serde_json::from_str(s).unwrap_or_default();
+    let dict_debug = if let Some(store) = engine.dict_store_ref() {
+        let d = store.lookup_dict(reading, limit as usize);
+        format!("lookup_dict({:?})={:?}", reading, d)
+    } else {
+        "dict_store=None".to_string()
+    };
+    set_dict_status(dict_debug);
+    let merged = engine.merge_candidates_for_reading(reading, llm_cands, limit as usize);
     let json = serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into());
     unsafe { to_cstr(json) }
 }

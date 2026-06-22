@@ -661,9 +661,12 @@ impl RakunEngine {
         self.dict_store.as_ref()
     }
 
-    pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
-        let hiragana = &self.hiragana_buf;
-
+    pub fn merge_candidates_for_reading(
+        &self,
+        hiragana: &str,
+        llm_candidates: Vec<String>,
+        limit: usize,
+    ) -> Vec<String> {
         // 優先順位: ユーザー辞書 → 学習済み辞書候補（スコア順） → 残り辞書候補 → LLM
         // 学習スコアで上位に来た辞書候補を先に表示し、LLM は空きスロットを埋める。
         let user_cands: Vec<String> = self
@@ -744,15 +747,19 @@ impl RakunEngine {
 
         // 候補不足時は元の読みを末尾に追加（変換せず確定する退避路）
         let desired_visible = self.config.num_candidates.min(limit);
-        if merged.len() < desired_visible && !merged.contains(hiragana) {
-            merged.push(hiragana.clone());
+        if merged.len() < desired_visible && !merged.iter().any(|c| c == hiragana) {
+            merged.push(hiragana.to_string());
         }
 
         if merged.is_empty() {
-            vec![hiragana.clone()]
+            vec![hiragana.to_string()]
         } else {
             merged
         }
+    }
+
+    pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
+        self.merge_candidates_for_reading(&self.hiragana_buf, llm_candidates, limit)
     }
 
     pub fn backend_label(&self) -> String {
@@ -1223,6 +1230,8 @@ mod digit_width_tests {
 #[cfg(test)]
 mod candidate_merge_tests {
     use super::{EngineConfig, RakunEngine};
+    use rakukan_dict::DictStore;
+    use std::fs;
 
     #[test]
     fn merge_candidates_pads_short_list_with_original_reading() {
@@ -1252,6 +1261,63 @@ mod candidate_merge_tests {
         let merged = engine.merge_candidates(llm_candidates, 40);
 
         assert_eq!(merged.iter().filter(|c| c.as_str() == "てすと").count(), 1);
+    }
+
+    #[test]
+    fn merge_candidates_uses_user_dict_even_without_llm_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_path = dir.path().join("user_dict.toml");
+        fs::write(
+            &user_path,
+            r#"
+[[entries]]
+reading = "かっことじ"
+surfaces = ["』"]
+"#,
+        )
+        .unwrap();
+
+        let store = DictStore::load(Some(&user_path), None, None).unwrap();
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.set_dict_store(store);
+        engine.force_preedit("かっことじ".to_string());
+
+        let merged = engine.merge_candidates(vec![], 40);
+
+        assert_eq!(merged.first().map(String::as_str), Some("』"));
+        assert!(merged.iter().any(|candidate| candidate == "かっことじ"));
+    }
+
+    #[test]
+    fn merge_candidates_for_reading_uses_given_reading_not_internal_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_path = dir.path().join("user_dict.toml");
+        fs::write(
+            &user_path,
+            r#"
+[[entries]]
+reading = "かっことじ"
+surfaces = ["』"]
+"#,
+        )
+        .unwrap();
+
+        let store = DictStore::load(Some(&user_path), None, None).unwrap();
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.set_dict_store(store);
+        engine.force_preedit("べつのよみ".to_string());
+
+        let merged = engine.merge_candidates_for_reading("かっことじ", vec![], 40);
+
+        assert_eq!(merged.first().map(String::as_str), Some("』"));
+        assert!(merged.iter().any(|candidate| candidate == "かっことじ"));
+        assert!(!merged.iter().any(|candidate| candidate == "べつのよみ"));
     }
 }
 

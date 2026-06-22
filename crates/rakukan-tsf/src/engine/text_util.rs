@@ -23,6 +23,30 @@ pub(crate) fn ascii_to_fullwidth_symbol(c: char) -> char {
     }
 }
 
+/// 入力時に再変換を起動せず、未確定 composition へ直接追加する記号。
+///
+/// `-` は長音符入力としてローマ字ルールに委ねるため、ここでは扱わない。
+pub(crate) fn direct_input_symbol(c: char) -> Option<char> {
+    match c {
+        ',' => Some('、'),
+        '.' => Some('。'),
+        '/' => Some('・'),
+        '[' => Some('「'),
+        ']' => Some('」'),
+        '?' => Some('？'),
+        '!' => Some('！'),
+        '~' => Some('〜'),
+        '\x5C' | '\u{A5}' => Some('\u{FFE5}'),
+        '、' | '。' | '「' | '」' | '・' | '？' | '！' | '〜' | '\u{FFE5}' => Some(c),
+        '-' => None,
+        _ if c.is_ascii_graphic() && !c.is_ascii_alphanumeric() => {
+            Some(ascii_to_fullwidth_symbol(c))
+        }
+        _ if is_kuten(c) => Some(c),
+        _ => None,
+    }
+}
+
 /// 全角記号 → ASCII 記号マッピング（F8/F10 用）
 pub(crate) fn fullwidth_symbol_to_ascii(c: char) -> char {
     match c {
@@ -806,6 +830,36 @@ pub fn split_by_punctuation(s: &str) -> Vec<(String, Option<char>)> {
     blocks
 }
 
+/// 先頭・末尾の記号を変換対象外 affix として分離する。
+///
+/// `「かっことじ」` は `("「", "かっことじ", "」")` を返す。
+/// target 内に記号が残る場合は、通常の区読点分割変換に委ねるため `None`。
+pub(crate) fn split_symbol_affixes(s: &str) -> Option<(String, String, String)> {
+    let mut first_target = None;
+    let mut last_target_end = 0usize;
+
+    for (idx, c) in s.char_indices() {
+        if !is_kuten(c) {
+            first_target.get_or_insert(idx);
+            last_target_end = idx + c.len_utf8();
+        }
+    }
+
+    let first_target = first_target?;
+    let target = &s[first_target..last_target_end];
+    if target.chars().any(is_kuten) {
+        return None;
+    }
+
+    let prefix = &s[..first_target];
+    let suffix = &s[last_target_end..];
+    if prefix.is_empty() && suffix.is_empty() {
+        return None;
+    }
+
+    Some((prefix.to_string(), target.to_string(), suffix.to_string()))
+}
+
 /// 文字列が区読点を含むかどうか。
 #[inline]
 pub fn contains_kuten(s: &str) -> bool {
@@ -1038,6 +1092,27 @@ mod tests {
                 ("あめがふった".to_string(), None),
             ]
         );
+    }
+
+    #[test]
+    fn split_symbol_affixes_for_leading_symbol() {
+        assert_eq!(
+            split_symbol_affixes("「かっことじ"),
+            Some(("「".to_string(), "かっことじ".to_string(), "".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_symbol_affixes_for_surrounding_symbols() {
+        assert_eq!(
+            split_symbol_affixes("「かっことじ」"),
+            Some(("「".to_string(), "かっことじ".to_string(), "」".to_string()))
+        );
+    }
+
+    #[test]
+    fn split_symbol_affixes_keeps_internal_punctuation_for_block_conversion() {
+        assert_eq!(split_symbol_affixes("「きょう、あした」"), None);
     }
 
     #[test]

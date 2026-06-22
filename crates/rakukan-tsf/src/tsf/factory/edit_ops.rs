@@ -13,8 +13,7 @@ use crate::tsf::candidate_window;
 use crate::tsf::language_bar;
 
 use super::{
-    CandidateDir, commit_text, commit_then_start_composition, end_composition,
-    engine_convert_sync_multi, update_caret_rect, update_composition,
+    CandidateDir, commit_then_start_composition, end_composition, update_composition,
     update_composition_candidate_parts,
 };
 
@@ -609,9 +608,10 @@ impl super::TextServiceFactory_Impl {
         Ok(true)
     }
 
-    /// 句読点入力:
-    ///   - プリエディットがあれば変換ウィンドウを表示し punct_pending にセット
-    ///   - プリエディットが空なら直接コミット
+    /// 記号入力:
+    ///   - プリエディットがあれば未確定 composition に直接追加する
+    ///   - 再変換・候補表示・自動確定は行わない
+    ///   - プリエディットが空でも未確定 composition として開始する
     pub(super) fn on_punctuate(
         &self,
         c: char,
@@ -625,162 +625,95 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
 
-        // プリエディットが空 → 直接コミット
+        let reading_before = engine.hiragana_text().to_string();
+        let symbol = numeric_separator_after_digit(&reading_before, c)
+            .filter(|_| crate::engine::state::is_digit_separator_auto_enabled())
+            .unwrap_or(c);
+
+        crate::tsf::live_session::conv_gen_bump();
+        candidate_window::hide();
+        candidate_window::stop_live_timer();
+        candidate_window::stop_waiting_timer();
+
+        let mut sess = session_get()?;
         if engine.preedit_is_empty() {
+            engine.push_raw(symbol);
+            let display = engine.preedit_display();
+            sess.set_preedit(display.clone());
+            drop(sess);
             drop(guard);
-            commit_text(ctx, tid, c.to_string())?;
+            update_composition(ctx, tid, sink, display)?;
             return Ok(true);
         }
 
-        // BlockSelecting 中に区読点 → 全ブロック確定して区読点をコミット
-        {
-            let mut sess = session_get()?;
-            if sess.is_block_selecting() {
-                let full_text = sess.block_selecting_full_text().unwrap_or_default();
-                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
-                sess.set_idle();
-                drop(sess);
-                candidate_window::hide();
-                if crate::engine::state::is_auto_learn_enabled()
-                    && full_text != full_reading
-                    && !full_reading.is_empty()
-                {
-                    engine.learn(&full_reading, &full_text);
-                }
-                let commit = format!("{full_text}{c}");
-                engine.commit(&commit);
-                engine.reset_preedit();
-                drop(guard);
-                end_composition(ctx, tid, commit)?;
-                return Ok(true);
-            }
-        }
-        // 候補選択中に句読点 → 現在の punct_pending を上書きしてウィンドウを更新
-        {
-            let mut sess = session_get()?;
-            if sess.is_selecting() {
-                sess.set_punct_pending(c);
-                // 候補ウィンドウのステータスラインに句読点が付くことを示す
-                let page_cands = sess.page_candidates().to_vec();
-                let page_sel = sess.page_selected();
-                let page_info = sess.page_info();
-                let (pos_x, pos_y) = sess.selecting_pos().unwrap_or_default();
-                drop(sess);
-                drop(guard);
-                candidate_window::show_with_status(
-                    &page_cands,
-                    page_sel,
-                    &page_info,
-                    pos_x,
-                    pos_y,
-                    Some(&format!("確定後「{c}」を入力")),
-                );
-                return Ok(true);
-            }
-        }
-
-        let reading = engine.hiragana_text();
-        if let Some(separator) = numeric_separator_after_digit(&reading, c) {
-            if crate::engine::state::is_digit_separator_auto_enabled() {
-                crate::tsf::live_session::conv_gen_bump();
-                engine.push_raw(separator);
-                let reading = engine.hiragana_text();
-                let preedit = engine.preedit_display();
-                let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &reading);
-                drop(guard);
-                if live_ready {
-                    candidate_window::live_input_notify(&ctx, tid);
-                }
-                update_composition(ctx, tid, sink, preedit)?;
-                return Ok(true);
-            }
-        }
-
-        // 未変換プリエディットあり → Convert と同じフローで変換ウィンドウを開く
-        // punct_pending は activate_selecting 後にセットする
-        engine.flush_pending_n();
-        let preedit = engine.preedit_display();
-        update_caret_rect(ctx.clone(), tid);
-
-        let llm_limit = crate::engine::state::get_num_candidates();
-        const DICT_LIMIT: usize = 40;
-        let _ = crate::engine::state::poll_dict_ready_cached(engine);
-        let _ = crate::engine::state::poll_model_ready_cached(engine);
-        let kanji_ready = engine.is_kanji_ready();
-        if kanji_ready && engine.bg_status() == "idle" {
-            engine.bg_start(llm_limit);
-        }
-        const BG_WAIT_MS: u64 = 400;
-        if kanji_ready && matches!(engine.bg_status(), "running" | "idle") {
-            engine.bg_wait_ms(BG_WAIT_MS);
-        }
-
-        let bg_status = engine.bg_status();
-        let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
-
-        let (candidates, llm_pending): (Vec<String>, bool) =
-            match engine.bg_take_candidates(&preedit) {
-                Some(llm_cands) if !llm_cands.is_empty() => {
-                    let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
-                    tracing::debug!("merge_candidates → {:?}", merged);
-                    if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
-                        (
-                            engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit),
-                            false,
-                        )
-                    } else {
-                        (merged, false)
-                    }
-                }
-                _ => {
-                    if kanji_ready && !bg_running {
-                        (
-                            engine_convert_sync_multi(engine, llm_limit, DICT_LIMIT, &preedit),
-                            false,
-                        )
-                    } else {
-                        let dict_cands = engine.merge_candidates(vec![], DICT_LIMIT);
-                        let dict_empty = dict_cands.is_empty()
-                            || (dict_cands.len() == 1 && dict_cands[0] == preedit);
-                        if dict_empty {
-                            (vec![preedit.clone()], bg_running)
-                        } else {
-                            (dict_cands, bg_running)
-                        }
-                    }
-                }
-            };
-
-        let first = candidates
-            .first()
-            .cloned()
-            .unwrap_or_else(|| preedit.clone());
-        let caret = caret_rect_get();
-        {
-            let mut sess = session_get()?;
-            sess.activate_selecting(
-                candidates,
-                preedit.clone(),
-                caret.left,
-                caret.bottom,
-                llm_pending,
-            );
-            sess.set_punct_pending(c);
-            let page_cands = sess.page_candidates().to_vec();
-            let page_info = sess.page_info();
+        if sess.is_live_conv() {
+            let (reading, preview) = sess
+                .live_conv_parts()
+                .map(|(r, p)| (r.to_string(), p.to_string()))
+                .unwrap_or_default();
+            engine.push_raw(symbol);
+            let display = format!("{preview}{symbol}");
+            sess.set_live_conv(format!("{reading}{symbol}"), display.clone());
             drop(sess);
             drop(guard);
-            let status_owned = format!("確定後「{c}」を入力");
-            candidate_window::show_with_status(
-                &page_cands,
-                0,
-                &page_info,
-                caret.left,
-                caret.bottom,
-                Some(&status_owned),
-            );
+            update_composition(ctx, tid, sink, display)?;
+            return Ok(true);
         }
-        update_composition(ctx, tid, sink, first)?;
+
+        if sess.is_block_selecting() {
+            let full_text = sess.block_selecting_full_text().unwrap_or_default();
+            let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+            engine.force_preedit(full_reading.clone());
+            engine.push_raw(symbol);
+            let display = format!("{full_text}{symbol}");
+            sess.set_live_conv(format!("{full_reading}{symbol}"), display.clone());
+            drop(sess);
+            drop(guard);
+            update_composition(ctx, tid, sink, display)?;
+            return Ok(true);
+        }
+
+        if sess.is_selecting() {
+            let prefix = sess.selecting_prefix_clone();
+            let prefix_reading = sess.selecting_prefix_reading_clone();
+            let text = sess
+                .current_candidate()
+                .or_else(|| sess.original_preedit())
+                .unwrap_or("")
+                .to_string();
+            let reading = sess.original_preedit().unwrap_or("").to_string();
+            let remainder = sess.selecting_remainder_clone();
+            let remainder_reading = sess.selecting_remainder_reading_clone();
+            let display = format!("{prefix}{text}{symbol}{remainder}");
+            let next_reading = format!("{prefix_reading}{reading}{symbol}{remainder_reading}");
+            engine.force_preedit(next_reading.clone());
+            sess.set_live_conv(next_reading, display.clone());
+            drop(sess);
+            drop(guard);
+            update_composition(ctx, tid, sink, display)?;
+            return Ok(true);
+        }
+
+        if sess.is_waiting() {
+            let text = sess.preedit_text().unwrap_or("").to_string();
+            engine.push_raw(symbol);
+            let display = format!("{text}{symbol}");
+            sess.set_preedit(display.clone());
+            drop(sess);
+            drop(guard);
+            update_composition(ctx, tid, sink, display)?;
+            return Ok(true);
+        }
+
+        let text = sess.preedit_text().map(str::to_string);
+        engine.push_raw(symbol);
+        let display = text
+            .map(|t| format!("{t}{symbol}"))
+            .unwrap_or_else(|| engine.preedit_display());
+        sess.set_preedit(display.clone());
+        drop(sess);
+        drop(guard);
+        update_composition(ctx, tid, sink, display)?;
         Ok(true)
     }
 

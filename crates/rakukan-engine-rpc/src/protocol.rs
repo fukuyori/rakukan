@@ -14,7 +14,8 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v1: 0.4.4 初版
 /// - v2: `InputChar` / `InputCharResult` バッチ RPC を追加（0.4.5）
 /// - v3: `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` を追加（Phase A）
-pub const PROTOCOL_VERSION: u32 = 3;
+/// - v4: `MergeCandidatesForReading` を追加
+pub const PROTOCOL_VERSION: u32 = 4;
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -194,6 +195,14 @@ pub enum Request {
     LearnForce {
         reading: String,
         surface: String,
+    },
+
+    // ─── 変換（追加 v4）────────────────────────────────────
+    /// エンジン内部の hiragana_buf ではなく、指定 reading をキーに候補をマージする。
+    MergeCandidatesForReading {
+        reading: String,
+        llm_cands: Vec<String>,
+        limit: u32,
     },
 }
 

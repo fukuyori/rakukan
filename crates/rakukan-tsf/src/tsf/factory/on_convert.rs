@@ -152,6 +152,20 @@ fn engine_convert_sync_multi_fallback(
     candidates
 }
 
+fn immediate_dict_candidates(
+    engine: &mut crate::engine::state::DynEngine,
+    preedit: &str,
+    dict_limit: usize,
+) -> Option<Vec<String>> {
+    let candidates = engine.merge_candidates(vec![], dict_limit);
+    let has_conversion = candidates.iter().any(|candidate| candidate != preedit);
+    if has_conversion {
+        Some(candidates)
+    } else {
+        None
+    }
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
         &self,
@@ -695,7 +709,46 @@ impl super::TextServiceFactory_Impl {
                 }
                 engine.bg_reclaim();
             }
+            if let Some((prefix, target, suffix)) =
+                crate::engine::text_util::split_symbol_affixes(&preedit)
+            {
+                engine.force_preedit(target.clone());
+                let caret = caret_rect_get();
+                const AFFIX_DICT_LIMIT: usize = 40;
+                let llm_limit_a = crate::engine::state::get_num_candidates();
+                let candidates =
+                    engine_convert_sync_multi(engine, llm_limit_a, AFFIX_DICT_LIMIT, &target);
+                let first = candidates
+                    .first()
+                    .cloned()
+                    .unwrap_or_else(|| target.clone());
+                {
+                    let mut sess = session_get()?;
+                    sess.activate_selecting_with_affixes(
+                        candidates.clone(),
+                        target.clone(),
+                        caret.left,
+                        caret.bottom,
+                        false,
+                        prefix.clone(),
+                        prefix.clone(),
+                        suffix.clone(),
+                        suffix.clone(),
+                    );
+                    sess.rebuild_selecting_candidate_views(CandidateViewSource::Dict);
+                }
+                drop(guard);
+                candidate_window::stop_waiting_timer();
+                let page_cands: Vec<String> = candidates.into_iter().take(9).collect();
+                candidate_window::show(&page_cands, 0, "", caret.left, caret.bottom);
+                update_composition_candidate_parts(ctx, tid, sink, prefix, first, suffix)?;
+                return Ok(true);
+            }
             let blocks_raw = crate::engine::text_util::split_by_punctuation(&preedit);
+            if blocks_raw.iter().all(|(reading, _)| reading.is_empty()) {
+                drop(guard);
+                return Ok(true);
+            }
             const BLOCK_DICT_LIMIT: usize = 9; // 1ブロックあたり最大候補数
             let llm_limit_b = crate::engine::state::get_num_candidates();
             let mut blocks: Vec<ConversionBlock> = Vec::new();
@@ -794,6 +847,59 @@ impl super::TextServiceFactory_Impl {
             phase3_path = "model_not_ready";
             phase3_candidate_source = "preedit_model_not_ready";
             let caret = caret_rect_get();
+            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT) {
+                phase3_candidate_source = "dict_model_not_ready";
+                let snapshot = activate_selecting_snapshot_with_source(
+                    candidates.clone(),
+                    preedit.clone(),
+                    caret.left,
+                    caret.bottom,
+                    false,
+                    CandidateViewSource::Dict,
+                )?;
+                drop(guard);
+                candidate_window::stop_waiting_timer();
+                candidate_window::show(
+                    &snapshot.page_candidates,
+                    snapshot.page_selected,
+                    &snapshot.page_info,
+                    caret.left,
+                    caret.bottom,
+                );
+                convert_mark(
+                    "selecting_dict_model_not_ready_show",
+                    convert_start,
+                    &mut convert_last,
+                );
+                tracing::info!(
+                    "convert_timing result=shown_dict_model_not_ready path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending=false total_us={}",
+                    phase3_path,
+                    phase3_bg_take,
+                    phase3_candidate_source,
+                    phase3_retry_attempted,
+                    phase3_sync_fallback,
+                    candidates.len(),
+                    convert_start.elapsed().as_micros()
+                );
+                log_candidate_display_probe(
+                    "space_initial",
+                    &preedit,
+                    snapshot
+                        .page_candidates
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    snapshot.page_selected,
+                    &snapshot.first,
+                    &snapshot.first,
+                    snapshot.candidate_source,
+                    false,
+                    snapshot.corresponding_reading_len,
+                    snapshot.suffix_len,
+                );
+                update_composition(ctx, tid, sink, snapshot.first)?;
+                return Ok(true);
+            }
             let snapshot = activate_selecting_snapshot_with_source(
                 vec![preedit.clone()],
                 preedit.clone(),
@@ -863,6 +969,55 @@ impl super::TextServiceFactory_Impl {
         if bg_running && kanji_ready {
             phase3_path = "bg_running_wait";
             let caret = caret_rect_get();
+            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT) {
+                phase3_candidate_source = "dict_before_bg_wait";
+                let snapshot = activate_selecting_snapshot_with_source(
+                    candidates.clone(),
+                    preedit.clone(),
+                    caret.left,
+                    caret.bottom,
+                    false,
+                    CandidateViewSource::Dict,
+                )?;
+                drop(guard);
+                candidate_window::stop_waiting_timer();
+                candidate_window::show(
+                    &snapshot.page_candidates,
+                    snapshot.page_selected,
+                    &snapshot.page_info,
+                    caret.left,
+                    caret.bottom,
+                );
+                convert_mark("selecting_dict_show", convert_start, &mut convert_last);
+                tracing::info!(
+                    "convert_timing result=shown_dict path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending=false total_us={}",
+                    phase3_path,
+                    phase3_bg_take,
+                    phase3_candidate_source,
+                    phase3_retry_attempted,
+                    phase3_sync_fallback,
+                    candidates.len(),
+                    convert_start.elapsed().as_micros()
+                );
+                log_candidate_display_probe(
+                    "space_initial",
+                    &preedit,
+                    snapshot
+                        .page_candidates
+                        .first()
+                        .map(String::as_str)
+                        .unwrap_or(""),
+                    snapshot.page_selected,
+                    &snapshot.first,
+                    &snapshot.first,
+                    snapshot.candidate_source,
+                    false,
+                    snapshot.corresponding_reading_len,
+                    snapshot.suffix_len,
+                );
+                update_composition(ctx, tid, sink, snapshot.first)?;
+                return Ok(true);
+            }
             let pending_from_live_preview = space_live_candidate.is_some();
             let pending_first = space_live_candidate
                 .as_ref()

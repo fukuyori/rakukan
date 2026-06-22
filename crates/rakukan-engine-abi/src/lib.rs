@@ -18,7 +18,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 8;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 9;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
 
@@ -121,6 +121,8 @@ struct EngineVTable {
     // 変換（同期）
     convert_sync: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
     merge_candidates: unsafe extern "C" fn(*mut c_void, *const c_char, u32) -> *mut c_char,
+    merge_candidates_for_reading:
+        unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32) -> *mut c_char,
 
     // 非同期初期化
     start_load_model: unsafe extern "C" fn(*mut c_void),
@@ -212,6 +214,7 @@ impl EngineVTable {
             reset_all: load_sym!(lib, b"engine_reset_all\0"),
             convert_sync: load_sym!(lib, b"engine_convert_sync\0"),
             merge_candidates: load_sym!(lib, b"engine_merge_candidates\0"),
+            merge_candidates_for_reading: load_sym!(lib, b"engine_merge_candidates_for_reading\0"),
             start_load_model: load_sym!(lib, b"engine_start_load_model\0"),
             poll_model_ready: load_sym!(lib, b"engine_poll_model_ready\0"),
             start_load_dict: load_sym!(lib, b"engine_start_load_dict\0"),
@@ -491,6 +494,29 @@ impl DynEngine {
         let cjson = Self::to_cstring(&json);
         unsafe {
             let ptr = (self.vtable.merge_candidates)(self.handle, cjson.as_ptr(), limit as u32);
+            match self.take_cstr(ptr) {
+                Some(s) => serde_json::from_str(&s).unwrap_or_default(),
+                None => vec![],
+            }
+        }
+    }
+
+    pub fn merge_candidates_for_reading(
+        &self,
+        reading: &str,
+        llm_cands: Vec<String>,
+        limit: usize,
+    ) -> Vec<String> {
+        let creading = Self::to_cstring(reading);
+        let json = serde_json::to_string(&llm_cands).unwrap_or_else(|_| "[]".into());
+        let cjson = Self::to_cstring(&json);
+        unsafe {
+            let ptr = (self.vtable.merge_candidates_for_reading)(
+                self.handle,
+                creading.as_ptr(),
+                cjson.as_ptr(),
+                limit as u32,
+            );
             match self.take_cstr(ptr) {
                 Some(s) => serde_json::from_str(&s).unwrap_or_default(),
                 None => vec![],
