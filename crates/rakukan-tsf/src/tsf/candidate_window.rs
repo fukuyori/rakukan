@@ -1462,6 +1462,7 @@ struct LivePreview {
     reading: String,
     pending: String,
     preview: String,
+    keep_timer_running: bool,
 }
 
 /// engine から preview を取得し、前回 preview との急縮小防壁を通す。
@@ -1475,7 +1476,7 @@ fn fetch_preview() -> Option<LivePreview> {
     use crate::engine::state::engine_try_get;
     crate::tsf::live_session::reset_fired_once();
 
-    let (reading, pending, preview, previous, keep_short_preview) = {
+    let (reading, pending, preview, previous, keep_short_preview, keep_timer_running) = {
         let Ok(mut g) = engine_try_get() else {
             tracing::warn!("[Live] on_live_timer: engine busy");
             return None;
@@ -1493,7 +1494,10 @@ fn fetch_preview() -> Option<LivePreview> {
         )
         .to_string();
         let dict_like_candidates = eng.merge_candidates_for_reading(&reading, vec![], 40);
+        let bg_status = eng.bg_status();
+        let mut used_bg_candidate = false;
         let preview = if let Some(top) = eng.bg_peek_top_candidate(&reading) {
+            used_bg_candidate = true;
             eng.merge_candidates_for_reading(&reading, vec![top], 40)
                 .into_iter()
                 .next()
@@ -1512,7 +1516,14 @@ fn fetch_preview() -> Option<LivePreview> {
             sess.live_conv_parts()
                 .map(|(reading, preview)| (reading.to_string(), preview.to_string()))
         });
-        (reading, pending, preview, previous, keep_short_preview)
+        (
+            reading,
+            pending,
+            preview,
+            previous,
+            keep_short_preview,
+            !used_bg_candidate && bg_status == "running",
+        )
     };
 
     let Some(preview) = preview else {
@@ -1535,6 +1546,7 @@ fn fetch_preview() -> Option<LivePreview> {
         reading,
         pending,
         preview,
+        keep_timer_running,
     })
 }
 
@@ -1543,6 +1555,7 @@ struct LiveSnapshot {
     reading: String,
     preview: String,
     display_shown: String,
+    keep_timer_running: bool,
 }
 
 fn build_apply_snapshot(data: LivePreview) -> LiveSnapshot {
@@ -1550,6 +1563,7 @@ fn build_apply_snapshot(data: LivePreview) -> LiveSnapshot {
         reading,
         pending,
         preview,
+        keep_timer_running,
     } = data;
     let display_shown = if pending.is_empty() {
         preview.clone()
@@ -1565,6 +1579,7 @@ fn build_apply_snapshot(data: LivePreview) -> LiveSnapshot {
         reading,
         preview,
         display_shown,
+        keep_timer_running,
     }
 }
 
@@ -1685,7 +1700,11 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
             if let Ok(mut sess) = crate::engine::state::session_get() {
                 sess.set_live_conv(snapshot.reading.clone(), snapshot.preview.clone());
             }
-            stop_live_timer();
+            if snapshot.keep_timer_running {
+                tracing::debug!("[Live] Phase1A: keeping timer for pending BG merge");
+            } else {
+                stop_live_timer();
+            }
             true
         }
         Err(_) => false,
@@ -1719,8 +1738,12 @@ fn queue_phase1b(snapshot: &LiveSnapshot) {
     } else {
         tracing::warn!("[Live] Phase1B: LIVE_PREVIEW_QUEUE busy, skipping");
     }
-    // Phase 1B ではタイマーを停止する（キュー上書きを防ぐ）
-    stop_live_timer();
+    if snapshot.keep_timer_running {
+        tracing::debug!("[Live] Phase1B: keeping timer for pending BG merge");
+    } else {
+        // Phase 1B ではタイマーを停止する（キュー上書きを防ぐ）
+        stop_live_timer();
+    }
 }
 
 /// WM_TIMER(LIVE_TIMER_ID) コールバック。

@@ -705,11 +705,8 @@ impl super::TextServiceFactory_Impl {
             return Ok(true);
         }
 
-        let text = sess.preedit_text().map(str::to_string);
         engine.push_raw(symbol);
-        let display = text
-            .map(|t| format!("{t}{symbol}"))
-            .unwrap_or_else(|| engine.preedit_display());
+        let display = engine.preedit_display();
         sess.set_preedit(display.clone());
         drop(sess);
         drop(guard);

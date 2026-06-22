@@ -976,21 +976,22 @@ impl super::TextServiceFactory_Impl {
                     preedit.clone(),
                     caret.left,
                     caret.bottom,
-                    false,
+                    true,
                     CandidateViewSource::Dict,
                 )?;
                 drop(guard);
-                candidate_window::stop_waiting_timer();
-                candidate_window::show(
+                candidate_window::show_with_status(
                     &snapshot.page_candidates,
                     snapshot.page_selected,
                     &snapshot.page_info,
                     caret.left,
                     caret.bottom,
+                    Some("⏳ 変換中..."),
                 );
+                candidate_window::start_waiting_timer();
                 convert_mark("selecting_dict_show", convert_start, &mut convert_last);
                 tracing::info!(
-                    "convert_timing result=shown_dict path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending=false total_us={}",
+                    "convert_timing result=shown_dict path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending=true total_us={}",
                     phase3_path,
                     phase3_bg_take,
                     phase3_candidate_source,
@@ -1011,7 +1012,7 @@ impl super::TextServiceFactory_Impl {
                     &snapshot.first,
                     &snapshot.first,
                     snapshot.candidate_source,
-                    false,
+                    true,
                     snapshot.corresponding_reading_len,
                     snapshot.suffix_len,
                 );
