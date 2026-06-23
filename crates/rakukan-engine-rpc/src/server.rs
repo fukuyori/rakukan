@@ -23,8 +23,22 @@ use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
 
-/// ホスト全体で共有される 1 つの DynEngine。
-pub type SharedEngine = Arc<Mutex<Option<DynEngine>>>;
+/// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
+pub type SharedEngine = Arc<Mutex<SharedEngineState>>;
+
+pub struct SharedEngineState {
+    pub engine: Option<DynEngine>,
+    pub config_json: Option<String>,
+}
+
+impl SharedEngineState {
+    pub fn new() -> Self {
+        Self {
+            engine: None,
+            config_json: None,
+        }
+    }
+}
 
 /// Named Pipe サーバを起動し、クライアント接続を待ち受けるループを実行する。
 ///
@@ -93,20 +107,24 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             }
         }
         Request::Create { config_json } => {
-            // 既に存在すれば何もしない（idempotent）。
             let mut g = lock_engine(engine);
-            if g.is_some() {
+            if g.engine.is_some() && g.config_json == config_json {
                 return Response::Unit;
             }
-            load_engine_into(&mut g, config_json.as_deref())
+            if g.engine.is_some() {
+                tracing::info!(
+                    "rpc: Create requested with changed config, reloading current engine"
+                );
+            }
+            load_engine_into(&mut g, config_json)
         }
         Request::Reload { config_json } => {
             // 既存 engine を drop してから作り直す。
             // config.toml 編集後のモード切替から呼ばれる。
             let mut g = lock_engine(engine);
             tracing::info!("rpc: Reload requested, dropping current engine");
-            *g = None;
-            load_engine_into(&mut g, config_json.as_deref())
+            g.engine = None;
+            load_engine_into(&mut g, config_json)
         }
         Request::Bye => Response::Unit,
         Request::Shutdown => Response::Unit,
@@ -118,7 +136,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
                     p.into_inner()
                 }
             };
-            let Some(eng) = g.as_mut() else {
+            let Some(eng) = g.engine.as_mut() else {
                 return Response::Error("engine not created".into());
             };
             dispatch_engine(eng, other)
@@ -127,7 +145,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
 }
 
 /// SharedEngine を lock し、poisoned を回復する小物ヘルパ。
-fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, Option<DynEngine>> {
+fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, SharedEngineState> {
     match engine.lock() {
         Ok(g) => g,
         Err(p) => {
@@ -139,12 +157,12 @@ fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, Option<DynEng
 
 /// 指定 config_json で DynEngine::load_auto し、既存 slot に入れる。
 /// 辞書・モデルの bg ロードも起動する。
-fn load_engine_into(slot: &mut Option<DynEngine>, config_json: Option<&str>) -> Response {
+fn load_engine_into(slot: &mut SharedEngineState, config_json: Option<String>) -> Response {
     let install = match rakukan_engine_abi::install_dir() {
         Some(p) => p,
         None => return Response::Error("install_dir not found".into()),
     };
-    match DynEngine::load_auto(&install, config_json) {
+    match DynEngine::load_auto(&install, config_json.as_deref()) {
         Ok(mut eng) => {
             if !eng.is_dict_ready() {
                 eng.start_load_dict();
@@ -152,7 +170,8 @@ fn load_engine_into(slot: &mut Option<DynEngine>, config_json: Option<&str>) -> 
             if !eng.is_kanji_ready() {
                 eng.start_load_model();
             }
-            *slot = Some(eng);
+            slot.engine = Some(eng);
+            slot.config_json = config_json;
             Response::Unit
         }
         Err(e) => Response::Error(format!("load_auto failed: {e}")),

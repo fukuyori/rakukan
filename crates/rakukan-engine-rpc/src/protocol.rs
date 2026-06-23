@@ -36,7 +36,8 @@ pub enum Request {
         protocol_version: u32,
     },
     /// エンジン側セッションの初期化要求。config_json は EngineConfig の JSON。
-    /// 既に DynEngine が存在する場合は何もしない（idempotent）。
+    /// 既に同じ config の DynEngine が存在する場合は何もしない。
+    /// 既存 DynEngine と config が異なる場合は作り直す。
     Create {
         config_json: Option<String>,
     },

@@ -688,15 +688,16 @@ impl RakunEngine {
             .unwrap_or_default();
 
         debug!(
-            "engine::merge: reading={:?} dict_store={} dict_cands={:?} learn_cands={:?} llm_cands={:?}",
+            "engine::merge: reading={:?} dict_store={} user_cands={:?} learn_cands={:?} dict_cands={:?} llm_cands={:?}",
             hiragana,
             if self.dict_store.is_some() {
                 "Some"
             } else {
                 "None"
             },
-            dict_cands,
+            user_cands,
             learn_cands,
+            dict_cands,
             llm_candidates
         );
 

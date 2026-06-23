@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rakukan_engine_rpc::server::{SharedEngine, serve};
+use rakukan_engine_rpc::server::{SharedEngine, SharedEngineState, serve};
 
 fn log_path() -> PathBuf {
     rakukan_engine_abi::install_dir()
@@ -163,7 +163,7 @@ fn main() -> Result<()> {
     // DynEngine::load_auto が呼ばれる。これにより「ホストを起動しても
     // model/dict ロードは初回クライアント接続までは走らない」という
     // 遅延ロード特性が維持される。
-    let engine: SharedEngine = Arc::new(Mutex::new(None));
+    let engine: SharedEngine = Arc::new(Mutex::new(SharedEngineState::new()));
 
     // serve() はブロッキングで Named Pipe を待ち受け続ける。
     if let Err(e) = serve(engine) {

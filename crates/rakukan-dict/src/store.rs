@@ -87,6 +87,16 @@ fn now_unix_secs() -> u64 {
         .unwrap_or(0)
 }
 
+fn user_dict_file_state(path: &Path) -> UserDictFileState {
+    match std::fs::metadata(path) {
+        Ok(meta) => UserDictFileState {
+            modified: meta.modified().ok(),
+            len: Some(meta.len()),
+        },
+        Err(_) => UserDictFileState::default(),
+    }
+}
+
 /// `surface` の各文字が辞書ガードなしで学習を許可してよいかを判定するヘルパー。
 ///
 /// **ひらがな**は読み相当なので surface としての学習を許可しない。
@@ -122,11 +132,21 @@ fn is_learnable_without_dict(c: char) -> bool {
 struct DictStoreInner {
     /// ユーザー辞書（手動登録のみ）。Phase 2b 以降は `learn()` で更新しない。
     user: RwLock<HashMap<String, Vec<String>>>,
+    /// ユーザー辞書ファイル。設定画面や外部エディタで編集された場合の
+    /// hot reload 判定に使う。
+    user_path: Option<PathBuf>,
+    user_file_state: RwLock<UserDictFileState>,
     mozc: Option<MozcDict>,
     /// 学習履歴。`learn()` で更新され、`lookup_learn` で score 降順に並べて返す。
     learn_history: RwLock<HashMap<String, Vec<LearnEntry>>>,
     /// 学習履歴ファイルパス。`None` なら永続化しない（テスト用）。
     learn_history_path: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct UserDictFileState {
+    modified: Option<SystemTime>,
+    len: Option<u64>,
 }
 
 unsafe impl Send for DictStoreInner {}
@@ -162,6 +182,7 @@ impl DictStore {
         mozc_path: Option<&Path>,
         learn_history_path: Option<&Path>,
     ) -> Result<Self> {
+        let user_file_state = user_path.map(user_dict_file_state).unwrap_or_default();
         // ユーザー辞書: 失敗しても空で続行（パスエラー・パースエラー問わず）
         let user = if let Some(p) = user_path {
             match UserDict::load(p) {
@@ -240,6 +261,8 @@ impl DictStore {
         Ok(Self {
             inner: Arc::new(DictStoreInner {
                 user: RwLock::new(user),
+                user_path: user_path.map(|p| p.to_path_buf()),
+                user_file_state: RwLock::new(user_file_state),
                 mozc,
                 learn_history: RwLock::new(learn_history),
                 learn_history_path: learn_history_path.map(|p| p.to_path_buf()),
@@ -251,11 +274,61 @@ impl DictStore {
         Self {
             inner: Arc::new(DictStoreInner {
                 user: RwLock::new(HashMap::new()),
+                user_path: None,
+                user_file_state: RwLock::new(UserDictFileState::default()),
                 mozc: None,
                 learn_history: RwLock::new(HashMap::new()),
                 learn_history_path: None,
             }),
         }
+    }
+
+    /// `user_dict.toml` が設定画面や外部エディタで更新されていれば、ユーザー辞書だけ
+    /// hot reload する。parse に失敗した場合は現在の辞書を保持する。
+    pub fn reload_user_if_changed(&self) -> bool {
+        let Some(path) = &self.inner.user_path else {
+            return false;
+        };
+        let current_state = user_dict_file_state(path);
+        if self
+            .inner
+            .user_file_state
+            .read()
+            .is_ok_and(|state| *state == current_state)
+        {
+            return false;
+        }
+
+        let loaded = match UserDict::load(path) {
+            Ok(ud) => ud.to_map(),
+            Err(e) => {
+                warn!(
+                    "user_dict hot reload failed ({}): {}; keeping previous entries",
+                    path.display(),
+                    e
+                );
+                if let Ok(mut state) = self.inner.user_file_state.write() {
+                    *state = current_state;
+                }
+                return false;
+            }
+        };
+        let count = loaded.len();
+        if let Ok(mut user) = self.inner.user.write() {
+            *user = loaded;
+        } else {
+            warn!("user_dict hot reload failed: user lock poisoned");
+            return false;
+        }
+        if let Ok(mut state) = self.inner.user_file_state.write() {
+            *state = current_state;
+        }
+        info!(
+            "user_dict hot reloaded entries={} path={}",
+            count,
+            path.display()
+        );
+        true
     }
 
     /// 確定した候補を学習履歴に記録する。
@@ -384,6 +457,7 @@ impl DictStore {
     /// ただし、括弧ペア（`『』` `《》` `«»` など）のような**記号のみからなる surface** は
     /// LLM 由来であっても誤学習リスクが低いため、辞書外でも学習を許可する。
     fn is_dict_surface(&self, reading: &str, surface: &str) -> bool {
+        self.reload_user_if_changed();
         if let Ok(user) = self.inner.user.read() {
             if user
                 .get(reading)
@@ -405,6 +479,7 @@ impl DictStore {
 
     /// ひらがな読みからユーザー辞書候補のみを返す（merge_candidates 用）
     pub fn lookup_user(&self, reading: &str) -> Vec<String> {
+        self.reload_user_if_changed();
         let Ok(user) = self.inner.user.read() else {
             return vec![];
         };
@@ -630,6 +705,8 @@ mod tests {
         DictStore {
             inner: Arc::new(DictStoreInner {
                 user: RwLock::new(user_map),
+                user_path: None,
+                user_file_state: RwLock::new(UserDictFileState::default()),
                 mozc: None,
                 learn_history: RwLock::new(HashMap::new()),
                 learn_history_path: None,
@@ -643,6 +720,28 @@ mod tests {
         let r = store.lookup("zzz", 10);
         assert!(r.candidates.is_empty());
         assert_eq!(r.source, DictSource::None);
+    }
+
+    #[test]
+    fn test_user_dict_hot_reload_on_lookup() {
+        let dir = tempfile::tempdir().unwrap();
+        let user_path = dir.path().join("user_dict.toml");
+
+        let mut ud = UserDict::default();
+        ud.add("かっこ", "『");
+        ud.save(&user_path).unwrap();
+
+        let store = DictStore::load(Some(&user_path), None, None).unwrap();
+        assert_eq!(store.lookup_user("かっこ"), vec!["『"]);
+
+        let mut updated = UserDict::default();
+        updated.add("かっこ", "《");
+        updated.add("かっこ", "『");
+        updated.add("かっことじ", "』");
+        updated.save(&user_path).unwrap();
+
+        assert_eq!(store.lookup_user("かっこ"), vec!["『", "《"]);
+        assert_eq!(store.lookup_user("かっことじ"), vec!["』"]);
     }
 
     #[test]

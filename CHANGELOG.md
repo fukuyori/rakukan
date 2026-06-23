@@ -3,6 +3,13 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.11] - 2026-06-23
+
+### Fixed
+
+- **ユーザー辞書編集の即時反映**: `user_dict.toml` の更新時刻・サイズを `DictStore` で保持し、ユーザー辞書候補の参照時に変更があればユーザー辞書だけを hot reload するよう修正。設定画面で編集した後に engine 側の候補生成へ反映されない問題を防ぐ。
+- **設定変更後の engine 再生成**: engine-host 側で現在の `config_json` を保持し、`Create` 要求で渡された config が既存 engine と異なる場合は DynEngine を作り直すよう修正。reload event が届かない場合でも、次回接続時に古い設定の engine を使い続けないようにした。
+
 ## [0.9.10] - 2026-06-23
 
 ### Fixed
