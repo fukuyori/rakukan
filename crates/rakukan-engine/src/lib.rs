@@ -195,6 +195,20 @@ pub struct EngineConfig {
     /// Space 変換時のビーム幅の**上限**（num_candidates と併せて min をとる）。
     /// デフォルト 30 では実質上限なし、num_candidates がそのまま beam 幅になる。
     pub convert_beam_size: usize,
+    /// 異常変換の棄却に使う「最良候補からの平均 log-prob 差」の許容幅 (nats/token)。
+    /// `null` で無効。既定 3.0 は寛容で、明らかな外れ値候補のみ落とす。
+    /// 詳細は `kanji::ConversionConfig::confidence_margin` を参照。
+    #[serde(default = "default_confidence_margin")]
+    pub confidence_margin: Option<f32>,
+    /// 最良候補の平均 log-prob (nats/token) の絶対下限。これを下回る変換は幻覚の
+    /// 可能性が高いため全候補を捨て、かなにフォールバックする。`null`（既定）で無効。
+    /// 詳細は `kanji::ConversionConfig::min_top_confidence` を参照。
+    #[serde(default)]
+    pub min_top_confidence: Option<f32>,
+}
+
+fn default_confidence_margin() -> Option<f32> {
+    Some(3.0)
 }
 
 impl Default for EngineConfig {
@@ -212,6 +226,8 @@ impl Default for EngineConfig {
             digit_candidates_order: default_digit_candidates_order(),
             live_conv_beam_size: 3,
             convert_beam_size: 30,
+            confidence_margin: default_confidence_margin(),
+            min_top_confidence: None,
         }
     }
 }
@@ -342,6 +358,8 @@ impl RakunEngine {
             .with_main_gpu(config.main_gpu);
         let conv_cfg = kanji::ConversionConfig {
             beam_size: config.convert_beam_size,
+            confidence_margin: config.confidence_margin,
+            min_top_confidence: config.min_top_confidence,
             ..Default::default()
         };
         let mut converter = KanaKanjiConverter::with_config(backend, conv_cfg)

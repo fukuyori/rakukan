@@ -18,6 +18,17 @@ pub struct ConversionConfig {
     /// デフォルト 30 では実質無制限で、num_candidates がそのまま beam 幅になる。
     /// 変換速度を抑えたいユーザは小さく設定する（例: 3）。ランタイムで [1, 30]。
     pub beam_size: usize,
+    /// 異常変換の棄却に使う「最良候補からの平均 log-prob 差」の許容幅 (nats/token)。
+    /// beam 候補は長さ正規化した平均 log-prob (1 トークンあたりの自信度) で評価し、
+    /// 最良候補より `margin` 以上低い候補は外れ値として捨てる。`None` で無効。
+    /// 既定 3.0 は寛容（最良候補比で 1 トークンあたり e^3≈20 倍も不確かな候補だけを
+    /// 落とす）で、通常の代替候補には影響しない。値を小さくすると棄却が強まる。
+    pub confidence_margin: Option<f32>,
+    /// 最良候補の平均 log-prob (nats/token) の絶対下限。最良候補すらこれを下回る変換は
+    /// 幻覚の可能性が高いため全候補を捨て、かな（元の読み）にフォールバックする。
+    /// 適切な閾値は実地のスコア分布に依存するため既定 `None`（無効）。有効化する場合は
+    /// まず `confidence_margin` のデバッグログで実際の平均 log-prob を観測してから設定する。
+    pub min_top_confidence: Option<f32>,
 }
 
 impl Default for ConversionConfig {
@@ -25,6 +36,8 @@ impl Default for ConversionConfig {
         Self {
             max_new_tokens: 15,
             beam_size: 30,
+            confidence_margin: Some(3.0),
+            min_top_confidence: None,
         }
     }
 }
@@ -40,6 +53,52 @@ fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
     config_max_new_tokens
         .max(reading_chars.saturating_mul(2).saturating_add(8))
         .min(256)
+}
+
+/// beam の累積 log-prob (score) を「1 トークンあたりの平均 log-prob」に正規化する。
+///
+/// `score` は生成トークンの log-softmax の総和 (≤ 0) で、系列が長いほど負に大きくなる
+/// 長さ依存量。トークン数で割ることで候補間で比較可能な「自信度」になる。
+fn avg_logprob(score: f32, n_tokens: usize) -> f32 {
+    score / (n_tokens.max(1) as f32)
+}
+
+/// 自信度 (平均 log-prob) に基づいて異常変換候補を棄却する。
+///
+/// 入力 `cands` は `(表層, 平均 log-prob)` のリスト（スコア降順を想定）。
+/// - `margin`: 最良候補よりこれ以上低い候補を外れ値として捨てる (相対棄却)。
+/// - `min_top`: 最良候補すらこれを下回るなら全候補を捨て、空を返す (絶対フロア／フォールバック)。
+///
+/// 純粋関数。llama 非依存で単体テスト可能。
+fn filter_by_confidence(
+    cands: Vec<(String, f32)>,
+    margin: Option<f32>,
+    min_top: Option<f32>,
+) -> Vec<String> {
+    if cands.is_empty() {
+        return Vec::new();
+    }
+    // 最良 (= 平均 log-prob 最大) を基準にする。入力はスコア降順想定だが念のため算出。
+    let top = cands
+        .iter()
+        .map(|(_, lp)| *lp)
+        .fold(f32::NEG_INFINITY, f32::max);
+
+    // 絶対フロア: 最良候補すら自信が低すぎる → 全棄却してフォールバックさせる。
+    if let Some(floor) = min_top {
+        if top < floor {
+            return Vec::new();
+        }
+    }
+
+    cands
+        .into_iter()
+        .filter(|(_, lp)| match margin {
+            Some(m) => *lp >= top - m,
+            None => true,
+        })
+        .map(|(s, _)| s)
+        .collect()
 }
 
 /// Build a prompt in jinen format
@@ -219,8 +278,6 @@ impl KanaKanjiConverter {
         let tokens = self.model.tokenize(&prompt)?;
         let eos = Some(self.model.eos_token_id().0);
 
-        let mut candidates = Vec::with_capacity(num_candidates);
-
         if num_candidates == 1 {
             // Single candidate: use greedy decoding (faster)
             let output_tokens = self.model.generate(&tokens, max_new_tokens, eos)?;
@@ -228,31 +285,45 @@ impl KanaKanjiConverter {
             let text = self.model.decode(generated, true)?;
             let clean = clean_model_output(&text);
 
+            let mut candidates = Vec::with_capacity(1);
             if !clean.is_empty() {
                 candidates.push(clean);
             }
-        } else {
-            // Multiple candidates: use true beam search for better candidate quality.
-            // d1_greedy is faster but generates candidates unrelated to the reading.
-            //
-            // beam_size は num_candidates に等しい（ユーザが要求した候補数がそのまま
-            // beam 幅になる）。`config.beam_size` は安全上限として機能し、デフォルト
-            // 30 で実質上限なし。変換速度を抑えたいユーザは config.toml の
-            // `[conversion] beam_size` を小さく設定して明示的に上限をかける。
-            let configured_cap = self.config.beam_size.clamp(1, 30);
-            let beam_size = num_candidates.min(configured_cap).clamp(1, 30);
-            let results =
-                self.model
-                    .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;
 
-            for (output_tokens, _score) in results {
-                let text = self.model.decode(&output_tokens, true)?;
-                let clean = clean_model_output(&text);
-
-                if !clean.is_empty() && !candidates.contains(&clean) {
-                    candidates.push(clean);
-                }
+            // greedy パスは score を返さないため自信度フィルタは適用できない。
+            // 長さ安全網 (下記) のみが効く。スコアによる異常検出が必要なら
+            // num_candidates >= 2 (beam パス) を使う。
+            let reading_chars = reading.chars().count();
+            candidates.retain(|c| c.chars().count() * 3 >= reading_chars);
+            if candidates.is_empty() {
+                candidates.push(reading.to_string());
             }
+            return Ok(candidates);
+        }
+
+        // Multiple candidates: use true beam search for better candidate quality.
+        // d1_greedy is faster but generates candidates unrelated to the reading.
+        //
+        // beam_size は num_candidates に等しい（ユーザが要求した候補数がそのまま
+        // beam 幅になる）。`config.beam_size` は安全上限として機能し、デフォルト
+        // 30 で実質上限なし。変換速度を抑えたいユーザは config.toml の
+        // `[conversion] beam_size` を小さく設定して明示的に上限をかける。
+        let configured_cap = self.config.beam_size.clamp(1, 30);
+        let beam_size = num_candidates.min(configured_cap).clamp(1, 30);
+        let results = self
+            .model
+            .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;
+
+        // (表層, 平均 log-prob) を保持。beam score は累積 log-prob (長さ依存) なので
+        // トークン数で正規化して候補間で比較可能な自信度にする。
+        let mut scored: Vec<(String, f32)> = Vec::with_capacity(results.len());
+        for (output_tokens, score) in results {
+            let text = self.model.decode(&output_tokens, true)?;
+            let clean = clean_model_output(&text);
+            if clean.is_empty() || scored.iter().any(|(s, _)| s == &clean) {
+                continue;
+            }
+            scored.push((clean, avg_logprob(score, output_tokens.len())));
         }
 
         // M1.5 T-BUG1 (c): 出力が極端に短い候補を捨てる安全網。reading の
@@ -260,7 +331,21 @@ impl KanaKanjiConverter {
         // 同等の防壁があるが、エンジン側で先に弾けば session に短い preview が
         // 入らず、後段の sanity check や filter に頼らず済む。
         let reading_chars = reading.chars().count();
-        candidates.retain(|c| c.chars().count() * 3 >= reading_chars);
+        scored.retain(|(c, _)| c.chars().count() * 3 >= reading_chars);
+
+        // 自信度 (平均 log-prob) の観測ログ。閾値チューニングの材料になる。
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            for (c, lp) in &scored {
+                tracing::debug!(reading = %reading, candidate = %c, avg_logprob = lp, "conv candidate confidence");
+            }
+        }
+
+        // 自信度に基づく異常変換の棄却（相対外れ値＋絶対フロア）。
+        let mut candidates = filter_by_confidence(
+            scored,
+            self.config.confidence_margin,
+            self.config.min_top_confidence,
+        );
 
         // If no candidates, return the original reading
         if candidates.is_empty() {
@@ -293,6 +378,59 @@ mod tests {
         assert_eq!(generation_budget("かな", 15), 15);
         // 15 文字 reading: 15*2+8 = 38。M1.5 T-BUG1 (a) で上限 256 に拡張済。
         assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 38);
+    }
+
+    #[test]
+    fn avg_logprob_normalizes_by_length() {
+        // 累積 -6.0 を 3 トークンで割れば -2.0/token
+        assert_eq!(avg_logprob(-6.0, 3), -2.0);
+        // 同じ累積でも長い系列ほど 1 トークンあたりは小さく（0 に近く）なる
+        assert!(avg_logprob(-6.0, 6) > avg_logprob(-6.0, 3));
+        // 0 除算ガード
+        assert_eq!(avg_logprob(-6.0, 0), -6.0);
+    }
+
+    #[test]
+    fn confidence_filter_keeps_all_when_disabled() {
+        let cands = vec![("漢字".into(), -0.5), ("感じ".into(), -4.0)];
+        let out = filter_by_confidence(cands, None, None);
+        assert_eq!(out, vec!["漢字".to_string(), "感じ".to_string()]);
+    }
+
+    #[test]
+    fn confidence_filter_drops_relative_outlier() {
+        // 最良 -0.5。margin 3.0 → -3.5 未満を棄却。-4.0 の候補は外れ値として落ちる。
+        let cands = vec![
+            ("漢字".into(), -0.5),
+            ("感じ".into(), -1.0),
+            ("ゴミ".into(), -4.0),
+        ];
+        let out = filter_by_confidence(cands, Some(3.0), None);
+        assert_eq!(out, vec!["漢字".to_string(), "感じ".to_string()]);
+    }
+
+    #[test]
+    fn confidence_filter_keeps_top_under_relative_rule() {
+        // 最良候補は基準そのものなので相対ルールでは決して落ちない。
+        let cands = vec![("唯一".into(), -9.9)];
+        let out = filter_by_confidence(cands, Some(3.0), None);
+        assert_eq!(out, vec!["唯一".to_string()]);
+    }
+
+    #[test]
+    fn confidence_filter_absolute_floor_rejects_all() {
+        // 最良 -5.0 が フロア -3.0 を下回る → 全棄却（呼び出し側でかなフォールバック）。
+        let cands = vec![("幻覚".into(), -5.0), ("別".into(), -6.0)];
+        let out = filter_by_confidence(cands, Some(3.0), Some(-3.0));
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn confidence_filter_absolute_floor_passes_when_confident() {
+        // 最良 -1.0 はフロア -3.0 以上なので通過し、相対ルールのみ適用。
+        let cands = vec![("良".into(), -1.0), ("悪".into(), -5.0)];
+        let out = filter_by_confidence(cands, Some(3.0), Some(-3.0));
+        assert_eq!(out, vec!["良".to_string()]);
     }
 
     #[test]

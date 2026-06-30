@@ -52,6 +52,7 @@ pub(crate) fn fullwidth_symbol_to_ascii(c: char) -> char {
     match c {
         '、' => ',',
         '。' => '.',
+        '・' => '/',
         '「' => '[',
         '」' => ']',
         '\u{FFE5}' => '\x5C',
@@ -422,10 +423,13 @@ fn ascii_to_fullwidth(s: &str) -> String {
     s.chars()
         .map(|c| {
             let n = c as u32;
-            if (0x21..=0x7E).contains(&n) {
-                char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c)
-            } else {
-                c
+            match c {
+                '、' => '，',
+                '。' => '．',
+                '・' => '／',
+                'ー' => '－',
+                _ if (0x21..=0x7E).contains(&n) => char::from_u32(n - 0x21 + 0xFF01).unwrap_or(c),
+                _ => c,
             }
         })
         .collect()
@@ -613,7 +617,7 @@ pub fn romaji_to_fullwidth_latin(romaji: &str) -> String {
 
 /// F9/F10 初回変換: ローマ字ログを半角英数（小文字）に変換する
 pub fn romaji_to_halfwidth_latin(romaji: &str) -> String {
-    romaji.to_lowercase()
+    fullwidth_to_ascii(romaji).to_lowercase()
 }
 
 /// 半角カタカナ変換（F8）
@@ -1030,6 +1034,18 @@ mod tests {
     fn romaji_to_half() {
         assert_eq!(romaji_to_halfwidth_latin("tesuto"), "tesuto");
         assert_eq!(romaji_to_halfwidth_latin("SCHEDULE"), "schedule");
+    }
+
+    #[test]
+    fn latin_convert_japanese_symbols() {
+        assert_eq!(to_full_latin("、。・ー"), "，．／－");
+        assert_eq!(to_half_latin("、。・ー"), ",./-");
+    }
+
+    #[test]
+    fn romaji_log_latin_convert_japanese_symbols() {
+        assert_eq!(romaji_to_fullwidth_latin("、。・-"), "，．／－");
+        assert_eq!(romaji_to_halfwidth_latin("、。・-"), ",./-");
     }
 
     // ─── split_by_punctuation ─────────────────────────────────────────────────
