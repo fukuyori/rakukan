@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
-## [0.9.13] - 2026-07-03
+## [0.9.13] - 2026-07-13
 
 変換停止・異常変換（途中切れ・同文 2 度出力）の修正一式。調査と設計は
 `docs/CONVERSION_ANOMALY_FIX_PLAN.md` を参照。
