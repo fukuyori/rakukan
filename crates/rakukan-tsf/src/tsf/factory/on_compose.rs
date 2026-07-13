@@ -242,6 +242,12 @@ pub(super) fn commit_then_start_composition(
 ) -> Result<()> {
     use windows::Win32::Foundation::E_FAIL;
 
+    // M1.8 T-MID1 拡張: 確定はライブ変換の世代を進める。これをしないと、
+    // 確定前に積まれた Phase1A/1B の遅延 SetText が gen 一致のまま
+    // 確定後の新 composition に古い preview を書き込み、テキストが
+    // 二重に見える競合が起こりうる。
+    crate::tsf::live_session::conv_gen_bump();
+
     // composition_take() をセッション内に移動する（end_composition と同じ理由）。
     // セッション外で take すると COMPOSITION=None になった瞬間に update_composition が
     // 誤ったカーソル位置から新 composition を開始するリスクがある。
@@ -250,6 +256,15 @@ pub(super) fn commit_then_start_composition(
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+
+        // SetText 排他化（M1.8 T-MID3 の commit 版）: Phase1A / update_composition
+        // の SetText と直列化する。他サイトは try_lock + skip だが、確定はスキップ
+        // するとユーザーテキストが失われるためブロッキングで取得する。
+        // 遅延実行された Phase1A がこのセッションの後に走っても、composition_take
+        // で旧 composition が外れているため古い preview の書き込みは失敗する。
+        let _apply_guard = crate::engine::state::COMPOSITION_APPLY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
 
         let comp = composition_take().unwrap_or(None);
         tracing::debug!(
@@ -563,11 +578,19 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
     use windows::Win32::UI::TextServices::{
         TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
     };
+    // 確定はライブ変換の世代を進める（commit_then_start_composition と同じ理由）。
+    // 確定前に積まれた Phase1A/1B の遅延 SetText を gen 不一致で棄却させる。
+    crate::tsf::live_session::conv_gen_bump();
     // composition_take() をセッション内に移動する。
     // セッション外で take すると COMPOSITION=None になった直後に次のキー入力が来たとき、
     // update_composition が existing=None を見て誤った位置から新 composition を開始してしまう。
     let ctx2 = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
+        // SetText 排他化（commit_then_start_composition と同様、確定なので
+        // try_lock + skip ではなくブロッキングで取得する）
+        let _apply_guard = crate::engine::state::COMPOSITION_APPLY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let comp = match composition_take().unwrap_or(None) {
             Some(c) => c,
             None => {
@@ -577,7 +600,12 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
                     let text_w: Vec<u16> = text.encode_utf16().collect();
                     let insert =
                         get_insert_range_or_end(&ctx2, ec, "end_composition direct insert")?;
-                    let _ = insert.SetText(ec, 0, &text_w);
+                    if let Err(e) = insert.SetText(ec, 0, &text_w) {
+                        tracing::warn!(
+                            "end_composition: direct insert SetText failed text={:?}: {e}",
+                            text
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -585,12 +613,14 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
 
         let text_w: Vec<u16> = text.encode_utf16().collect();
         tracing::debug!("end_composition[session]: text={:?}", text);
-        let range = comp
-            .GetRange()
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
-        range
-            .SetText(ec, 0, &text_w)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText end: {e}")))?;
+        let range = comp.GetRange().map_err(|e| {
+            tracing::warn!("end_composition: GetRange failed text={:?}: {e}", text);
+            windows::core::Error::new(E_FAIL, format!("GetRange: {e}"))
+        })?;
+        range.SetText(ec, 0, &text_w).map_err(|e| {
+            tracing::warn!("end_composition: SetText failed text={:?}: {e}", text);
+            windows::core::Error::new(E_FAIL, format!("SetText end: {e}"))
+        })?;
 
         // Fix3: EndComposition の前に SetSelection する
         // （EndComposition 後に SetSelection するとアプリがカーソルをリセットしてしまうため）
@@ -606,14 +636,24 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
             let _ = ctx2.SetSelection(ec, &[sel]);
         }
 
-        comp.EndComposition(ec)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))?;
+        comp.EndComposition(ec).map_err(|e| {
+            tracing::warn!("end_composition: EndComposition failed text={:?}: {e}", text);
+            windows::core::Error::new(E_FAIL, format!("EndComposition: {e}"))
+        })?;
         Ok(())
     });
+    // 確定はユーザーテキストを失うと致命的なので、edit session の結果
+    // (phrSession) まで確認して失敗を必ずログに残す。
     unsafe {
-        let _ = ctx
-            .RequestEditSession(tid, &session, TF_ES_READWRITE)
-            .map_err(|e| anyhow::anyhow!("RequestEditSession end: {e}"));
+        match ctx.RequestEditSession(tid, &session, TF_ES_READWRITE) {
+            Ok(hr) if hr.is_err() => {
+                tracing::warn!("end_composition: edit session failed hr={hr:?}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("end_composition: RequestEditSession failed: {e}");
+            }
+        }
     }
     Ok(())
 }

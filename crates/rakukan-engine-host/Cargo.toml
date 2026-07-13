@@ -18,8 +18,10 @@ tracing  = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 # サイレント死の診断: Win32 stderr を log ファイルへリダイレクトするのに使う。
+# Win32_System_Threading: named mutex による多重起動防止に使う。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
     "Win32_Foundation",
     "Win32_System_Console",
+    "Win32_System_Threading",
 ] }

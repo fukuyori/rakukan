@@ -21,6 +21,12 @@ use std::sync::OnceLock;
 /// Global llama.cpp backend (can only be initialized once)
 static LLAMA_BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = OnceLock::new();
 
+/// 生成全体のウォールクロック上限秒数（greedy / beam 共通）。
+/// GPU ハング以外の「EOS が出ずに max_new_tokens まで走り続ける」ケースを打ち切る。
+/// GPU ハング（ctx.decode がブロッキングになる）はここでは防げないが、
+/// その場合は TSF 側のウォッチドッグ (bg_timeout_watchdog) が engine_reload で対処する。
+const GEN_TIMEOUT_SECS: u64 = 15;
+
 /// Get or initialize the global llama.cpp backend
 fn get_backend() -> Result<&'static LlamaBackend> {
     let result = LLAMA_BACKEND.get_or_init(|| {
@@ -407,7 +413,16 @@ impl LlamaCppModel {
         let mut samplers: Vec<LlamaSampler> =
             (0..beam_size).map(|_| LlamaSampler::greedy()).collect();
 
+        let gen_start = std::time::Instant::now();
+
         for _step in 0..(max_new_tokens - 1) {
+            if gen_start.elapsed().as_secs() >= GEN_TIMEOUT_SECS {
+                tracing::warn!(
+                    "d1_greedy_batch: wall-clock timeout ({:.1}s), stopping generation early",
+                    gen_start.elapsed().as_secs_f32()
+                );
+                break;
+            }
             let active_count = beam_finished.iter().filter(|&&f| !f).count();
             if active_count == 0 {
                 break;
@@ -448,8 +463,19 @@ impl LlamaCppModel {
             }
         }
 
-        let results: Vec<(Vec<LlamaToken>, f32)> =
-            beam_tokens.into_iter().zip(beam_scores).collect();
+        // EOS に到達した beam のみ返す（未完了 beam は途中切れテキストになる）
+        let results: Vec<(Vec<LlamaToken>, f32)> = beam_tokens
+            .into_iter()
+            .zip(beam_scores)
+            .zip(beam_finished)
+            .filter_map(|((tokens, score), finished)| finished.then_some((tokens, score)))
+            .collect();
+        if results.is_empty() {
+            tracing::warn!(
+                "d1_greedy_batch: no beam reached EOS (budget={} tokens), returning no candidates",
+                max_new_tokens
+            );
+        }
         Ok(results)
     }
 
@@ -470,8 +496,14 @@ impl LlamaCppModel {
     /// 3. Repeat until all beams reach EOS or max_new_tokens
     ///
     /// True beam search implementation without KV cache sharing.
-    /// This implementation processes full sequences at each step to avoid
-    /// KV cache copy issues with GPT-2 models. It's slower but more reliable.
+    ///
+    /// beam の選択で同一親から複数の子が残るため KV cache の seq 分岐が必要に
+    /// なるが、seq コピー共有は過去に GPT-2 モデルで問題が出たため使わない。
+    /// 代わりに 1 コンテキストを維持し、毎ステップ `clear_kv_cache` してから
+    /// 全 beam のフル系列を **1 回の batched decode** で評価する。
+    /// （旧実装は beam × step ごとに fresh context を生成してフル再デコード
+    /// しており、context 生成 = KV 確保が beam_size × max_new_tokens 回走って
+    /// 長文 × 大 beam で分単位の遅延 =「変換が止まる」体感の主因だった。）
     fn generate_beam_search_impl(
         &self,
         input_tokens: &[LlamaToken],
@@ -479,10 +511,40 @@ impl LlamaCppModel {
         eos_token_id: Option<i32>,
         beam_size: usize,
     ) -> Result<Vec<(Vec<LlamaToken>, f32)>> {
+        let backend = get_backend()?;
         let model_eos = self.model.token_eos();
+        let input_len = input_tokens.len();
 
-        // Step 1: Get initial logits
-        let initial_logits = self.eval_sequence(input_tokens)?;
+        // n_ctx / n_batch は「全 beam のフル系列を 1 decode に載せる」ぶんが必要。
+        let max_seq_len = input_len.saturating_add(max_new_tokens).saturating_add(1);
+        let batch_size = max_seq_len
+            .saturating_mul(beam_size)
+            .min(u32::MAX as usize) as u32;
+        let n_ctx_needed = batch_size.max(self.n_ctx);
+        let ctx_params = self
+            .context_params()
+            .with_n_ctx(Some(
+                NonZeroU32::new(n_ctx_needed).expect("n_ctx must be non-zero"),
+            ))
+            .with_n_seq_max(beam_size.try_into().unwrap_or(32))
+            .with_n_batch(batch_size)
+            .with_n_ubatch(batch_size);
+        let mut ctx = self
+            .model
+            .new_context(backend, ctx_params)
+            .map_err(|e| KanjiError::Inference(e.into()))?;
+        let mut batch = LlamaBatch::new(batch_size as usize, 1);
+
+        // Step 1: Get initial logits (input を seq 0 で 1 回だけ評価)
+        for (i, token) in input_tokens.iter().enumerate() {
+            let is_last = i == input_len - 1;
+            batch
+                .add(*token, i as i32, &[0], is_last)
+                .map_err(|e| KanjiError::Inference(e.into()))?;
+        }
+        ctx.decode(&mut batch)
+            .map_err(|e| KanjiError::Inference(e.into()))?;
+        let initial_logits = ctx.get_logits().to_vec();
         let (top_tokens, top_log_probs) = self.get_top_k_tokens(&initial_logits, beam_size);
 
         // Initialize beams, partitioning EOS tokens into finished
@@ -505,8 +567,13 @@ impl LlamaCppModel {
         // Expansion factor
         let expand_k = beam_size.max(4);
 
+        // ウォールクロック制限。EOS が出ないまま走り続けると「変換が止まった」
+        // 体感になるため、超過時はその時点の finished_beams のみで打ち切る。
+        let gen_start = std::time::Instant::now();
+        let mut timed_out = false;
+
         // Step 2: Main beam search loop
-        for _step in 0..(max_new_tokens - 1) {
+        'step: for _step in 0..(max_new_tokens - 1) {
             if beams.is_empty() {
                 break;
             }
@@ -526,17 +593,50 @@ impl LlamaCppModel {
                 }
             }
 
+            // ステップ単位（= 1 batched decode）でタイムアウトを判定する
+            if gen_start.elapsed().as_secs() >= GEN_TIMEOUT_SECS {
+                tracing::warn!(
+                    "generate_beam_search_impl: wall-clock timeout ({:.1}s), stopping with {} finished beams",
+                    gen_start.elapsed().as_secs_f32(),
+                    finished_beams.len()
+                );
+                timed_out = true;
+                break 'step;
+            }
+
+            // 全 beam のフル系列（input + beam.tokens）を別 seq に載せ、
+            // 1 回の decode で各 beam の最終トークン位置の logits を得る
+            ctx.clear_kv_cache();
+            batch.clear();
+            let mut last_logit_idx: Vec<i32> = Vec::with_capacity(beams.len());
+            let mut n_added: i32 = 0;
+            for (beam_idx, beam) in beams.iter().enumerate() {
+                let seq = beam_idx as i32;
+                for (i, token) in input_tokens.iter().enumerate() {
+                    batch
+                        .add(*token, i as i32, &[seq], false)
+                        .map_err(|e| KanjiError::Inference(e.into()))?;
+                    n_added += 1;
+                }
+                for (j, token) in beam.tokens.iter().enumerate() {
+                    let pos = (input_len + j) as i32;
+                    let is_last = j == beam.tokens.len() - 1;
+                    batch
+                        .add(*token, pos, &[seq], is_last)
+                        .map_err(|e| KanjiError::Inference(e.into()))?;
+                    n_added += 1;
+                }
+                last_logit_idx.push(n_added - 1);
+            }
+            ctx.decode(&mut batch)
+                .map_err(|e| KanjiError::Inference(e.into()))?;
+
             // Collect candidates from all beams
             let mut candidates: Vec<BeamState> = Vec::new();
 
-            for beam in &beams {
-                // Build full sequence: input_tokens + beam.tokens
-                let mut full_seq: Vec<LlamaToken> = input_tokens.to_vec();
-                full_seq.extend(&beam.tokens);
-
-                // Get logits for this sequence
-                let logits = self.eval_sequence(&full_seq)?;
-                let (top_tokens, top_log_probs) = self.get_top_k_tokens(&logits, expand_k);
+            for (beam_idx, beam) in beams.iter().enumerate() {
+                let logits = ctx.get_logits_ith(last_logit_idx[beam_idx]);
+                let (top_tokens, top_log_probs) = self.get_top_k_tokens(logits, expand_k);
 
                 // Create candidates
                 for (&token, &log_prob) in top_tokens.iter().zip(top_log_probs.iter()) {
@@ -570,15 +670,19 @@ impl LlamaCppModel {
             }
         }
 
-        // Prefer completed candidates. Active beams are only a last resort when
-        // no beam reached EOS; otherwise a high-scoring unfinished prefix can
-        // surface as a live preview and make the displayed text look truncated.
-        let result_beams = if finished_beams.is_empty() {
-            beams
-        } else {
-            finished_beams
-        };
-        let mut all_results: Vec<(Vec<LlamaToken>, f32)> = result_beams
+        // EOS に到達した beam だけを候補にする。未完了 beam は文の途中で
+        // 切れたテキストなので、候補・確定に流れると「途中切れ」の異常変換
+        // になる。1 つも完走していなければ空を返し、呼び出し側（convert）の
+        // 読みフォールバックに委ねる。
+        if finished_beams.is_empty() {
+            tracing::warn!(
+                "generate_beam_search_impl: no beam reached EOS (budget={} tokens, timed_out={}), returning no candidates",
+                max_new_tokens,
+                timed_out
+            );
+            return Ok(Vec::new());
+        }
+        let mut all_results: Vec<(Vec<LlamaToken>, f32)> = finished_beams
             .into_iter()
             .map(|b| (b.tokens, b.score))
             .collect();
@@ -588,32 +692,6 @@ impl LlamaCppModel {
         all_results.truncate(beam_size);
 
         Ok(all_results)
-    }
-
-    /// Process a token sequence and return the logits at the last position.
-    ///
-    /// Creates a fresh context for each call. Used by true beam search where
-    /// each beam needs independent evaluation.
-    fn eval_sequence(&self, tokens: &[LlamaToken]) -> Result<Vec<f32>> {
-        let backend = get_backend()?;
-        let ctx_params = self.context_params();
-
-        let mut ctx = self
-            .model
-            .new_context(backend, ctx_params)
-            .map_err(|e| KanjiError::Inference(e.into()))?;
-
-        let mut batch = LlamaBatch::new(tokens.len().max(64), 1);
-        for (i, token) in tokens.iter().enumerate() {
-            let is_last = i == tokens.len() - 1;
-            batch
-                .add(*token, i as i32, &[0], is_last)
-                .map_err(|e| KanjiError::Inference(e.into()))?;
-        }
-        ctx.decode(&mut batch)
-            .map_err(|e| KanjiError::Inference(e.into()))?;
-
-        Ok(ctx.get_logits().to_vec())
     }
 
     /// Get top-k tokens from logits with log probabilities
@@ -691,11 +769,7 @@ impl LlamaCppModel {
         // Get model's EOS token for comparison
         let model_eos = self.model.token_eos();
 
-        // ウォールクロック制限: 生成全体の上限時間。
-        // GPU ハング以外の「EOS が出ずに max_new_tokens まで走り続ける」ケースを防ぐ。
-        // GPU ハング（ctx.decode がブロッキングになる）はここでは防げないが、
-        // その場合は TSF 側のウォッチドッグ (bg_timeout_watchdog) が engine_reload で対処する。
-        const GEN_TIMEOUT_SECS: u64 = 15;
+        // ウォールクロック制限（GEN_TIMEOUT_SECS はモジュールレベルで定義）
         let gen_start = std::time::Instant::now();
 
         // Generate new tokens

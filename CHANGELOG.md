@@ -3,6 +3,32 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.9.13] - 2026-07-03
+
+変換停止・異常変換（途中切れ・同文 2 度出力）の修正一式。調査と設計は
+`docs/CONVERSION_ANOMALY_FIX_PLAN.md` を参照。
+
+### Fixed
+
+- **beam search の大幅高速化（「変換が止まる」の主因対策）**: true beam search が beam × ステップごとに新しい LlamaContext を生成してプロンプト全体を再デコードしていた問題を修正。1 コンテキストを維持し、毎ステップ `clear_kv_cache` → 全 beam を 1 回の batched decode で評価する方式に書き換え。context 生成（KV 確保）は 1 変換 1 回になった。
+- **EOS 未到達ビームの棄却（「途中切れ」対策）**: 生成予算内に EOS へ到達しなかった未完了 beam をそのまま候補として返していた問題を修正。finished beam が 1 つもなければ空を返し、読みフォールバックに委ねる。d1_greedy 経路も同様。
+- **候補の反復・過長検出（「同文 2 度出力」対策）**: 候補長の上限安全網（読み×1.5+2 文字、従来は下限 33% のみ）と、周期 4 文字以上のタンデム反復検出を追加。読み自身が反復を含む入力（「わかったわかった」等）では反復検出を無効化。confidence フィルタでは捕捉できない退化出力を棄却する。
+- **beam 経路にウォールクロックタイムアウト**: greedy 専用だった 15 秒制限（`GEN_TIMEOUT_SECS`）を beam 2 経路にも適用。超過時はその時点の finished beam のみで打ち切る。
+- **engine-host の多重起動防止**: named mutex によるシングルトンガードを追加。同一 pipe 名で 2 プロセスが listen して要求が分散する問題を防ぐ（実ログで 0.6 秒差の二重起動を確認）。engine_reload の世代交代を誤検出しないよう 2 秒のリトライ付き。
+- **TSF 確定パスの SetText 競合封鎖**: `commit_then_start_composition` / `end_composition` が `COMPOSITION_APPLY_LOCK` を取らずに SetText していた問題と、確定時に live 変換世代（conv_gen）が進まず遅延 Phase1A が確定後の composition に古い preview を書き込みうる問題を修正（ドキュメント上のテキスト二重化の副次経路）。
+- **engine-host の再起動ストームを修正**: TSF DLL はアプリごとに別プロセスで動くため、設定保存 1 回を各プロセスが独立に検出し、共有シングルトンホストへ順番に `Shutdown` を送る連鎖が起きていた（実ログ: 5 分間に 4 回再起動。再起動中の約 4〜8 秒は live 変換が無言で停止し「長文入力中に変換がかからなくなる」症状になる）。`ShutdownIfConfigDiffers` RPC を追加し、ホストが既に同じ config で動いていれば再起動をスキップする。ハング復旧用の BG ウォッチドッグと langbar メニューの「エンジン再起動」は従来どおり無条件で再起動する（`engine_reload_force`）。
+- **Cancel 後の Preedit 状態が編集に追随しない問題を修正**: ライブ変換を Esc でキャンセルした後、Backspace や文字入力で読みが変わってもセッション状態のテキストが古いまま残り（実ログ: state=`Preedit("いまわのきわ")` のまま実バッファは「いまは」）、Waiting 確定などの経路で前の読みが使われうる（「前の変換内容が出る」症状の一経路）。Input / Backspace の各経路で state テキストを実際の読みに同期し、読みが空になったら Idle へ戻す。
+- **表示と確定テキストの不一致（ひらがな表示のまま Enter → 漢字が確定される）を修正**: 確定は表示済みテキストのみ（WYSIWYG）とする不変条件で 3 経路を封鎖。(1) `on_commit_raw` のフォールバックが Enter 時に BG 変換完了を最大 180ms 待ち、一度も表示していない変換結果を確定していた（`min_chars` 未満でプレビューが出ない読みでも変換されてしまう主経路）。表示中の preedit をそのまま確定するよう変更。(2) Enter 処理冒頭の Phase1B キュー適用が、未表示 preview をその Enter 自身で LiveConv 化して確定していた。CommitRaw ではキューを破棄する。(3) Phase1A が `RequestEditSession` の Ok だけで LiveConv 状態へ遷移し、SetText が実行されない場合（非同期実行 / `COMPOSITION_APPLY_LOCK` busy skip / stale gen / focus 変更）に内部状態だけ変換済みになっていた。SetText の実行をクロージャから伝搬させ、確認できた場合のみ遷移する（未確認時は遅延適用も取り消して Phase1B へ）。
+
+### Added
+
+- **エンジン DLL 内 tracing ログ**: cdylib は host と tracing static を共有しないため DLL 内のログがどこにも出ていなかった。`engine_create` 時に subscriber を初期化し `%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log` に出力（`RAKUKAN_LOG` で上書き可、8 MiB × 1 世代ローテーション）。
+- **変換観測ログ**: beam 変換 1 件ごとに reading 文字数 / beam 数 / 生成予算 / EOS 到達 beam 数 / 所要 ms を INFO で記録。engine-host 側も 1 秒超ブロックした RPC 要求を INFO で記録。「止まる」「切れる」報告時のログだけでの切り分けを可能にする。
+
+### Changed
+
+- **BG ウォッチドッグ閾値 30 秒 → 20 秒**: エンジン側生成タイムアウト（15 秒）＋マージンに合わせて短縮。
+
 ## [0.9.12] - 2026-06-24
 
 ### Added

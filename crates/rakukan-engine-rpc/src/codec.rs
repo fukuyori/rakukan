@@ -66,4 +66,33 @@ mod tests {
             _ => panic!("wrong variant"),
         }
     }
+
+    #[test]
+    fn roundtrip_shutdown_if_config_differs() {
+        let mut buf = Vec::new();
+        let req = Request::ShutdownIfConfigDiffers {
+            config_json: Some(r#"{"num_candidates":9}"#.into()),
+        };
+        write_frame(&mut buf, &req).unwrap();
+        let mut cur = Cursor::new(&buf);
+        let got: Request = read_frame(&mut cur).unwrap();
+        assert!(matches!(
+            got,
+            Request::ShutdownIfConfigDiffers { config_json: Some(s) }
+                if s == r#"{"num_candidates":9}"#
+        ));
+    }
+
+    /// 新 variant は enum 末尾に追加する規約の検証: postcard は宣言順 discriminant
+    /// なので、途中挿入すると既存 variant のワイヤ表現が壊れる。Shutdown が
+    /// 「1 バイトの varint discriminant のみ（ペイロードなし）」であることを固定し、
+    /// 誤ってペイロードを足す変更を検出する。
+    #[test]
+    fn existing_variant_wire_format_is_stable() {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &Request::Shutdown).unwrap();
+        // [len=4bytes LE][varint discriminant]
+        let payload = &buf[4..];
+        assert_eq!(payload.len(), 1, "Shutdown must stay a 1-byte discriminant");
+    }
 }

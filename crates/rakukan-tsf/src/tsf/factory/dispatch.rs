@@ -99,6 +99,10 @@ impl super::TextServiceFactory_Impl {
                 conv_gen_snapshot, queue_preview_consume, session_nonce_snapshot,
             };
             if let Some(entry) = queue_preview_consume() {
+                // CommitRaw (Enter) では適用しない: ここで適用すると、まだ画面に
+                // 出ていない preview をこの Enter 自身が LiveConv 化してそのまま
+                // 確定し、「表示=ひらがな、確定=変換済み」の不一致になる。
+                // 確定は表示済みテキストのみ (WYSIWYG)。entry は破棄する。
                 // stale 判定
                 let current_gen = conv_gen_snapshot();
                 let current_nonce = session_nonce_snapshot();
@@ -106,7 +110,12 @@ impl super::TextServiceFactory_Impl {
                 let stale_gen = entry.gen_when_requested != current_gen;
                 let stale_reading = entry.reading != current_reading;
                 let stale_nonce = entry.session_nonce_at_request != current_nonce;
-                if stale_gen || stale_reading || stale_nonce {
+                if matches!(action, UserAction::CommitRaw) {
+                    tracing::info!(
+                        "[Live] Phase1B: discard undisplayed preview on CommitRaw preview={:?}",
+                        entry.preview
+                    );
+                } else if stale_gen || stale_reading || stale_nonce {
                     tracing::warn!(
                         "[Live] Phase1B: discarded stale preview entry_gen={} cur_gen={} entry_nonce={} cur_nonce={} entry_reading={:?} cur_reading={:?}",
                         entry.gen_when_requested,

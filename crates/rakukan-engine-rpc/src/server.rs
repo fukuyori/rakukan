@@ -24,20 +24,52 @@ use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
 
 /// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
-pub type SharedEngine = Arc<Mutex<SharedEngineState>>;
+pub type SharedEngine = Arc<HostShared>;
+
+pub struct HostShared {
+    /// エンジン本体。変換中はこのロックが長時間（最大 GEN_TIMEOUT 秒）保持される。
+    pub state: Mutex<SharedEngineState>,
+    /// 現在の engine 生成に使った config JSON。
+    ///
+    /// `state` とは別ロックにする: `ShutdownIfConfigDiffers` は変換で engine
+    /// ロックが塞がっていても即応答できる必要がある（`Shutdown` が engine
+    /// ロックなしで動くのと同じ理由）。ロックは比較・更新の瞬間だけ保持する。
+    pub config_json: Mutex<Option<String>>,
+}
+
+impl HostShared {
+    pub fn new() -> Self {
+        Self {
+            state: Mutex::new(SharedEngineState { engine: None }),
+            config_json: Mutex::new(None),
+        }
+    }
+
+    /// config_json の現在値を短時間ロックで複製する。poisoned は回復する。
+    fn config_snapshot(&self) -> Option<String> {
+        match self.config_json.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
+        }
+    }
+
+    /// config_json を短時間ロックで更新する。poisoned は回復する。
+    fn set_config(&self, cfg: Option<String>) {
+        match self.config_json.lock() {
+            Ok(mut g) => *g = cfg,
+            Err(p) => *p.into_inner() = cfg,
+        }
+    }
+}
+
+impl Default for HostShared {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 pub struct SharedEngineState {
     pub engine: Option<DynEngine>,
-    pub config_json: Option<String>,
-}
-
-impl SharedEngineState {
-    pub fn new() -> Self {
-        Self {
-            engine: None,
-            config_json: None,
-        }
-    }
 }
 
 /// Named Pipe サーバを起動し、クライアント接続を待ち受けるループを実行する。
@@ -77,7 +109,21 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
         };
         // M1.6 T-HOST1: Shutdown は応答送信後にプロセス exit するため前取り判定。
         let is_shutdown = matches!(req, Request::Shutdown);
+        // ShutdownIfConfigDiffers は「config が異なる」と判定したとき（Bool(true)
+        // 応答）だけ Shutdown と同じ exit 経路に乗る。
+        let is_conditional_shutdown = matches!(req, Request::ShutdownIfConfigDiffers { .. });
+        let label = request_label(&req);
+        let started = std::time::Instant::now();
         let resp = dispatch(&engine, req);
+        let is_shutdown =
+            is_shutdown || (is_conditional_shutdown && matches!(resp, Response::Bool(true)));
+        // 変換遅延の診断: 長くブロックした要求だけを INFO で残す。
+        // BgWaitMs はクライアント指定のタイムアウトまで待つのが正常動作なので
+        // 1 秒以上（= engine mutex 待ち等の異常）に絞ってノイズを避ける。
+        let elapsed_ms = started.elapsed().as_millis();
+        if elapsed_ms >= 1_000 {
+            tracing::info!("rpc: {label} took {elapsed_ms}ms");
+        }
         if let Err(e) = write_frame(&mut stream, &resp) {
             tracing::debug!("rpc session: write_frame failed, closing: {e}");
             return Ok(());
@@ -90,6 +136,71 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
             tracing::info!("rpc: Shutdown requested, exiting host process");
             std::process::exit(0);
         }
+    }
+}
+
+/// ログ用のリクエスト名（payload は含めない）。
+fn request_label(req: &Request) -> &'static str {
+    use Request::*;
+    match req {
+        Hello { .. } => "Hello",
+        Create { .. } => "Create",
+        Reload { .. } => "Reload",
+        Bye => "Bye",
+        Shutdown => "Shutdown",
+        PushChar(_) => "PushChar",
+        PushRaw(_) => "PushRaw",
+        PushFullwidthAlpha(_) => "PushFullwidthAlpha",
+        Backspace => "Backspace",
+        FlushPendingN => "FlushPendingN",
+        PreeditDisplay => "PreeditDisplay",
+        PreeditIsEmpty => "PreeditIsEmpty",
+        HiraganaText => "HiraganaText",
+        RomajiLogStr => "RomajiLogStr",
+        HiraganaFromRomajiLog => "HiraganaFromRomajiLog",
+        CommittedText => "CommittedText",
+        BgStart { .. } => "BgStart",
+        BgStatus => "BgStatus",
+        BgTakeCandidates { .. } => "BgTakeCandidates",
+        BgPeekTopCandidate { .. } => "BgPeekTopCandidate",
+        #[allow(deprecated)]
+        _ReservedBgTakeSegmentedCandidates { .. } => "_Reserved",
+        BgReclaim => "BgReclaim",
+        BgWaitMs { .. } => "BgWaitMs",
+        Commit { .. } => "Commit",
+        CommitAsHiragana => "CommitAsHiragana",
+        ResetPreedit => "ResetPreedit",
+        ForcePreedit { .. } => "ForcePreedit",
+        ResetAll => "ResetAll",
+        ConvertSync => "ConvertSync",
+        #[allow(deprecated)]
+        _ReservedConvertSyncSegmented => "_Reserved",
+        MergeCandidates { .. } => "MergeCandidates",
+        #[allow(deprecated)]
+        _ReservedSegmentSurface { .. } => "_Reserved",
+        #[allow(deprecated)]
+        _ReservedSegmentCandidate { .. } => "_Reserved",
+        #[allow(deprecated)]
+        _ReservedConvertToSegments { .. } => "_Reserved",
+        ResizeSegment { .. } => "ResizeSegment",
+        SegmentCandidatesFor { .. } => "SegmentCandidatesFor",
+        StartLoadModel => "StartLoadModel",
+        PollModelReady => "PollModelReady",
+        StartLoadDict => "StartLoadDict",
+        PollDictReady => "PollDictReady",
+        IsKanjiReady => "IsKanjiReady",
+        IsDictReady => "IsDictReady",
+        BackendLabel => "BackendLabel",
+        NGpuLayers => "NGpuLayers",
+        MainGpu => "MainGpu",
+        AvailableModelsJson => "AvailableModelsJson",
+        Learn { .. } => "Learn",
+        LearnForce { .. } => "LearnForce",
+        MergeCandidatesForReading { .. } => "MergeCandidatesForReading",
+        LastError => "LastError",
+        DictStatus => "DictStatus",
+        InputChar { .. } => "InputChar",
+        ShutdownIfConfigDiffers { .. } => "ShutdownIfConfigDiffers",
     }
 }
 
@@ -108,7 +219,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
         }
         Request::Create { config_json } => {
             let mut g = lock_engine(engine);
-            if g.engine.is_some() && g.config_json == config_json {
+            if g.engine.is_some() && engine.config_snapshot() == config_json {
                 return Response::Unit;
             }
             if g.engine.is_some() {
@@ -116,7 +227,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
                     "rpc: Create requested with changed config, reloading current engine"
                 );
             }
-            load_engine_into(&mut g, config_json)
+            load_engine_into(engine, &mut g, config_json)
         }
         Request::Reload { config_json } => {
             // 既存 engine を drop してから作り直す。
@@ -124,12 +235,24 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             let mut g = lock_engine(engine);
             tracing::info!("rpc: Reload requested, dropping current engine");
             g.engine = None;
-            load_engine_into(&mut g, config_json)
+            load_engine_into(engine, &mut g, config_json)
         }
         Request::Bye => Response::Unit,
         Request::Shutdown => Response::Unit,
+        Request::ShutdownIfConfigDiffers { config_json } => {
+            // 変換中でも応答できるよう engine ロックは取らない（Shutdown と同じ扱い）。
+            // config だけを短時間ロックで比較する。
+            let current = engine.config_snapshot();
+            if current == config_json {
+                tracing::info!("rpc: ShutdownIfConfigDiffers: config unchanged, keeping host");
+                Response::Bool(false)
+            } else {
+                tracing::info!("rpc: ShutdownIfConfigDiffers: config differs, will exit");
+                Response::Bool(true)
+            }
+        }
         other => {
-            let mut g = match engine.lock() {
+            let mut g = match engine.state.lock() {
                 Ok(g) => g,
                 Err(p) => {
                     tracing::warn!("engine mutex poisoned, recovering");
@@ -144,9 +267,9 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
     }
 }
 
-/// SharedEngine を lock し、poisoned を回復する小物ヘルパ。
+/// SharedEngine の engine 側を lock し、poisoned を回復する小物ヘルパ。
 fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, SharedEngineState> {
-    match engine.lock() {
+    match engine.state.lock() {
         Ok(g) => g,
         Err(p) => {
             tracing::warn!("engine mutex poisoned, recovering");
@@ -157,7 +280,11 @@ fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, SharedEngineS
 
 /// 指定 config_json で DynEngine::load_auto し、既存 slot に入れる。
 /// 辞書・モデルの bg ロードも起動する。
-fn load_engine_into(slot: &mut SharedEngineState, config_json: Option<String>) -> Response {
+fn load_engine_into(
+    host: &HostShared,
+    slot: &mut SharedEngineState,
+    config_json: Option<String>,
+) -> Response {
     let install = match rakukan_engine_abi::install_dir() {
         Some(p) => p,
         None => return Response::Error("install_dir not found".into()),
@@ -171,7 +298,7 @@ fn load_engine_into(slot: &mut SharedEngineState, config_json: Option<String>) -
                 eng.start_load_model();
             }
             slot.engine = Some(eng);
-            slot.config_json = config_json;
+            host.set_config(config_json);
             Response::Unit
         }
         Err(e) => Response::Error(format!("load_auto failed: {e}")),
@@ -181,7 +308,12 @@ fn load_engine_into(slot: &mut SharedEngineState, config_json: Option<String>) -
 fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
     use Request::*;
     match req {
-        Hello { .. } | Create { .. } | Reload { .. } | Bye | Shutdown => Response::Unit, // handled upstream
+        Hello { .. }
+        | Create { .. }
+        | Reload { .. }
+        | Bye
+        | Shutdown
+        | ShutdownIfConfigDiffers { .. } => Response::Unit, // handled upstream
 
         PushChar(c) => {
             if let Some(ch) = char::from_u32(c) {

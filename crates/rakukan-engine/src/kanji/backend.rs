@@ -55,6 +55,51 @@ fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
         .min(256)
 }
 
+/// 反復検出の最小周期（文字数）。「ますます」「きらきら」のような正当な畳語は
+/// 周期 2〜3 なので、4 以上の周期のみを退化とみなす。
+const REPEAT_MIN_PERIOD: usize = 4;
+
+/// 候補長の上限安全網。かな→漢字変換で文字数は通常縮むため、読みの
+/// 1.5 倍 + 2 を超える候補は反復生成などの異常出力とみなして棄却する。
+/// （下限 33% の安全網と対になる。同じ文が 2 度続く候補は長さ約 2 倍に
+/// なるため、この上限で捕捉できる。）
+fn max_candidate_chars(reading_chars: usize) -> usize {
+    reading_chars.saturating_mul(3) / 2 + 2
+}
+
+/// 候補内のタンデム反復（同一部分列 X が「XX」と連続する、|X| >= min_period）を
+/// 検出する。小型 LLM が EOS を出せず同じ句を繰り返す退化パターンの検出用。
+///
+/// 純粋関数。呼び出し側は「読み自身が反復を含む場合」（ユーザーが実際に
+/// 繰り返し表現を入力したケース）には適用しないこと。
+fn has_tandem_repeat(text: &str, min_period: usize) -> bool {
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    for p in min_period..=n / 2 {
+        for i in 0..=(n - 2 * p) {
+            if chars[i..i + p] == chars[i + p..i + 2 * p] {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// 長さ上限・反復検出による異常候補の棄却（症状: 途中切れ・同文 2 度出力）。
+///
+/// 読み自身にタンデム反復が含まれる場合は反復検出を無効化する
+/// （「わかったわかった」のような入力を正当に変換できるようにする）。
+fn is_degenerate_candidate(candidate: &str, reading_chars: usize, reading_repeats: bool) -> bool {
+    let len = candidate.chars().count();
+    if len > max_candidate_chars(reading_chars) {
+        return true;
+    }
+    if !reading_repeats && has_tandem_repeat(candidate, REPEAT_MIN_PERIOD) {
+        return true;
+    }
+    false
+}
+
 /// beam の累積 log-prob (score) を「1 トークンあたりの平均 log-prob」に正規化する。
 ///
 /// `score` は生成トークンの log-softmax の総和 (≤ 0) で、系列が長いほど負に大きくなる
@@ -294,7 +339,17 @@ impl KanaKanjiConverter {
             // 長さ安全網 (下記) のみが効く。スコアによる異常検出が必要なら
             // num_candidates >= 2 (beam パス) を使う。
             let reading_chars = reading.chars().count();
-            candidates.retain(|c| c.chars().count() * 3 >= reading_chars);
+            let reading_repeats = has_tandem_repeat(reading, REPEAT_MIN_PERIOD);
+            candidates.retain(|c| {
+                if c.chars().count() * 3 < reading_chars {
+                    return false;
+                }
+                if is_degenerate_candidate(c, reading_chars, reading_repeats) {
+                    tracing::debug!(reading = %reading, candidate = %c, "dropped degenerate candidate (greedy)");
+                    return false;
+                }
+                true
+            });
             if candidates.is_empty() {
                 candidates.push(reading.to_string());
             }
@@ -310,9 +365,20 @@ impl KanaKanjiConverter {
         // `[conversion] beam_size` を小さく設定して明示的に上限をかける。
         let configured_cap = self.config.beam_size.clamp(1, 30);
         let beam_size = num_candidates.min(configured_cap).clamp(1, 30);
+        let gen_start = std::time::Instant::now();
         let results = self
             .model
             .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;
+        // 変換 1 件ごとの観測ログ。「止まる」「切れる」報告時に
+        // rakukan-engine-dll.log だけで所要時間と EOS 到達状況を切り分けられる。
+        tracing::info!(
+            reading_chars = reading.chars().count(),
+            beam_size,
+            budget = max_new_tokens,
+            finished_beams = results.len(),
+            elapsed_ms = gen_start.elapsed().as_millis() as u64,
+            "beam conversion done"
+        );
 
         // (表層, 平均 log-prob) を保持。beam score は累積 log-prob (長さ依存) なので
         // トークン数で正規化して候補間で比較可能な自信度にする。
@@ -330,8 +396,20 @@ impl KanaKanjiConverter {
         // 33% 以上の長さを持つ候補だけを残す。0.7.0 で TSF 側 (T-BUG2) にも
         // 同等の防壁があるが、エンジン側で先に弾けば session に短い preview が
         // 入らず、後段の sanity check や filter に頼らず済む。
+        // 加えて長さ上限（読み×1.5+2）とタンデム反復検出で「同じ文が 2 度
+        // 続く」退化候補を棄却する（confidence フィルタは反復を捕捉できない）。
         let reading_chars = reading.chars().count();
-        scored.retain(|(c, _)| c.chars().count() * 3 >= reading_chars);
+        let reading_repeats = has_tandem_repeat(reading, REPEAT_MIN_PERIOD);
+        scored.retain(|(c, _)| {
+            if c.chars().count() * 3 < reading_chars {
+                return false;
+            }
+            if is_degenerate_candidate(c, reading_chars, reading_repeats) {
+                tracing::debug!(reading = %reading, candidate = %c, "dropped degenerate candidate (beam)");
+                return false;
+            }
+            true
+        });
 
         // 自信度 (平均 log-prob) の観測ログ。閾値チューニングの材料になる。
         if tracing::enabled!(tracing::Level::DEBUG) {
@@ -378,6 +456,68 @@ mod tests {
         assert_eq!(generation_budget("かな", 15), 15);
         // 15 文字 reading: 15*2+8 = 38。M1.5 T-BUG1 (a) で上限 256 に拡張済。
         assert_eq!(generation_budget("これはながめのへんかんぶんです", 15), 38);
+    }
+
+    #[test]
+    fn tandem_repeat_detects_doubled_sentence() {
+        // 同じ文がそのまま 2 度続く退化パターン
+        assert!(has_tandem_repeat(
+            "対応策を検討して対応策を検討して",
+            REPEAT_MIN_PERIOD
+        ));
+        // 文中の部分反復（8 文字周期）
+        assert!(has_tandem_repeat(
+            "本日は晴天なり本日は晴天なりです",
+            REPEAT_MIN_PERIOD
+        ));
+    }
+
+    #[test]
+    fn tandem_repeat_allows_normal_text() {
+        assert!(!has_tandem_repeat("今日は良い天気です", REPEAT_MIN_PERIOD));
+        // 畳語（周期 2〜3）は正当な日本語なので検出しない
+        assert!(!has_tandem_repeat("ますます盛り上がる", REPEAT_MIN_PERIOD));
+        assert!(!has_tandem_repeat("きらきら光る星", REPEAT_MIN_PERIOD));
+        // 空文字・短い文字列は安全に false
+        assert!(!has_tandem_repeat("", REPEAT_MIN_PERIOD));
+        assert!(!has_tandem_repeat("短い", REPEAT_MIN_PERIOD));
+    }
+
+    #[test]
+    fn degenerate_filter_rejects_overlong_candidate() {
+        // 読み 10 文字 → 上限 17 文字。18 文字の候補は棄却。
+        assert_eq!(max_candidate_chars(10), 17);
+        let reading_chars = 10;
+        assert!(is_degenerate_candidate(
+            "あいうえおかきくけこさしすせそたちつ", // 18 文字
+            reading_chars,
+            false
+        ));
+        // 上限ちょうど（17 文字）は通す
+        assert!(!is_degenerate_candidate(
+            "あいうえおかきくけこさしすせそたち", // 17 文字
+            reading_chars,
+            false
+        ));
+    }
+
+    #[test]
+    fn degenerate_filter_respects_reading_repeats() {
+        // 読み自身が反復を含む場合（「わかったわかった」等の実入力）は
+        // 候補の反復を許容する
+        let reading = "わかったわかった";
+        let reading_chars = reading.chars().count();
+        assert!(!is_degenerate_candidate(
+            "分かった分かった",
+            reading_chars,
+            has_tandem_repeat(reading, REPEAT_MIN_PERIOD)
+        ));
+        // 読みに反復がなければ候補の反復は退化として棄却
+        assert!(is_degenerate_candidate(
+            "分かった分かった",
+            reading_chars,
+            false
+        ));
     }
 
     #[test]
@@ -431,6 +571,25 @@ mod tests {
         let cands = vec![("良".into(), -1.0), ("悪".into(), -5.0)];
         let out = filter_by_confidence(cands, Some(3.0), Some(-3.0));
         assert_eq!(out, vec!["良".to_string()]);
+    }
+
+    #[test]
+    fn test_default_model_beam_conversion() {
+        // beam 経路（generate_beam_search_impl）の実モデル検証。
+        // 1 コンテキスト × batched decode 書き換え（F5）の回帰確認と、
+        // EOS 未到達 beam 棄却（F3）後も通常の読みで候補が返ることの確認。
+        let backend =
+            Backend::from_variant_id("jinen-v1-small-q5").expect("Failed to load default model");
+        let converter = KanaKanjiConverter::new(backend).expect("Failed to create converter");
+
+        let result = converter.convert("へんかんけっかをかくにんする", "", 9);
+        assert!(result.is_ok(), "Conversion failed: {:?}", result.err());
+
+        let candidates = result.unwrap();
+        assert!(!candidates.is_empty(), "No candidates returned");
+        for c in &candidates {
+            assert!(!c.contains("ã"), "Output contains mojibake: '{}'", c);
+        }
     }
 
     #[test]

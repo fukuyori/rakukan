@@ -205,6 +205,27 @@ pub enum Request {
         llm_cands: Vec<String>,
         limit: u32,
     },
+
+    // ─── 条件付きプロセス終了（reload storm 対策）─────────────
+    /// ホストが現在使用中の config と `config_json` が異なる場合だけ self-exit する。
+    ///
+    /// 背景: TSF DLL はアプリごとに別プロセスで動いており、各プロセスが独立に
+    /// config.toml の変更を検出して `engine_reload()` → `Shutdown` を送る。
+    /// ホストは全プロセス共有のシングルトンなので、設定保存 1 回が
+    /// 「プロセス数ぶんの連続ホスト再起動」に化ける（2026-07-13 実ログで
+    /// 5 分間に 4 回再起動を確認）。ホスト側で config を比較し、既に同じ
+    /// config で動いていれば再起動をスキップする。
+    ///
+    /// 応答: `Bool(true)` = config が異なる（またはホストが比較不能）。応答送信後に
+    /// `Shutdown` と同じ経路でプロセス終了する。`Bool(false)` = 同一 config、継続。
+    ///
+    /// NOTE: postcard の enum discriminant は宣言順なので、この variant は
+    /// **必ず末尾に追加**する（既存 variant のワイヤ表現を変えない）。旧ホストは
+    /// この variant をデコードできず接続を閉じるが、クライアント側が無条件
+    /// `Shutdown` にフォールバックするため互換性は保たれる。
+    ShutdownIfConfigDiffers {
+        config_json: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use rakukan_engine_rpc::server::{SharedEngine, SharedEngineState, serve};
+use rakukan_engine_rpc::server::{HostShared, SharedEngine, serve};
 
 fn log_path() -> PathBuf {
     rakukan_engine_abi::install_dir()
@@ -121,6 +121,75 @@ fn redirect_stderr_to_log(log_path: &std::path::Path) {
 #[cfg(not(windows))]
 fn redirect_stderr_to_log(_log_path: &std::path::Path) {}
 
+/// named mutex による多重起動防止。
+///
+/// 同一 pipe 名で複数ホストが listen すると、クライアント接続が 2 プロセスへ
+/// 分散して engine 状態の不整合（片方に Create、もう片方に変換要求）を起こす。
+/// 実ログで 0.6 秒差の二重起動を確認済み（2026-07-02 12:03:52, pid 30800/24740）。
+/// mutex ハンドルは HANDLE (no Drop) なのでプロセス終了まで保持される。
+#[cfg(windows)]
+fn exit_if_already_running() {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
+    use windows::Win32::System::Threading::CreateMutexW;
+    use windows::core::PCWSTR;
+
+    // pipe 名 (pipe_name_for_current_user) と同じユーザー単位のスコープにする
+    let user = std::env::var("USERNAME").unwrap_or_else(|_| "default".into());
+    let sanitized: String = user
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '_' || c == '-' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let name = format!("Local\\rakukan-engine-host-{sanitized}");
+    let wide: Vec<u16> = std::ffi::OsStr::new(&name)
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // engine_reload は旧ホストへ Shutdown を送った直後に新ホストを spawn する。
+    // 旧プロセスの終了（= mutex ハンドル解放）が新プロセスの検査より遅れる
+    // ことがあるため、短いリトライで正当な世代交代を誤検出しないようにする。
+    use windows::Win32::Foundation::CloseHandle;
+    const RETRY_MAX: u32 = 20;
+    const RETRY_INTERVAL_MS: u64 = 100;
+    for attempt in 0..RETRY_MAX {
+        match unsafe { CreateMutexW(None, false, PCWSTR(wide.as_ptr())) } {
+            Ok(handle) => {
+                if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+                    // 獲得成功。HANDLE は Drop で閉じられないためプロセス終了まで有効。
+                    return;
+                }
+                let _ = unsafe { CloseHandle(handle) };
+                if attempt == 0 {
+                    tracing::info!(
+                        "another rakukan-engine-host holds the singleton mutex, waiting up to {}ms",
+                        RETRY_MAX as u64 * RETRY_INTERVAL_MS
+                    );
+                }
+                std::thread::sleep(std::time::Duration::from_millis(RETRY_INTERVAL_MS));
+            }
+            Err(e) => {
+                // ガードなしでも従来動作と同じなので続行する
+                tracing::warn!("exit_if_already_running: CreateMutexW failed: {e}");
+                return;
+            }
+        }
+    }
+    tracing::info!(
+        "another rakukan-engine-host is already running for this user, exiting (pid={})",
+        std::process::id()
+    );
+    std::process::exit(0);
+}
+
+#[cfg(not(windows))]
+fn exit_if_already_running() {}
+
 /// Rust panic を tracing log に書き出す panic hook を設定する。
 ///
 /// `panic = "abort"` 設定でも panic hook は abort 前に実行される。これがないと
@@ -158,12 +227,13 @@ fn main() -> Result<()> {
     install_panic_hook();
     redirect_stderr_to_log(&log_path);
     tracing::info!("rakukan-engine-host starting (pid={})", std::process::id());
+    exit_if_already_running();
 
     // エンジンはまだ作らない。最初のクライアント Create リクエストで
     // DynEngine::load_auto が呼ばれる。これにより「ホストを起動しても
     // model/dict ロードは初回クライアント接続までは走らない」という
     // 遅延ロード特性が維持される。
-    let engine: SharedEngine = Arc::new(Mutex::new(SharedEngineState::new()));
+    let engine: SharedEngine = Arc::new(HostShared::new());
 
     // serve() はブロッキングで Named Pipe を待ち受け続ける。
     if let Err(e) = serve(engine) {

@@ -337,6 +337,12 @@ impl super::TextServiceFactory_Impl {
         });
         tracing::trace!("Input: hiragana={:?} bg={}", hiragana, bg_status);
 
+        // Cancel 後に残る Preedit 状態のテキストを実際の読みに追随させる
+        // （放置すると確定経路が前の読みを使う）。
+        if let Ok(mut sess) = session_get() {
+            sess.sync_preedit_reading(&hiragana);
+        }
+
         if !hiragana.is_empty() {
             let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &hiragana);
             drop(guard);
@@ -488,6 +494,10 @@ impl super::TextServiceFactory_Impl {
         // Space 押下時は on_convert 内で bg_reclaim + bg_start(num_candidates) により
         // fresh に変換し直すため、ここの prefetch 結果は Space には流用されない。
         let reading = engine.hiragana_text();
+        // Cancel 後に残る Preedit 状態のテキストを実際の読みに追随させる
+        if let Ok(mut sess) = session_get() {
+            sess.sync_preedit_reading(&reading);
+        }
         let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &reading);
         if live_ready {
             candidate_window::live_input_notify(&ctx, tid);

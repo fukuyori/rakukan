@@ -162,6 +162,43 @@ impl RpcEngine {
         }
     }
 
+    /// ホストの現在 config と異なる場合だけ self-exit を依頼する（reload storm 対策）。
+    ///
+    /// - `Ok(true)`  = config が異なり、ホストは exit する。既存接続は破棄済み。
+    ///   次回 API 呼び出しで新 config の Create 付きで再 spawn される。
+    /// - `Ok(false)` = ホストは既に同一 config で動作中。接続・エンジンとも継続。
+    /// - `Err(_)`    = 比較不能（旧プロトコルのホストが variant をデコードできず
+    ///   切断した、ホストが応答しない等）。呼び出し元は無条件 `shutdown()` に
+    ///   フォールバックすること。
+    ///
+    /// `config_json` は結果に依らず内部に保存する（次回 re-spawn 時の Create に使う）。
+    pub fn shutdown_if_config_differs(&self, config_json: Option<String>) -> Result<bool> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
+        if let Some(cfg) = config_json.clone() {
+            guard.config_json = Some(cfg);
+        }
+        let result = guard.call_with_retry(Request::ShutdownIfConfigDiffers { config_json });
+        match result {
+            Ok(Response::Bool(true)) => {
+                // ホストは応答後に exit する。既存接続はもう使えない。
+                guard.stream = None;
+                tracing::info!("rpc: ShutdownIfConfigDiffers: host restarting (config differs)");
+                Ok(true)
+            }
+            Ok(Response::Bool(false)) => Ok(false),
+            Ok(Response::Error(e)) => bail!("shutdown_if_config_differs error: {e}"),
+            Ok(other) => bail!("unexpected shutdown_if_config_differs response: {:?}", other),
+            Err(e) => {
+                // 旧ホスト（variant 未知でデコード失敗→切断）や half-dead ホスト。
+                guard.stream = None;
+                Err(e)
+            }
+        }
+    }
+
     fn call(&self, req: Request) -> Result<Response> {
         let mut guard = self
             .inner

@@ -387,32 +387,58 @@ pub fn bg_timeout_watchdog(is_stuck: bool) {
     let since = guard.get_or_insert_with(std::time::Instant::now);
     let elapsed_secs = since.elapsed().as_secs();
     tracing::debug!("bg_timeout_watchdog: conv worker stuck {elapsed_secs}s");
-    if elapsed_secs >= 30 {
+    // 閾値はエンジン側 GEN_TIMEOUT_SECS (15 秒) より長くすること。
+    // 短くすると正常な長時間生成（beam 経路の上限 15 秒）中に誤発動して
+    // engine_reload が変換を殺してしまう。15 秒 + マージン 5 秒 = 20 秒。
+    if elapsed_secs >= 20 {
         tracing::warn!(
             "bg_timeout_watchdog: conv worker stuck {elapsed_secs}s, auto engine_reload"
         );
         *guard = None;
         drop(guard);
-        engine_reload();
+        // ハング復旧目的なので config が同じでも必ず再起動する
+        engine_reload_force();
     }
 }
 
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
+///
+/// **条件付き**: ホストが既に同じ config で動いている場合は再起動しない
+/// （reload storm 対策）。TSF DLL はアプリごとに別プロセスで動くため、
+/// 設定保存 1 回を各プロセスが独立に検出し、共有シングルトンホストを
+/// 順番に殺す連鎖が起きていた（2026-07-13 実ログ: 5 分間に 4 回再起動）。
+/// config 比較はホスト側（`ShutdownIfConfigDiffers`）で行うので、
+/// 自プロセスのキャッシュが古くても「ホストは既に新 config」なら skip される。
+///
+/// GPU ハング等からの復旧目的で無条件に再起動したい場合は
+/// `engine_reload_force()` を使うこと（ウォッチドッグ・メニュー用）。
 #[track_caller]
 pub fn engine_reload() {
+    let caller = std::panic::Location::caller();
+    engine_reload_impl(false, caller);
+}
+
+/// config の異同に関わらず必ずホストを再起動する版。
+/// BG ウォッチドッグ（GPU ハング復旧）と langbar メニューの
+/// 「エンジン再起動」から呼ぶ。
+#[track_caller]
+pub fn engine_reload_force() {
+    let caller = std::panic::Location::caller();
+    engine_reload_impl(true, caller);
+}
+
+fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static>) {
     // 診断: 誰がこの関数を呼んだかをログに残す。0.7.x で調査中の
     // 「reload event/runtime config 由来でない engine_reload」を切り分けるため。
-    let caller = std::panic::Location::caller();
     tracing::info!(
-        "engine_reload: invoked from {}:{}:{}",
+        "engine_reload: invoked from {}:{}:{} force={}",
         caller.file(),
         caller.line(),
-        caller.column()
+        caller.column(),
+        force
     );
-    // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
-    reset_ready_latches();
     // バックグラウンドで shutdown（UI スレッドをブロックしない）
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let t_start = std::time::Instant::now();
 
         // config.toml をディスクから再読み込みしてから EngineConfig JSON を生成する。
@@ -431,19 +457,47 @@ pub fn engine_reload() {
         };
         match guard.0.as_mut() {
             Some(eng) => {
-                // ホストに self-exit を依頼。応答は待つが失敗しても前進する
-                // （相手が exit 中で応答が返らないのは想定内）。
-                let r = eng.shutdown(Some(cfg));
-                let elapsed = t_start.elapsed();
-                match r {
-                    Ok(()) => {
-                        tracing::info!("engine_reload: host shutdown requested ({:?})", elapsed)
+                if !force {
+                    // まずホスト側と config を比較。同一なら再起動せず終了
+                    // （ハンドル・ready ラッチとも現状維持）。
+                    match eng.shutdown_if_config_differs(Some(cfg.clone())) {
+                        Ok(false) => {
+                            tracing::info!(
+                                "engine_reload: host already running with same config, skipping restart ({:?})",
+                                t_start.elapsed()
+                            );
+                            return;
+                        }
+                        Ok(true) => {
+                            // ホストは exit 中。以降は従来の shutdown 後処理に合流。
+                        }
+                        Err(e) => {
+                            // 旧プロトコルのホスト・half-dead なホスト等、比較不能。
+                            // 従来どおり無条件 Shutdown にフォールバックする。
+                            tracing::warn!(
+                                "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
+                            );
+                            let _ = eng.shutdown(Some(cfg.clone()));
+                        }
                     }
-                    Err(e) => tracing::warn!(
-                        "engine_reload: host shutdown call returned error ({:?}): {e}",
-                        elapsed
-                    ),
+                } else {
+                    // ホストに self-exit を依頼。応答は待つが失敗しても前進する
+                    // （相手が exit 中で応答が返らないのは想定内）。
+                    let r = eng.shutdown(Some(cfg.clone()));
+                    let elapsed = t_start.elapsed();
+                    match r {
+                        Ok(()) => tracing::info!(
+                            "engine_reload: host shutdown requested ({:?})",
+                            elapsed
+                        ),
+                        Err(e) => tracing::warn!(
+                            "engine_reload: host shutdown call returned error ({:?}): {e}",
+                            elapsed
+                        ),
+                    }
                 }
+                // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
+                reset_ready_latches();
                 // ホスト側は応答送信後 50ms sleep してから `process::exit(0)` する
                 // (server.rs:73-77)。ここでハンドルを即 drop すると、次の
                 // `engine_try_get_or_create()` がその 50ms 内に死にゆくパイプへ
@@ -460,6 +514,7 @@ pub fn engine_reload() {
             None => {
                 // ハンドル未作成 = まだ一度も使われていない or 前回落ちた状態。
                 // 通常の初回ロードパスに合流させる。
+                reset_ready_latches();
                 drop(guard);
                 ENGINE_INIT_STARTED.store(false, AO::Release);
                 engine_start_bg_init();
@@ -592,7 +647,12 @@ pub fn get_live_conv_min_chars() -> usize {
 }
 
 pub fn is_live_conversion_reading_ready(reading: &str) -> bool {
-    reading.chars().count() >= get_live_conv_min_chars()
+    reading_ready_with_min_chars(reading, get_live_conv_min_chars())
+}
+
+/// `is_live_conversion_reading_ready` の純粋関数部分（config 非依存・単体テスト用）。
+fn reading_ready_with_min_chars(reading: &str, min_chars: usize) -> bool {
+    reading.chars().count() >= min_chars
 }
 
 pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
@@ -1438,6 +1498,23 @@ impl SessionState {
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
     }
 
+    /// `Preedit` 状態の text を実際の読みに追随させる。
+    ///
+    /// Cancel で `Preedit` に落ちたあと Backspace / 文字入力で読みが変わっても
+    /// state のテキストが古いまま残り、`Waiting` 確定などが前の読みを使う
+    /// バグの修正（2026-07-13 実ログ: state=Preedit("いまわのきわ") のまま
+    /// hira="いまは" まで乖離）。`Preedit` 以外の状態には触らない。
+    /// 読みが空になった場合は `Idle` へ戻す。
+    pub fn sync_preedit_reading(&mut self, reading: &str) {
+        if let SessionState::Preedit { text } = self {
+            if reading.is_empty() {
+                self.set_idle();
+            } else if text != reading {
+                *text = reading.to_string();
+            }
+        }
+    }
+
     /// ライブ変換表示状態へ遷移。
     /// `reading` = hiragana_buf（変換キー）、`preview` = BG トップ候補。
     pub fn set_live_conv(&mut self, reading: String, preview: String) {
@@ -2273,17 +2350,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn live_conversion_reading_ready_starts_at_default_min_chars() {
-        // デフォルト min_chars = 3（config 未初期化時は Default::default() が使われる）
-        assert!(!is_live_conversion_reading_ready(""));
-        assert!(!is_live_conversion_reading_ready("あ"));
-        assert!(!is_live_conversion_reading_ready("あい"));
-        assert!(is_live_conversion_reading_ready("あいう"));
+    fn live_conversion_reading_ready_starts_at_min_chars() {
+        // NOTE: is_live_conversion_reading_ready は実環境の config.toml
+        // （min_chars）を読むため、テストは純粋関数側で行う。
+        assert!(!reading_ready_with_min_chars("", 3));
+        assert!(!reading_ready_with_min_chars("あ", 3));
+        assert!(!reading_ready_with_min_chars("あい", 3));
+        assert!(reading_ready_with_min_chars("あいう", 3));
+        assert!(!reading_ready_with_min_chars("あいう", 4));
+        assert!(reading_ready_with_min_chars("あいうえ", 4));
     }
 
     #[test]
     fn live_conversion_reading_ready_counts_chars_not_bytes() {
-        assert!(is_live_conversion_reading_ready("漢字仮"));
+        assert!(reading_ready_with_min_chars("漢字仮", 3));
+    }
+
+    #[test]
+    fn sync_preedit_reading_updates_stale_text() {
+        // Cancel 後の Preedit がその後の編集に追随するか（2026-07-13 実ログの再現）
+        let mut s = SessionState::Preedit {
+            text: "いまわのきわ".to_string(),
+        };
+        s.sync_preedit_reading("いまは");
+        assert!(matches!(&s, SessionState::Preedit { text } if text == "いまは"));
+    }
+
+    #[test]
+    fn sync_preedit_reading_goes_idle_on_empty() {
+        let mut s = SessionState::Preedit {
+            text: "いまわのきわ".to_string(),
+        };
+        s.sync_preedit_reading("");
+        assert!(matches!(s, SessionState::Idle));
+    }
+
+    #[test]
+    fn sync_preedit_reading_leaves_other_states_untouched() {
+        let mut idle = SessionState::Idle;
+        idle.sync_preedit_reading("あいう");
+        assert!(matches!(idle, SessionState::Idle));
+
+        let mut live = SessionState::LiveConv {
+            reading: "よみ".to_string(),
+            preview: "読み".to_string(),
+        };
+        live.sync_preedit_reading("あいう");
+        assert!(matches!(&live, SessionState::LiveConv { reading, .. } if reading == "よみ"));
     }
 
     #[test]

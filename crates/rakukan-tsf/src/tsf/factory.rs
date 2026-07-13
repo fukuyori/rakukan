@@ -205,7 +205,8 @@ fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
         ID_MENU_ENGINE_RELOAD => {
             tracing::info!("langbar menu: ID_MENU_ENGINE_RELOAD selected");
             crate::engine::config::init_config_manager();
-            crate::engine::state::engine_reload();
+            // 手動の「エンジン再起動」はハング復旧用途なので config が同じでも必ず再起動する
+            crate::engine::state::engine_reload_force();
         }
         _ => {}
     }

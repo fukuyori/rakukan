@@ -1619,11 +1619,27 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
     let captured_reading = snapshot.reading.clone();
     let captured_gen = crate::tsf::live_session::conv_gen_snapshot();
 
+    // WYSIWYG 保証: RequestEditSession の Ok は SetText 実行を意味しない
+    // (非同期実行 TF_S_ASYNC / COMPOSITION_APPLY_LOCK busy skip / stale gen /
+    // focus 変更で走らないことがある)。SetText 完了をクロージャから `applied`
+    // で伝搬させ、確認できた場合のみ LiveConv 状態へ遷移する。未確認のまま
+    // 遷移すると「表示=ひらがな、確定=変換済み」の不一致が生じる。
+    // `cancelled` は遅延実行に対する取り消し: caller が Phase1B へ落とした後に
+    // 遅延クロージャが SetText すると逆向きの不一致になるため no-op にする。
+    let applied = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let applied_in = applied.clone();
+    let cancelled_in = cancelled.clone();
+
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::Foundation::E_FAIL;
         use windows::Win32::UI::TextServices::{
             TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+        if cancelled_in.load(std::sync::atomic::Ordering::Acquire) {
+            tracing::debug!("[Live] Phase1A: cancelled before deferred execution, skip");
+            return Ok(());
+        }
         let now_focus = current_focus_dm_ptr();
         if now_focus != Some(captured_dm_ptr) {
             return Err(windows::core::Error::new(
@@ -1668,6 +1684,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
                 .SetText(ec, 0, &text_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
         }
+        applied_in.store(true, std::sync::atomic::Ordering::Release);
 
         let atom = crate::tsf::display_attr::atom_input();
         if atom != 0 {
@@ -1695,19 +1712,26 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
     });
 
     let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
-    match result {
-        Ok(_) => {
-            if let Ok(mut sess) = crate::engine::state::session_get() {
-                sess.set_live_conv(snapshot.reading.clone(), snapshot.preview.clone());
-            }
-            if snapshot.keep_timer_running {
-                tracing::debug!("[Live] Phase1A: keeping timer for pending BG merge");
-            } else {
-                stop_live_timer();
-            }
-            true
+    if result.is_ok() && applied.load(std::sync::atomic::Ordering::Acquire) {
+        if let Ok(mut sess) = crate::engine::state::session_get() {
+            sess.set_live_conv(snapshot.reading.clone(), snapshot.preview.clone());
         }
-        Err(_) => false,
+        if snapshot.keep_timer_running {
+            tracing::debug!("[Live] Phase1A: keeping timer for pending BG merge");
+        } else {
+            stop_live_timer();
+        }
+        true
+    } else {
+        // SetText 未確認 (非同期実行待ち / skip / 失敗)。遅延実行での適用も
+        // 取り消して Phase1B キューへ落とす。状態遷移はキュー消費側が
+        // 表示更新と対で行う。
+        cancelled.store(true, std::sync::atomic::Ordering::Release);
+        tracing::debug!(
+            "[Live] Phase1A: SetText not confirmed (result_ok={}), fall back to Phase1B",
+            result.is_ok()
+        );
+        false
     }
 }
 

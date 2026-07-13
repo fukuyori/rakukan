@@ -1613,67 +1613,22 @@ impl super::TextServiceFactory_Impl {
             }
         }
         engine.flush_pending_n();
-        if crate::tsf::live_session::suppress_commit_take() {
-            tracing::debug!("[Live] on_commit_raw[fallback]: suppressed once");
-        } else if crate::engine::config::current_config()
-            .live_conversion
-            .enabled
-        {
-            const LIVE_COMMIT_WAIT_MS: u64 = 180;
-            let reading = engine.hiragana_text().to_string();
-            if !reading.is_empty() {
-                let n_cands = crate::engine::state::get_num_candidates();
-                let bg_before = engine.bg_status();
-                tracing::debug!(
-                    "[Live] on_commit_raw[fallback]: reading={:?} bg_before={}",
-                    reading,
-                    bg_before
-                );
-                if engine.is_kanji_ready() && bg_before == "idle" {
-                    let _ = engine.bg_start(n_cands);
-                }
-                if matches!(engine.bg_status(), "running" | "idle") {
-                    let completed = engine.bg_wait_ms(LIVE_COMMIT_WAIT_MS);
-                    tracing::debug!(
-                        "[Live] on_commit_raw[fallback]: bg_wait({LIVE_COMMIT_WAIT_MS}ms) completed={}",
-                        completed
-                    );
-                }
-                if engine.bg_status() == "done" {
-                    if let Some(preview) = engine
-                        .bg_take_candidates(&reading)
-                        .and_then(|c| c.into_iter().next())
-                    {
-                        if !preview.is_empty() && preview != reading {
-                            if let Ok(mut sess) = session_get() {
-                                sess.set_idle();
-                            }
-                            candidate_window::hide();
-                            candidate_window::stop_live_timer();
-                            if crate::engine::state::is_auto_learn_enabled() {
-                                engine.learn(&reading, &preview);
-                            }
-                            engine.commit(&preview);
-                            engine.reset_preedit();
-                            drop(guard);
-                            tracing::info!(
-                                "[Live] on_commit_raw[fallback]: commit preview {:?}",
-                                preview
-                            );
-                            diag::event(DiagEvent::CommitRaw {
-                                preedit: preview.clone(),
-                            });
-                            end_composition(ctx, tid, preview)?;
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-        }
+        // WYSIWYG: ここに来るのは preview が一度も画面に出ていない (LiveConv で
+        // ない) 場合。確定してよいのは表示中の preedit のみ。bg 変換の完了を
+        // 待って未表示の候補を commit すると「表示=ひらがな、確定=変換済み」の
+        // 不一致になるため行わない。armed フラグは消費だけしておく。
+        let _ = crate::tsf::live_session::suppress_commit_take();
         let preedit = engine.preedit_display();
         if preedit.is_empty() {
             return Ok(false);
         }
+        // 確定後にセッション状態が古い Preedit のまま残らないよう Idle へ戻す
+        // (他の確定分岐と同じ後始末)。
+        if let Ok(mut sess) = session_get() {
+            sess.set_idle();
+        }
+        candidate_window::hide();
+        candidate_window::stop_live_timer();
         diag::event(DiagEvent::CommitRaw {
             preedit: preedit.clone(),
         });
@@ -1722,6 +1677,12 @@ impl super::TextServiceFactory_Impl {
                 if consumed {
                     engine2.bg_reclaim();
                     let preedit = engine2.preedit_display();
+                    // 直前の set_preedit(reading) は削除前の読みなので、削除後の
+                    // 読みに追随させる（空なら Idle へ）。
+                    let hira = engine2.hiragana_text();
+                    if let Ok(mut sess2) = session_get() {
+                        sess2.sync_preedit_reading(&hira);
+                    }
                     drop(guard);
                     if preedit.is_empty() {
                         end_composition(ctx, tid, String::new())?;
@@ -1780,6 +1741,13 @@ impl super::TextServiceFactory_Impl {
         if consumed {
             engine.bg_reclaim();
             let preedit = engine.preedit_display();
+            // Cancel 後の Preedit 状態は Backspace で読みが縮んでも text が
+            // 古いまま残る（実ログ: Preedit("いまわのきわ") のまま hira="いまは"）。
+            // 削除後の読みに追随させ、空になったら Idle へ戻す。
+            let hira = engine.hiragana_text();
+            if let Ok(mut sess) = session_get() {
+                sess.sync_preedit_reading(&hira);
+            }
             diag::event(DiagEvent::Backspace {
                 preedit_after: preedit.clone(),
             });

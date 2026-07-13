@@ -10,8 +10,51 @@
 
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
+use std::sync::OnceLock;
 
 pub const ENGINE_ABI_VERSION: u32 = 9;
+
+static LOG_INIT: OnceLock<()> = OnceLock::new();
+
+/// DLL 内の tracing subscriber を初期化する。
+///
+/// cdylib は tracing の static をホストプロセスと共有しないため、これを
+/// 行わないと DLL 内の tracing ログ（生成タイムアウト・EOS 未到達の警告等）は
+/// どこにも出ない。%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log に書き出す。
+/// ログレベルは RAKUKAN_LOG 環境変数で上書き可能（既定 info）。
+///
+/// rlib として静的リンクされる場合（CLI 等）は呼び出し元の subscriber が
+/// 先に設定されるので try_init は no-op になる。
+fn init_dll_logging() {
+    LOG_INIT.get_or_init(|| {
+        let dir = std::env::var("LOCALAPPDATA")
+            .map(|d| std::path::PathBuf::from(d).join("rakukan"))
+            .unwrap_or_else(|_| std::path::PathBuf::from("."));
+        let path = dir.join("rakukan-engine-dll.log");
+        // 8 MiB 超で 1 世代ローテーション
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > 8 * 1024 * 1024 {
+                let rotated = dir.join("rakukan-engine-dll.log.1");
+                let _ = std::fs::remove_file(&rotated);
+                let _ = std::fs::rename(&path, &rotated);
+            }
+        }
+        if let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = tracing_subscriber::fmt()
+                .with_writer(std::sync::Mutex::new(file))
+                .with_ansi(false)
+                .with_env_filter(
+                    tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
+                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                )
+                .try_init();
+        }
+    });
+}
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
 
@@ -39,6 +82,7 @@ unsafe fn from_cstr<'a>(ptr: *const c_char) -> &'a str {
 /// 戻り値は `engine_destroy` で必ず解放すること。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_create(config_json: *const c_char) -> *mut c_void {
+    init_dll_logging();
     let config: EngineConfig = if config_json.is_null() {
         EngineConfig::default()
     } else {
