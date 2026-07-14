@@ -5,7 +5,7 @@ use super::hf_download::{get_tokenizer_path, get_variant_path};
 use super::llamacpp::LlamaCppModel;
 use super::model_config::{ModelFamily, VariantConfig, registry};
 use super::{CONTEXT_TOKEN, INPUT_START_TOKEN, OUTPUT_START_TOKEN};
-use crate::kana::hiragana_to_katakana;
+use crate::kana::{hiragana_to_katakana, katakana_to_hiragana};
 
 type Result<T> = super::error::Result<T>;
 
@@ -58,6 +58,64 @@ fn generation_budget(reading: &str, config_max_new_tokens: usize) -> usize {
 /// 反復検出の最小周期（文字数）。「ますます」「きらきら」のような正当な畳語は
 /// 周期 2〜3 なので、4 以上の周期のみを退化とみなす。
 const REPEAT_MIN_PERIOD: usize = 4;
+
+/// エコー源マスキングを適用する読みの最小文字数。「は」「が」など短い読みで
+/// context を切り捨てると誤爆だらけになるため、短い読みには適用しない。
+const ECHO_MIN_READING_CHARS: usize = 4;
+
+/// エコー源検索に使う読みプレフィックスの長さ（文字数）。長めに取るほど
+/// 「というこ」等の一般的なかな列との偶然一致（正当な context の切り捨て）が減る。
+const ECHO_NEEDLE_CHARS: usize = 6;
+
+/// context 汚染（エコーアトラクタ）対策: 読みの先頭かな列と一致する部分が
+/// context 内にあれば、その最初の出現位置で context を切り捨てて返す。
+///
+/// 未変換のまま確定されたテキスト（例:「きだじゅんいちろう氏は、」）が context に
+/// 残っていると、小型 LLM は変換ではなく context からのコピー（エコー）を選び、
+/// 全ビームがエコー系に収束して漢字候補が消える。漢字に変換済みの文はかな列として
+/// 一致しないため削られない。カタカナ確定（F7 等）由来の汚染も検出する。
+///
+/// 純粋関数。llama 非依存で単体テスト可能。
+fn strip_echo_context<'a>(context: &'a str, reading: &str) -> &'a str {
+    if context.is_empty() {
+        return context;
+    }
+    let reading_chars = reading.chars().count();
+    if reading_chars < ECHO_MIN_READING_CHARS {
+        return context;
+    }
+    let needle: String = reading.chars().take(ECHO_NEEDLE_CHARS).collect();
+    let kata_needle = hiragana_to_katakana(&needle);
+    let pos = match (context.find(&needle), context.find(&kata_needle)) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    match pos {
+        Some(p) => &context[..p],
+        None => context,
+    }
+}
+
+/// かなのみで読みの真のプレフィックス（読み全体は除く）になっている候補を検出する。
+///
+/// 「きだじゅん」「キダジュン」のような途中で切れたエコー候補は、読み全体を
+/// カバーしない未変換断片であり正当な変換結果ではありえないため棄却する。
+/// 読み全体と一致する候補（無変換・カタカナ変換のフォールバック）は残す。
+fn is_kana_prefix_echo(candidate: &str, reading: &str) -> bool {
+    if candidate.is_empty() {
+        return false;
+    }
+    let hira = katakana_to_hiragana(candidate);
+    if hira == reading {
+        return false;
+    }
+    if !hira.chars().all(is_kana_or_prolonged) {
+        return false;
+    }
+    reading.starts_with(&hira)
+}
 
 /// 候補長の上限安全網。かな→漢字変換で文字数は通常縮むため、読みの
 /// 1.5 倍 + 2 を超える候補は反復生成などの異常出力とみなして棄却する。
@@ -313,6 +371,19 @@ impl KanaKanjiConverter {
     ) -> Result<Vec<String>> {
         let max_new_tokens = generation_budget(reading, self.config.max_new_tokens);
 
+        // context 汚染対策: 読みのエコー源を含む context はその位置で切り捨てる。
+        // 「変換できない」報告の切り分け用に、発動時のみ INFO で観測ログを残す。
+        let stripped = strip_echo_context(context, reading);
+        if stripped.len() != context.len() {
+            tracing::info!(
+                reading_chars = reading.chars().count(),
+                context_bytes = context.len(),
+                stripped_bytes = stripped.len(),
+                "echo source stripped from context"
+            );
+        }
+        let context = stripped;
+
         // Convert hiragana to katakana (model expects katakana input)
         let katakana = hiragana_to_katakana(reading);
 
@@ -346,6 +417,10 @@ impl KanaKanjiConverter {
                 }
                 if is_degenerate_candidate(c, reading_chars, reading_repeats) {
                     tracing::debug!(reading = %reading, candidate = %c, "dropped degenerate candidate (greedy)");
+                    return false;
+                }
+                if is_kana_prefix_echo(c, reading) {
+                    tracing::debug!(reading = %reading, candidate = %c, "dropped kana prefix echo candidate (greedy)");
                     return false;
                 }
                 true
@@ -406,6 +481,10 @@ impl KanaKanjiConverter {
             }
             if is_degenerate_candidate(c, reading_chars, reading_repeats) {
                 tracing::debug!(reading = %reading, candidate = %c, "dropped degenerate candidate (beam)");
+                return false;
+            }
+            if is_kana_prefix_echo(c, reading) {
+                tracing::debug!(reading = %reading, candidate = %c, "dropped kana prefix echo candidate (beam)");
                 return false;
             }
             true
@@ -518,6 +597,73 @@ mod tests {
             reading_chars,
             false
         ));
+    }
+
+    #[test]
+    fn strip_echo_context_cuts_at_hiragana_echo_source() {
+        // 実機事例: 未変換確定「きだじゅんいちろう氏は、」が context 末尾に残ったケース
+        let context = "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、きだじゅんいちろう氏は、";
+        let reading = "きだじゅんいちろうしは";
+        assert_eq!(
+            strip_echo_context(context, reading),
+            "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、"
+        );
+    }
+
+    #[test]
+    fn strip_echo_context_cuts_at_katakana_echo_source() {
+        // F7 カタカナ確定由来の汚染も検出する
+        let context = "前の文。キダジュンイチロウは、";
+        let reading = "きだじゅんいちろうしは";
+        assert_eq!(strip_echo_context(context, reading), "前の文。");
+    }
+
+    #[test]
+    fn strip_echo_context_keeps_converted_context() {
+        // 漢字に変換済みの文はかな列として一致しないので削られない
+        let context = "紀田順一郎氏は、蔵書を処分した。";
+        let reading = "きだじゅんいちろうしは";
+        assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn strip_echo_context_ignores_short_readings() {
+        // 短い読み（助詞等）では context を切り捨てない
+        let context = "それはそうだが、";
+        assert_eq!(strip_echo_context(context, "それ"), context);
+        assert_eq!(strip_echo_context(context, "は"), context);
+    }
+
+    #[test]
+    fn strip_echo_context_requires_prefix_match() {
+        // 読みプレフィックス（6 文字）が丸ごと一致しない限り切らない。
+        // 「ということだ。」は reading「ということで」と 5 文字しか一致しない。
+        let context = "それは当然のことだ、ということだ。";
+        let reading = "ということで";
+        assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn kana_prefix_echo_rejects_truncated_echo() {
+        let reading = "きだじゅんいちろうしは";
+        // ひらがな・カタカナの尻切れエコーは棄却
+        assert!(is_kana_prefix_echo("きだじゅん", reading));
+        assert!(is_kana_prefix_echo("キダジュン", reading));
+        assert!(is_kana_prefix_echo("きだじゅ", reading));
+    }
+
+    #[test]
+    fn kana_prefix_echo_keeps_legitimate_candidates() {
+        let reading = "きだじゅんいちろうしは";
+        // 読み全体（無変換フォールバック）は残す
+        assert!(!is_kana_prefix_echo("きだじゅんいちろうしは", reading));
+        // 漢字を含む候補は対象外
+        assert!(!is_kana_prefix_echo("木田純一郎氏は", reading));
+        assert!(!is_kana_prefix_echo("きだ純一郎氏は", reading));
+        // 読み全体のカタカナ変換（F7 相当）は残す
+        assert!(!is_kana_prefix_echo("コーヒー", "こーひー"));
+        // プレフィックスでないかな候補は対象外
+        assert!(!is_kana_prefix_echo("だじゅん", reading));
     }
 
     #[test]
