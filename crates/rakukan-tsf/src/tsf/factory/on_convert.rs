@@ -724,6 +724,9 @@ impl super::TextServiceFactory_Impl {
                     .unwrap_or_else(|| target.clone());
                 {
                     let mut sess = session_get()?;
+                    // suffix は「、」等のリテラル記号であり再変換対象の読みではないため、
+                    // remainder_reading は空にする（非空だと Enter 確定時に suffix だけで
+                    // 新しいプリエディットが再開され、未確定のまま残ってしまう）。
                     sess.activate_selecting_with_affixes(
                         candidates.clone(),
                         target.clone(),
@@ -733,7 +736,7 @@ impl super::TextServiceFactory_Impl {
                         prefix.clone(),
                         prefix.clone(),
                         suffix.clone(),
-                        suffix.clone(),
+                        String::new(),
                     );
                     sess.rebuild_selecting_candidate_views(CandidateViewSource::Dict);
                 }

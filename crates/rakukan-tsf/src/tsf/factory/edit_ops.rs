@@ -683,7 +683,11 @@ impl super::TextServiceFactory_Impl {
                 .to_string();
             let reading = sess.original_preedit().unwrap_or("").to_string();
             let remainder = sess.selecting_remainder_clone();
-            let remainder_reading = sess.selecting_remainder_reading_clone();
+            // remainder_reading が空でも remainder（リテラル記号接尾辞）は読みに含める
+            let mut remainder_reading = sess.selecting_remainder_reading_clone();
+            if remainder_reading.is_empty() {
+                remainder_reading = remainder.clone();
+            }
             let display = format!("{prefix}{text}{symbol}{remainder}");
             let next_reading = format!("{prefix_reading}{reading}{symbol}{remainder_reading}");
             engine.force_preedit(next_reading.clone());
