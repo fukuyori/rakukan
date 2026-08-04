@@ -92,6 +92,19 @@ A は独立したバグ修正で効果測定が容易、B は変換品質に直�
 
 ## Phase B: echo strip の誤爆削減
 
+**状態: 実装済み（2026-08-04）**。計画からの変更点:
+- run 判定は計画どおり `ECHO_RUN_MIN_CHARS = 8`。除去単位も計画どおり文単位（`split_sentences`、
+  戻り値は `Cow<str>`）。発動時は `echo sentence dropped from context` ログに needle と除去文の
+  先頭 20 文字を出す。
+- commit 時除外の閾値は 8 ではなく **ひらがな 4 文字**（`CONTEXT_ECHO_MIN_HIRAGANA_CHARS`）にした。
+  「きもちは、」のような短いひらがな確定は strip の run 条件（8 文字）に届かないため、
+  commit 側で低めに拾わないと v0.9.15 より短読みエコーに弱くなる。
+- commit 時除外は**ひらがなのみ**を対象とし、カタカナのみのテキストは除外しない
+  （カタカナはエコーしても正しい出力になるため。混在汚染は strip が保険で捕捉）。
+- 実機事例の汚染文「きだじゅんいちろう氏は、」は漢字（氏）を含むため、「文に漢字がなければ
+  エコー源」という単純化は不可と確認済み。run 長判定が必須。
+- repro_context.rs で汚染 context 全パターンの漢字候補 1 位維持を確認済み。実機での効果測定は未実施。
+
 ### 現状の問題
 
 `strip_echo_context`（`crates/rakukan-engine/src/kanji/backend.rs:79`）は

@@ -67,34 +67,99 @@ const ECHO_MIN_READING_CHARS: usize = 4;
 /// 「というこ」等の一般的なかな列との偶然一致（正当な context の切り捨て）が減る。
 const ECHO_NEEDLE_CHARS: usize = 6;
 
-/// context 汚染（エコーアトラクタ）対策: 読みの先頭かな列と一致する部分が
-/// context 内にあれば、その最初の出現位置で context を切り捨てて返す。
+/// エコー源とみなす、一致箇所を含む かな連続 run の最小長（文字数）。
+/// 本物のエコー源は「きだじゅんいちろう」のような長いかな列になる。
+/// 変換済みの文中の送り仮名・助詞は漢字・記号で数文字ごとに区切られ run が
+/// 短いため、偶然一致してもここには達しない（7月ログで月 3,182 回の過剰発動）。
+const ECHO_RUN_MIN_CHARS: usize = 8;
+
+/// context を文単位に分割する（文末記号を文に含める）。
+/// 境界文字集合は lib.rs の `last_n_sentences_start` と揃える。
+fn split_sentences(text: &str) -> impl Iterator<Item = &str> {
+    let mut rest = text;
+    std::iter::from_fn(move || {
+        if rest.is_empty() {
+            return None;
+        }
+        let end = rest
+            .char_indices()
+            .find(|(_, c)| matches!(c, '。' | '！' | '？' | '!' | '?' | '.' | '．' | '\n'))
+            .map(|(i, c)| i + c.len_utf8())
+            .unwrap_or(rest.len());
+        let (head, tail) = rest.split_at(end);
+        rest = tail;
+        Some(head)
+    })
+}
+
+/// 文中に「needle と一致し、かつ長さ `ECHO_RUN_MIN_CHARS` 以上の かな連続 run に
+/// 含まれる」箇所があるか判定する。
+fn sentence_has_echo_run(sentence: &str, needle: &str, kata_needle: &str) -> bool {
+    for pat in [needle, kata_needle] {
+        let mut search_from = 0;
+        while let Some(rel) = sentence[search_from..].find(pat) {
+            let pos = search_from + rel;
+            // 一致箇所から左右に かな連続 run を伸ばして長さを測る
+            let run_start = sentence[..pos]
+                .char_indices()
+                .rev()
+                .take_while(|(_, c)| is_kana_or_prolonged(*c))
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(pos);
+            let run_len = sentence[run_start..]
+                .chars()
+                .take_while(|c| is_kana_or_prolonged(*c))
+                .count();
+            if run_len >= ECHO_RUN_MIN_CHARS {
+                return true;
+            }
+            search_from = pos + pat.len();
+        }
+    }
+    false
+}
+
+/// context 汚染（エコーアトラクタ）対策: 読みの先頭かな列と一致する長いかな run を
+/// 含む文を context から除去して返す。前後の文は温存する。
 ///
 /// 未変換のまま確定されたテキスト（例:「きだじゅんいちろう氏は、」）が context に
 /// 残っていると、小型 LLM は変換ではなく context からのコピー（エコー）を選び、
-/// 全ビームがエコー系に収束して漢字候補が消える。漢字に変換済みの文はかな列として
-/// 一致しないため削られない。カタカナ確定（F7 等）由来の汚染も検出する。
+/// 全ビームがエコー系に収束して漢字候補が消える。カタカナ確定（F7 等）由来の
+/// 汚染も検出する。変換済みの文中の送り仮名・助詞への偶然一致は run 長条件で
+/// 除外する（かな run が `ECHO_RUN_MIN_CHARS` 未満なら削らない）。
 ///
-/// 純粋関数。llama 非依存で単体テスト可能。
-fn strip_echo_context<'a>(context: &'a str, reading: &str) -> &'a str {
+/// 純粋関数（tracing を除く）。llama 非依存で単体テスト可能。
+fn strip_echo_context<'a>(context: &'a str, reading: &str) -> std::borrow::Cow<'a, str> {
+    use std::borrow::Cow;
     if context.is_empty() {
-        return context;
+        return Cow::Borrowed(context);
     }
     let reading_chars = reading.chars().count();
     if reading_chars < ECHO_MIN_READING_CHARS {
-        return context;
+        return Cow::Borrowed(context);
     }
     let needle: String = reading.chars().take(ECHO_NEEDLE_CHARS).collect();
     let kata_needle = hiragana_to_katakana(&needle);
-    let pos = match (context.find(&needle), context.find(&kata_needle)) {
-        (Some(a), Some(b)) => Some(a.min(b)),
-        (Some(a), None) => Some(a),
-        (None, Some(b)) => Some(b),
-        (None, None) => None,
-    };
-    match pos {
-        Some(p) => &context[..p],
-        None => context,
+
+    let mut kept = String::new();
+    let mut removed = false;
+    for sentence in split_sentences(context) {
+        if sentence_has_echo_run(sentence, &needle, &kata_needle) {
+            tracing::info!(
+                needle = %needle,
+                dropped_head = %sentence.chars().take(20).collect::<String>(),
+                "echo sentence dropped from context"
+            );
+            removed = true;
+        } else {
+            kept.push_str(sentence);
+        }
+    }
+    if removed {
+        Cow::Owned(kept)
+    } else {
+        Cow::Borrowed(context)
     }
 }
 
@@ -371,8 +436,9 @@ impl KanaKanjiConverter {
     ) -> Result<Vec<String>> {
         let max_new_tokens = generation_budget(reading, self.config.max_new_tokens);
 
-        // context 汚染対策: 読みのエコー源を含む context はその位置で切り捨てる。
-        // 「変換できない」報告の切り分け用に、発動時のみ INFO で観測ログを残す。
+        // context 汚染対策: 読みのエコー源（長いかな run）を含む文を context から除去。
+        // 「変換できない」報告の切り分け用に、発動時のみ INFO で観測ログを残す
+        // （除去された文の中身は strip_echo_context 内の "echo sentence dropped" に出る）。
         let stripped = strip_echo_context(context, reading);
         if stripped.len() != context.len() {
             tracing::info!(
@@ -382,7 +448,7 @@ impl KanaKanjiConverter {
                 "echo source stripped from context"
             );
         }
-        let context = stripped;
+        let context = stripped.as_ref();
 
         // Convert hiragana to katakana (model expects katakana input)
         let katakana = hiragana_to_katakana(reading);
@@ -600,18 +666,19 @@ mod tests {
     }
 
     #[test]
-    fn strip_echo_context_cuts_at_hiragana_echo_source() {
-        // 実機事例: 未変換確定「きだじゅんいちろう氏は、」が context 末尾に残ったケース
+    fn strip_echo_context_drops_hiragana_echo_sentence() {
+        // 実機事例: 未変換確定「きだじゅんいちろう氏は、」が context 末尾に残ったケース。
+        // エコー run（きだじゅんいちろう = 9 文字）を含む文だけが除去され、前の文は残る。
         let context = "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、きだじゅんいちろう氏は、";
         let reading = "きだじゅんいちろうしは";
         assert_eq!(
             strip_echo_context(context, reading),
-            "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、"
+            "あらゆるコレクターの涙する場面だ。"
         );
     }
 
     #[test]
-    fn strip_echo_context_cuts_at_katakana_echo_source() {
+    fn strip_echo_context_drops_katakana_echo_sentence() {
         // F7 カタカナ確定由来の汚染も検出する
         let context = "前の文。キダジュンイチロウは、";
         let reading = "きだじゅんいちろうしは";
@@ -619,10 +686,29 @@ mod tests {
     }
 
     #[test]
+    fn strip_echo_context_keeps_following_sentences() {
+        // エコー文が中間にある場合、後続の文まで捨てない（旧実装は一致位置以降を全損していた）
+        let context = "昨日は晴れだった。きだじゅんいちろうしは、つぎのよていだ。今日は雨だ。";
+        let reading = "きだじゅんいちろうしは";
+        assert_eq!(
+            strip_echo_context(context, reading),
+            "昨日は晴れだった。今日は雨だ。"
+        );
+    }
+
+    #[test]
     fn strip_echo_context_keeps_converted_context() {
         // 漢字に変換済みの文はかな列として一致しないので削られない
         let context = "紀田順一郎氏は、蔵書を処分した。";
         let reading = "きだじゅんいちろうしは";
+        assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn strip_echo_context_keeps_short_kana_run_match() {
+        // 変換済み文中の短いかな run（のことなら = 5 文字 < 8）への偶然一致では削らない
+        let context = "その件のことなら大丈夫。";
+        let reading = "ことなら";
         assert_eq!(strip_echo_context(context, reading), context);
     }
 
@@ -641,6 +727,13 @@ mod tests {
         let context = "それは当然のことだ、ということだ。";
         let reading = "ということで";
         assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn split_sentences_keeps_terminators() {
+        let parts: Vec<&str> = split_sentences("一文目。二文目！三文目").collect();
+        assert_eq!(parts, vec!["一文目。", "二文目！", "三文目"]);
+        assert_eq!(split_sentences("").count(), 0);
     }
 
     #[test]

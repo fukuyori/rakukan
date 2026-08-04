@@ -42,6 +42,57 @@ use tracing::{debug, info};
 
 // ── コンテキストトリミング ────────────────────────────────────────────────────
 
+/// context への追加を拒否する、ひらがな（+長音・中点）の最小文字数。
+/// 変換時の strip（backend.rs の `ECHO_RUN_MIN_CHARS` = 8）より低く設定する:
+/// 「きもちは、」のような短いひらがな確定も、同じ読みの再変換でエコーを誘発するため。
+const CONTEXT_ECHO_MIN_HIRAGANA_CHARS: usize = 4;
+
+/// context に入れると LLM のエコーアトラクタ（変換ではなく context からの
+/// コピー）を誘発するテキストか判定する。
+///
+/// 対象は「未変換のまま確定された」ひらがな文: 句読点・空白を除いた全文字が
+/// ひらがな（+長音・中点）で、その数が `CONTEXT_ECHO_MIN_HIRAGANA_CHARS` 以上。
+/// 漢字・カタカナ・英数字を 1 文字でも含むテキストは変換済みとみなして通す
+/// （カタカナ確定はエコーしても正しい出力になるため対象外。混在汚染は
+/// backend.rs の `strip_echo_context` が保険として捕捉する）。
+fn is_context_echo_risk(text: &str) -> bool {
+    let mut hiragana_count = 0usize;
+    for c in text.chars() {
+        let n = c as u32;
+        if (0x3041..=0x3096).contains(&n) || c == 'ー' || c == '・' {
+            hiragana_count += 1;
+        } else if matches!(
+            c,
+            '、' | '。'
+                | '！'
+                | '？'
+                | '!'
+                | '?'
+                | '.'
+                | '．'
+                | '，'
+                | ','
+                | '\n'
+                | ' '
+                | '\u{3000}'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '（'
+                | '）'
+                | '('
+                | ')'
+        ) {
+            // 句読点・括弧・空白は無視
+        } else {
+            // 漢字・カタカナ・英数字等を含む → 変換済みテキストとみなす
+            return false;
+        }
+    }
+    hiragana_count >= CONTEXT_ECHO_MIN_HIRAGANA_CHARS
+}
+
 /// テキストから末尾 `n` 文の開始バイト位置を返す。
 ///
 /// fast-bunkai の BasicRule / LinebreakAnnotator 相当の純 Rust 実装。
@@ -568,6 +619,16 @@ impl RakunEngine {
 
     pub fn commit(&mut self, text: &str) {
         info!("engine::commit: {:?}", text);
+        if is_context_echo_risk(text) {
+            // 未変換のまま確定されたひらがな文を context に入れると、同じ読みの
+            // 変換で LLM がコピー（エコー）に収束する（v0.9.15 のエコーアトラクタ）。
+            // 確定自体は成立させ、context にだけ入れない。
+            info!("engine::commit: hiragana-only text excluded from context");
+            self.hiragana_buf.clear();
+            self.romaji_input_log.clear();
+            self.romaji = RomajiConverter::new();
+            return;
+        }
         self.committed.push_str(text);
         if self.committed.chars().count() > 200 {
             // 文境界でトリミング: 直近 2 文を残す。
@@ -996,6 +1057,45 @@ mod context_trim_tests {
         // n=1 \u{2192} \u{6700}\u{5F8C}\u{306E}\u{5883}\u{754C} = \u{300C}\u{6587}C\u{300D}\u{5148}\u{982D}
         let start = last_n_sentences_start(text, 1);
         assert_eq!(&text[start..], "\u{6587}C");
+    }
+}
+
+#[cfg(test)]
+mod context_echo_risk_tests {
+    use super::{RakunEngine, is_context_echo_risk};
+
+    #[test]
+    fn hiragana_only_text_is_echo_risk() {
+        // 実機事例と同型: 未変換のまま確定されたひらがな文
+        assert!(is_context_echo_risk("きだじゅんいちろうしは、"));
+        // 短いひらがな確定（4 文字）も対象
+        assert!(is_context_echo_risk("きもちは、"));
+        // 句読点・括弧・空白は無視して判定
+        assert!(is_context_echo_risk("「よろしくおねがいします。」"));
+    }
+
+    #[test]
+    fn converted_or_short_text_is_not_echo_risk() {
+        // 漢字を含む = 変換済み
+        assert!(!is_context_echo_risk("木田純一郎氏は、"));
+        // カタカナはエコーしても正しい出力になるため対象外
+        assert!(!is_context_echo_risk("コーヒー"));
+        // 英数字を含む
+        assert!(!is_context_echo_risk("2024ねん"));
+        // ひらがな 4 文字未満
+        assert!(!is_context_echo_risk("です。"));
+        assert!(!is_context_echo_risk(""));
+    }
+
+    #[test]
+    fn commit_excludes_hiragana_only_text_from_context() {
+        let mut e = RakunEngine::new(crate::EngineConfig::default());
+        e.commit("今日は晴れ。");
+        e.commit("きだじゅんいちろうしは、");
+        // ひらがなのみの確定は context（committed）に入らない
+        assert_eq!(e.committed_text(), "今日は晴れ。");
+        e.commit("紀田順一郎氏は、");
+        assert_eq!(e.committed_text(), "今日は晴れ。紀田順一郎氏は、");
     }
 }
 
