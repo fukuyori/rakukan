@@ -655,7 +655,27 @@ fn reading_ready_with_min_chars(reading: &str, min_chars: usize) -> bool {
     reading.chars().count() >= min_chars
 }
 
+/// 読みの末尾が未確定ローマ字（次の打鍵で必ず変わる ASCII 子音）かを判定する。
+///
+/// この状態で BG 変換を起動しても、次のキー入力でキーが変わって結果は必ず
+/// 捨てられる（7月ログ: conv-cache MISMATCH の主因。`"ぁr"` `"cd"` 等のキーで
+/// LLM 変換が起動していた）。母音 (a/i/u/e/o) で終わる場合は英単語などの
+/// 完結形でありうるため対象外。
+fn ends_with_pending_romaji(reading: &str) -> bool {
+    match reading.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => {
+            !matches!(c.to_ascii_lowercase(), 'a' | 'i' | 'u' | 'e' | 'o')
+        }
+        _ => false,
+    }
+}
+
 pub fn live_bg_start_n_cands(reading: &str) -> Option<usize> {
+    // 末尾が未確定ローマ字ならライブ変換を起動しない。かなが完成した次の
+    // 打鍵で正しいキーの BG 変換が起動する。
+    if ends_with_pending_romaji(reading) {
+        return None;
+    }
     // 区読点が含まれる場合: 最後の区読点以降のサフィックスが min_chars 以上あれば許可する。
     // 「きょうは、」のように区読点で終わっている（続きがない）場合は起動しない。
     // 「きょうは、またあした」のように続きがある場合はフル reading を BG 変換に渡す。
@@ -2364,6 +2384,26 @@ mod tests {
     #[test]
     fn live_conversion_reading_ready_counts_chars_not_bytes() {
         assert!(reading_ready_with_min_chars("漢字仮", 3));
+    }
+
+    #[test]
+    fn pending_romaji_tail_blocks_live_bg() {
+        // 7月ログの実例: 末尾が未確定ローマ字のキーで BG 変換が起動していた
+        assert!(ends_with_pending_romaji("ぁr"));
+        assert!(ends_with_pending_romaji("cd"));
+        assert!(ends_with_pending_romaji("c"));
+        assert!(ends_with_pending_romaji("きょうのてんきはn"));
+    }
+
+    #[test]
+    fn kana_or_vowel_tail_allows_live_bg() {
+        // かなで終わる通常の読み
+        assert!(!ends_with_pending_romaji("きょう"));
+        assert!(!ends_with_pending_romaji(""));
+        // 母音で終わる ASCII は英単語の完結形でありうる
+        assert!(!ends_with_pending_romaji("hello"));
+        // 数字・記号で終わる読み
+        assert!(!ends_with_pending_romaji("2024"));
     }
 
     #[test]

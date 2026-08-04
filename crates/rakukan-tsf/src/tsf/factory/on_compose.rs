@@ -617,10 +617,27 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
             tracing::warn!("end_composition: GetRange failed text={:?}: {e}", text);
             windows::core::Error::new(E_FAIL, format!("GetRange: {e}"))
         })?;
-        range.SetText(ec, 0, &text_w).map_err(|e| {
-            tracing::warn!("end_composition: SetText failed text={:?}: {e}", text);
-            windows::core::Error::new(E_FAIL, format!("SetText end: {e}"))
-        })?;
+        if let Err(e) = range.SetText(ec, 0, &text_w) {
+            // 0x80040209 は TSF では TS_E_READONLY（ドキュメントが一時的に読み取り専用。
+            // FormatMessage は同値の OLE エラー文字列を出すため紛らわしい）。
+            // 一時的なロックなら同一セッション内の再試行で通ることがある。
+            if let Err(e2) = range.SetText(ec, 0, &text_w) {
+                // TSF DLL はアプリのプロセス内で動くため current_exe = 発生アプリ
+                let app = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                tracing::warn!(
+                    "end_composition: SetText failed text={:?} app={:?}: {e} / retry: {e2}",
+                    text,
+                    app
+                );
+                // SetText できなくても EndComposition までは進め、表示中のテキスト
+                // （preedit）をそのまま確定させる。中断すると composition が宙吊りに
+                // なり確定テキストが丸ごと消える（7月に 2 件実測）。表示済みテキストの
+                // 確定は WYSIWYG 不変条件の範囲内。
+            }
+        }
 
         // Fix3: EndComposition の前に SetSelection する
         // （EndComposition 後に SetSelection するとアプリがカーソルをリセットしてしまうため）

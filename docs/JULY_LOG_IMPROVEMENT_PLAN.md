@@ -164,6 +164,16 @@ A は独立したバグ修正で効果測定が容易、B は変換品質に直�
 
 ## Phase C: BG 変換の無駄打ち削減と WARN 降格
 
+**状態: 実装済み（2026-08-04）**。計画からの変更点:
+- MISMATCH の降格は計画どおり（prefix 関係の不一致 → `trace!`「take_ready stale (typing race)」、
+  それ以外のみ `warn!` を維持）。
+- 未確定ローマ字ガードは engine 側 `bg_start` ではなく **TSF 側 `live_bg_start_n_cands`** に実装した。
+  engine 側に入れると Space 押下時の明示変換経路（on_convert / on_waiting_timer の再起動）まで
+  false になり error ログ・変換不能につながるため、投機起動（ライブ変換）だけを止める。
+  判定は `ends_with_pending_romaji`: 末尾が ASCII 子音なら見送り。母音 (a/i/u/e/o) 終わりは
+  英単語の完結形でありうるため通す。
+- デバウンス（任意項目）は未実装。1・2 の効果を実機で見てから判断する。
+
 ### 現状の問題
 
 - `conv-cache: take_ready MISMATCH`（`crates/rakukan-engine/src/conv_cache.rs:293-299`）は
@@ -196,6 +206,18 @@ A は独立したバグ修正で効果測定が容易、B は変換品質に直�
 ---
 
 ## Phase D: 確定テキスト消失への手当（小粒、B か C に同乗）
+
+**状態: 実装済み（2026-08-04）**。計画からの変更点:
+- エラーコードの意味を特定: 0x80040209 は TSF では **TS_E_READONLY**（ドキュメントが一時的に
+  読み取り専用）。FormatMessage が同値の OLE エラー（CONNECT_E_ADVISELIMIT）の文字列を出すため
+  ログ上は「イベントを開始するメソッドが〜」と紛らわしい表示になっていた。
+- リトライは「別 edit session」ではなく**同一セッション内の即時再試行**にした（一時ロックなら
+  これで通る。別セッションだと composition が既に take 済みで復元が複雑になる）。
+- 再試行も失敗した場合は中断せず **EndComposition まで進める**: 従来は `?` で中断して
+  composition が宙吊りになり確定テキストが丸ごと消えていた。表示中の preedit をそのまま
+  確定させる方がユーザー入力を失わない（WYSIWYG 不変条件の範囲内）。
+- アプリ名は TSF DLL がアプリのプロセス内で動くことを利用し `current_exe()` で取得して
+  WARN ログに含める。
 
 ### 現状の問題
 

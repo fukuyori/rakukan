@@ -298,13 +298,24 @@ pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
 
     let matched = k == key;
     if !matched {
-        tracing::warn!(
-            "conv-cache: take_ready MISMATCH cache_key={:?}({} bytes) req_key={:?}({} bytes)",
-            k,
-            k.len(),
-            key,
-            key.len()
-        );
+        // 片方が他方の prefix の不一致は「BG 変換がタイプ速度に負けた」だけの
+        // 想定内レース（呼び出し元が正しいキーで再起動する）なので trace に留める。
+        // prefix 関係にない不一致のみ、想定外のキー混線として warn を残す。
+        if k.starts_with(key) || key.starts_with(k.as_str()) {
+            tracing::trace!(
+                "conv-cache: take_ready stale (typing race) cache_key={:?} req_key={:?}",
+                k,
+                key
+            );
+        } else {
+            tracing::warn!(
+                "conv-cache: take_ready MISMATCH cache_key={:?}({} bytes) req_key={:?}({} bytes)",
+                k,
+                k.len(),
+                key,
+                key.len()
+            );
+        }
         // キー不一致 → Done 状態を復元し、呼び出し元には None を返す
         inner.state = State::Done {
             key: k,
