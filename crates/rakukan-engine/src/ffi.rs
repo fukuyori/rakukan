@@ -406,34 +406,79 @@ pub extern "C" fn engine_merge_candidates_for_reading(
 // ─── 初期化（非同期）──────────────────────────────────────────────────────────
 
 /// モデル（漢字変換 LLM）のロードをバックグラウンドで開始する。
+///
+/// `engine.kanji = None` でも、converter が BG 変換のため conv_cache 側に
+/// 出張中（pending / Running / Done）ならモデルは存在するのでロードしない。
+/// かつてはこの区別がなく、変換中や commit 直後の Activate のたびに
+/// モデルを二重ロードしていた（7月ログで engine::init ×800 回）。
+/// 併せて `MODEL_LOADING` ガードで並行 spawn を抑止する（`DICT_LOADING` と同形式）。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
+    static MODEL_LOADING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if engine.is_kanji_ready() {
         return;
     }
-    set_last_error(String::new()); // clear
+    // converter が conv_cache の Done に眠っているだけなら回収して復帰（ロード不要）
+    if let Some(conv) = crate::conv_cache::try_reclaim_done() {
+        tracing::info!("start_load_model: converter reclaimed from conv_cache (no reload)");
+        engine.set_kanji_converter(conv);
+        return;
+    }
+    // pending / Running 中もモデルは存在する。回収は bg_start / bg_take_candidates が行う
+    if crate::conv_cache::has_converter() {
+        tracing::debug!("start_load_model: converter busy in conv_cache (no reload)");
+        return;
+    }
     let config = engine.get_config().clone();
+    let fingerprint = config_fingerprint(&config);
+    // 前回のロードが完了して注入待ち（engine_poll_model_ready 待ち）なら何もしない。
+    // ただし config が変わっていたら古い converter を破棄してロードし直す。
+    if let Ok(mut g) = PENDING_CONVERTER.lock() {
+        match &*g {
+            Some((fp, _)) if *fp == fingerprint => return,
+            Some(_) => {
+                tracing::info!("start_load_model: discarding pending converter (config changed)");
+                *g = None;
+            }
+            None => {}
+        }
+    }
+    // 多重 spawn 防止
+    if MODEL_LOADING.swap(true, std::sync::atomic::Ordering::AcqRel) {
+        return;
+    }
+    set_last_error(String::new()); // clear
     std::thread::spawn(move || {
         set_last_error("model loading...".to_string());
         match RakunEngine::build_converter(&config) {
             Ok(converter) => {
                 set_last_error("model load complete".to_string());
-                let _ = PENDING_CONVERTER.lock().map(|mut g| *g = Some(converter));
+                let _ = PENDING_CONVERTER
+                    .lock()
+                    .map(|mut g| *g = Some((fingerprint, converter)));
             }
             Err(e) => {
                 let msg = format!("model load failed: {e}");
                 set_last_error(msg);
             }
         }
+        MODEL_LOADING.store(false, std::sync::atomic::Ordering::Release);
     });
 }
 
-// pending converter をスレッド間で渡すための一時置き場
+// pending converter をスレッド間で渡すための一時置き場。
+// ビルド時の config フィンガープリントを添えて保存し、Reload で config が
+// 変わった場合に古い converter を誤って注入しないようにする。
 use crate::kanji::KanaKanjiConverter;
 use std::sync::{LazyLock, Mutex};
-static PENDING_CONVERTER: LazyLock<Mutex<Option<KanaKanjiConverter>>> =
+static PENDING_CONVERTER: LazyLock<Mutex<Option<(String, KanaKanjiConverter)>>> =
     LazyLock::new(|| Mutex::new(None));
+
+fn config_fingerprint(config: &EngineConfig) -> String {
+    serde_json::to_string(config).unwrap_or_default()
+}
 
 /// モデルが pending_converter に届いているか確認し、届いていたら engine に注入する。
 /// 戻り値: true = 注入した（is_kanji_ready() が true になった）
@@ -441,13 +486,27 @@ static PENDING_CONVERTER: LazyLock<Mutex<Option<KanaKanjiConverter>>> =
 pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if engine.is_kanji_ready() {
+        // 二重ロード等で残った注入待ち converter は破棄する
+        if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
+            if g.take().is_some() {
+                tracing::info!("poll_model_ready: discarded stale pending converter");
+            }
+        }
         return true;
-    } // already ready
+    }
     if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
-        if let Some(conv) = g.take() {
-            engine.set_kanji_converter(conv);
-            tracing::info!("converter injected into engine");
-            return true;
+        // config が一致する converter のみ注入する（Reload 直後の取り違え防止）
+        let fingerprint = config_fingerprint(engine.get_config());
+        match g.take() {
+            Some((fp, conv)) if fp == fingerprint => {
+                engine.set_kanji_converter(conv);
+                tracing::info!("converter injected into engine");
+                return true;
+            }
+            Some(_) => {
+                tracing::info!("poll_model_ready: discarded pending converter (config mismatch)");
+            }
+            None => {}
         }
     }
     false

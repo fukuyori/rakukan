@@ -3,6 +3,19 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.10.0] - 2026-08-04
+
+### Fixed
+
+- **エンジン（LLM モデル）の二重ロード乱発を修正**: 7月の運用ログで `engine::init: loading model` が月 800 回発生していた問題。原因は 2 つ:
+  - converter が BG 変換のため conv_cache 側に出張中（pending / Running / Done）の間は `engine.kanji = None` になるため、`is_kanji_ready()` が「モデル未ロード」と誤認し、変換中や commit 直後の Activate（フォーカス切替）のたびに `engine_start_load_model` がモデルを丸ごともう 1 個ビルドしていた。`conv_cache::has_converter()` を追加し、ロード前に Done からの回収（`try_reclaim_done`）→ 出張中判定を行い、モデルが存在する限りロードしないようにした。
+  - `engine_start_load_model` に多重起動ガードがなく（辞書側の `DICT_LOADING` に相当するものが欠落）、短時間の連続呼び出しで 2 スレッドが並行してモデルを 2 個ビルドしていた（実ログで 10ms 差のペア init ×179）。`MODEL_LOADING` AtomicBool ガードを追加。
+- **Reload 直後の converter 取り違え防止**: 注入待ち converter（`PENDING_CONVERTER`）に config の JSON フィンガープリントを添えて保存し、`engine_poll_model_ready` は現在の config と一致する場合のみ注入するようにした。config 変更を伴う Reload の直後に古い設定でビルドされた converter を掴む可能性を封鎖。ready 済みエンジンに残った注入待ち converter は破棄する。
+
+### Added
+
+- **7月ログ分析にもとづく改善計画**: `docs/JULY_LOG_IMPROVEMENT_PLAN.md`。上記修正（Phase A）のほか、echo strip の誤爆削減（Phase B）、BG 変換の無駄打ち削減（Phase C）、確定テキスト消失への手当（Phase D）、効果再計測（Phase E）を計画。
+
 ## [0.9.15] - 2026-07-14
 
 ### Fixed

@@ -74,6 +74,14 @@ struct Inner {
     pending: Option<Request>,
 }
 
+impl Inner {
+    /// converter がこのキャッシュのどこか（pending / Running のワーカー / Done）に
+    /// 存在するか。`Idle && pending=None` のときだけ false。
+    fn holds_converter(&self) -> bool {
+        self.pending.is_some() || !matches!(self.state, State::Idle)
+    }
+}
+
 struct Cache {
     inner: Mutex<Inner>,
     /// ワーカー ↔ 待機側（`wait_done_timeout`）の通知用 Condvar
@@ -333,6 +341,25 @@ pub fn reclaim_nonblocking() -> Option<KanaKanjiConverter> {
     try_reclaim_done()
 }
 
+/// conv_cache が converter を保持しているか（モデル再ロード要否の判定用）。
+///
+/// converter は以下のいずれかの場所に存在しうる:
+/// - `pending=Some`: リクエストが converter を抱えてワーカー待ち
+/// - `Running`: ワーカーが変換実行中（converter はワーカーのスタック上）
+/// - `Done`: 回収待ち
+///
+/// いずれの場合も「モデルは存在する」ため、`engine.kanji = None` でも
+/// モデルの再ロードは不要。lock 競合時は `true` を返す
+/// （誰かが converter を操作中 = 存在するとみなし、二重ロードを避ける安全側に倒す）。
+pub fn has_converter() -> bool {
+    let cache = &**CACHE;
+    match cache.inner.try_lock() {
+        Ok(inner) => inner.holds_converter(),
+        Err(std::sync::TryLockError::Poisoned(p)) => p.into_inner().holds_converter(),
+        Err(std::sync::TryLockError::WouldBlock) => true,
+    }
+}
+
 /// バックグラウンド変換の完了を最大 `timeout` 待つ。
 ///
 /// # 戻り値
@@ -398,5 +425,36 @@ pub fn status() -> &'static str {
             State::Done { .. } => "done",
         },
         Err(_) => "idle", // poisoned — フォールバック
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn holds_converter_reflects_state() {
+        // Done / pending は KanaKanjiConverter（実モデル）が必要なため、
+        // モデル不要で構築できる Idle / Running の 2 状態を検証する
+        let idle = Inner {
+            state: State::Idle,
+            pending: None,
+        };
+        assert!(!idle.holds_converter());
+
+        let running = Inner {
+            state: State::Running {
+                key: "きょう".into(),
+            },
+            pending: None,
+        };
+        assert!(running.holds_converter());
+    }
+
+    #[test]
+    fn has_converter_false_on_untouched_cache() {
+        // このクレートの単体テストは conv_cache::start を呼ばない
+        // （converter 構築に実モデルが要るため）ので、グローバル CACHE は Idle のまま
+        assert!(!has_converter());
     }
 }
