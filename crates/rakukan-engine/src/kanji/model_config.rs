@@ -95,7 +95,7 @@ mod tests {
     fn test_parse_registry() {
         let reg = registry();
         assert_eq!(reg.default_model, "jinen-v1-small-q5");
-        assert_eq!(reg.models.len(), 2, "Expected exactly 2 model families");
+        assert_eq!(reg.models.len(), 4, "Expected exactly 4 model families");
     }
 
     #[test]
@@ -130,24 +130,44 @@ mod tests {
     fn test_all_variant_ids() {
         let reg = registry();
         let ids = reg.all_variant_ids();
-        // v0.6.x で f16 variant が追加され、現在は q5 / f16 の各 small/xsmall 計 4 種
+        // v1 (GPT-2) / v2 (Qwen3) の各 small/xsmall × q5/f16 で計 8 種
         assert_eq!(
             ids.len(),
-            4,
-            "Expected exactly 4 variants, got {}",
+            8,
+            "Expected exactly 8 variants, got {}",
             ids.len()
         );
         assert!(ids.contains(&"jinen-v1-xsmall-q5"));
         assert!(ids.contains(&"jinen-v1-small-q5"));
         assert!(ids.contains(&"jinen-v1-xsmall-f16"));
         assert!(ids.contains(&"jinen-v1-small-f16"));
+        assert!(ids.contains(&"jinen-v2-xsmall-q5"));
+        assert!(ids.contains(&"jinen-v2-small-q5"));
+        assert!(ids.contains(&"jinen-v2-xsmall-f16"));
+        assert!(ids.contains(&"jinen-v2-small-f16"));
     }
 
     #[test]
     fn test_iter_variants() {
         let reg = registry();
         let count = reg.iter_variants().count();
-        assert_eq!(count, 4, "Expected exactly 4 variants, got {}", count);
+        assert_eq!(count, 8, "Expected exactly 8 variants, got {}", count);
+    }
+
+    #[test]
+    fn test_find_variant_v2() {
+        let reg = registry();
+        let (family, variant) = reg
+            .find_variant("jinen-v2-xsmall-q5")
+            .expect("variant not found");
+        assert_eq!(family.repo_id, "togatogah/jinen-v2-xsmall.gguf");
+        assert_eq!(variant.filename, "jinen-v2-xsmall-Q5_K_M.gguf");
+
+        let (family, variant) = reg
+            .find_variant("jinen-v2-small-f16")
+            .expect("variant not found");
+        assert_eq!(family.repo_id, "togatogah/jinen-v2-small.gguf");
+        assert_eq!(variant.filename, "jinen-v2-small-f16.gguf");
     }
 
     #[test]

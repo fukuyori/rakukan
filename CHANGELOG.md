@@ -3,6 +3,15 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.10.3] - 2026-08-08
+
+### Added
+
+- **jinen-v2 モデルを追加**: Qwen3 ベースの新世代モデル `jinen-v2-xsmall`（36M）/ `jinen-v2-small` をモデルレジストリに登録（各 q5 / f16、計 4 variant）。プロンプト形式（私用領域トークン）は v1 と共通で、モデルカードが要求する NFKC 正規化はエンジン側で実装済みのため、`config.toml` の `model_variant` を書き換えるだけで切り替えられる。WinUI 設定のモデル選択、install.ps1 の事前ダウンロード、config テンプレートのコメントにも追加。
+  - `jinen-v2-xsmall-q5`（約 28 MB）/ `jinen-v2-small-q5`（約 81 MB）
+  - `jinen-v2-xsmall-f16`（約 72 MB）/ `jinen-v2-small-f16`（約 220 MB）
+  - デフォルトモデルは `jinen-v1-small-q5` のまま変更なし
+
 ## [0.10.2] - 2026-08-04
 
 ### Fixed

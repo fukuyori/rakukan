@@ -133,6 +133,10 @@
                                             <ComboBoxItem Content="jinen-v1-small-q5    (約 84 MB)" Tag="jinen-v1-small-q5" />
                                             <ComboBoxItem Content="jinen-v1-xsmall-f16  (約 138 MB)" Tag="jinen-v1-xsmall-f16" />
                                             <ComboBoxItem Content="jinen-v1-small-f16   (約 423 MB)" Tag="jinen-v1-small-f16" />
+                                            <ComboBoxItem Content="jinen-v2-xsmall-q5   (約 28 MB)" Tag="jinen-v2-xsmall-q5" />
+                                            <ComboBoxItem Content="jinen-v2-small-q5    (約 81 MB)" Tag="jinen-v2-small-q5" />
+                                            <ComboBoxItem Content="jinen-v2-xsmall-f16  (約 72 MB)" Tag="jinen-v2-xsmall-f16" />
+                                            <ComboBoxItem Content="jinen-v2-small-f16   (約 220 MB)" Tag="jinen-v2-small-f16" />
                                         </ComboBox>
                                     </StackPanel>
                                 </Grid>

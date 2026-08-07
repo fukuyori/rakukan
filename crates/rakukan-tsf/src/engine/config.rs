@@ -484,6 +484,10 @@ main_gpu = 0
 # jinen-v1-small-q5   : 標準（約 84 MB、通常用途）
 # jinen-v1-xsmall-f16 : 高精度・大容量（約 138 MB、量子化なし FP16）
 # jinen-v1-small-f16  : 高精度・大容量（約 423 MB、量子化なし FP16）
+# jinen-v2-xsmall-q5  : v2 世代 (Qwen3) 軽量（約 28 MB）
+# jinen-v2-small-q5   : v2 世代 (Qwen3) 標準（約 81 MB）
+# jinen-v2-xsmall-f16 : v2 世代 (Qwen3) FP16（約 72 MB）
+# jinen-v2-small-f16  : v2 世代 (Qwen3) FP16（約 220 MB）
 model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]

@@ -483,6 +483,10 @@ if (-not $modelVariant) {
         "jinen-v1-xsmall-q5"  = @{ repo = "togatogah/jinen-v1-xsmall.gguf";  file = "jinen-v1-xsmall-Q5_K_M.gguf";  tok = "tokenizer.json" }
         "jinen-v1-small-f16"  = @{ repo = "togatogah/jinen-v1-small.gguf";   file = "jinen-v1-small-f16.gguf";      tok = "tokenizer.json" }
         "jinen-v1-xsmall-f16" = @{ repo = "togatogah/jinen-v1-xsmall.gguf";  file = "jinen-v1-xsmall-f16.gguf";     tok = "tokenizer.json" }
+        "jinen-v2-small-q5"   = @{ repo = "togatogah/jinen-v2-small.gguf";   file = "jinen-v2-small-Q5_K_M.gguf";   tok = "tokenizer.json" }
+        "jinen-v2-xsmall-q5"  = @{ repo = "togatogah/jinen-v2-xsmall.gguf";  file = "jinen-v2-xsmall-Q5_K_M.gguf";  tok = "tokenizer.json" }
+        "jinen-v2-small-f16"  = @{ repo = "togatogah/jinen-v2-small.gguf";   file = "jinen-v2-small-f16.gguf";      tok = "tokenizer.json" }
+        "jinen-v2-xsmall-f16" = @{ repo = "togatogah/jinen-v2-xsmall.gguf";  file = "jinen-v2-xsmall-f16.gguf";     tok = "tokenizer.json" }
     }
     if (-not $modelMap.ContainsKey($modelVariant)) {
         Write-Host ("  Unknown model_variant: " + $modelVariant + " - skipping.")

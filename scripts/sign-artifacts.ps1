@@ -34,7 +34,12 @@ param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
     [string]$BuildDir = "C:\rb",
     [string]$SigntoolPath = $null,
-    [string]$TimestampUrl = "http://timestamp.digicert.com"
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
+    # 署名に使う証明書の Subject CN。空にすると signtool /a の自動選択に戻る。
+    # /a は「有効期限が最も長い証明書」を選ぶため、WDK テスト証明書などが
+    # ストアに入ると本来の証明書から勝手に乗り換わる (2026-08 に実際に発生。
+    # パスワード保護のないテスト証明書が選ばれ、プロンプトなしで署名されていた)。
+    [string]$CertSubject = "Noriaki Fukuyori"
 )
 
 $ErrorActionPreference = "Stop"
@@ -120,7 +125,14 @@ if ($presentTargets.Count -eq 0) {
 } else {
     Write-Host "[sign] Signing $($presentTargets.Count) files in a single signtool invocation:" -ForegroundColor Cyan
     foreach ($f in $presentTargets) { Write-Host ("  - " + $f) -ForegroundColor Gray }
-    $sigArgs = @("sign","/fd","SHA256","/a","/tr",$TimestampUrl,"/td","SHA256") + $presentTargets
+    $certArgs = if ($CertSubject) {
+        Write-Host "[sign] Certificate: CN=$CertSubject (pinned)" -ForegroundColor Cyan
+        @("/n",$CertSubject)
+    } else {
+        Write-Host "[sign] Certificate: auto-select (/a)" -ForegroundColor Yellow
+        @("/a")
+    }
+    $sigArgs = @("sign","/fd","SHA256") + $certArgs + @("/tr",$TimestampUrl,"/td","SHA256") + $presentTargets
     & $signtool @sigArgs
     if ($LASTEXITCODE -eq 0) {
         $success = $presentTargets.Count
