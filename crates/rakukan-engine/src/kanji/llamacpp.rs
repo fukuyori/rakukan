@@ -14,6 +14,7 @@ use llama_cpp_2::model::LlamaModel;
 use llama_cpp_2::model::params::LlamaModelParams;
 use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::token::LlamaToken;
+use std::collections::HashSet;
 use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -58,6 +59,32 @@ fn load_tokenizer<P: AsRef<Path>>(path: P) -> Result<tokenizers::Tokenizer> {
     Ok(tokenizer)
 }
 
+/// `<0xNN>` 形式のバイトフォールバックトークンなら true。
+fn is_byte_fallback_token(content: &str) -> bool {
+    content.len() == 6
+        && content.starts_with("<0x")
+        && content.ends_with('>')
+        && u8::from_str_radix(&content[3..5], 16).is_ok()
+}
+
+/// skip 対象にする special トークン ID を収集する（バイトフォールバックは除外）。
+///
+/// jinen v2 (Qwen3) の tokenizer.json はバイトフォールバックトークン
+/// (`<0xNN>`) を `special: true` で登録しているため、tokenizers クレートの
+/// `decode(_, skip_special_tokens=true)` に任せると UTF-8 復元前に
+/// バイトトークンごと捨てられ、語彙に単独トークンが無い文字
+/// （Ψ・€・絵文字など）が出力から無言で消える。
+/// skip は本モジュール側で ID フィルタとして行い、tokenizers には常に
+/// `skip_special_tokens=false` で渡す。
+fn non_byte_special_token_ids(tokenizer: &tokenizers::Tokenizer) -> HashSet<u32> {
+    tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .filter(|(_, tok)| tok.special && !is_byte_fallback_token(&tok.content))
+        .map(|(id, _)| id)
+        .collect()
+}
+
 /// A beam candidate with generated tokens and cumulative score
 #[derive(Clone)]
 struct BeamState {
@@ -73,6 +100,9 @@ pub struct LlamaCppModel {
     /// External HuggingFace tokenizer (always required).
     /// `tokenize()` and `decode()` use this instead of llama.cpp's built-in tokenizer.
     external_tokenizer: tokenizers::Tokenizer,
+    /// special トークンのうちバイトフォールバック (`<0xNN>`) を除いた ID 集合。
+    /// `decode(skip_special_tokens=true)` はこの集合で自前フィルタする。
+    special_token_ids: HashSet<u32>,
     /// Number of threads for inference (0 = use llama.cpp default)
     n_threads: u32,
     /// Number of layers to offload to GPU (0 = CPU only, u32::MAX = all layers)
@@ -105,10 +135,12 @@ impl LlamaCppModel {
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
+        let special_token_ids = non_byte_special_token_ids(&external_tokenizer);
         Ok(Self {
             model,
             n_ctx: 128,
             external_tokenizer,
+            special_token_ids,
             n_threads: 0,
             n_gpu_layers,
             main_gpu,
@@ -149,11 +181,13 @@ impl LlamaCppModel {
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
+        let special_token_ids = non_byte_special_token_ids(&external_tokenizer);
 
         Ok(Self {
             model,
             n_ctx: 128,
             external_tokenizer,
+            special_token_ids,
             n_threads: 0,
             n_gpu_layers: 0,
             main_gpu: 0,
@@ -173,11 +207,13 @@ impl LlamaCppModel {
         let model = LlamaModel::load_from_file(backend, path.as_ref(), &model_params)
             .map_err(|e| KanjiError::ModelLoad(e.into()))?;
         let external_tokenizer = load_tokenizer(tokenizer_json)?;
+        let special_token_ids = non_byte_special_token_ids(&external_tokenizer);
 
         Ok(Self {
             model,
             n_ctx,
             external_tokenizer,
+            special_token_ids,
             n_threads: 0,
             n_gpu_layers: 0,
             main_gpu: 0,
@@ -221,12 +257,20 @@ impl LlamaCppModel {
     /// Decode tokens to string using the external tokenizer
     ///
     /// When `skip_special_tokens` is true, special tokens (BOS, EOS, EOG) are
-    /// excluded from the output.
+    /// excluded from the output. バイトフォールバックトークン (`<0xNN>`) は
+    /// special 扱いでも捨てずにデコーダへ渡す（Ψ など語彙外文字の復元に必要）。
     pub fn decode(&self, tokens: &[LlamaToken], skip_special_tokens: bool) -> Result<String> {
-        let ids: Vec<u32> = tokens.iter().map(|t| t.0 as u32).collect();
+        let ids: Vec<u32> = tokens
+            .iter()
+            .map(|t| t.0 as u32)
+            .filter(|id| !(skip_special_tokens && self.special_token_ids.contains(id)))
+            .collect();
+        // tokenizers 側の skip_special_tokens は常に false。true にすると
+        // special フラグ付きのバイトフォールバックトークンが UTF-8 復元前に
+        // 破棄され、Ψ・€・絵文字などが出力から消える（karukan PR #91 と同件）。
         let text = self
             .external_tokenizer
-            .decode(&ids, skip_special_tokens)
+            .decode(&ids, false)
             .map_err(KanjiError::Inference)?;
         Ok(text)
     }
@@ -919,5 +963,94 @@ impl<'a> NllScorer<'a> {
 
         let n_chars = surface.chars().count().max(1);
         Ok(total_nll / n_chars as f32)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_is_byte_fallback_token() {
+        assert!(is_byte_fallback_token("<0xCE>"));
+        assert!(is_byte_fallback_token("<0x00>"));
+        assert!(is_byte_fallback_token("<0xFF>"));
+        assert!(!is_byte_fallback_token("<s>"));
+        assert!(!is_byte_fallback_token("</s>"));
+        assert!(!is_byte_fallback_token("<unk>"));
+        assert!(!is_byte_fallback_token("<0xGG>"));
+        assert!(!is_byte_fallback_token("<0xCE> "));
+        assert!(!is_byte_fallback_token(""));
+    }
+
+    /// jinen-v2 と同じ構成のミニ tokenizer:
+    /// バイトフォールバックトークンが `special: true` で登録され、
+    /// decoder は ByteFallback + Fuse。
+    fn byte_fallback_tokenizer() -> tokenizers::Tokenizer {
+        let json = r#"{
+            "version": "1.0",
+            "truncation": null,
+            "padding": null,
+            "added_tokens": [
+                {"id": 0, "content": "<s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 1, "content": "</s>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 2, "content": "<0xCE>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true},
+                {"id": 3, "content": "<0xA8>", "single_word": false, "lstrip": false, "rstrip": false, "normalized": false, "special": true}
+            ],
+            "normalizer": null,
+            "pre_tokenizer": null,
+            "post_processor": null,
+            "decoder": {"type": "Sequence", "decoders": [{"type": "ByteFallback"}, {"type": "Fuse"}]},
+            "model": {
+                "type": "BPE",
+                "dropout": null,
+                "unk_token": null,
+                "continuing_subword_prefix": null,
+                "end_of_word_suffix": null,
+                "fuse_unk": false,
+                "byte_fallback": true,
+                "ignore_merges": false,
+                "vocab": {"<s>": 0, "</s>": 1, "<0xCE>": 2, "<0xA8>": 3, "\u96e3": 4},
+                "merges": []
+            }
+        }"#;
+        tokenizers::Tokenizer::from_bytes(json.as_bytes()).expect("valid tokenizer json")
+    }
+
+    #[test]
+    fn test_non_byte_special_token_ids_excludes_byte_fallback() {
+        let tok = byte_fallback_tokenizer();
+        let ids = non_byte_special_token_ids(&tok);
+        assert!(ids.contains(&0), "<s> は skip 対象");
+        assert!(ids.contains(&1), "</s> は skip 対象");
+        assert!(!ids.contains(&2), "<0xCE> は skip してはいけない");
+        assert!(!ids.contains(&3), "<0xA8> は skip してはいけない");
+    }
+
+    /// 修正の本体: special フィルタを自前 ID フィルタで行い、
+    /// tokenizers には skip_special_tokens=false で渡すと
+    /// バイトフォールバック 2 トークンから Ψ (U+03A8) が復元される。
+    #[test]
+    fn test_decode_restores_psi_from_byte_fallback() {
+        let tok = byte_fallback_tokenizer();
+        let special = non_byte_special_token_ids(&tok);
+        // <s> <0xCE> <0xA8> 難 </s>  →  "Ψ難"
+        let ids: Vec<u32> = [0u32, 2, 3, 4, 1]
+            .iter()
+            .copied()
+            .filter(|id| !special.contains(id))
+            .collect();
+        let text = tok.decode(&ids, false).expect("decode");
+        assert_eq!(text, "Ψ難");
+    }
+
+    /// 旧実装の再現: tokenizers に skip_special_tokens=true を委譲すると
+    /// バイトフォールバックトークンごと捨てられて Ψ が消える。
+    /// （この挙動が変わったら自前フィルタは不要になっている可能性がある）
+    #[test]
+    fn test_tokenizers_skip_special_drops_byte_fallback() {
+        let tok = byte_fallback_tokenizer();
+        let text = tok.decode(&[0u32, 2, 3, 4, 1], true).expect("decode");
+        assert_eq!(text, "難");
     }
 }

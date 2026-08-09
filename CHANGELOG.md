@@ -3,6 +3,12 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.10.4] - 2026-08-09
+
+### Fixed
+
+- **語彙外文字（Ψ・€・絵文字など）が変換候補から無言で消える問題を修正**（[karukan PR #91](https://github.com/togatoga/karukan/pull/91) と同件）: jinen v2 (Qwen3) の tokenizer.json はバイトフォールバックトークン (`<0xNN>`) を `special: true` で登録しているため、tokenizers クレートの `decode(_, skip_special_tokens=true)` に任せると UTF-8 復元前にバイトトークンごと破棄され、「さいきくすおのさいなん」→「斉木楠雄の難」のように語彙に単独トークンが無い文字が欠落していた。special トークンの除去を `LlamaCppModel::decode` 内の自前 ID フィルタ（バイトフォールバックは除外）に変更し、tokenizers には常に `skip_special_tokens=false` で渡すようにした。修正後は「斉木楠雄のΨ難」が第 1 候補に出る（jinen-v2-small-q5 で確認、v1 系は挙動変化なし）。
+
 ## [0.10.3] - 2026-08-08
 
 ### Added
