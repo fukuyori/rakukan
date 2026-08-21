@@ -29,20 +29,30 @@
 # 使い方:
 #   cargo make sign
 #   powershell -ExecutionPolicy Bypass -File scripts\sign-artifacts.ps1 [-Profile release|debug]
+#
+# 事前準備 (証明書の指定):
+#   環境変数 CODESIGN_CERT に署名証明書の Subject CN を設定しておくこと。
+#     setx CODESIGN_CERT "<CN>"
+#   未設定のまま実行するとエラーになる (誤った証明書での署名事故を防ぐため)。
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
     [string]$BuildDir = "C:\rb",
     [string]$SigntoolPath = $null,
     [string]$TimestampUrl = "http://timestamp.digicert.com",
-    # 署名に使う証明書の Subject CN。空にすると signtool /a の自動選択に戻る。
-    # /a は「有効期限が最も長い証明書」を選ぶため、WDK テスト証明書などが
-    # ストアに入ると本来の証明書から勝手に乗り換わる (2026-08 に実際に発生。
-    # パスワード保護のないテスト証明書が選ばれ、プロンプトなしで署名されていた)。
-    [string]$CertSubject = "Noriaki Fukuyori"
+    # 署名に使う証明書の Subject CN。既定は環境変数 CODESIGN_CERT から取得する。
+    # (明示的に -CertSubject "..." を渡せば環境変数より優先される)
+    # 未指定時にエラーとする理由は scripts\signtool-common.ps1 を参照。
+    [string]$CertSubject = $env:CODESIGN_CERT,
+    [switch]$AutoSelectCert
 )
 
 $ErrorActionPreference = "Stop"
+
+. (Join-Path $PSScriptRoot "signtool-common.ps1")
+
+# --- 証明書 Subject CN の解決 (未設定ならここで停止) ---
+$CertSubject = Resolve-CertSubject -CertSubject $CertSubject -AutoSelectCert:$AutoSelectCert
 
 # Console encoding: UTF-8 で Write-Host できるよう設定 (文字化け防止)
 try {
@@ -60,28 +70,7 @@ try {
 Set-Location (Split-Path $PSScriptRoot)
 
 # --- signtool.exe を検出 ---
-if ($SigntoolPath -and (Test-Path -LiteralPath $SigntoolPath)) {
-    $signtool = $SigntoolPath
-} else {
-    $candidates = @()
-    $appCertKit = "${env:ProgramFiles(x86)}\Windows Kits\10\App Certification Kit\signtool.exe"
-    if (Test-Path -LiteralPath $appCertKit) { $candidates += $appCertKit }
-
-    $binRoot = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
-    if (Test-Path -LiteralPath $binRoot) {
-        Get-ChildItem -Path $binRoot -Directory -ErrorAction SilentlyContinue |
-            Sort-Object Name -Descending |
-            ForEach-Object {
-                $p = Join-Path $_.FullName "x64\signtool.exe"
-                if (Test-Path -LiteralPath $p) { $candidates += $p }
-            }
-    }
-
-    $signtool = $candidates | Select-Object -First 1
-    if (-not $signtool) {
-        throw "signtool.exe not found. Install Windows 10/11 SDK or pass -SigntoolPath."
-    }
-}
+$signtool = Find-SignTool -SigntoolPath $SigntoolPath
 Write-Host "[sign] signtool: $signtool"
 
 $profileDir = if ($Profile -eq "release") { "release" } else { "debug" }

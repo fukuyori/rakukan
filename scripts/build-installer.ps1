@@ -1,20 +1,38 @@
-# =============================================================================
+﻿# =============================================================================
 # scripts\build-installer.ps1
 # rakukan IME Inno Setup インストーラー作成スクリプト
 #
 # 使用方法:
 #   cd D:\home\source\rust\rakukan
 #   .\scripts\build-installer.ps1
+#   .\scripts\build-installer.ps1 -Sign      # インストーラー/アンインストーラーに署名
 #
 # 前提:
 #   - cargo make install が完了していること
 #   - Inno Setup 6 がインストールされていること
+#   - -Sign を使う場合: 環境変数 CODESIGN_CERT に証明書の Subject CN を設定済みで、
+#     Windows SDK の signtool.exe が使えること
+#
+# -Sign について:
+#   ISCC の SignTool 機能 (/S スイッチ) 経由で signtool を呼び出す。
+#   .iss 側の SignedUninstaller=yes により、セットアップ本体だけでなく
+#   インストール先に展開される **アンインストーラー (unins000.exe)** にも
+#   同じ証明書で署名が付く。
+#   dist\ に詰める DLL/EXE 自体の署名は cargo make sign が担当する (別レイヤ)。
 # =============================================================================
 
 param(
     [string]$Version,
     [string]$InstallDir = "$env:LOCALAPPDATA\rakukan",
-    [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss"
+    [string]$InstallerScript = "$PSScriptRoot\..\rakukan_installer.iss",
+    # インストーラー / アンインストーラーに電子署名を付与する
+    [switch]$Sign,
+    # 署名に使う証明書の Subject CN (既定: 環境変数 CODESIGN_CERT)
+    [string]$CertSubject = $env:CODESIGN_CERT,
+    [string]$SigntoolPath = $null,
+    [string]$TimestampUrl = "http://timestamp.digicert.com",
+    # signtool /a の自動選択を使う (非推奨。理由は scripts\signtool-common.ps1)
+    [switch]$AutoSelectCert
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,6 +65,33 @@ $iscc = @(
 if (-not $iscc) {
     Write-Error "Inno Setup 6 が見つかりません。https://jrsoftware.org/isinfo.php からインストールしてください。"
     exit 1
+}
+
+# --- 署名の準備 (dist を組み立てる前に失敗させる) ---
+$isccExtraArgs = @()
+$signtool = $null
+if ($Sign) {
+    . (Join-Path $PSScriptRoot "signtool-common.ps1")
+
+    $signtool    = Find-SignTool -SigntoolPath $SigntoolPath
+    $CertSubject = Resolve-CertSubject -CertSubject $CertSubject -AutoSelectCert:$AutoSelectCert
+
+    Write-Host "[sign] signtool: $signtool"
+
+    # ISCC の SignTool コマンド文字列。
+    #   $q -> ダブルクォート、$f -> 署名対象ファイル (既にクォート済みなので $q で囲まない)
+    # PowerShell の変数展開と衝突するため $q / $f はリテラルで組み立てる。
+    $Q = '$q'
+    $F = '$f'
+    $certPart = if ($CertSubject) {
+        Write-Host "[sign] Certificate: CN=$CertSubject (pinned)" -ForegroundColor Cyan
+        "/n $Q$CertSubject$Q"
+    } else {
+        Write-Host "[sign] Certificate: auto-select (/a)" -ForegroundColor Yellow
+        "/a"
+    }
+    $signCommand = "$Q$signtool$Q sign /fd SHA256 $certPart /tr $TimestampUrl /td SHA256 $F"
+    $isccExtraArgs = @("/DSIGN", "/Srakukan=$signCommand")
 }
 
 Write-Host "[1/3] dist フォルダを準備中..."
@@ -159,8 +204,12 @@ $issContent = $issContent -replace '#define MyAppVersion\s+"[^"]+"', "#define My
 $issContent | Set-Content $InstallerScript -NoNewline -Encoding UTF8
 
 Write-Host ""
-Write-Host "[2/3] Inno Setup コンパイル中..."
-& $iscc $InstallerScript
+if ($Sign) {
+    Write-Host "[2/3] Inno Setup コンパイル中 (署名あり: setup + uninstaller)..."
+} else {
+    Write-Host "[2/3] Inno Setup コンパイル中..."
+}
+& $iscc @isccExtraArgs $InstallerScript
 if ($LASTEXITCODE -ne 0) {
     Write-Error "ISCC.exe が失敗しました (exit code $LASTEXITCODE)"
     exit 1
@@ -173,4 +222,15 @@ $outputFile = Get-ChildItem "$PSScriptRoot\..\output\rakukan-*.exe" |
 if ($outputFile) {
     Write-Host "インストーラー: $($outputFile.FullName)"
     Write-Host "サイズ: $([math]::Round($outputFile.Length / 1MB, 1)) MB"
+
+    if ($Sign) {
+        # 署名検証 (アンインストーラーは ISCC が埋め込み済みなのでここでは検証できない)
+        & $signtool verify /pa $outputFile.FullName
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[sign] 署名を確認しました (アンインストーラーも同じ証明書で署名済み)" -ForegroundColor Green
+        } else {
+            Write-Error "[sign] 署名の検証に失敗しました (exit code $LASTEXITCODE)"
+            exit 1
+        }
+    }
 }

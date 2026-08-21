@@ -66,6 +66,13 @@ CloseApplications=no
 ; ログ
 SetupLogging=yes
 
+; コード署名 (scripts\build-installer.ps1 -Sign から /DSIGN + /Srakukan=... で有効化)
+; SignedUninstaller=yes により、インストール先に置かれる unins000.exe にも署名が付く。
+#ifdef SIGN
+SignTool=rakukan
+SignedUninstaller=yes
+#endif
+
 [Languages]
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "english";  MessagesFile: "compiler:Default.isl"
