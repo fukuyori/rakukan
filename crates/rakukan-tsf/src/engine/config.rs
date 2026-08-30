@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::SystemTime;
 
@@ -18,11 +19,39 @@ pub struct AppConfig {
     #[serde(default)]
     pub conversion: ConversionConfig,
     #[serde(default)]
+    pub appearance: AppearanceConfig,
+    #[serde(default)]
     pub diagnostics: DiagnosticsConfig,
 
     /// 旧形式との互換用（config.toml に num_candidates = N と書いた場合に有効）。
     #[serde(default)]
     pub num_candidates: Option<usize>,
+}
+
+/// 候補ウィンドウの見た目。
+///
+/// `candidate_font_height` は候補ウィンドウのフォント高さ（ピクセル）。
+/// 行の高さ・余白・最小幅もこの値を基準に同じ比率で拡大されるため、
+/// ここだけ変えればウィンドウ全体が破綻せずに拡大縮小する。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AppearanceConfig {
+    #[serde(default = "default_candidate_font_height")]
+    pub candidate_font_height: i32,
+}
+
+/// 既定のフォント高さ。candidate_window.rs のレイアウト定数はこの値を基準に決めてある。
+pub const DEFAULT_CANDIDATE_FONT_HEIGHT: i32 = 17;
+
+fn default_candidate_font_height() -> i32 {
+    DEFAULT_CANDIDATE_FONT_HEIGHT
+}
+
+impl Default for AppearanceConfig {
+    fn default() -> Self {
+        Self {
+            candidate_font_height: default_candidate_font_height(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -322,6 +351,7 @@ impl ConfigManager {
         let path = config_path().unwrap_or_else(|_| PathBuf::from("config.toml"));
         let current = load_app_config_from_path(&path).unwrap_or_default();
         let last_modified = file_modified(&path);
+        publish_atomics(&current);
         Self {
             path,
             last_modified,
@@ -335,10 +365,35 @@ impl ConfigManager {
             return Ok(false);
         }
         let cfg = load_app_config_from_path(&self.path)?;
+        publish_atomics(&cfg);
         self.current = cfg;
         self.last_modified = modified;
         Ok(true)
     }
+}
+
+/// 描画パスから読む値をアトミックに複製しておく。
+///
+/// 候補ウィンドウの WM_PAINT は 1 行ごとに寸法を参照するため、そこで
+/// CONFIG_MANAGER の Mutex を取ると描画のたびにロック競合が起きる。
+/// 設定を読み込んだタイミングでアトミックへ写しておき、描画側はロックなしで読む。
+fn publish_atomics(cfg: &AppConfig) {
+    CANDIDATE_FONT_HEIGHT.store(
+        cfg.appearance
+            .candidate_font_height
+            .clamp(MIN_CANDIDATE_FONT_HEIGHT, MAX_CANDIDATE_FONT_HEIGHT),
+        Ordering::Relaxed,
+    );
+}
+
+const MIN_CANDIDATE_FONT_HEIGHT: i32 = 10;
+const MAX_CANDIDATE_FONT_HEIGHT: i32 = 72;
+
+static CANDIDATE_FONT_HEIGHT: AtomicI32 = AtomicI32::new(DEFAULT_CANDIDATE_FONT_HEIGHT);
+
+/// 候補ウィンドウのフォント高さ（ピクセル）。描画パスから毎行呼ばれる想定でロックしない。
+pub fn candidate_font_height() -> i32 {
+    CANDIDATE_FONT_HEIGHT.load(Ordering::Relaxed)
 }
 
 static CONFIG_MANAGER: LazyLock<Mutex<ConfigManager>> =
@@ -376,6 +431,7 @@ pub fn init_config_manager() {
         mgr.path = config_path().unwrap_or_else(|_| mgr.path.clone());
         mgr.current = load_app_config_from_path(&mgr.path).unwrap_or_default();
         mgr.last_modified = file_modified(&mgr.path);
+        publish_atomics(&mgr.current);
     }
 }
 
@@ -507,6 +563,12 @@ beam_size = 6
 # Space 変換で表示する候補数（1〜30、デフォルト 6）。
 # 新形式は [conversion].num_candidates。旧形式のルート直下 num_candidates も引き続き読める。
 # num_candidates = 6
+
+[appearance]
+# 候補ウィンドウのフォント高さ（ピクセル）。既定 17
+# 行の高さ・余白・最小幅も同じ比率で拡大するので、この値だけ変えればよい。
+# 10〜72 にクランプされる。IME をオフ→オンで反映。
+candidate_font_height = 17
 
 [diagnostics]
 dump_active_config = false
