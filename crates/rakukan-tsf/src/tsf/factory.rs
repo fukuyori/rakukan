@@ -892,6 +892,15 @@ fn normalize_key_event_vk(vk: u16) -> u16 {
     if vk == 0x27 && ctrl && alt && !shift && space_down {
         return 0x20;
     }
+
+    // JIS 配列の半角/全角キーは VK_KANJI ではなく VK_DBE_SBCSCHAR (0xF3) /
+    // VK_DBE_DBCSCHAR (0xF4) を送る（現在の IME 状態でどちらになるかが変わる）。
+    // VK_KANJI (0x19) が来るのは Alt 併用の「漢字」キーとしての用法のときだけ。
+    // keymap 側は "Zenkaku" = 0x19 で持っているので、ここで 0x19 に寄せる。
+    if vk == 0xF3 || vk == 0xF4 {
+        return 0x19;
+    }
+
     vk
 }
 
