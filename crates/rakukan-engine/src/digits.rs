@@ -763,21 +763,34 @@ pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
 /// 「5まん」が「5満」「5マン」になる。数字の直後という限定した条件でのみ、
 /// 数詞の漢字を先頭に差し込んで救済する。
 ///
-/// 完全一致のみを対象にしているのは誤爆を避けるため。前方一致にすると
-/// 「3せんち」(3センチ) が「3千ち」になるなど、実在する読みを壊す。
+/// 戻り値の `bool` は「第 1 候補に置いてよいか」。
+///
+/// `true` は数字の直後という条件下でほぼ一意な単位。`false` は同音異義語が
+/// あるもので、候補には入れるが順位は LLM の判断に譲る
+/// （「3せん」= 3戦/3選、「1ちょう」= 1丁、「5じゅう」= 5重 など）。
+/// 構造的に候補へ出てこないことだけを補い、どれを既定にするかは文脈を見た
+/// 変換器に任せる、という切り分け。
+///
+/// なお、このルールが発動するのは run が `[Digit, Kana]` の 2 つで、かつ
+/// かな run が数詞に完全一致する場合だけ。「5せんのしはらい」は かな run が
+/// `"せんのしはらい"` になるため対象外で、文脈ごと LLM が変換する。
+/// つまりここで扱うのは実質「文脈が存在しない単独入力」に限られる。
+///
+/// 完全一致のみを見るのは前方一致による破壊を避けるため。前方一致にすると
+/// 「3まんが」のような読みを「3万が」に固定してしまう。
 ///
 /// なお、この救済候補を run の候補リストに差し込んで `combine_runs` に通すのは
 /// 誤り。`verify_digits_preserved` が「万」を数値 10000 と読むため
 /// 「5万」が数字改変とみなされて捨てられ、生成順の都合で候補が全滅しうる。
 /// 呼び出し側は verify の後に直接差し込むこと。
-fn numeric_unit_kanji(reading: &str) -> Option<&'static str> {
+fn numeric_unit_kanji(reading: &str) -> Option<(&'static str, bool)> {
     match reading {
-        "じゅう" => Some("十"),
-        "ひゃく" => Some("百"),
-        "せん" => Some("千"),
-        "まん" => Some("万"),
-        "おく" => Some("億"),
-        "ちょう" => Some("兆"),
+        "まん" => Some(("万", true)),
+        "おく" => Some(("億", true)),
+        "ちょう" => Some(("兆", false)),
+        "せん" => Some(("千", false)),
+        "ひゃく" => Some(("百", false)),
+        "じゅう" => Some(("十", false)),
         _ => None,
     }
 }
@@ -861,11 +874,21 @@ pub fn convert_with_digit_protection(
     // "5"+"10000" が一致せず、数字が改変されたと誤判定されて捨てられてしまう。
     // ここは数字 run と数詞をこちらで組み立てており、数字が保存されていることは
     // 自明なので、フィルタの後に直接差し込む。
+    // 数字表記は digit_candidates_order の設定に従う。生の run テキストを
+    // そのまま使うと、arabic を除外している設定でも半角数字が先頭に出てしまう。
     if let [Run::Digit(d), Run::Kana(k)] = runs.as_slice() {
-        if let Some(unit) = numeric_unit_kanji(k) {
-            let cand = format!("{d}{unit}");
-            verified.retain(|c| c != &cand);
-            verified.insert(0, cand);
+        if let Some((unit, promote)) = numeric_unit_kanji(k) {
+            // promote=false（同音異義語あり）は LLM の第 1 候補を既定のまま残し、
+            // 数詞はその次に置く。候補として存在させることだけを保証する。
+            let at = if promote { 0 } else { 1.min(verified.len()) };
+            for digit in digit_candidates(d, digit_candidates_order)
+                .into_iter()
+                .rev()
+            {
+                let cand = format!("{digit}{unit}");
+                verified.retain(|c| c != &cand);
+                verified.insert(at.min(verified.len()), cand);
+            }
         }
     }
 
@@ -1302,17 +1325,6 @@ mod tests {
     }
 
     #[test]
-    fn numeric_unit_after_digit_is_recognized() {
-        assert_eq!(numeric_unit_kanji("まん"), Some("万"));
-        assert_eq!(numeric_unit_kanji("おく"), Some("億"));
-        assert_eq!(numeric_unit_kanji("せん"), Some("千"));
-        // 前方一致にすると「3せんち」を壊すので、完全一致のみ
-        assert_eq!(numeric_unit_kanji("せんち"), None);
-        assert_eq!(numeric_unit_kanji("まんが"), None);
-        assert_eq!(numeric_unit_kanji("かわ"), None);
-    }
-
-    #[test]
     fn digit_plus_unit_is_rejected_by_digit_verification() {
         // 「5万」は verify_digits_preserved を通らない（万が 10000 と読まれる）。
         // この性質があるため、救済候補は verify の後に差し込む必要がある。
@@ -1328,5 +1340,42 @@ mod tests {
         assert!(runs[0].is_digit());
         assert_eq!(runs[0].text(), "5");
         assert_eq!(runs[1].text(), "まん");
+    }
+    #[test]
+    #[test]
+    fn numeric_unit_promotion_depends_on_ambiguity() {
+        // 数字の直後でほぼ一意 → 第 1 候補に置いてよい
+        assert_eq!(numeric_unit_kanji("まん"), Some(("万", true)));
+        assert_eq!(numeric_unit_kanji("おく"), Some(("億", true)));
+
+        // 同音異義語あり → 候補には入れるが順位は LLM に譲る
+        // 3せん=3戦/3選, 1ちょう=1丁, 5じゅう=5重
+        assert_eq!(numeric_unit_kanji("せん"), Some(("千", false)));
+        assert_eq!(numeric_unit_kanji("ちょう"), Some(("兆", false)));
+        assert_eq!(numeric_unit_kanji("じゅう"), Some(("十", false)));
+        assert_eq!(numeric_unit_kanji("ひゃく"), Some(("百", false)));
+
+        // 前方一致では拾わない
+        assert_eq!(numeric_unit_kanji("まんが"), None);
+        assert_eq!(numeric_unit_kanji("せんち"), None);
+        assert_eq!(numeric_unit_kanji("かわ"), None);
+    }
+
+    #[test]
+    fn numeric_unit_rule_does_not_apply_when_context_follows() {
+        // 「5せんのしはらい」「5せんをかちぬいた」は かな run が数詞に
+        // 完全一致しないので、このルールは発動せず文脈ごと LLM に渡る。
+        for reading in ["5せんのしはらい", "5せんをかちぬいた", "5まんえん"] {
+            let runs = split_by_digits(reading);
+            assert_eq!(runs.len(), 2, "{reading}");
+            let Run::Kana(k) = &runs[1] else {
+                panic!("{reading}: 2 番目が Kana ではない")
+            };
+            assert_eq!(
+                numeric_unit_kanji(k),
+                None,
+                "{reading}: かな run \"{k}\" で発動してはいけない"
+            );
+        }
     }
 }
