@@ -50,16 +50,64 @@ use windows::{
 
 // ─── レイアウト定数 ───────────────────────────────────────────────────────────
 
-const PADDING_X: i32 = 10;
-const PADDING_Y: i32 = 4;
-const ITEM_HEIGHT: i32 = 26;
-const FONT_HEIGHT: i32 = 17;
+// 以下の *_BASE は「フォント高さ 17px のとき」の寸法。
+// config.toml の [appearance] candidate_font_height を変えると、
+// scaled() が同じ比率で全ての寸法を拡大縮小する。
+// 幅は compute_needed_width が実フォントで実測するため、ここでは下限/上限のみ。
+
+const PADDING_X_BASE: i32 = 10;
+const PADDING_Y_BASE: i32 = 4;
+const ITEM_HEIGHT_BASE: i32 = 26;
+const FONT_HEIGHT_BASE: i32 = crate::engine::config::DEFAULT_CANDIDATE_FONT_HEIGHT;
 /// 候補ウィンドウの最小幅（最大幅は `compute_needed_width` で動的に算出）
-const WIN_WIDTH_MIN: i32 = 260;
+const WIN_WIDTH_MIN_BASE: i32 = 260;
 /// 候補ウィンドウの上限幅（画面幅に対する暴走を防ぐ）
-const WIN_WIDTH_MAX: i32 = 900;
+const WIN_WIDTH_MAX_BASE: i32 = 900;
 /// ページインジケーター行の高さ
-const PAGER_HEIGHT: i32 = 22;
+const PAGER_HEIGHT_BASE: i32 = 22;
+/// ステータス行の高さ
+const STATUS_HEIGHT_BASE: i32 = 22;
+
+/// 現在のフォント高さ（config.toml の [appearance] candidate_font_height）。
+#[inline]
+fn font_height() -> i32 {
+    crate::engine::config::candidate_font_height()
+}
+
+/// FONT_HEIGHT_BASE 基準の寸法を現在のフォント高さに合わせて拡大する（四捨五入）。
+#[inline]
+fn scaled(base: i32) -> i32 {
+    (base * font_height() + FONT_HEIGHT_BASE / 2) / FONT_HEIGHT_BASE
+}
+
+#[inline]
+fn padding_x() -> i32 {
+    scaled(PADDING_X_BASE)
+}
+#[inline]
+fn padding_y() -> i32 {
+    scaled(PADDING_Y_BASE)
+}
+#[inline]
+fn item_height() -> i32 {
+    scaled(ITEM_HEIGHT_BASE)
+}
+#[inline]
+fn pager_height() -> i32 {
+    scaled(PAGER_HEIGHT_BASE)
+}
+#[inline]
+fn status_height() -> i32 {
+    scaled(STATUS_HEIGHT_BASE)
+}
+#[inline]
+fn win_width_min() -> i32 {
+    scaled(WIN_WIDTH_MIN_BASE)
+}
+#[inline]
+fn win_width_max() -> i32 {
+    scaled(WIN_WIDTH_MAX_BASE)
+}
 /// キャレット高さの推定値（画面端反転時に使用）
 const CARET_HEIGHT_ESTIMATE: i32 = 24;
 
@@ -80,7 +128,7 @@ thread_local! {
     /// 表示中の候補データ（WM_PAINT コールバックで参照）
     static TL_CAND: RefCell<CandData> = RefCell::new(CandData::default());
     /// 最後に `show_inner` で算出したウィンドウ幅。WM_PAINT でも使う。
-    static TL_WIN_WIDTH: Cell<i32> = const { Cell::new(WIN_WIDTH_MIN) };
+    static TL_WIN_WIDTH: Cell<i32> = Cell::new(win_width_min());
 
     // ─── [Live] ライブ変換セッション状態は `live_session.rs` の LiveConvSession に集約 (M4 Phase 1)。
     // 旧 TL_LIVE_CTX / TL_LIVE_TID / TL_LIVE_DM_PTR は削除済み。
@@ -229,8 +277,8 @@ unsafe extern "system" fn wnd_proc(
 ///
 /// スクリーン DC をソースに CreateCompatibleDC で measuring DC を作成し、
 /// CreateFontW で描画時と同じフォントを選択して GetTextExtentPoint32W で測る。
-/// 描画時に各行は `PADDING_X + text_w + PADDING_X` の幅が必要。
-/// 結果は [`WIN_WIDTH_MIN`, `WIN_WIDTH_MAX`] にクランプする。
+/// 描画時に各行は `padding_x() + text_w + padding_x()` の幅が必要。
+/// 結果は `win_width_min()` 〜 `win_width_max()` にクランプする。
 unsafe fn compute_needed_width(
     candidates: &[String],
     status_line: Option<&str>,
@@ -239,17 +287,17 @@ unsafe fn compute_needed_width(
     // measuring DC
     let screen_dc = GetDC(HWND::default());
     if screen_dc.is_invalid() {
-        return WIN_WIDTH_MIN;
+        return win_width_min();
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     if mem_dc.is_invalid() {
         ReleaseDC(HWND::default(), screen_dc);
-        return WIN_WIDTH_MIN;
+        return win_width_min();
     }
 
     let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        FONT_HEIGHT,
+        font_height(),
         0,
         0,
         0,
@@ -305,8 +353,8 @@ unsafe fn compute_needed_width(
     ReleaseDC(HWND::default(), screen_dc);
 
     // padding + 実測 + padding + スクロールバー的余白（2px）
-    let needed = PADDING_X + max_text + PADDING_X + 2;
-    needed.clamp(WIN_WIDTH_MIN, WIN_WIDTH_MAX)
+    let needed = padding_x() + max_text + padding_x() + 2;
+    needed.clamp(win_width_min(), win_width_max())
 }
 
 unsafe fn draw(hdc: HDC) {
@@ -334,7 +382,7 @@ unsafe fn draw(hdc: HDC) {
     // フォント
     let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        FONT_HEIGHT,
+        font_height(),
         0,
         0,
         0,
@@ -362,50 +410,50 @@ unsafe fn draw(hdc: HDC) {
         if let Some(ref s) = data.status_line {
             let row = RECT {
                 left: 0,
-                top: PADDING_Y,
+                top: padding_y(),
                 right: win_width,
-                bottom: PADDING_Y + STATUS_HEIGHT,
+                bottom: padding_y() + status_height(),
             };
             FillRect(hdc, &row, status_brush);
             SetTextColor(hdc, COLORREF(0x00_88_88_88));
             let text_w: Vec<u16> = s.encode_utf16().collect();
             let _ = TextOutW(
                 hdc,
-                PADDING_X,
-                PADDING_Y + (STATUS_HEIGHT - FONT_HEIGHT) / 2,
+                padding_x(),
+                padding_y() + (status_height() - font_height()) / 2,
                 &text_w,
             );
         }
-        STATUS_HEIGHT
+        status_height()
     } else {
         0
     };
 
     // 候補行
     for (i, cand) in data.candidates.iter().enumerate() {
-        let y = PADDING_Y + status_offset + i as i32 * ITEM_HEIGHT;
+        let y = padding_y() + status_offset + i as i32 * item_height();
         let row = RECT {
             left: 0,
             top: y,
             right: win_width,
-            bottom: y + ITEM_HEIGHT,
+            bottom: y + item_height(),
         };
         let is_sel = i == data.selected;
         FillRect(hdc, &row, if is_sel { sel_brush } else { wht_brush });
         SetTextColor(hdc, if is_sel { COLOR_SEL_FG } else { COLOR_FG });
         let text = format!("{} {}", i + 1, cand);
         let text_w: Vec<u16> = text.encode_utf16().collect();
-        let _ = TextOutW(hdc, PADDING_X, y + (ITEM_HEIGHT - FONT_HEIGHT) / 2, &text_w);
+        let _ = TextOutW(hdc, padding_x(), y + (item_height() - font_height()) / 2, &text_w);
     }
 
     // ページインジケーター行（複数ページがある場合のみ）
     if has_pager {
-        let y = PADDING_Y + status_offset + n as i32 * ITEM_HEIGHT;
+        let y = padding_y() + status_offset + n as i32 * item_height();
         let row = RECT {
             left: 0,
             top: y,
             right: win_width,
-            bottom: y + PAGER_HEIGHT,
+            bottom: y + pager_height(),
         };
         FillRect(hdc, &row, pager_brush);
         let _ = windows::Win32::Graphics::Gdi::MoveToEx(hdc, 0, y, None);
@@ -415,8 +463,8 @@ unsafe fn draw(hdc: HDC) {
         let pager_w: Vec<u16> = pager_text.encode_utf16().collect();
         let _ = TextOutW(
             hdc,
-            PADDING_X,
-            y + (PAGER_HEIGHT - FONT_HEIGHT) / 2,
+            padding_x(),
+            y + (pager_height() - font_height()) / 2,
             &pager_w,
         );
     }
@@ -429,14 +477,12 @@ unsafe fn draw(hdc: HDC) {
     let _ = DeleteObject(font);
 }
 
-const STATUS_HEIGHT: i32 = 22;
-
 #[inline]
 fn window_height(n: usize, has_pager: bool, has_status: bool) -> i32 {
-    let base = PADDING_Y * 2 + n as i32 * ITEM_HEIGHT;
-    let with_pager = if has_pager { base + PAGER_HEIGHT } else { base };
+    let base = padding_y() * 2 + n as i32 * item_height();
+    let with_pager = if has_pager { base + pager_height() } else { base };
     if has_status {
-        with_pager + STATUS_HEIGHT
+        with_pager + status_height()
     } else {
         with_pager
     }
