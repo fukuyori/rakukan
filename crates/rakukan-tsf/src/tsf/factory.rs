@@ -1046,7 +1046,7 @@ fn engine_convert_sync_multi(
     let _ = llm_limit; // DynEngine::convert_sync は num_candidates を内部設定から読む
 
     // 辞書候補とマージ（dict_limit 件まで）
-    let merged = engine.merge_candidates(llm_cands, dict_limit);
+    let merged = engine.merge_candidates_for_reading(preedit, llm_cands, dict_limit);
     tracing::debug!("merge_candidates → {:?}", merged);
     if merged.is_empty() {
         vec![preedit.to_string()]

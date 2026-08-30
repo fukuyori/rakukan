@@ -157,7 +157,7 @@ fn immediate_dict_candidates(
     preedit: &str,
     dict_limit: usize,
 ) -> Option<Vec<String>> {
-    let candidates = engine.merge_candidates(vec![], dict_limit);
+    let candidates = engine.merge_candidates_for_reading(preedit, vec![], dict_limit);
     let has_conversion = candidates.iter().any(|candidate| candidate != preedit);
     if has_conversion {
         Some(candidates)
@@ -336,7 +336,8 @@ impl super::TextServiceFactory_Impl {
 
                 // inline 完走 → 取得してマージ
                 let llm_cands = engine.bg_take_candidates(&target).unwrap_or_default();
-                let candidates = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                let candidates =
+                    engine.merge_candidates_for_reading(&target, llm_cands, DICT_LIMIT);
                 let candidates = if candidates.is_empty() {
                     vec![target.clone()]
                 } else {
@@ -453,7 +454,8 @@ impl super::TextServiceFactory_Impl {
                                     "on_convert[llm_pending]: bg_take_candidates → Some({} cands)",
                                     llm_cands.len()
                                 );
-                                let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                let merged = engine
+                                    .merge_candidates_for_reading(&take_key, llm_cands, DICT_LIMIT);
                                 tracing::debug!("merge_candidates → {:?}", merged);
                                 tracing::debug!(
                                     "on_convert[llm_pending]: merged={} cands",
@@ -555,7 +557,9 @@ impl super::TextServiceFactory_Impl {
                                         "on_convert[llm_pending]: reclaim+retry → Some({} cands)",
                                         llm_cands.len()
                                     );
-                                    let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                                    let merged = engine.merge_candidates_for_reading(
+                                        &take_key, llm_cands, DICT_LIMIT,
+                                    );
                                     tracing::debug!("merge_candidates → {:?}", merged);
                                     if !merged.is_empty() {
                                         if let Ok(mut sess2) = session_get() {
@@ -1274,7 +1278,7 @@ impl super::TextServiceFactory_Impl {
                 };
                 // bg_take_candidates 成功時に kanji が復元されているため再評価
                 let kanji_ready_now = engine.is_kanji_ready();
-                let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+                let merged = engine.merge_candidates_for_reading(&preedit, llm_cands, DICT_LIMIT);
                 convert_mark("merge_candidates", convert_start, &mut convert_last);
                 tracing::debug!(
                     "merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
