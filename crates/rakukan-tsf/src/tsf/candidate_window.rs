@@ -357,6 +357,55 @@ unsafe fn compute_needed_width(
     needed.clamp(win_width_min(), win_width_max())
 }
 
+/// 候補ウィンドウの幅を作業領域に収まる範囲へ抑える。
+///
+/// `candidate_font_height` を大きくすると `win_width_min()` / `win_width_max()` も
+/// 比例して広がる（72px 指定だと下限 1101px / 上限 3812px）。狭いモニタでは
+/// これがそのまま画面外にはみ出すため、モニタ幅を最終的な上限として被せる。
+unsafe fn clamp_width_to_work_area(x: i32, caret_bottom: i32, win_w: i32) -> i32 {
+    let pt = POINT { x, y: caret_bottom };
+    let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        let work_w = mi.rcWork.right - mi.rcWork.left;
+        if work_w > 0 && win_w > work_w {
+            return work_w;
+        }
+    }
+    win_w
+}
+
+/// 候補ウィンドウの表示 X を作業領域内に収める。
+///
+/// `calc_window_y` が縦方向のはみ出しを扱うのに対し、こちらは横方向。
+/// `candidate_font_height` を大きくすると幅も比例して広がるため、
+/// キャレット位置そのままだと右端からはみ出しうる。
+unsafe fn calc_window_x(x: i32, caret_bottom: i32, win_w: i32) -> i32 {
+    let pt = POINT { x, y: caret_bottom };
+    let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        if x + win_w > mi.rcWork.right {
+            let shifted = mi.rcWork.right - win_w;
+            tracing::debug!(
+                "candwin::shift_x: x={} win_w={} work_right={} → x={}",
+                x,
+                win_w,
+                mi.rcWork.right,
+                shifted
+            );
+            return shifted.max(mi.rcWork.left);
+        }
+    }
+    x
+}
+
 unsafe fn draw(hdc: HDC) {
     let data = TL_CAND.with(|c| c.borrow().clone());
     if data.candidates.is_empty() {
@@ -532,10 +581,12 @@ pub fn show_with_status(
     // 最長候補 / status 行に合わせてウィンドウ幅を動的に算出する。
     // GDI で実測するので Meiryo UI の実字幅で正確。
     let win_width = unsafe { compute_needed_width(page_candidates, status_line, page_info) };
+    let win_width = unsafe { clamp_width_to_work_area(x, y, win_width) };
     TL_WIN_WIDTH.with(|c| c.set(win_width));
 
     // ─── 画面端検出：ウィンドウが画面外にはみ出す場合はキャレットの上側に反転 ───
     let win_y = unsafe { calc_window_y(x, y, win_h) };
+    let win_x = unsafe { calc_window_x(x, y, win_width) };
 
     let hwnd = get_hwnd();
 
@@ -544,7 +595,7 @@ pub fn show_with_status(
             let _ = SetWindowPos(
                 hwnd,
                 HWND_TOPMOST,
-                x,
+                win_x,
                 win_y,
                 win_width,
                 win_h,
@@ -562,7 +613,7 @@ pub fn show_with_status(
                 PCWSTR(CLASS_NAME_UTF16.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP | WS_BORDER,
-                x,
+                win_x,
                 win_y,
                 win_width,
                 win_h,
@@ -635,8 +686,9 @@ pub fn reposition(x: i32, y: i32) {
     let win_h = window_height(n, has_pager, has_status);
     let win_w = TL_WIN_WIDTH.with(|c| c.get());
     let win_y = unsafe { calc_window_y(x, y, win_h) };
+    let win_x = unsafe { calc_window_x(x, y, win_w) };
     unsafe {
-        let _ = SetWindowPos(hwnd, HWND_TOPMOST, x, win_y, win_w, win_h, SWP_NOACTIVATE);
+        let _ = SetWindowPos(hwnd, HWND_TOPMOST, win_x, win_y, win_w, win_h, SWP_NOACTIVATE);
     }
 }
 
