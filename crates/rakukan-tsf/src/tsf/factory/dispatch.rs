@@ -309,9 +309,17 @@ impl super::TextServiceFactory_Impl {
                                 bg_timeout_watchdog(false); // 回復 → ウォッチドッグリセット
                                 // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
                                 let merged = if llm_cands.is_empty() {
-                                    engine.merge_candidates(vec![], DICT_LIMIT_WAIT)
+                                    engine.merge_candidates_for_reading(
+                                        &wait_preedit,
+                                        vec![],
+                                        DICT_LIMIT_WAIT,
+                                    )
                                 } else {
-                                    engine.merge_candidates(llm_cands, DICT_LIMIT_WAIT)
+                                    engine.merge_candidates_for_reading(
+                                        &wait_preedit,
+                                        llm_cands,
+                                        DICT_LIMIT_WAIT,
+                                    )
                                 };
                                 tracing::debug!("waiting-poll: merged={} cands", merged.len());
                                 // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
