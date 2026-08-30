@@ -755,6 +755,33 @@ pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
     extract_digits(input) == extract_digits(output)
 }
 
+/// 数字 run の直後に単独で現れたとき、数詞（位取りの単位）として解釈すべき読み。
+///
+/// 辞書は「まん → 万」を正しく持っているが、数字が混ざる読みは
+/// `convert_with_digit_protection` が run 単位で `KanaKanjiConverter::convert()`
+/// を呼ぶ経路になり、そこは LLM のみで辞書を参照しない。その結果
+/// 「5まん」が「5満」「5マン」になる。数字の直後という限定した条件でのみ、
+/// 数詞の漢字を先頭に差し込んで救済する。
+///
+/// 完全一致のみを対象にしているのは誤爆を避けるため。前方一致にすると
+/// 「3せんち」(3センチ) が「3千ち」になるなど、実在する読みを壊す。
+///
+/// なお、この救済候補を run の候補リストに差し込んで `combine_runs` に通すのは
+/// 誤り。`verify_digits_preserved` が「万」を数値 10000 と読むため
+/// 「5万」が数字改変とみなされて捨てられ、生成順の都合で候補が全滅しうる。
+/// 呼び出し側は verify の後に直接差し込むこと。
+fn numeric_unit_kanji(reading: &str) -> Option<&'static str> {
+    match reading {
+        "じゅう" => Some("十"),
+        "ひゃく" => Some("百"),
+        "せん" => Some("千"),
+        "まん" => Some("万"),
+        "おく" => Some("億"),
+        "ちょう" => Some("兆"),
+        _ => None,
+    }
+}
+
 fn build_local_context(runs: &[Run], kana_index: usize, global_context: &str) -> String {
     let mut ctx = String::from(global_context);
     if kana_index > 0
@@ -822,10 +849,25 @@ pub fn convert_with_digit_protection(
 
     let combined = combine_runs(&run_candidates, num_candidates);
 
-    let verified: Vec<String> = combined
+    let mut verified: Vec<String> = combined
         .into_iter()
         .filter(|c| verify_digits_preserved(reading, c))
         .collect();
+
+    // 「5まん」→「5万」の救済。
+    //
+    // この候補は verify_digits_preserved を意図的に通していない。extract_digits() は
+    // 「万」を数値 10000 として読むため、入力「5まん」の数字 "5" と出力「5万」の
+    // "5"+"10000" が一致せず、数字が改変されたと誤判定されて捨てられてしまう。
+    // ここは数字 run と数詞をこちらで組み立てており、数字が保存されていることは
+    // 自明なので、フィルタの後に直接差し込む。
+    if let [Run::Digit(d), Run::Kana(k)] = runs.as_slice() {
+        if let Some(unit) = numeric_unit_kanji(k) {
+            let cand = format!("{d}{unit}");
+            verified.retain(|c| c != &cand);
+            verified.insert(0, cand);
+        }
+    }
 
     if verified.is_empty() {
         Ok(vec![reading.to_string()])
@@ -1257,5 +1299,34 @@ mod tests {
         ];
         let result = combine_runs(&runs, 3);
         assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn numeric_unit_after_digit_is_recognized() {
+        assert_eq!(numeric_unit_kanji("まん"), Some("万"));
+        assert_eq!(numeric_unit_kanji("おく"), Some("億"));
+        assert_eq!(numeric_unit_kanji("せん"), Some("千"));
+        // 前方一致にすると「3せんち」を壊すので、完全一致のみ
+        assert_eq!(numeric_unit_kanji("せんち"), None);
+        assert_eq!(numeric_unit_kanji("まんが"), None);
+        assert_eq!(numeric_unit_kanji("かわ"), None);
+    }
+
+    #[test]
+    fn digit_plus_unit_is_rejected_by_digit_verification() {
+        // 「5万」は verify_digits_preserved を通らない（万が 10000 と読まれる）。
+        // この性質があるため、救済候補は verify の後に差し込む必要がある。
+        assert!(!verify_digits_preserved("5まん", "5万"));
+        // 一方、単位を伴わない通常の候補は通る
+        assert!(verify_digits_preserved("5まん", "5マン"));
+    }
+
+    #[test]
+    fn split_by_digits_splits_digit_and_kana() {
+        let runs = split_by_digits("5まん");
+        assert_eq!(runs.len(), 2);
+        assert!(runs[0].is_digit());
+        assert_eq!(runs[0].text(), "5");
+        assert_eq!(runs[1].text(), "まん");
     }
 }
