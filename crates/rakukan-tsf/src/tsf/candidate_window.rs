@@ -907,22 +907,25 @@ pub fn on_waiting_timer() {
             let mut guard = engine_get().ok()?;
             let engine = guard.as_mut()?;
             let hira_key = engine.hiragana_text();
-            let llm_cands = engine.bg_take_candidates(&preedit_key).or_else(|| {
-                if hira_key != preedit_key {
+            // 候補を取得できたキーを覚えておく。preedit_key は pending_romaji を
+            // 含む（例「たt」）ことがあり、その場合フォールバックした hira_key
+            // （例「た」）が実際の読み。マージも同じキーで引く必要がある。
+            let (matched_key, llm_cands) = match engine.bg_take_candidates(&preedit_key) {
+                Some(c) => (preedit_key.clone(), c),
+                None if hira_key != preedit_key => {
                     tracing::debug!(
                         "on_waiting_timer(selecting): key mismatch, retry hira={:?}",
                         hira_key
                     );
-                    engine.bg_take_candidates(&hira_key)
-                } else {
-                    None
+                    (hira_key.clone(), engine.bg_take_candidates(&hira_key)?)
                 }
-            })?;
+                None => return None,
+            };
             // 読みを明示的に渡す。merge_candidates() はエンジン内部の
             // hiragana_buf を見るため、この経路ではユーザー辞書・学習履歴が
             // 引けずに LLM 候補だけになる（protocol v4 で追加された
             // MergeCandidatesForReading への移行漏れ）。
-            let merged = engine.merge_candidates_for_reading(&preedit_key, llm_cands, DICT_LIMIT);
+            let merged = engine.merge_candidates_for_reading(&matched_key, llm_cands, DICT_LIMIT);
             if merged.is_empty() {
                 None
             } else {
@@ -1060,16 +1063,20 @@ pub fn on_waiting_timer() {
         // wait_preedit は preedit_display()（pending_romaji 含む）なので不一致の場合がある。
         // hiragana_text() でフォールバックして両方試す。
         let hira_key = engine.hiragana_text();
-        let llm_cands = engine.bg_take_candidates(&wait_preedit).or_else(|| {
-            if hira_key != wait_preedit {
+        // 取得できたキーを覚えておく。マージも同じキーで引かないと、
+        // フォールバックが効いた時にユーザー辞書・学習履歴が引けない。
+        let taken = match engine.bg_take_candidates(&wait_preedit) {
+            Some(c) => Some((wait_preedit.clone(), c)),
+            None if hira_key != wait_preedit => {
                 tracing::debug!("on_waiting_timer: key mismatch, retry hira={:?}", hira_key);
-                engine.bg_take_candidates(&hira_key)
-            } else {
-                None
+                engine
+                    .bg_take_candidates(&hira_key)
+                    .map(|c| (hira_key.clone(), c))
             }
-        });
+            None => None,
+        };
 
-        let llm_cands = match llm_cands {
+        let (matched_key, llm_cands) = match taken {
             Some(c) => c,
             None => {
                 // キー不一致 → bg_reclaim して bg_start で正しいキーで再起動
@@ -1092,8 +1099,8 @@ pub fn on_waiting_timer() {
         };
 
         // 読みを明示的に渡す（merge_candidates() は内部バッファ参照のため
-        // ユーザー辞書・学習履歴が反映されない）。
-        let merged = engine.merge_candidates_for_reading(&wait_preedit, llm_cands, DICT_LIMIT);
+        // ユーザー辞書・学習履歴が反映されない）。キーは実際に候補が取れた方。
+        let merged = engine.merge_candidates_for_reading(&matched_key, llm_cands, DICT_LIMIT);
         if merged.is_empty() {
             return None;
         }
