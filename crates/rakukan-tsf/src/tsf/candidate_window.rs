@@ -918,7 +918,11 @@ pub fn on_waiting_timer() {
                     None
                 }
             })?;
-            let merged = engine.merge_candidates(llm_cands, DICT_LIMIT);
+            // 読みを明示的に渡す。merge_candidates() はエンジン内部の
+            // hiragana_buf を見るため、この経路ではユーザー辞書・学習履歴が
+            // 引けずに LLM 候補だけになる（protocol v4 で追加された
+            // MergeCandidatesForReading への移行漏れ）。
+            let merged = engine.merge_candidates_for_reading(&preedit_key, llm_cands, DICT_LIMIT);
             if merged.is_empty() {
                 None
             } else {
@@ -1087,11 +1091,9 @@ pub fn on_waiting_timer() {
             }
         };
 
-        let merged = if llm_cands.is_empty() {
-            engine.merge_candidates(vec![], DICT_LIMIT)
-        } else {
-            engine.merge_candidates(llm_cands, DICT_LIMIT)
-        };
+        // 読みを明示的に渡す（merge_candidates() は内部バッファ参照のため
+        // ユーザー辞書・学習履歴が反映されない）。
+        let merged = engine.merge_candidates_for_reading(&wait_preedit, llm_cands, DICT_LIMIT);
         if merged.is_empty() {
             return None;
         }

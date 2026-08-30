@@ -207,7 +207,14 @@ impl super::TextServiceFactory_Impl {
                                 "poll: bg_take_candidates → Some({} cands)",
                                 llm_cands.len()
                             );
-                            let merged = engine.merge_candidates(llm_cands, DICT_LIMIT_POLL);
+                            // 読みを明示的に渡す（merge_candidates() は内部
+                            // バッファ参照のため、ユーザー辞書・学習履歴が
+                            // 反映されず LLM 候補だけになる）。
+                            let merged = engine.merge_candidates_for_reading(
+                                &preedit_key,
+                                llm_cands,
+                                DICT_LIMIT_POLL,
+                            );
                             tracing::debug!("poll: merge_candidates → {:?}", merged);
                             if !merged.is_empty() {
                                 sess.replace_selecting_candidates(merged, CandidateViewSource::Bg);
