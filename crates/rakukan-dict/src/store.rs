@@ -30,7 +30,12 @@ const LEARN_LRU_CAPACITY: usize = 30_000;
 const STALE_ENTRY_MAX_AGE_DAYS: u64 = 180;
 
 /// bincode ファイルのフォーマットバージョン。破壊的変更時にインクリメントする。
-const LEARN_HISTORY_FORMAT_VERSION: u32 = 1;
+///
+/// - v1: `suggestion_freq` が減衰しない `u32` カウンタ
+/// - v2: `suggestion_freq` を確定時に減衰させる `f32` アキュムレータに変更
+///
+/// 旧 version のファイルは移行せず破棄する（`load_learn_history_file`）。
+const LEARN_HISTORY_FORMAT_VERSION: u32 = 2;
 
 #[derive(Debug, Clone)]
 pub struct DictResult {
@@ -55,8 +60,12 @@ pub struct LearnEntry {
     pub surface: String,
     /// 最終確定時刻 (unix 秒)
     pub last_access_time: u64,
-    /// 確定回数。時間減衰と組み合わせて頻度ボーナスに使う。
-    pub suggestion_freq: u32,
+    /// 減衰付き確定回数。確定のたびに前回からの経過で減衰させてから +1 する
+    /// （`learn_inner` 参照）。生のカウンタではないので過去の回数が復活しない。
+    ///
+    /// 一定間隔 Δ 日で使い続けた場合、`1 / (1 - 0.5^(Δ/30))` に収束する。
+    /// 毎日なら約 44、週1なら約 7。青天井にならないのがこの型の要点。
+    pub suggestion_freq: f32,
     /// 候補ウィンドウで表示された回数（Phase 2c の未選択エントリ削除用、当面 0 のまま）
     pub shown_freq: u32,
 }
@@ -70,6 +79,13 @@ impl LearnEntry {
     /// mozc 準拠のスコア。大きいほど上位。
     ///
     /// `score = last_access_time + W_FREQ * freq * 0.5^(Δdays/30) - chars_count`
+    ///
+    /// `freq` は `last_access_time` 時点での減衰済み回数なので、ここでの減衰は
+    /// それを `now` まで延長しているだけ。`learn_inner` の減衰と同じ係数を使う。
+    ///
+    /// `W_FREQ` が 1 日ぶんの秒数なので「1 回使う = 1 日ぶん新しくなる」と読める。
+    /// `- chars_count` は秒単位のスコアに対して 1〜10 しか効かないため、実質的には
+    /// 完全同点時に短い表記を先に出すタイブレークとしてのみ機能する。
     pub fn score(&self, now: u64) -> f64 {
         let dt_secs = now.saturating_sub(self.last_access_time) as f64;
         let dt_days = dt_secs / 86_400.0;
@@ -367,13 +383,20 @@ impl DictStore {
             };
             let entries = hist.entry(reading.to_string()).or_default();
             if let Some(e) = entries.iter_mut().find(|e| e.surface == surface) {
+                // 前回確定からの経過分を減衰させてから +1 する。
+                // score() 側の減衰と同じ係数なので、f は常に「last_access_time 時点の
+                // 減衰済み回数」を表し、score() がそれを now まで延長する形になる。
+                // 生カウンタだと 1 回使うだけで過去の回数が満額で復活してしまう。
+                let dt_days = now.saturating_sub(e.last_access_time) as f64 / 86_400.0;
+                let decayed =
+                    e.suggestion_freq as f64 * 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
                 e.last_access_time = now;
-                e.suggestion_freq = e.suggestion_freq.saturating_add(1);
+                e.suggestion_freq = (decayed + 1.0) as f32;
             } else {
                 entries.push(LearnEntry {
                     surface: surface.to_string(),
                     last_access_time: now,
-                    suggestion_freq: 1,
+                    suggestion_freq: 1.0,
                     shown_freq: 0,
                 });
             }
@@ -595,6 +618,36 @@ impl DictStore {
 
 // ─── 永続化ヘルパ ─────────────────────────────────────────────────────────────
 
+/// bincode から読んだ `suggestion_freq` を、計算に使える値へ丸める。
+///
+/// v2 の更新式 `f = f * 0.5^(dt / HALF_LIFE) + 1` は有限かつ 1.0 以上の値しか作らない。
+/// NaN・±Inf・負値が入っているのはファイル破損か別実装が書いた場合で、そのまま
+/// `score()` に渡すと候補順が壊れる。エントリ自体は `last_access_time` だけでも
+/// 順位付けできるので、捨てずに頻度ボーナスの側だけを直す。
+///
+/// - NaN / ±Inf: 値は失われているが確定された事実は残るので、新規学習と同じ `1.0`。
+/// - 負値: 「確定した回数」として最も近いのは 0 回なので `0.0`。
+/// - 有限の極端値: 順序を持った情報であり、減衰でいずれ下がる。丸めずに残す。
+fn sanitize_learn_freq(freq: f32) -> f32 {
+    if freq.is_finite() { freq.max(0.0) } else { 1.0 }
+}
+
+/// 読み込んだ履歴全体をサニタイズし、直した件数を返す。
+fn sanitize_learn_freqs(entries: &mut HashMap<String, Vec<LearnEntry>>) -> usize {
+    let mut fixed = 0;
+    for list in entries.values_mut() {
+        for e in list.iter_mut() {
+            let sane = sanitize_learn_freq(e.suggestion_freq);
+            // NaN は `!=` で比較できないのでビット列で見る。
+            if sane.to_bits() != e.suggestion_freq.to_bits() {
+                e.suggestion_freq = sane;
+                fixed += 1;
+            }
+        }
+    }
+    fixed
+}
+
 fn load_learn_history_file(path: &Path) -> Result<HashMap<String, Vec<LearnEntry>>> {
     if !path.exists() {
         return Ok(HashMap::new());
@@ -602,6 +655,9 @@ fn load_learn_history_file(path: &Path) -> Result<HashMap<String, Vec<LearnEntry
     let bytes = std::fs::read(path)?;
     let file: LearnHistoryFile =
         bincode::deserialize(&bytes).map_err(|e| anyhow::anyhow!("bincode decode: {e}"))?;
+    // v1 は移行せず破棄する。減衰しない生カウンタと v2 の減衰付きアキュムレータは
+    // 意味が違い、どう写しても移行直後の候補順位を作為的に固定してしまう。
+    // version 不一致の共通経路がそのまま破棄を担い、次回保存で v2 が作られる。
     if file.version != LEARN_HISTORY_FORMAT_VERSION {
         warn!(
             "learn_history: version mismatch (file={}, expected={}); ignoring file",
@@ -610,6 +666,13 @@ fn load_learn_history_file(path: &Path) -> Result<HashMap<String, Vec<LearnEntry
         return Ok(HashMap::new());
     }
     let mut entries = file.entries;
+    let sanitized = sanitize_learn_freqs(&mut entries);
+    if sanitized > 0 {
+        warn!(
+            "learn_history: sanitized {} invalid suggestion_freq value(s) (NaN / Inf / negative)",
+            sanitized
+        );
+    }
     let pruned = prune_stale_entries(&mut entries, STALE_ENTRY_MAX_AGE_DAYS, now_unix_secs());
     if pruned > 0 {
         info!(
@@ -942,13 +1005,13 @@ mod tests {
         let old = LearnEntry {
             surface: "A".into(),
             last_access_time: 1_000,
-            suggestion_freq: 1,
+            suggestion_freq: 1.0,
             shown_freq: 0,
         };
         let new = LearnEntry {
             surface: "B".into(),
             last_access_time: 2_000,
-            suggestion_freq: 1,
+            suggestion_freq: 1.0,
             shown_freq: 0,
         };
         let now = 2_000;
@@ -961,7 +1024,7 @@ mod tests {
         let fresh = LearnEntry {
             surface: "A".into(),
             last_access_time: 0,
-            suggestion_freq: 10,
+            suggestion_freq: 10.0,
             shown_freq: 0,
         };
         let score_now = fresh.score(0);
@@ -996,13 +1059,13 @@ mod tests {
                 LearnEntry {
                     surface: "A".into(),
                     last_access_time: 100,
-                    suggestion_freq: 1,
+                    suggestion_freq: 1.0,
                     shown_freq: 0,
                 },
                 LearnEntry {
                     surface: "B".into(),
                     last_access_time: 300,
-                    suggestion_freq: 1,
+                    suggestion_freq: 1.0,
                     shown_freq: 0,
                 },
             ],
@@ -1012,7 +1075,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "C".into(),
                 last_access_time: 200,
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1039,7 +1102,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "X".into(),
                 last_access_time: 100,
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1048,7 +1111,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "Y".into(),
                 last_access_time: 500,
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1074,7 +1137,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "日本語".into(),
                 last_access_time: now,
-                suggestion_freq: 3,
+                suggestion_freq: 3.0,
                 shown_freq: 5,
             }],
         );
@@ -1086,7 +1149,7 @@ mod tests {
         let e = &loaded["にほんご"][0];
         assert_eq!(e.surface, "日本語");
         assert_eq!(e.last_access_time, now);
-        assert_eq!(e.suggestion_freq, 3);
+        assert_eq!(e.suggestion_freq, 3.0);
         assert_eq!(e.shown_freq, 5);
     }
 
@@ -1104,7 +1167,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "A".into(),
                 last_access_time: now - 10 * day, // 残る
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1113,7 +1176,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "B".into(),
                 last_access_time: now.saturating_sub(365 * day), // 1 年前: 消える
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1130,6 +1193,283 @@ mod tests {
         let path = dir.path().join("missing.bin");
         let loaded = load_learn_history_file(&path).unwrap();
         assert!(loaded.is_empty(), "ファイルが無ければ空 HashMap");
+    }
+
+    #[test]
+    fn test_learn_decays_freq_before_incrementing() {
+        // 30 日（半減期ちょうど）空けて 2 回目を確定すると 1 * 0.5 + 1 = 1.5 になる。
+        // 生カウンタなら 2 になるところ。
+        let mut e = LearnEntry {
+            surface: "森の".into(),
+            last_access_time: 0,
+            suggestion_freq: 1.0,
+            shown_freq: 0,
+        };
+        let now = 30 * 86_400_u64;
+        let dt_days = now.saturating_sub(e.last_access_time) as f64 / 86_400.0;
+        let decayed = e.suggestion_freq as f64 * 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
+        e.suggestion_freq = (decayed + 1.0) as f32;
+        assert!(
+            (e.suggestion_freq - 1.5).abs() < 1e-5,
+            "got {}",
+            e.suggestion_freq
+        );
+    }
+
+    #[test]
+    fn test_learn_does_not_resurrect_old_frequency() {
+        // 1 年放置した f=300 の語を 1 回使っても、300 が満額で戻ってこないこと。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        let year_ago = now - 365 * 86_400;
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        hist.insert(
+            "もりの".into(),
+            vec![LearnEntry {
+                surface: "杜野".into(),
+                last_access_time: year_ago,
+                suggestion_freq: 300.0,
+                shown_freq: 0,
+            }],
+        );
+        save_learn_history_file(&path, &hist).unwrap();
+
+        let store = DictStore::load(None, None, Some(&path)).unwrap();
+        store.learn_force("もりの", "杜野");
+
+        let reloaded = load_learn_history_file(&path).unwrap();
+        let f = reloaded["もりの"][0].suggestion_freq;
+        // 300 * 0.5^(365/30) ≈ 0.064 → +1 でおよそ 1.06
+        assert!(f < 2.0, "1 回の確定で過去の回数が復活してはいけない: f={f}");
+        assert!(f >= 1.0, "直近の 1 回はカウントされる: f={f}");
+    }
+
+    #[test]
+    fn test_learn_freq_is_self_bounded_for_daily_use() {
+        // 毎日 1 回使い続けたときの収束値 1/(1-0.5^(1/30)) ≈ 43.8 を超えないこと。
+        let mut f: f64 = 0.0;
+        for _ in 0..2000 {
+            f = f * 0.5_f64.powf(1.0 / LEARN_HALF_LIFE_DAYS) + 1.0;
+        }
+        assert!(f < 45.0, "毎日利用の収束値は約 44 のはず: {f}");
+        assert!(f > 43.0, "収束値が小さすぎる: {f}");
+    }
+
+    /// v1 形式（`suggestion_freq` が `u32`）を書き出すテスト用の型。
+    /// 本体に v1 の読み込み経路は無いので、fixture 側にだけ残す。
+    #[derive(Serialize)]
+    struct LearnEntryV1Fixture {
+        surface: String,
+        last_access_time: u64,
+        suggestion_freq: u32,
+        shown_freq: u32,
+    }
+
+    #[derive(Serialize)]
+    struct LearnHistoryFileV1Fixture {
+        version: u32,
+        entries: HashMap<String, Vec<LearnEntryV1Fixture>>,
+    }
+
+    fn write_v1_fixture(path: &Path, reading: &str, surface: &str, freq: u32, now: u64) {
+        let mut entries: HashMap<String, Vec<LearnEntryV1Fixture>> = HashMap::new();
+        entries.insert(
+            reading.into(),
+            vec![LearnEntryV1Fixture {
+                surface: surface.into(),
+                last_access_time: now,
+                suggestion_freq: freq,
+                shown_freq: 0,
+            }],
+        );
+        let bytes = bincode::serialize(&LearnHistoryFileV1Fixture {
+            version: 1,
+            entries,
+        })
+        .unwrap();
+        std::fs::write(path, bytes).unwrap();
+    }
+
+    fn save_single(path: &Path, reading: &str, entry: LearnEntry) {
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        hist.insert(reading.into(), vec![entry]);
+        save_learn_history_file(path, &hist).unwrap();
+    }
+
+    #[test]
+    fn test_learn_history_v1_is_discarded() {
+        // v1 は移行せず破棄する。旧履歴の候補が 1 件も混入しないこと。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        write_v1_fixture(&path, "もりの", "杜野", 1000, now_unix_secs());
+
+        let loaded = load_learn_history_file(&path).unwrap();
+        assert!(loaded.is_empty(), "v1 は空の履歴として扱う: {loaded:?}");
+    }
+
+    #[test]
+    fn test_learn_history_v1_discard_then_save_writes_v2() {
+        // 破棄したあと、最初の学習と保存で正常な v2 ファイルができること。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        write_v1_fixture(&path, "もりの", "杜野", 1000, now_unix_secs());
+
+        let store = DictStore::load(None, None, Some(&path)).unwrap();
+        assert_eq!(store.learn_entry_count(), 0, "v1 は読み込まない");
+        store.learn_force("もりの", "森の");
+
+        let bytes = std::fs::read(&path).unwrap();
+        let file: LearnHistoryFile = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(file.version, LEARN_HISTORY_FORMAT_VERSION);
+        let entries = &file.entries["もりの"];
+        assert_eq!(entries.len(), 1, "旧履歴が残っている: {entries:?}");
+        assert_eq!(entries[0].surface, "森の");
+        assert!((entries[0].suggestion_freq - 1.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_learn_freq_is_sanitized_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        let mk = |surface: &str, freq: f32| LearnEntry {
+            surface: surface.into(),
+            last_access_time: now,
+            suggestion_freq: freq,
+            shown_freq: 0,
+        };
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        hist.insert(
+            "こわれ".into(),
+            vec![
+                mk("nan", f32::NAN),
+                mk("inf", f32::INFINITY),
+                mk("neg_inf", f32::NEG_INFINITY),
+                mk("neg", -5.0),
+                mk("max", f32::MAX),
+            ],
+        );
+        save_learn_history_file(&path, &hist).unwrap();
+
+        let loaded = load_learn_history_file(&path).unwrap();
+        let get = |surface: &str| {
+            loaded["こわれ"]
+                .iter()
+                .find(|e| e.surface == surface)
+                .unwrap()
+        };
+        assert_eq!(get("nan").suggestion_freq, 1.0);
+        assert_eq!(get("inf").suggestion_freq, 1.0);
+        assert_eq!(get("neg_inf").suggestion_freq, 1.0);
+        assert_eq!(get("neg").suggestion_freq, 0.0);
+        // 有限の極端値は順序を持つ情報なので丸めない。score が発散しないことだけ見る。
+        assert_eq!(get("max").suggestion_freq, f32::MAX);
+        assert!(get("max").score(now).is_finite(), "極端値でも score は有限");
+    }
+
+    #[test]
+    fn test_learn_decay_handles_same_time_and_rollback() {
+        // last_access_time が未来（時刻巻き戻り）でも減衰は 1 倍で頭打ちにする。
+        // saturating_sub で dt=0 に潰れる経路なので、同一時刻の確定もここで押さえる。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        save_single(
+            &path,
+            "もりの",
+            LearnEntry {
+                surface: "森の".into(),
+                last_access_time: now + 86_400,
+                suggestion_freq: 2.0,
+                shown_freq: 0,
+            },
+        );
+
+        let store = DictStore::load(None, None, Some(&path)).unwrap();
+        store.learn_force("もりの", "森の");
+
+        let reloaded = load_learn_history_file(&path).unwrap();
+        let e = &reloaded["もりの"][0];
+        assert!(
+            (e.suggestion_freq - 3.0).abs() < 1e-4,
+            "巻き戻り時は減衰させない: {}",
+            e.suggestion_freq
+        );
+    }
+
+    #[test]
+    fn test_learn_decay_handles_very_long_gap() {
+        // 長期放置のエントリは stale 削除で消え、学習し直しても 1 回ぶんから始まる。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        save_single(
+            &path,
+            "もりの",
+            LearnEntry {
+                surface: "森の".into(),
+                last_access_time: now.saturating_sub(100 * 365 * 86_400),
+                suggestion_freq: 1_000_000.0,
+                shown_freq: 0,
+            },
+        );
+
+        let store = DictStore::load(None, None, Some(&path)).unwrap();
+        assert_eq!(store.learn_entry_count(), 0, "180 日超は起動時に消える");
+        store.learn_force("もりの", "森の");
+
+        let reloaded = load_learn_history_file(&path).unwrap();
+        let e = &reloaded["もりの"][0];
+        assert!(
+            (e.suggestion_freq - 1.0).abs() < 1e-3,
+            "長期放置後は 1 回ぶんに戻る: {}",
+            e.suggestion_freq
+        );
+    }
+
+    #[test]
+    fn test_learn_history_roundtrip_is_stable() {
+        // 保存と再読込を繰り返しても値が動かないこと（f32 の往復で順位が揺れない）。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        let mut hist: HashMap<String, Vec<LearnEntry>> = HashMap::new();
+        hist.insert(
+            "もりの".into(),
+            vec![
+                LearnEntry {
+                    surface: "森の".into(),
+                    last_access_time: now,
+                    suggestion_freq: 43.766_2,
+                    shown_freq: 0,
+                },
+                LearnEntry {
+                    surface: "杜野".into(),
+                    last_access_time: now,
+                    suggestion_freq: 43.766_3,
+                    shown_freq: 0,
+                },
+            ],
+        );
+        save_learn_history_file(&path, &hist).unwrap();
+
+        let first = load_learn_history_file(&path).unwrap();
+        save_learn_history_file(&path, &first).unwrap();
+        let second = load_learn_history_file(&path).unwrap();
+
+        let bits = |h: &HashMap<String, Vec<LearnEntry>>| {
+            h["もりの"]
+                .iter()
+                .map(|e| (e.surface.clone(), e.suggestion_freq.to_bits()))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(bits(&first), bits(&second));
+        let f = &first["もりの"];
+        assert!(
+            f[0].suggestion_freq < f[1].suggestion_freq,
+            "僅差の順位が往復で潰れてはいけない"
+        );
     }
 
     #[test]
@@ -1152,7 +1492,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "A".into(),
                 last_access_time: now - 30 * day, // 30日前: 残す
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
@@ -1161,7 +1501,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "B".into(),
                 last_access_time: now - 200 * day, // 200日前: 消す
-                suggestion_freq: 5,
+                suggestion_freq: 5.0,
                 shown_freq: 0,
             }],
         );
@@ -1171,13 +1511,13 @@ mod tests {
                 LearnEntry {
                     surface: "C-keep".into(),
                     last_access_time: now - 10 * day, // 10日前: 残す
-                    suggestion_freq: 2,
+                    suggestion_freq: 2.0,
                     shown_freq: 0,
                 },
                 LearnEntry {
                     surface: "C-drop".into(),
                     last_access_time: now - 365 * day, // 1年前: 消す
-                    suggestion_freq: 1,
+                    suggestion_freq: 1.0,
                     shown_freq: 0,
                 },
             ],
@@ -1207,7 +1547,7 @@ mod tests {
             vec![LearnEntry {
                 surface: "X".into(),
                 last_access_time: now,
-                suggestion_freq: 1,
+                suggestion_freq: 1.0,
                 shown_freq: 0,
             }],
         );
