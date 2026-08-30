@@ -155,7 +155,9 @@ fn name_to_vk(name: &str) -> Option<u16> {
         "f10" => 0x79,
         "f11" => 0x7A,
         "f12" => 0x7B,
-        "zenkaku" | "hankaku" | "kanji" => 0x19, // VK_KANJI (全角/半角キー)
+        // 全角/半角キー。JIS 配列の実際の VK は 0xF3 / 0xF4 だが、
+        // normalize_key_event_vk() が 0x19 に寄せてから resolve_action へ渡す。
+        "zenkaku" | "hankaku" | "kanji" => 0x19, // VK_KANJI
         "henkan" => 0x1C,
         "muhenkan" => 0x1D,
         "eisuu" | "alphanumeric" => 0xF0, // 英数キー
