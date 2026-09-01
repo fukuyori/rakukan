@@ -916,3 +916,36 @@ cargo make test
 - 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、`cargo test -p rakukan-tsf --lib` 75 件通過。
 - 未実施（実機）: 1 週間運用して `live_continuation_guard event=fallback` が数回/月以下になること、Backspace / 未確定ローマ字 / 連続入力で古い preview が残らないこと。
 - テスト結果（全体）: dict 33 / engine 166 / abi 14 / rpc 8 / tsf 75、失敗 0。
+
+### Step 6（2026-09-01）
+
+- `keymap.rs` に `KeymapReloader`（path / 最終更新時刻）と `classify_change`（Unchanged / Created / Updated / Deleted の純粋判定）を追加。グローバル `KEYMAP_RELOADER` を `Keymap::load()`（Activate）で基準化し、`Keymap::reload_if_changed()` はモード切替時に mtime が変わった場合だけ `keymap.toml` を読み直す（変化なしなら `metadata` 1 回のみ）。
+- 更新・作成 → 新 keymap、削除 → 既定 keymap、parse 失敗 → WARN を出して `None`（`factory.rs` 側は直前の keymap を維持）。失敗時も mtime を更新し、壊れたファイルを切替ごとに parse し直さない。ロード処理は `reload_if_changed_with(load)` で注入可能にしてテストした。
+- `factory.rs` の `maybe_reload_runtime_config`: `Keymap::load()` の無条件呼び出しを `reload_if_changed()` に置換。config 側（`maybe_reload_on_mode_switch`）とは独立に判定し、互いの失敗を巻き込まない。Activate の初回ロードは gate を通さず従来どおり。
+- テスト（`keymap::tests`、6 件）: 変更種別の全遷移、mtime 不変で parse しない、更新で新 binding（F6: hiragana → katakana）を反映し 2 回目は変化なし、parse 失敗で直前を維持し再試行しない、削除で既定 keymap（Space=Convert）、path 不明なら何もしない。一時ファイルは `File::set_modified` で mtime を確実に進めている。
+- 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、keymap テスト 13 件通過。
+- 未実施（実機）: モード切替ごとに `keymap loaded` が出ないこと（Activate 時のみ）、`keymap.toml` 編集後の切替で `keymap reloaded (Updated)` が出て新 binding が効くこと、SLOW OnKeyDown の直前パターンが消えること。
+- テスト結果（全体）: dict 33 / engine 166 / abi 14 / rpc 8 / tsf 81、失敗 0。
+
+### Step 7（2026-09-01）
+
+- 仕様の固定: rakukan は preedit 内にキャレットを持たない（既存の Left / Right も消費するだけで位置を変えない）ため、Home / End は次のとおりとした。
+  - 未確定文字列なし → アプリへ渡す（`key_should_eat` は `has_preedit` で gate）。
+  - Preedit / LiveConv / Waiting / Selecting / BlockSelecting → 消費して何もしない（アプリ側キャレットは動かない）。BlockSelecting は確定済みブロックへ戻れないため、先頭ブロックへの移動も定義しない。
+  - RangeSelect（Shift+矢印の範囲指定）→ 選択範囲の右端を Home で先頭（1 文字）、End で末尾（全体）へ移す。
+- 実装: `UserAction::CursorHome` / `CursorEnd`、`KeyAction::CursorHome` / `CursorEnd`（`cursor_home` / `cursor_end`）、`to_user_action`、既定プリセット（JIS / US）と keymap.toml テンプレートに `Home` / `End` を追加。`key_should_eat` と `action_name` に追加。dispatch から `on_cursor_jump(to_end)` を呼ぶ。`SessionState::range_select_to_start` / `range_select_to_end` を追加。
+- 「preedit 中の未定義キーをすべて握り潰す」変更は計画どおり含めない。
+- テスト（6 件）: 既定プリセットで 0x24 / 0x23 が `CursorHome` / `CursorEnd` に解決、keymap.toml の `cursor_home` / `cursor_end` を parse、`key_should_eat` が Home / End を preedit ありのときだけ消費し Left / Right と同じ gate、RangeSelect の Home / End で境界が先頭 / 末尾へ移り既に端なら変化なし、他状態では無変化。
+- 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、`cargo test -p rakukan-tsf --lib` 87 件通過。
+- 未実施（実機）: 変換中（候補表示中 / 通常 preedit / ライブ変換中）に Home / End を押してもアプリ側キャレットが動かないこと、未確定文字列が無いときはアプリの Home / End が動くこと、Shift+Right で範囲指定中に Home / End で範囲が先頭 / 末尾へ変わること、Left / Right・文節伸縮・候補移動が壊れていないこと。
+- テスト結果（全体）: dict 33 / engine 166 / abi 14 / rpc 8 / tsf 87、失敗 0。
+
+### Step 8（2026-09-01）
+
+- 8月の DLL ログで `echo sentence dropped` の実例を確認したところ、捨てられた文は「分類方法がをトランプはトランプは、極めて…」「プレビューファイル名の下、および…」のように**変換済みのカタカナ語に助詞・漢字が続く正常な文**で、かな run はカタカナだけで構成されていない（`トランプはトランプは` = 10 文字の混在 run）。計画の「`kata_needle` のみ一致かつ純カタカナ run は除外」では混在 run が引き続き削られ、再計測目標「カタカナ needle による strip 0 件」を満たせないため、**カタカナ形 needle での照合自体を廃止**し、ひらがな needle のみで判定するようにした（計画 L-2 の意図「カタカナ語の echo は正しい出力」に沿う）。
+- `sentence_has_echo_run(sentence, needle)` から `kata_needle` を削除。`strip_echo_context` の `hiragana_to_katakana(&needle)` も削除。候補側の `is_kana_prefix_echo` は維持。
+- 既存テスト `strip_echo_context_drops_katakana_echo_sentence`（F7 カタカナ確定文を除去）は方針変更に伴い `..._keeps_katakana_echo_sentence` に反転（理由をコメントに記録）。追加テスト: 「インストーラを起動する。」を保持、長いカタカナ複合語（ギャラリーエクスポート）と混在 run（トランプはトランプは）を保持、カタカナ語の直後に続く未変換ひらがな汚染は従来どおり除去。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`git diff --check` OK、`strip_echo` テスト 10 件通過。
+- `repro_context.rs`（`cargo run -p rakukan-engine --example repro_context --release`、jinen-v1-small-q5 が必要）は本 Step の対象パターン（ひらがな汚染）に変更が無いため単体テストで代替した。実行結果は本節末尾に追記する（実行できた場合）。
+- 未実施（実機）: `echo sentence dropped` が数回/日以下になり、needle にカタカナ語が並ばなくなること（1 週間運用）。
+- テスト結果（全体）: dict 33 / engine 169 / abi 14 / rpc 8 / tsf 87、失敗 0。`repro_context.rs` は本環境にモデルディレクトリ（`%LOCALAPPDATA%\rakukan\models`）が無く未実行。
