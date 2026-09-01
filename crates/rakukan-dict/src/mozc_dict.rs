@@ -157,7 +157,7 @@ impl MozcDict {
         while lo < hi {
             let mid = lo + (hi - lo) / 2;
             let r = self.reading_at(mid);
-            match r.as_deref().cmp(&Some(reading)) {
+            match r.cmp(&Some(reading)) {
                 std::cmp::Ordering::Equal => return Some(mid),
                 std::cmp::Ordering::Less => lo = mid + 1,
                 std::cmp::Ordering::Greater => hi = mid,

@@ -184,7 +184,7 @@ fn run_interactive(engine: &mut RakunEngine, n: usize) -> Result<()> {
 fn print_model_list() {
     let models = RakunEngine::available_models();
     println!("利用可能なモデル:");
-    println!("{:<40} {}", "ID", "表示名");
+    println!("{:<40} 表示名", "ID");
     println!("{}", "─".repeat(70));
     for m in &models {
         let mark = if m.is_default {

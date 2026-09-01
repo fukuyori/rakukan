@@ -51,9 +51,9 @@ const COLOR_FG_DARK: COLORREF = COLORREF(0x00_FF_FF_FF);
 // ─── スレッドローカル状態 ──────────────────────────────────────────────────────
 
 thread_local! {
-    static TL_HWND: Cell<isize> = Cell::new(0);
-    static TL_TEXT: Cell<&'static str> = Cell::new("あ");
-    static TL_LIGHT: Cell<bool> = Cell::new(false);
+    static TL_HWND: Cell<isize> = const { Cell::new(0) };
+    static TL_TEXT: Cell<&'static str> = const { Cell::new("あ") };
+    static TL_LIGHT: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 表示中フラグ（キー入力で即非表示にするためアトミック）

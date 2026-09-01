@@ -221,7 +221,7 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
     let mut skipped = 0usize;
     let mut skipped_unrenderable = 0usize;
 
-    for (_lineno, line) in text.lines().enumerate() {
+    for line in text.lines() {
         let line = line.trim();
         // ヘッダ・コメント・空行スキップ
         if line.is_empty() || line.starts_with('#') || line.starts_with("POS\t") {

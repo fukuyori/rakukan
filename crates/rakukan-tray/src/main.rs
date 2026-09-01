@@ -157,7 +157,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, w: WPARAM, l: LPARAM) ->
             LRESULT(0)
         }
         WM_COMMAND => {
-            let id = (w.0 & 0xffff) as usize;
+            let id = w.0 & 0xffff;
             if id == ID_MENU_RELOAD {
                 signal_engine_reload();
                 return LRESULT(0);
@@ -245,11 +245,13 @@ fn show_context_menu(hwnd: HWND) -> Result<()> {
 }
 
 fn delete_notify_icon(hwnd: HWND) -> Result<()> {
-    let mut nid = NOTIFYICONDATAW::default();
-    nid.cbSize = size_of::<NOTIFYICONDATAW>() as u32;
-    nid.hWnd = hwnd;
-    nid.uFlags = NIF_GUID;
-    nid.guidItem = TRAY_GUID;
+    let nid = NOTIFYICONDATAW {
+        cbSize: size_of::<NOTIFYICONDATAW>() as u32,
+        hWnd: hwnd,
+        uFlags: NIF_GUID,
+        guidItem: TRAY_GUID,
+        ..Default::default()
+    };
     let _ = unsafe { Shell_NotifyIconW(NIM_DELETE, &nid) };
     Ok(())
 }
@@ -305,7 +307,7 @@ fn main() -> Result<()> {
                     Mode::Katakana => 1u32,
                     Mode::Alnum => 2u32,
                 };
-                let w = WPARAM(((mode_id as u32) << 16 | (open as u32)) as usize);
+                let w = WPARAM((mode_id << 16 | (open as u32)) as usize);
                 let hwnd_send = HWND(hwnd2 as *mut core::ffi::c_void);
                 let _ = PostMessageW(hwnd_send, WM_MODE_UPDATE, w, LPARAM(0));
             }

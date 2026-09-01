@@ -293,81 +293,80 @@ impl super::TextServiceFactory_Impl {
         let is_cancel = matches!(action, UserAction::Cancel | UserAction::CancelAll);
         if !is_cancel {
             const DICT_LIMIT_WAIT: usize = 40;
-            if let Ok(mut sess) = session_get() {
-                if let Some((wait_preedit, pos_x, pos_y)) =
+            if let Ok(mut sess) = session_get()
+                && let Some((wait_preedit, pos_x, pos_y)) =
                     sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y))
-                {
-                    let bg_now = engine.bg_status();
+            {
+                let bg_now = engine.bg_status();
+                tracing::debug!(
+                    "waiting-poll: wait_preedit={:?} bg={}",
+                    wait_preedit,
+                    bg_now
+                );
+                // ウォッチドッグ: Running 状態が 30 秒続いたら auto engine_reload
+                bg_timeout_watchdog(bg_now == "running");
+                if bg_now == "done" {
                     tracing::debug!(
-                        "waiting-poll: wait_preedit={:?} bg={}",
-                        wait_preedit,
-                        bg_now
+                        "waiting-poll: calling bg_take_candidates({:?})",
+                        wait_preedit
                     );
-                    // ウォッチドッグ: Running 状態が 30 秒続いたら auto engine_reload
-                    bg_timeout_watchdog(bg_now == "running");
-                    if bg_now == "done" {
-                        tracing::debug!(
-                            "waiting-poll: calling bg_take_candidates({:?})",
-                            wait_preedit
-                        );
-                        match engine.bg_take_candidates(&wait_preedit) {
-                            Some(llm_cands) => {
-                                tracing::debug!("waiting-poll: got {} LLM cands", llm_cands.len());
-                                bg_timeout_watchdog(false); // 回復 → ウォッチドッグリセット
-                                // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
-                                let merged = if llm_cands.is_empty() {
-                                    engine.merge_candidates_for_reading(
-                                        &wait_preedit,
-                                        vec![],
-                                        DICT_LIMIT_WAIT,
-                                    )
-                                } else {
-                                    engine.merge_candidates_for_reading(
-                                        &wait_preedit,
-                                        llm_cands,
-                                        DICT_LIMIT_WAIT,
-                                    )
-                                };
-                                tracing::debug!("waiting-poll: merged={} cands", merged.len());
-                                // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
-                                if !merged.is_empty() {
-                                    let first = merged.first().cloned().unwrap_or_default();
-                                    sess.activate_selecting(
-                                        merged,
-                                        wait_preedit.clone(),
-                                        pos_x,
-                                        pos_y,
-                                        false,
-                                    );
-                                    let page_cands = sess.page_candidates().to_vec();
-                                    let page_info = sess.page_info();
-                                    drop(sess);
-                                    drop(guard);
-                                    candidate_window::stop_waiting_timer();
-                                    candidate_window::show_with_status(
-                                        &page_cands,
-                                        0,
-                                        &page_info,
-                                        pos_x,
-                                        pos_y,
-                                        None,
-                                    );
-                                    update_composition(ctx, tid, sink, first)?;
-                                    return Ok(true);
-                                }
-                            }
-                            None => {
-                                // キー不一致 or ロック競合 → Done 状態は保持されたまま
-                                // Waiting 状態を維持して次のキー/Space で再試行
-                                tracing::warn!(
-                                    "waiting-poll: bg_take_candidates → None (key mismatch?), bg={}",
-                                    engine.bg_status()
+                    match engine.bg_take_candidates(&wait_preedit) {
+                        Some(llm_cands) => {
+                            tracing::debug!("waiting-poll: got {} LLM cands", llm_cands.len());
+                            bg_timeout_watchdog(false); // 回復 → ウォッチドッグリセット
+                            // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
+                            let merged = if llm_cands.is_empty() {
+                                engine.merge_candidates_for_reading(
+                                    &wait_preedit,
+                                    vec![],
+                                    DICT_LIMIT_WAIT,
+                                )
+                            } else {
+                                engine.merge_candidates_for_reading(
+                                    &wait_preedit,
+                                    llm_cands,
+                                    DICT_LIMIT_WAIT,
+                                )
+                            };
+                            tracing::debug!("waiting-poll: merged={} cands", merged.len());
+                            // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
+                            if !merged.is_empty() {
+                                let first = merged.first().cloned().unwrap_or_default();
+                                sess.activate_selecting(
+                                    merged,
+                                    wait_preedit.clone(),
+                                    pos_x,
+                                    pos_y,
+                                    false,
                                 );
+                                let page_cands = sess.page_candidates().to_vec();
+                                let page_info = sess.page_info();
+                                drop(sess);
+                                drop(guard);
+                                candidate_window::stop_waiting_timer();
+                                candidate_window::show_with_status(
+                                    &page_cands,
+                                    0,
+                                    &page_info,
+                                    pos_x,
+                                    pos_y,
+                                    None,
+                                );
+                                update_composition(ctx, tid, sink, first)?;
+                                return Ok(true);
                             }
                         }
-                        // merged が空（LLM候補なし）だった場合のみ preedit に戻す
-                        // None だった場合は Waiting を維持（→ Cancel や次のSpace で対処）
+                        None => {
+                            // キー不一致 or ロック競合 → Done 状態は保持されたまま
+                            // Waiting 状態を維持して次のキー/Space で再試行
+                            tracing::warn!(
+                                "waiting-poll: bg_take_candidates → None (key mismatch?), bg={}",
+                                engine.bg_status()
+                            );
+                        }
                     }
+                    // merged が空（LLM候補なし）だった場合のみ preedit に戻す
+                    // None だった場合は Waiting を維持（→ Cancel や次のSpace で対処）
                 }
             }
         } // if !is_cancel

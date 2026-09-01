@@ -156,41 +156,29 @@ pub enum EngineError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DigitWidth {
     Fullwidth,
+    #[default]
     Halfwidth,
-}
-
-impl Default for DigitWidth {
-    fn default() -> Self {
-        DigitWidth::Halfwidth
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AlphaWidth {
+    #[default]
     Fullwidth,
     Halfwidth,
-}
-
-impl Default for AlphaWidth {
-    fn default() -> Self {
-        AlphaWidth::Fullwidth
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SymbolWidth {
+    #[default]
     Fullwidth,
     Halfwidth,
-}
-
-impl Default for SymbolWidth {
-    fn default() -> Self {
-        SymbolWidth::Fullwidth
-    }
 }
 
 fn default_digit_separator_auto() -> bool {
@@ -438,34 +426,34 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
-        if self.config.digit_separator_auto && self.pending_romaji_buf.is_empty() {
-            if let Some(separator) =
+        if self.config.digit_separator_auto
+            && self.pending_romaji_buf.is_empty()
+            && let Some(separator) =
                 numeric_separator_after_digit(self.hiragana_buf.chars().last(), c)
-            {
-                self.hiragana_buf.push(separator);
-                self.romaji_input_log.push(c.to_string());
-                debug!("engine::push: numeric separator {:?} → {:?}", c, separator);
-                return self.current_preedit();
-            }
+        {
+            self.hiragana_buf.push(separator);
+            self.romaji_input_log.push(c.to_string());
+            debug!("engine::push: numeric separator {:?} → {:?}", c, separator);
+            return self.current_preedit();
         }
 
         // 英字・記号後の `,` / `.` を Western 句読点 (， / ． or , / .) へ自動置換
         // 幅設定 (alpha_width / symbol_width) に追従する。
-        if self.pending_romaji_buf.is_empty() {
-            if let Some(separator) = alpha_symbol_separator_auto(
+        if self.pending_romaji_buf.is_empty()
+            && let Some(separator) = alpha_symbol_separator_auto(
                 self.hiragana_buf.chars().last(),
                 c,
                 self.config.alpha_width,
                 self.config.symbol_width,
-            ) {
-                self.hiragana_buf.push(separator);
-                self.romaji_input_log.push(c.to_string());
-                debug!(
-                    "engine::push: alpha/symbol separator {:?} → {:?}",
-                    c, separator
-                );
-                return self.current_preedit();
-            }
+            )
+        {
+            self.hiragana_buf.push(separator);
+            self.romaji_input_log.push(c.to_string());
+            debug!(
+                "engine::push: alpha/symbol separator {:?} → {:?}",
+                c, separator
+            );
+            return self.current_preedit();
         }
 
         // 数字 0–9（pending_romaji がない場合のみ）

@@ -96,6 +96,7 @@ fn activate_selecting_snapshot_with_candidate_view(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn log_candidate_display_probe(
     event: &'static str,
     reading: &str,
@@ -124,6 +125,7 @@ fn log_candidate_display_probe(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn engine_convert_sync_multi_fallback(
     engine: &mut crate::engine::state::DynEngine,
     llm_limit: usize,
@@ -483,8 +485,105 @@ impl super::TextServiceFactory_Impl {
                                     "on_convert[llm_pending]: merged={} cands",
                                     merged.len()
                                 );
-                                if !merged.is_empty() {
-                                    if let Ok(mut sess2) = session_get() {
+                                if !merged.is_empty()
+                                    && let Ok(mut sess2) = session_get()
+                                {
+                                    sess2.replace_selecting_candidates(
+                                        merged,
+                                        CandidateViewSource::Bg,
+                                    );
+                                    if let SessionState::Selecting {
+                                        ref mut llm_pending,
+                                        ..
+                                    } = *sess2
+                                    {
+                                        *llm_pending = false;
+                                    }
+                                    let page_cands = sess2.page_candidates().to_vec();
+                                    let page_selected = sess2.page_selected();
+                                    let page_info = sess2.page_info();
+                                    let cand_text = sess2
+                                        .current_candidate()
+                                        .or_else(|| sess2.original_preedit())
+                                        .unwrap_or("")
+                                        .to_string();
+                                    let candidate_view = sess2.current_candidate_view().cloned();
+                                    let prefix = sess2.selecting_prefix_clone();
+                                    let remainder = sess2.selecting_remainder_clone();
+                                    let pos = caret_rect_get();
+                                    drop(sess2);
+                                    drop(guard);
+                                    candidate_window::show(
+                                        &page_cands,
+                                        page_selected,
+                                        &page_info,
+                                        pos.left,
+                                        pos.bottom,
+                                    );
+                                    if let Some(view) = candidate_view {
+                                        log_candidate_display_probe(
+                                            "pending_update",
+                                            &original_preedit,
+                                            page_cands.first().map(String::as_str).unwrap_or(""),
+                                            page_selected,
+                                            &cand_text,
+                                            &cand_text,
+                                            view.source,
+                                            false,
+                                            view.corresponding_reading_len,
+                                            view.suffix.chars().count(),
+                                        );
+                                    }
+                                    update_composition_candidate_parts(
+                                        ctx, tid, sink, prefix, cand_text, remainder,
+                                    )?;
+                                    return Ok(true);
+                                }
+                            }
+                            None => {
+                                // bg_reclaim で converter を強制回収 → 即 bg_start で再変換起動
+                                // (bg_reclaim だけして bg_start しないと converter が engine に戻ったまま
+                                //  次の変換が永遠に起動されない)
+                                let bg_now = engine.bg_status();
+                                tracing::warn!(
+                                    "on_convert[llm_pending]: take_key={:?}({}) returned None, bg={}. reclaim+restart.",
+                                    take_key,
+                                    take_key.len(),
+                                    bg_now
+                                );
+                                engine.bg_reclaim();
+                                // bg_start で正しいキーで即再変換 → その場で待機 → 1回のSpace押しで候補取得
+                                let llm_limit2 = crate::engine::state::get_num_candidates();
+                                if engine.bg_start(llm_limit2) {
+                                    tracing::debug!(
+                                        "on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline",
+                                        take_key
+                                    );
+                                    // ここで最大 1500ms 待つ（ユーザーは1回のSpaceで候補を得られる）
+                                    const RESTART_WAIT_MS: u64 = 1500;
+                                    engine.bg_wait_ms(RESTART_WAIT_MS);
+                                    tracing::debug!(
+                                        "on_convert[llm_pending]: inline wait done, bg={}",
+                                        engine.bg_status()
+                                    );
+                                } else {
+                                    tracing::error!(
+                                        "on_convert[llm_pending]: bg_start also failed (kanji_ready={})",
+                                        engine.is_kanji_ready()
+                                    );
+                                }
+                                if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
+                                    tracing::debug!(
+                                        "on_convert[llm_pending]: reclaim+retry → Some({} cands)",
+                                        llm_cands.len()
+                                    );
+                                    let merged = engine.merge_candidates_for_reading(
+                                        &take_key, llm_cands, DICT_LIMIT,
+                                    );
+                                    tracing::debug!("merge_candidates → {:?}", merged);
+                                    if !merged.is_empty()
+                                        && let Ok(mut sess2) = session_get()
+                                    {
                                         sess2.replace_selecting_candidates(
                                             merged,
                                             CandidateViewSource::Bg,
@@ -539,107 +638,6 @@ impl super::TextServiceFactory_Impl {
                                             ctx, tid, sink, prefix, cand_text, remainder,
                                         )?;
                                         return Ok(true);
-                                    }
-                                }
-                            }
-                            None => {
-                                // bg_reclaim で converter を強制回収 → 即 bg_start で再変換起動
-                                // (bg_reclaim だけして bg_start しないと converter が engine に戻ったまま
-                                //  次の変換が永遠に起動されない)
-                                let bg_now = engine.bg_status();
-                                tracing::warn!(
-                                    "on_convert[llm_pending]: take_key={:?}({}) returned None, bg={}. reclaim+restart.",
-                                    take_key,
-                                    take_key.len(),
-                                    bg_now
-                                );
-                                engine.bg_reclaim();
-                                // bg_start で正しいキーで即再変換 → その場で待機 → 1回のSpace押しで候補取得
-                                let llm_limit2 = crate::engine::state::get_num_candidates();
-                                if engine.bg_start(llm_limit2) {
-                                    tracing::debug!(
-                                        "on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline",
-                                        take_key
-                                    );
-                                    // ここで最大 1500ms 待つ（ユーザーは1回のSpaceで候補を得られる）
-                                    const RESTART_WAIT_MS: u64 = 1500;
-                                    engine.bg_wait_ms(RESTART_WAIT_MS);
-                                    tracing::debug!(
-                                        "on_convert[llm_pending]: inline wait done, bg={}",
-                                        engine.bg_status()
-                                    );
-                                } else {
-                                    tracing::error!(
-                                        "on_convert[llm_pending]: bg_start also failed (kanji_ready={})",
-                                        engine.is_kanji_ready()
-                                    );
-                                }
-                                if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
-                                    tracing::debug!(
-                                        "on_convert[llm_pending]: reclaim+retry → Some({} cands)",
-                                        llm_cands.len()
-                                    );
-                                    let merged = engine.merge_candidates_for_reading(
-                                        &take_key, llm_cands, DICT_LIMIT,
-                                    );
-                                    tracing::debug!("merge_candidates → {:?}", merged);
-                                    if !merged.is_empty() {
-                                        if let Ok(mut sess2) = session_get() {
-                                            sess2.replace_selecting_candidates(
-                                                merged,
-                                                CandidateViewSource::Bg,
-                                            );
-                                            if let SessionState::Selecting {
-                                                ref mut llm_pending,
-                                                ..
-                                            } = *sess2
-                                            {
-                                                *llm_pending = false;
-                                            }
-                                            let page_cands = sess2.page_candidates().to_vec();
-                                            let page_selected = sess2.page_selected();
-                                            let page_info = sess2.page_info();
-                                            let cand_text = sess2
-                                                .current_candidate()
-                                                .or_else(|| sess2.original_preedit())
-                                                .unwrap_or("")
-                                                .to_string();
-                                            let candidate_view =
-                                                sess2.current_candidate_view().cloned();
-                                            let prefix = sess2.selecting_prefix_clone();
-                                            let remainder = sess2.selecting_remainder_clone();
-                                            let pos = caret_rect_get();
-                                            drop(sess2);
-                                            drop(guard);
-                                            candidate_window::show(
-                                                &page_cands,
-                                                page_selected,
-                                                &page_info,
-                                                pos.left,
-                                                pos.bottom,
-                                            );
-                                            if let Some(view) = candidate_view {
-                                                log_candidate_display_probe(
-                                                    "pending_update",
-                                                    &original_preedit,
-                                                    page_cands
-                                                        .first()
-                                                        .map(String::as_str)
-                                                        .unwrap_or(""),
-                                                    page_selected,
-                                                    &cand_text,
-                                                    &cand_text,
-                                                    view.source,
-                                                    false,
-                                                    view.corresponding_reading_len,
-                                                    view.suffix.chars().count(),
-                                                );
-                                            }
-                                            update_composition_candidate_parts(
-                                                ctx, tid, sink, prefix, cand_text, remainder,
-                                            )?;
-                                            return Ok(true);
-                                        }
                                     }
                                 } else {
                                     tracing::error!(
@@ -1127,10 +1125,10 @@ impl super::TextServiceFactory_Impl {
             // 前の変換の converter がまだ conv_cache に貸し出されている。
             // 完了を待って reclaim し、新しいキーで bg_start を再試行する。
             let caret = caret_rect_get();
-            if let Ok(mut sess) = session_get() {
-                if !sess.is_waiting() {
-                    sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
-                }
+            if let Ok(mut sess) = session_get()
+                && !sess.is_waiting()
+            {
+                sess.set_waiting(preedit.clone(), caret.left, caret.bottom);
             }
             let dummy = vec![preedit.clone()];
             candidate_window::show_with_status(
@@ -1380,10 +1378,10 @@ impl super::TextServiceFactory_Impl {
             }
         };
         // Waiting 状態を解除
-        if let Ok(mut sess) = session_get() {
-            if sess.is_waiting() {
-                sess.set_preedit(preedit.clone());
-            }
+        if let Ok(mut sess) = session_get()
+            && sess.is_waiting()
+        {
+            sess.set_preedit(preedit.clone());
         }
         candidate_window::stop_waiting_timer();
         convert_mark("session_ready", convert_start, &mut convert_last);
@@ -1746,22 +1744,21 @@ impl super::TextServiceFactory_Impl {
                 return Ok(consumed);
             }
             // RangeSelect → Backspace → LiveConv に戻る
-            if sess.is_range_select() {
-                if let SessionState::RangeSelect {
+            if sess.is_range_select()
+                && let SessionState::RangeSelect {
                     full_reading,
                     original_preview,
                     ..
                 } = &*sess
-                {
-                    let reading = full_reading.clone();
-                    let preview = original_preview.clone();
-                    sess.set_live_conv(reading.clone(), preview.clone(), reading);
-                    drop(sess);
-                    candidate_window::hide();
-                    drop(guard);
-                    update_composition(ctx, tid, sink, preview)?;
-                    return Ok(true);
-                }
+            {
+                let reading = full_reading.clone();
+                let preview = original_preview.clone();
+                sess.set_live_conv(reading.clone(), preview.clone(), reading);
+                drop(sess);
+                candidate_window::hide();
+                drop(guard);
+                update_composition(ctx, tid, sink, preview)?;
+                return Ok(true);
             }
             // BlockSelecting → Backspace → ESC と同様、元のひらがなに戻す
             if sess.is_block_selecting() {
@@ -1856,22 +1853,21 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
             // RangeSelect → ESC → LiveConv に戻る（元の preview を復元）
-            if sess.is_range_select() {
-                if let SessionState::RangeSelect {
+            if sess.is_range_select()
+                && let SessionState::RangeSelect {
                     full_reading,
                     original_preview,
                     ..
                 } = &*sess
-                {
-                    let reading = full_reading.clone();
-                    let preview = original_preview.clone();
-                    sess.set_live_conv(reading.clone(), preview.clone(), reading);
-                    drop(sess);
-                    candidate_window::hide();
-                    drop(guard);
-                    update_composition(ctx, tid, sink, preview)?;
-                    return Ok(true);
-                }
+            {
+                let reading = full_reading.clone();
+                let preview = original_preview.clone();
+                sess.set_live_conv(reading.clone(), preview.clone(), reading);
+                drop(sess);
+                candidate_window::hide();
+                drop(guard);
+                update_composition(ctx, tid, sink, preview)?;
+                return Ok(true);
             }
             if sess.is_selecting() {
                 // 変換中 → ESC → 未変換状態へ戻す（2回目のESCでプリエディット全消去）

@@ -66,109 +66,14 @@ fn live_continuation_display(
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::live_continuation_display;
-
-    #[test]
-    fn live_continuation_keeps_compact_kanji_preview_on_long_reading() {
-        // 8月21日の実例: 11 文字の読みが 6 文字に圧縮された正常な preview。
-        // 旧ガード（表示 7 文字 × 5 < 読み 12 文字 × 3）は fallback していた。
-        let (display_hira, display_shown) = live_continuation_display(
-            "だいとうりょうからこく",
-            "大統領から酷",
-            "だいとうりょうからこく",
-            "だいとうりょうからこくい",
-            "",
-        );
-
-        assert_eq!(display_hira, "大統領から酷い");
-        assert_eq!(display_shown, "大統領から酷い");
-    }
-
-    #[test]
-    fn live_continuation_keeps_preview_across_consecutive_input() {
-        // 2 文字目以降の継続: preview_for は最初の BG 変換キーのまま、
-        // reading / preview は前回の継続結果。
-        let (display_hira, display_shown) = live_continuation_display(
-            "だいとうりょうからこく",
-            "大統領から酷い",
-            "だいとうりょうからこくい",
-            "だいとうりょうからこくいで",
-            "",
-        );
-
-        assert_eq!(display_hira, "大統領から酷いで");
-        assert_eq!(display_shown, "大統領から酷いで");
-    }
-
-    #[test]
-    fn live_continuation_keeps_long_alnum_preview() {
-        // 旧テストの入力（ローマ字 12 文字 → 3 文字）。長さ比では fallback していたが、
-        // preview_for が prefix なら正当な圧縮として維持する。
-        let (display_hira, display_shown) =
-            live_continuation_display("abcdefghijkl", "ABC", "abcdefghijkl", "abcdefghijklm", "");
-
-        assert_eq!(display_hira, "ABCm");
-        assert_eq!(display_shown, "ABCm");
-    }
-
-    #[test]
-    fn live_continuation_falls_back_when_preview_for_is_not_a_prefix() {
-        // preview は「きょうは」向けなのに、現在の読みは「きょうの…」
-        let (display_hira, display_shown) =
-            live_continuation_display("きょうは", "今日は", "きょうの", "きょうのて", "");
-
-        assert_eq!(display_hira, "きょうのて");
-        assert_eq!(display_shown, "きょうのて");
-    }
-
-    #[test]
-    fn live_continuation_falls_back_when_reading_is_not_a_prefix() {
-        // 直前の reading が new_reading の prefix でない（読みが差し替わった）
-        let (display_hira, display_shown) =
-            live_continuation_display("あ", "亜", "あい", "あう", "");
-
-        assert_eq!(display_hira, "あう");
-        assert_eq!(display_shown, "あう");
-    }
-
-    #[test]
-    fn live_continuation_appends_pending_romaji_only_to_shown_text() {
-        // 未確定ローマ字は表示にだけ付き、保持する display_hira には含めない
-        let (display_hira, display_shown) = live_continuation_display("た", "田", "た", "た", "t");
-
-        assert_eq!(display_hira, "田");
-        assert_eq!(display_shown, "田t");
-    }
-
-    #[test]
-    fn live_continuation_keeps_short_compact_preview() {
-        let (display_hira, display_shown) =
-            live_continuation_display("かっこ", "『", "かっこ", "かっこと", "");
-
-        assert_eq!(display_hira, "『と");
-        assert_eq!(display_shown, "『と");
-    }
-
-    #[test]
-    fn live_continuation_keeps_reasonable_preview() {
-        let (display_hira, display_shown) =
-            live_continuation_display("ろぐを", "ログを", "ろぐを", "ろぐをか", "");
-
-        assert_eq!(display_hira, "ログをか");
-        assert_eq!(display_shown, "ログをか");
-    }
-}
-
 impl super::TextServiceFactory_Impl {
     pub(super) fn prepare_for_direct_input(&self) -> Result<()> {
-        if let Ok(mut sess) = session_get() {
-            if sess.is_waiting() {
-                let pre = sess.preedit_text().unwrap_or("").to_string();
-                sess.set_preedit(pre);
-                candidate_window::hide();
-            }
+        if let Ok(mut sess) = session_get()
+            && sess.is_waiting()
+        {
+            let pre = sess.preedit_text().unwrap_or("").to_string();
+            sess.set_preedit(pre);
+            candidate_window::hide();
         }
         Ok(())
     }
@@ -251,7 +156,7 @@ impl super::TextServiceFactory_Impl {
                     &preview,
                     &reading,
                     &new_reading,
-                    pending.as_ref(),
+                    pending,
                 );
                 // fallback（display_hira == new_reading）した場合は preview が読み全体に
                 // 対応するので preview_for も new_reading にする。継続できた場合は
@@ -276,13 +181,13 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
             // RangeSelect 中の入力 → キャンセルしてひらがなに戻す
-            if sess.is_range_select() {
-                if let SessionState::RangeSelect { full_reading, .. } = &*sess {
-                    let reading = full_reading.clone();
-                    sess.set_preedit(reading.clone());
-                    candidate_window::hide();
-                    engine.force_preedit(reading);
-                }
+            if sess.is_range_select()
+                && let SessionState::RangeSelect { full_reading, .. } = &*sess
+            {
+                let reading = full_reading.clone();
+                sess.set_preedit(reading.clone());
+                candidate_window::hide();
+                engine.force_preedit(reading);
             }
         }
 
@@ -611,5 +516,100 @@ impl super::TextServiceFactory_Impl {
         }
         commit_text(ctx, tid, "　".into())?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::live_continuation_display;
+
+    #[test]
+    fn live_continuation_keeps_compact_kanji_preview_on_long_reading() {
+        // 8月21日の実例: 11 文字の読みが 6 文字に圧縮された正常な preview。
+        // 旧ガード（表示 7 文字 × 5 < 読み 12 文字 × 3）は fallback していた。
+        let (display_hira, display_shown) = live_continuation_display(
+            "だいとうりょうからこく",
+            "大統領から酷",
+            "だいとうりょうからこく",
+            "だいとうりょうからこくい",
+            "",
+        );
+
+        assert_eq!(display_hira, "大統領から酷い");
+        assert_eq!(display_shown, "大統領から酷い");
+    }
+
+    #[test]
+    fn live_continuation_keeps_preview_across_consecutive_input() {
+        // 2 文字目以降の継続: preview_for は最初の BG 変換キーのまま、
+        // reading / preview は前回の継続結果。
+        let (display_hira, display_shown) = live_continuation_display(
+            "だいとうりょうからこく",
+            "大統領から酷い",
+            "だいとうりょうからこくい",
+            "だいとうりょうからこくいで",
+            "",
+        );
+
+        assert_eq!(display_hira, "大統領から酷いで");
+        assert_eq!(display_shown, "大統領から酷いで");
+    }
+
+    #[test]
+    fn live_continuation_keeps_long_alnum_preview() {
+        // 旧テストの入力（ローマ字 12 文字 → 3 文字）。長さ比では fallback していたが、
+        // preview_for が prefix なら正当な圧縮として維持する。
+        let (display_hira, display_shown) =
+            live_continuation_display("abcdefghijkl", "ABC", "abcdefghijkl", "abcdefghijklm", "");
+
+        assert_eq!(display_hira, "ABCm");
+        assert_eq!(display_shown, "ABCm");
+    }
+
+    #[test]
+    fn live_continuation_falls_back_when_preview_for_is_not_a_prefix() {
+        // preview は「きょうは」向けなのに、現在の読みは「きょうの…」
+        let (display_hira, display_shown) =
+            live_continuation_display("きょうは", "今日は", "きょうの", "きょうのて", "");
+
+        assert_eq!(display_hira, "きょうのて");
+        assert_eq!(display_shown, "きょうのて");
+    }
+
+    #[test]
+    fn live_continuation_falls_back_when_reading_is_not_a_prefix() {
+        // 直前の reading が new_reading の prefix でない（読みが差し替わった）
+        let (display_hira, display_shown) =
+            live_continuation_display("あ", "亜", "あい", "あう", "");
+
+        assert_eq!(display_hira, "あう");
+        assert_eq!(display_shown, "あう");
+    }
+
+    #[test]
+    fn live_continuation_appends_pending_romaji_only_to_shown_text() {
+        // 未確定ローマ字は表示にだけ付き、保持する display_hira には含めない
+        let (display_hira, display_shown) = live_continuation_display("た", "田", "た", "た", "t");
+
+        assert_eq!(display_hira, "田");
+        assert_eq!(display_shown, "田t");
+    }
+
+    #[test]
+    fn live_continuation_keeps_short_compact_preview() {
+        let (display_hira, display_shown) =
+            live_continuation_display("かっこ", "『", "かっこ", "かっこと", "");
+
+        assert_eq!(display_hira, "『と");
+        assert_eq!(display_shown, "『と");
+    }
+
+    #[test]
+    fn live_continuation_keeps_reasonable_preview() {
+        let (display_hira, display_shown) =
+            live_continuation_display("ろぐを", "ログを", "ろぐを", "ろぐをか", "");
+
+        assert_eq!(display_hira, "ログをか");
+        assert_eq!(display_shown, "ログをか");
     }
 }

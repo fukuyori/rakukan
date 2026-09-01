@@ -190,7 +190,8 @@ fn parse_kanji_integer_digits(s: &str) -> Option<String> {
             saw_unit = true;
             let digit = pending_digit.take().unwrap_or(1);
             group = group.checked_add(digit.checked_mul(unit)?)?;
-        } else if let Some(unit) = large_kanji_unit(c) {
+        } else {
+            let unit = large_kanji_unit(c)?;
             saw_unit = true;
             let mut group_value = group;
             if let Some(digit) = pending_digit.take() {
@@ -201,8 +202,6 @@ fn parse_kanji_integer_digits(s: &str) -> Option<String> {
             }
             total = total.checked_add(group_value.checked_mul(unit)?)?;
             group = 0;
-        } else {
-            return None;
         }
     }
 
@@ -493,14 +492,14 @@ fn digit_candidate_structs(s: &str, order: &[DigitCandidateKind]) -> Vec<Candida
             DigitCandidateKind::PerDigit => (Some(kanji.clone()), "桁並び漢数字"),
             DigitCandidateKind::Daiji => (to_daiji_positional(&normalized), "大字"),
         };
-        if let Some(surface) = surface {
-            if !candidates.iter().any(|c: &Candidate| c.surface == surface) {
-                candidates.push(Candidate {
-                    surface,
-                    source: CandidateSource::Digit,
-                    annotation: Some(annotation.into()),
-                });
-            }
+        if let Some(surface) = surface
+            && !candidates.iter().any(|c: &Candidate| c.surface == surface)
+        {
+            candidates.push(Candidate {
+                surface,
+                source: CandidateSource::Digit,
+                annotation: Some(annotation.into()),
+            });
         }
     }
     candidates
@@ -758,15 +757,14 @@ pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
 
 fn build_local_context(runs: &[Run], kana_index: usize, global_context: &str) -> String {
     let mut ctx = String::from(global_context);
-    if kana_index > 0 {
-        if let Some(run) = runs.get(kana_index - 1) {
-            if run.is_literal() {
-                if !ctx.is_empty() {
-                    ctx.push_str("…");
-                }
-                ctx.push_str(run.text());
-            }
+    if kana_index > 0
+        && let Some(run) = runs.get(kana_index - 1)
+        && run.is_literal()
+    {
+        if !ctx.is_empty() {
+            ctx.push('…');
         }
+        ctx.push_str(run.text());
     }
     ctx
 }

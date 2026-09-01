@@ -463,13 +463,13 @@ impl RpcEngine {
 impl Connection {
     fn call_with_retry(&mut self, req: Request) -> Result<Response> {
         for attempt in 0..2 {
-            if self.stream.is_none() {
-                if let Err(e) = self.ensure_connected() {
-                    if attempt == 1 {
-                        return Err(e);
-                    }
-                    continue;
+            if self.stream.is_none()
+                && let Err(e) = self.ensure_connected()
+            {
+                if attempt == 1 {
+                    return Err(e);
                 }
+                continue;
             }
             let stream = self.stream.as_mut().expect("just ensured");
             if let Err(e) = write_frame(stream, &req) {
@@ -671,6 +671,7 @@ fn spawn_detached(exe: &PathBuf) -> Result<()> {
         .with_context(|| format!("spawn {}", exe.display()))?;
     Ok(())
 }
+const _: &str = PIPE_BASE_NAME;
 
 #[cfg(not(target_os = "windows"))]
 fn spawn_detached(_exe: &PathBuf) -> Result<()> {
@@ -724,4 +725,3 @@ mod tests {
         assert!(guard.blocked_until_ms.is_none());
     }
 }
-const _: &str = PIPE_BASE_NAME;

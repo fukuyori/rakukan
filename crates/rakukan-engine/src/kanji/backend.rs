@@ -259,10 +259,10 @@ fn filter_by_confidence(
         .fold(f32::NEG_INFINITY, f32::max);
 
     // 絶対フロア: 最良候補すら自信が低すぎる → 全棄却してフォールバックさせる。
-    if let Some(floor) = min_top {
-        if top < floor {
-            return Vec::new();
-        }
+    if let Some(floor) = min_top
+        && top < floor
+    {
+        return Vec::new();
     }
 
     cands

@@ -8,6 +8,11 @@
 //! - `*mut c_void` ハンドルは `engine_destroy` で解放すること
 //! - caller が渡す `*const c_char` は関数呼び出しの間だけ有効であればよい
 
+// FFI 境界の関数は生ポインタを受けて内部で deref する前提（規約は上記の通り）。
+// `unsafe fn` 化はエクスポート関数全部と ABI 側の型定義に波及するため、
+// clippy::not_unsafe_ptr_arg_deref はモジュール単位で許容する。
+#![allow(clippy::not_unsafe_ptr_arg_deref)]
+
 use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
@@ -36,12 +41,12 @@ fn init_dll_logging() {
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let path = dir.join("rakukan-engine-dll.log");
         // 8 MiB 超で 1 世代ローテーション
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() > 8 * 1024 * 1024 {
-                let rotated = dir.join("rakukan-engine-dll.log.1");
-                let _ = std::fs::remove_file(&rotated);
-                let _ = std::fs::rename(&path, &rotated);
-            }
+        if let Ok(meta) = std::fs::metadata(&path)
+            && meta.len() > 8 * 1024 * 1024
+        {
+            let rotated = dir.join("rakukan-engine-dll.log.1");
+            let _ = std::fs::remove_file(&rotated);
+            let _ = std::fs::rename(&path, &rotated);
         }
         let status = match std::fs::OpenOptions::new()
             .create(true)
@@ -177,24 +182,6 @@ pub extern "C" fn engine_build_info() -> *mut c_char {
     unsafe { to_cstr(json) }
 }
 
-#[cfg(test)]
-mod build_info_tests {
-    use super::*;
-
-    #[test]
-    fn build_info_reports_version_abi_and_roundtrips_as_json() {
-        let info = build_info();
-        assert_eq!(info.pkg_version, env!("CARGO_PKG_VERSION"));
-        assert_eq!(info.abi_version, ENGINE_ABI_VERSION);
-        assert!(!info.git_sha.is_empty());
-        let json = serde_json::to_string(&info).unwrap();
-        let back: BuildInfo = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.pkg_version, info.pkg_version);
-        assert_eq!(back.abi_version, info.abi_version);
-        assert_eq!(back.git_sha, info.git_sha);
-    }
-}
-
 // ─── 文字入力 ──────────────────────────────────────────────────────────────────
 
 /// ローマ字変換を経由せず hiragana_buf に直接1文字追加する。
@@ -308,9 +295,9 @@ pub extern "C" fn engine_bg_start(handle: *mut c_void, n_cands: u32) -> bool {
 pub extern "C" fn engine_bg_status(handle: *mut c_void) -> *const c_char {
     let _engine = unsafe { &*(handle as *const RakunEngine) };
     match crate::conv_cache::status() {
-        "running" => b"running\0".as_ptr() as *const c_char,
-        "done" => b"done\0".as_ptr() as *const c_char,
-        _ => b"idle\0".as_ptr() as *const c_char,
+        "running" => c"running".as_ptr(),
+        "done" => c"done".as_ptr(),
+        _ => c"idle".as_ptr(),
     }
 }
 
@@ -562,10 +549,10 @@ pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if engine.is_kanji_ready() {
         // 二重ロード等で残った注入待ち converter は破棄する
-        if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
-            if g.take().is_some() {
-                tracing::info!("poll_model_ready: discarded stale pending converter");
-            }
+        if let Ok(mut g) = PENDING_CONVERTER.try_lock()
+            && g.take().is_some()
+        {
+            tracing::info!("poll_model_ready: discarded stale pending converter");
         }
         return true;
     }
@@ -639,12 +626,12 @@ pub extern "C" fn engine_poll_dict_ready(handle: *mut c_void) -> bool {
     if engine.is_dict_ready() {
         return false;
     }
-    if let Ok(mut g) = PENDING_DICT.try_lock() {
-        if let Some(store) = g.take() {
-            engine.set_dict_store(store);
-            set_dict_status("injected: mozc=true".to_string());
-            return true;
-        }
+    if let Ok(mut g) = PENDING_DICT.try_lock()
+        && let Some(store) = g.take()
+    {
+        engine.set_dict_store(store);
+        set_dict_status("injected: mozc=true".to_string());
+        return true;
     }
     false
 }
@@ -760,4 +747,22 @@ pub extern "C" fn engine_last_error() -> *mut c_char {
 pub extern "C" fn engine_dict_status() -> *mut c_char {
     let msg = DICT_STATUS.lock().map(|g| g.clone()).unwrap_or_default();
     unsafe { to_cstr(msg) }
+}
+
+#[cfg(test)]
+mod build_info_tests {
+    use super::*;
+
+    #[test]
+    fn build_info_reports_version_abi_and_roundtrips_as_json() {
+        let info = build_info();
+        assert_eq!(info.pkg_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.abi_version, ENGINE_ABI_VERSION);
+        assert!(!info.git_sha.is_empty());
+        let json = serde_json::to_string(&info).unwrap();
+        let back: BuildInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pkg_version, info.pkg_version);
+        assert_eq!(back.abi_version, info.abi_version);
+        assert_eq!(back.git_sha, info.git_sha);
+    }
 }

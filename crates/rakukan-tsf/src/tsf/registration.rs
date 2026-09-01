@@ -161,7 +161,7 @@ fn install_layout_or_tip() -> Result<()> {
         let hmod = LoadLibraryW(windows::core::PCWSTR(input_dll_name.as_ptr()))
             .map_err(|e| anyhow::anyhow!("LoadLibrary input.dll: {e}"))?;
 
-        let proc_name = windows::core::PCSTR(b"InstallLayoutOrTip\0".as_ptr());
+        let proc_name = windows::core::s!("InstallLayoutOrTip");
         let proc = GetProcAddress(hmod, proc_name)
             .ok_or_else(|| anyhow::anyhow!("GetProcAddress InstallLayoutOrTip not found"))?;
 

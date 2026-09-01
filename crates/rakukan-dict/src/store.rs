@@ -384,10 +384,10 @@ impl DictStore {
             "dict::store: learned reading={:?} surface={:?}",
             reading, surface
         );
-        if let Some(path) = &self.inner.learn_history_path {
-            if let Err(e) = save_learn_history_file(path, &snapshot) {
-                warn!("learn_history save failed: {e}");
-            }
+        if let Some(path) = &self.inner.learn_history_path
+            && let Err(e) = save_learn_history_file(path, &snapshot)
+        {
+            warn!("learn_history save failed: {e}");
         }
     }
 
@@ -419,10 +419,10 @@ impl DictStore {
                 "dict::store: forget reading={:?} surface={:?}",
                 reading, surface
             );
-            if let (Some(snapshot), Some(path)) = (snapshot, &self.inner.learn_history_path) {
-                if let Err(e) = save_learn_history_file(path, &snapshot) {
-                    warn!("learn_history save failed after forget: {e}");
-                }
+            if let (Some(snapshot), Some(path)) = (snapshot, &self.inner.learn_history_path)
+                && let Err(e) = save_learn_history_file(path, &snapshot)
+            {
+                warn!("learn_history save failed after forget: {e}");
             }
         }
         removed
@@ -458,13 +458,12 @@ impl DictStore {
     /// LLM 由来であっても誤学習リスクが低いため、辞書外でも学習を許可する。
     fn is_dict_surface(&self, reading: &str, surface: &str) -> bool {
         self.reload_user_if_changed();
-        if let Ok(user) = self.inner.user.read() {
-            if user
+        if let Ok(user) = self.inner.user.read()
+            && user
                 .get(reading)
                 .is_some_and(|list| list.iter().any(|s| s == surface))
-            {
-                return true;
-            }
+        {
+            return true;
         }
         if let Some(mozc) = &self.inner.mozc {
             // 1 読みあたり 1024 候補を超えることはまず無いので、この範囲を走査すれば十分。

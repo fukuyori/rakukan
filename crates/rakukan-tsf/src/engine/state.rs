@@ -161,13 +161,11 @@ pub fn poll_model_ready_cached(eng: &DynEngine) -> bool {
         return true;
     }
     let r = eng.poll_model_ready();
-    if r {
-        if !MODEL_READY_LATCH.swap(true, AO::AcqRel) {
-            let reset_at = READY_RESET_AT_MS.load(AO::Acquire);
-            if reset_at != 0 {
-                let elapsed = now_ms().saturating_sub(reset_at);
-                tracing::info!("model ready: {} ms since reload reset", elapsed);
-            }
+    if r && !MODEL_READY_LATCH.swap(true, AO::AcqRel) {
+        let reset_at = READY_RESET_AT_MS.load(AO::Acquire);
+        if reset_at != 0 {
+            let elapsed = now_ms().saturating_sub(reset_at);
+            tracing::info!("model ready: {} ms since reload reset", elapsed);
         }
     }
     r
@@ -280,14 +278,14 @@ pub fn engine_start_bg_init() {
     // すでに起動済みなら何もしない（エンジンが既に存在する場合も不要）
     if ENGINE_INIT_STARTED.swap(true, AO::AcqRel) {
         // 既存エンジンで辞書・モデルがまだ未ロードなら起動する
-        if let Ok(mut g) = RAKUKAN_ENGINE.try_lock() {
-            if let Some(eng) = g.0.as_mut() {
-                if !eng.is_dict_ready() {
-                    eng.start_load_dict();
-                }
-                if !eng.is_kanji_ready() {
-                    eng.start_load_model();
-                }
+        if let Ok(mut g) = RAKUKAN_ENGINE.try_lock()
+            && let Some(eng) = g.0.as_mut()
+        {
+            if !eng.is_dict_ready() {
+                eng.start_load_dict();
+            }
+            if !eng.is_kanji_ready() {
+                eng.start_load_model();
             }
         }
         tracing::debug!("engine_start_bg_init: already started, skipping DLL load");
@@ -319,20 +317,20 @@ pub fn engine_start_bg_init() {
             match load_result {
                 Ok(()) => {
                     // 辞書・モデルのバックグラウンドロードを起動
-                    if let Ok(mut g) = RAKUKAN_ENGINE.lock() {
-                        if let Some(eng) = g.0.as_mut() {
-                            tracing::debug!(
-                                "engine-init: is_dict_ready={} is_kanji_ready={}",
-                                eng.is_dict_ready(),
-                                eng.is_kanji_ready()
-                            );
-                            if !eng.is_dict_ready() {
-                                tracing::info!("engine-init: calling start_load_dict");
-                                eng.start_load_dict();
-                            }
-                            if !eng.is_kanji_ready() {
-                                eng.start_load_model();
-                            }
+                    if let Ok(mut g) = RAKUKAN_ENGINE.lock()
+                        && let Some(eng) = g.0.as_mut()
+                    {
+                        tracing::debug!(
+                            "engine-init: is_dict_ready={} is_kanji_ready={}",
+                            eng.is_dict_ready(),
+                            eng.is_kanji_ready()
+                        );
+                        if !eng.is_dict_ready() {
+                            tracing::info!("engine-init: calling start_load_dict");
+                            eng.start_load_dict();
+                        }
+                        if !eng.is_kanji_ready() {
+                            eng.start_load_model();
                         }
                     }
                     tracing::info!("engine-init: engine created successfully");
@@ -1374,12 +1372,11 @@ impl SessionState {
             current_index,
             ..
         } = self
+            && let Some(block) = blocks.get_mut(*current_index)
         {
-            if let Some(block) = blocks.get_mut(*current_index) {
-                let len = block.candidates.len();
-                if len > 0 {
-                    block.selected = (block.selected + 1) % len;
-                }
+            let len = block.candidates.len();
+            if len > 0 {
+                block.selected = (block.selected + 1) % len;
             }
         }
     }
@@ -1391,16 +1388,15 @@ impl SessionState {
             current_index,
             ..
         } = self
+            && let Some(block) = blocks.get_mut(*current_index)
         {
-            if let Some(block) = blocks.get_mut(*current_index) {
-                let len = block.candidates.len();
-                if len > 0 {
-                    block.selected = if block.selected == 0 {
-                        len - 1
-                    } else {
-                        block.selected - 1
-                    };
-                }
+            let len = block.candidates.len();
+            if len > 0 {
+                block.selected = if block.selected == 0 {
+                    len - 1
+                } else {
+                    block.selected - 1
+                };
             }
         }
     }
@@ -1504,13 +1500,12 @@ impl SessionState {
             current_index,
             ..
         } = self
+            && let Some(block) = blocks.get_mut(*current_index)
         {
-            if let Some(block) = blocks.get_mut(*current_index) {
-                let idx = n - 1;
-                if idx < block.candidates.len() {
-                    block.selected = idx;
-                    return true;
-                }
+            let idx = n - 1;
+            if idx < block.candidates.len() {
+                block.selected = idx;
+                return true;
             }
         }
         false
@@ -1524,11 +1519,10 @@ impl SessionState {
             current_index,
             ..
         } = self
+            && *current_index + 1 < blocks.len()
         {
-            if *current_index + 1 < blocks.len() {
-                *current_index += 1;
-                return true;
-            }
+            *current_index += 1;
+            return true;
         }
         false
     }
@@ -1678,22 +1672,22 @@ impl SessionState {
 
     /// RangeSelect の選択範囲を 1 文字縮める。戻り値: 成功したか。
     pub fn range_select_shrink(&mut self) -> bool {
-        if let SessionState::RangeSelect { select_end, .. } = self {
-            if *select_end > 1 {
-                *select_end -= 1;
-                return true;
-            }
+        if let SessionState::RangeSelect { select_end, .. } = self
+            && *select_end > 1
+        {
+            *select_end -= 1;
+            return true;
         }
         false
     }
 
     /// RangeSelect の右端を先頭（1 文字選択）へ移す（Home）。戻り値: 変化したか。
     pub fn range_select_to_start(&mut self) -> bool {
-        if let SessionState::RangeSelect { select_end, .. } = self {
-            if *select_end > 1 {
-                *select_end = 1;
-                return true;
-            }
+        if let SessionState::RangeSelect { select_end, .. } = self
+            && *select_end > 1
+        {
+            *select_end = 1;
+            return true;
         }
         false
     }
@@ -1792,6 +1786,7 @@ impl SessionState {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn activate_selecting_with_affixes(
         &mut self,
         candidates: Vec<String>,
@@ -1984,7 +1979,7 @@ impl SessionState {
                 if len == 0 {
                     0
                 } else {
-                    (len + page_size - 1) / page_size
+                    len.div_ceil(*page_size)
                 }
             }
             _ => 0,
@@ -2079,90 +2074,82 @@ impl SessionState {
     }
 
     pub fn next_with_page_wrap(&mut self) {
-        match self {
-            SessionState::Selecting {
-                candidate_views,
-                selected,
-                page_size,
-                ..
-            } => {
-                let len = candidate_views.len();
-                if len == 0 {
-                    return;
-                }
-                let next_idx = (*selected + 1) % len;
-                let cur_page = *selected / *page_size;
-                let next_page = next_idx / *page_size;
-                *selected = if next_page != cur_page {
-                    next_page * *page_size
-                } else {
-                    next_idx
-                };
+        if let SessionState::Selecting {
+            candidate_views,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            let len = candidate_views.len();
+            if len == 0 {
+                return;
             }
-            _ => {}
+            let next_idx = (*selected + 1) % len;
+            let cur_page = *selected / *page_size;
+            let next_page = next_idx / *page_size;
+            *selected = if next_page != cur_page {
+                next_page * *page_size
+            } else {
+                next_idx
+            };
         }
     }
 
     pub fn prev(&mut self) {
-        match self {
-            SessionState::Selecting {
-                candidate_views,
-                selected,
-                ..
-            } => {
-                let len = candidate_views.len();
-                if len == 0 {
-                    return;
-                }
-                *selected = if *selected == 0 {
-                    len - 1
-                } else {
-                    *selected - 1
-                };
+        if let SessionState::Selecting {
+            candidate_views,
+            selected,
+            ..
+        } = self
+        {
+            let len = candidate_views.len();
+            if len == 0 {
+                return;
             }
-            _ => {}
+            *selected = if *selected == 0 {
+                len - 1
+            } else {
+                *selected - 1
+            };
         }
     }
 
     pub fn next_page(&mut self) {
-        match self {
-            SessionState::Selecting {
-                candidate_views,
-                selected,
-                page_size,
-                ..
-            } => {
-                let len = candidate_views.len();
-                if len == 0 {
-                    return;
-                }
-                let total_pages = len.div_ceil(*page_size);
-                let cur = *selected / *page_size;
-                let next = (cur + 1) % total_pages;
-                *selected = next * *page_size;
+        if let SessionState::Selecting {
+            candidate_views,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            let len = candidate_views.len();
+            if len == 0 {
+                return;
             }
-            _ => {}
+            let total_pages = len.div_ceil(*page_size);
+            let cur = *selected / *page_size;
+            let next = (cur + 1) % total_pages;
+            *selected = next * *page_size;
         }
     }
 
     pub fn prev_page(&mut self) {
-        match self {
-            SessionState::Selecting {
-                candidate_views,
-                selected,
-                page_size,
-                ..
-            } => {
-                let len = candidate_views.len();
-                if len == 0 {
-                    return;
-                }
-                let total_pages = len.div_ceil(*page_size);
-                let cur = *selected / *page_size;
-                let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
-                *selected = prev * *page_size;
+        if let SessionState::Selecting {
+            candidate_views,
+            selected,
+            page_size,
+            ..
+        } = self
+        {
+            let len = candidate_views.len();
+            if len == 0 {
+                return;
             }
-            _ => {}
+            let total_pages = len.div_ceil(*page_size);
+            let cur = *selected / *page_size;
+            let prev = if cur == 0 { total_pages - 1 } else { cur - 1 };
+            *selected = prev * *page_size;
         }
     }
 

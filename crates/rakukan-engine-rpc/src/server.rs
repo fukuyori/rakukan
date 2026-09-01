@@ -455,10 +455,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
             let preedit = eng.preedit_display();
             let hiragana = eng.hiragana_text();
             let bg_status = eng.bg_status().to_string();
-            if let Some(n) = bg_start_n_cands {
-                if !hiragana.is_empty() {
-                    eng.bg_start(n as usize);
-                }
+            if let Some(n) = bg_start_n_cands
+                && !hiragana.is_empty()
+            {
+                eng.bg_start(n as usize);
             }
             Response::InputCharResult {
                 preedit,

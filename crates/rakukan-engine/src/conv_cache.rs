@@ -53,6 +53,9 @@ struct Request {
 
 // ─── キャッシュ状態 ────────────────────────────────────────────────────────────
 
+// Done が KanaKanjiConverter を抱えるため variant 間サイズ差が大きいが、
+// State は Inner 内の 1 箇所にしか存在しない単一インスタンスなので Box 化しない。
+#[allow(clippy::large_enum_variant)]
 enum State {
     /// 変換中でも結果待ちでもない
     Idle,
@@ -217,16 +220,16 @@ pub fn start(
     };
 
     // 同一キーが Done / Running 中なら再起動しない
-    if let State::Done { key, .. } = &inner.state {
-        if key == &hiragana {
-            tracing::trace!("conv-cache: skip same key {:?}", hiragana);
-            return Some(converter);
-        }
+    if let State::Done { key, .. } = &inner.state
+        && key == &hiragana
+    {
+        tracing::trace!("conv-cache: skip same key {:?}", hiragana);
+        return Some(converter);
     }
-    if let State::Running { key } = &inner.state {
-        if key == &hiragana {
-            return Some(converter);
-        }
+    if let State::Running { key } = &inner.state
+        && key == &hiragana
+    {
+        return Some(converter);
     }
 
     inner.pending = Some(Request {
@@ -263,10 +266,9 @@ pub fn peek_top_candidate(key: &str) -> Option<String> {
     if let State::Done {
         key: k, candidates, ..
     } = &inner.state
+        && k == key
     {
-        if k == key {
-            return candidates.first().cloned();
-        }
+        return candidates.first().cloned();
     }
     None
 }

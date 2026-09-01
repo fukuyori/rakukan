@@ -70,7 +70,7 @@ pub(super) unsafe fn get_cursor_range(
     if fetched == 0 {
         return None;
     }
-    let range_ref = (&*sel_buf[0].range).as_ref()?;
+    let range_ref = (*sel_buf[0].range).as_ref()?;
     let cloned = unsafe { range_ref.Clone() }.ok()?;
     if let Err(e) = unsafe { cloned.Collapse(ec, TF_ANCHOR_END) } {
         tracing::warn!("get_cursor_range: Collapse failed: {e}, range may not be zero-length");
@@ -556,14 +556,14 @@ pub(super) fn update_caret_rect(ctx: ITfContext, tid: u32) {
     };
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
-        if let Ok(range) = comp.GetRange() {
-            if let Ok(view) = ctx.GetActiveView() {
-                use windows::Win32::Foundation::RECT;
-                let mut rect = RECT::default();
-                let mut clipped = windows::Win32::Foundation::BOOL(0);
-                if view.GetTextExt(ec, &range, &mut rect, &mut clipped).is_ok() {
-                    caret_rect_set(rect);
-                }
+        if let Ok(range) = comp.GetRange()
+            && let Ok(view) = ctx.GetActiveView()
+        {
+            use windows::Win32::Foundation::RECT;
+            let mut rect = RECT::default();
+            let mut clipped = windows::Win32::Foundation::BOOL(0);
+            if view.GetTextExt(ec, &range, &mut rect, &mut clipped).is_ok() {
+                caret_rect_set(rect);
             }
         }
         Ok(())

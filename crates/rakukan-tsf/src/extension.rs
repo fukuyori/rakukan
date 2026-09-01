@@ -149,6 +149,8 @@ impl RegKey for HKEY {
 
 #[allow(dead_code)]
 pub trait VKeyExt {
+    // VIRTUAL_KEY は Copy な newtype のため self 受けのままとする
+    #[allow(clippy::wrong_self_convention)]
     fn is_pressed(self) -> bool;
 }
 

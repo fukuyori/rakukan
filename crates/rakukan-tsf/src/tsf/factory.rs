@@ -311,6 +311,7 @@ fn to_wide_menu_text(text: &str) -> Vec<u16> {
 
 // ─── TextServiceState ─────────────────────────────────────────────────────────
 
+#[derive(Default)]
 pub struct TextServiceState {
     pub client_id: u32,
     pub thread_mgr: Option<ITfThreadMgr>,
@@ -320,19 +321,6 @@ pub struct TextServiceState {
     pub threadmgr_cookie: u32,
     /// ITfThreadFocusSink の登録クッキー（Deactivate で解除）
     pub threadfocus_cookie: u32,
-}
-
-impl Default for TextServiceState {
-    fn default() -> Self {
-        Self {
-            client_id: 0,
-            thread_mgr: None,
-            keymap: Keymap::default(),
-            langbar_sink: None,
-            threadmgr_cookie: 0,
-            threadfocus_cookie: 0,
-        }
-    }
 }
 
 // Safety: TSF は STA。RefCell + COM オブジェクトを持つが
@@ -508,19 +496,18 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // Alt+Tab 等で別アプリに移ったとき、ITfThreadMgrEventSink::OnSetFocus は TSF 対応
         // アプリ以外では発火しないため、これが無いと候補ウィンドウが残ることがある。
         unsafe {
-            if let Ok(src) = tm.cast::<ITfSource>() {
-                if let Ok(sink) = self.cast::<ITfThreadFocusSink>() {
-                    if let Ok(unk) = sink.cast::<IUnknown>() {
-                        match src.AdviseSink(&ITfThreadFocusSink::IID, &unk) {
-                            Ok(cookie) => {
-                                if let Ok(mut inner) = self.inner.try_borrow_mut() {
-                                    inner.threadfocus_cookie = cookie;
-                                }
-                                tracing::debug!("ITfThreadFocusSink registered cookie={cookie}");
-                            }
-                            Err(e) => tracing::warn!("AdviseSink(ThreadFocusSink) failed: {e}"),
+            if let Ok(src) = tm.cast::<ITfSource>()
+                && let Ok(sink) = self.cast::<ITfThreadFocusSink>()
+                && let Ok(unk) = sink.cast::<IUnknown>()
+            {
+                match src.AdviseSink(&ITfThreadFocusSink::IID, &unk) {
+                    Ok(cookie) => {
+                        if let Ok(mut inner) = self.inner.try_borrow_mut() {
+                            inner.threadfocus_cookie = cookie;
                         }
+                        tracing::debug!("ITfThreadFocusSink registered cookie={cookie}");
                     }
+                    Err(e) => tracing::warn!("AdviseSink(ThreadFocusSink) failed: {e}"),
                 }
             }
         }
@@ -561,22 +548,20 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                     })
                 })
             };
-            if let Some(dm_ptr) = focused_dm_ptr {
-                if let Some(mode) = doc_mode_on_focus_change(0, dm_ptr, hwnd_val) {
-                    if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                        tracing::info!(
-                            "Activate: initial mode={mode:?} (config.input.default_mode)"
-                        );
-                        st.set_mode(mode);
-                    }
-                    // KEYBOARD_OPENCLOSE を正しいモードで再設定
-                    let is_open2 = mode != InputMode::Alphanumeric;
-                    if let Ok(inner) = self.inner.try_borrow() {
-                        if let Some(tm) = &inner.thread_mgr {
-                            unsafe {
-                                let _ = language_bar::set_open_close(tm, tid, is_open2);
-                            }
-                        }
+            if let Some(dm_ptr) = focused_dm_ptr
+                && let Some(mode) = doc_mode_on_focus_change(0, dm_ptr, hwnd_val)
+            {
+                if let Ok(mut st) = crate::engine::state::ime_state_get() {
+                    tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
+                    st.set_mode(mode);
+                }
+                // KEYBOARD_OPENCLOSE を正しいモードで再設定
+                let is_open2 = mode != InputMode::Alphanumeric;
+                if let Ok(inner) = self.inner.try_borrow()
+                    && let Some(tm) = &inner.thread_mgr
+                {
+                    unsafe {
+                        let _ = language_bar::set_open_close(tm, tid, is_open2);
                     }
                 }
             }
@@ -606,26 +591,26 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                     let _ = language_bar::langbar_remove(tm, &btn);
                 }
                 // ITfThreadMgrEventSink 登録解除
-                if inner.threadmgr_cookie != 0 {
-                    if let Ok(src) = tm.cast::<ITfSource>() {
-                        let _ = src.UnadviseSink(inner.threadmgr_cookie);
-                        tracing::debug!("ITfThreadMgrEventSink unregistered");
-                    }
+                if inner.threadmgr_cookie != 0
+                    && let Ok(src) = tm.cast::<ITfSource>()
+                {
+                    let _ = src.UnadviseSink(inner.threadmgr_cookie);
+                    tracing::debug!("ITfThreadMgrEventSink unregistered");
                 }
                 // ITfThreadFocusSink 登録解除
-                if inner.threadfocus_cookie != 0 {
-                    if let Ok(src) = tm.cast::<ITfSource>() {
-                        let _ = src.UnadviseSink(inner.threadfocus_cookie);
-                        tracing::debug!("ITfThreadFocusSink unregistered");
-                    }
+                if inner.threadfocus_cookie != 0
+                    && let Ok(src) = tm.cast::<ITfSource>()
+                {
+                    let _ = src.UnadviseSink(inner.threadfocus_cookie);
+                    tracing::debug!("ITfThreadFocusSink unregistered");
                 }
             }
         }
         let _ = composition_set(None);
-        if let Ok(mut g) = engine_get() {
-            if let Some(e) = g.as_mut() {
-                e.bg_reclaim();
-            }
+        if let Ok(mut g) = engine_get()
+            && let Some(e) = g.as_mut()
+        {
+            e.bg_reclaim();
         }
         candidate_window::destroy();
         candidate_window::stop_live_timer();
@@ -661,11 +646,11 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         // 不要になるため、converter の回収有無に関わらず必ず reset_all() を呼ぶ。
         // ※ 以前は conv が Some の場合に return していたため hiragana_buf が残り、
         //    次のキー入力で古いひらがなが末尾に追加される「途中切れ」バグがあった。
-        if let Ok(mut g) = engine_get() {
-            if let Some(e) = g.as_mut() {
-                e.bg_reclaim();
-                e.reset_all();
-            }
+        if let Ok(mut g) = engine_get()
+            && let Some(e) = g.as_mut()
+        {
+            e.bg_reclaim();
+            e.reset_all();
         }
         tracing::debug!("OnCompositionTerminated");
         Ok(())
@@ -898,11 +883,11 @@ impl TextServiceFactory_Impl {
     fn notify_langbar_update(&self) {
         use windows::Win32::UI::TextServices::TF_LBI_ICON;
         const TF_LBI_TEXT: u32 = 2;
-        if let Ok(inner) = self.inner.try_borrow() {
-            if let Some(sink) = &inner.langbar_sink {
-                unsafe {
-                    let _ = sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT);
-                }
+        if let Ok(inner) = self.inner.try_borrow()
+            && let Some(sink) = &inner.langbar_sink
+        {
+            unsafe {
+                let _ = sink.OnUpdate(TF_LBI_ICON | TF_LBI_TEXT);
             }
         }
     }
@@ -938,12 +923,11 @@ impl TextServiceFactory_Impl {
         // ラッチが立っていない場合はエンジンに直接問い合わせてラッチを更新する。
         // モード切替はキー入力前にも発生するため、初回切替時にラッチが false のまま
         // 「ー」がカーソル位置に表示されるのを防ぐ。
-        if !crate::engine::state::is_conversion_ready() {
-            if let Ok(g) = crate::engine::state::engine_try_get() {
-                if let Some(eng) = g.as_ref() {
-                    crate::engine::state::poll_dict_ready_cached(eng);
-                }
-            }
+        if !crate::engine::state::is_conversion_ready()
+            && let Ok(g) = crate::engine::state::engine_try_get()
+            && let Some(eng) = g.as_ref()
+        {
+            crate::engine::state::poll_dict_ready_cached(eng);
         }
 
         let ready = crate::engine::state::is_conversion_ready();
@@ -984,10 +968,10 @@ impl TextServiceFactory_Impl {
     /// 読まない（キースレッド上の同期 I/O を避ける）。両者の失敗は互いに影響しない。
     fn maybe_reload_runtime_config(&self) {
         let config_changed = crate::engine::config::maybe_reload_on_mode_switch();
-        if let Some(new_keymap) = crate::engine::keymap::Keymap::reload_if_changed() {
-            if let Ok(mut inner) = self.inner.try_borrow_mut() {
-                inner.keymap = new_keymap;
-            }
+        if let Some(new_keymap) = crate::engine::keymap::Keymap::reload_if_changed()
+            && let Ok(mut inner) = self.inner.try_borrow_mut()
+        {
+            inner.keymap = new_keymap;
         }
         if config_changed {
             tracing::info!("runtime config reloaded on input mode switch");
@@ -1023,10 +1007,10 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
             engine.reset_preedit();
         }
         // 選択待機状態もクリア
-        if let Ok(mut sess) = session_get() {
-            if sess.is_waiting() || sess.is_selecting() {
-                sess.set_idle();
-            }
+        if let Ok(mut sess) = session_get()
+            && (sess.is_waiting() || sess.is_selecting())
+        {
+            sess.set_idle();
         }
         p
     };
@@ -1429,10 +1413,10 @@ impl ITfSource_Impl for TextServiceFactory_Impl {
             return Err(windows::core::Error::new(E_INVALIDARG, "invalid sink IID"));
         }
         let punk = punk.ok_or_else(|| windows::core::Error::new(E_INVALIDARG, "null punk"))?;
-        if let Ok(sink) = punk.cast::<ITfLangBarItemSink>() {
-            if let Ok(mut inner) = self.inner.try_borrow_mut() {
-                inner.langbar_sink = Some(sink);
-            }
+        if let Ok(sink) = punk.cast::<ITfLangBarItemSink>()
+            && let Ok(mut inner) = self.inner.try_borrow_mut()
+        {
+            inner.langbar_sink = Some(sink);
         }
         Ok(LANGBAR_SINK_COOKIE)
     }

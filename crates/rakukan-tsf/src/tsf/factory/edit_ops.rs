@@ -437,16 +437,15 @@ impl super::TextServiceFactory_Impl {
         } else {
             ("unknown".into(), "unknown", true)
         };
-        if let Ok(inner) = self.inner.try_borrow() {
-            if let Some(tm) = &inner.thread_mgr {
-                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, now_open) } {
-                    tracing::warn!("ImeToggle: set_open_close({}) failed: {e}", now_open);
-                    diag::event(DiagEvent::Error {
-                        site: "set_open_close/toggle",
-                        msg: e.to_string(),
-                    });
-                }
-            }
+        if let Ok(inner) = self.inner.try_borrow()
+            && let Some(tm) = &inner.thread_mgr
+            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, now_open) }
+        {
+            tracing::warn!("ImeToggle: set_open_close({}) failed: {e}", now_open);
+            diag::event(DiagEvent::Error {
+                site: "set_open_close/toggle",
+                msg: e.to_string(),
+            });
         }
         diag::event(DiagEvent::ModeChange { from, to });
         self.notify_langbar_update();
@@ -495,16 +494,15 @@ impl super::TextServiceFactory_Impl {
                 to: "Alphanumeric",
             });
         }
-        if let Ok(inner) = self.inner.try_borrow() {
-            if let Some(tm) = &inner.thread_mgr {
-                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, false) } {
-                    tracing::warn!("ImeOff: set_open_close(false) failed: {e}");
-                    diag::event(DiagEvent::Error {
-                        site: "set_open_close/off",
-                        msg: e.to_string(),
-                    });
-                }
-            }
+        if let Ok(inner) = self.inner.try_borrow()
+            && let Some(tm) = &inner.thread_mgr
+            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, false) }
+        {
+            tracing::warn!("ImeOff: set_open_close(false) failed: {e}");
+            diag::event(DiagEvent::Error {
+                site: "set_open_close/off",
+                msg: e.to_string(),
+            });
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);
@@ -522,16 +520,15 @@ impl super::TextServiceFactory_Impl {
                 to: "Hiragana",
             });
         }
-        if let Ok(inner) = self.inner.try_borrow() {
-            if let Some(tm) = &inner.thread_mgr {
-                if let Err(e) = unsafe { language_bar::set_open_close(tm, tid, true) } {
-                    tracing::warn!("ImeOn: set_open_close(true) failed: {e}");
-                    diag::event(DiagEvent::Error {
-                        site: "set_open_close/on",
-                        msg: e.to_string(),
-                    });
-                }
-            }
+        if let Ok(inner) = self.inner.try_borrow()
+            && let Some(tm) = &inner.thread_mgr
+            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, true) }
+        {
+            tracing::warn!("ImeOn: set_open_close(true) failed: {e}");
+            diag::event(DiagEvent::Error {
+                site: "set_open_close/on",
+                msg: e.to_string(),
+            });
         }
         self.notify_langbar_update();
         self.notify_tray_update(tid);

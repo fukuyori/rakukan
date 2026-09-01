@@ -806,7 +806,7 @@ impl LlamaCppModel {
         ctx.decode(&mut batch)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
-        let mut n_cur = input_tokens.len();
+        let n_start = input_tokens.len();
 
         // Get model's EOS token for comparison
         let model_eos = self.model.token_eos();
@@ -815,7 +815,7 @@ impl LlamaCppModel {
         let gen_start = std::time::Instant::now();
 
         // Generate new tokens
-        for _ in 0..max_new_tokens {
+        for n_cur in n_start..n_start + max_new_tokens {
             if gen_start.elapsed().as_secs() >= GEN_TIMEOUT_SECS {
                 tracing::warn!(
                     "generate_with_sampler: wall-clock timeout ({:.1}s), stopping generation early",
@@ -853,7 +853,6 @@ impl LlamaCppModel {
 
             ctx.decode(&mut batch)
                 .map_err(|e| KanjiError::Inference(e.into()))?;
-            n_cur += 1;
         }
 
         Ok(generated)

@@ -437,7 +437,7 @@ fn ascii_to_fullwidth(s: &str) -> String {
 
 /// 文字列を半角英数字にする
 fn fullwidth_to_ascii(s: &str) -> String {
-    s.chars().map(|c| fullwidth_symbol_to_ascii(c)).collect()
+    s.chars().map(fullwidth_symbol_to_ascii).collect()
 }
 
 /// 全角文字列を大文字化

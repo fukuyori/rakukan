@@ -364,16 +364,17 @@ impl Keymap {
         let n = unsafe { ToUnicode(vk as u32, 0, Some(&key_state), &mut buf, 0) };
         if n > 0 {
             let c = buf[0];
-            if c >= 0x20 && !(0x7F..=0x9F).contains(&c) {
-                if let Some(ch) = char::from_u32(c as u32) {
-                    // Shift+アルファベット → 全角大文字（Ａ–Ｚ）でプリエディットに追加
-                    // F9/F10 サイクルが効くよう Input で送り、factory 側で専用メソッドを呼ぶ
-                    if shift && !ctrl && !alt && ch.is_ascii_uppercase() {
-                        return Some(UserAction::Input(ch));
-                    }
-                    // 全ての印字可能文字を Input として push_char に委ねる。
+            if c >= 0x20
+                && !(0x7F..=0x9F).contains(&c)
+                && let Some(ch) = char::from_u32(c as u32)
+            {
+                // Shift+アルファベット → 全角大文字（Ａ–Ｚ）でプリエディットに追加
+                // F9/F10 サイクルが効くよう Input で送り、factory 側で専用メソッドを呼ぶ
+                if shift && !ctrl && !alt && ch.is_ascii_uppercase() {
                     return Some(UserAction::Input(ch));
                 }
+                // 全ての印字可能文字を Input として push_char に委ねる。
+                return Some(UserAction::Input(ch));
             }
         }
 

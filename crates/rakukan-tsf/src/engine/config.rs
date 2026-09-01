@@ -5,7 +5,7 @@ use std::time::SystemTime;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     #[serde(default)]
     pub general: GeneralConfig,
@@ -23,20 +23,6 @@ pub struct AppConfig {
     /// 旧形式との互換用（config.toml に num_candidates = N と書いた場合に有効）。
     #[serde(default)]
     pub num_candidates: Option<usize>,
-}
-
-impl Default for AppConfig {
-    fn default() -> Self {
-        Self {
-            general: GeneralConfig::default(),
-            keyboard: KeyboardConfig::default(),
-            input: InputConfig::default(),
-            live_conversion: LiveConversionConfig::default(),
-            conversion: ConversionConfig::default(),
-            diagnostics: DiagnosticsConfig::default(),
-            num_candidates: None,
-        }
-    }
 }
 
 impl AppConfig {
@@ -142,41 +128,29 @@ fn default_digit_candidates_order() -> Vec<DigitCandidateKind> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum DigitWidth {
     Fullwidth,
+    #[default]
     Halfwidth,
-}
-
-impl Default for DigitWidth {
-    fn default() -> Self {
-        DigitWidth::Halfwidth
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum AlphaWidth {
+    #[default]
     Fullwidth,
     Halfwidth,
-}
-
-impl Default for AlphaWidth {
-    fn default() -> Self {
-        AlphaWidth::Fullwidth
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[derive(Default)]
 pub enum SymbolWidth {
+    #[default]
     Fullwidth,
     Halfwidth,
-}
-
-impl Default for SymbolWidth {
-    fn default() -> Self {
-        SymbolWidth::Fullwidth
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

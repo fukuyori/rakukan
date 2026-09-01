@@ -22,6 +22,8 @@ pub struct EditSession {
 }
 
 impl EditSession {
+    // COM の生成パターン: Self ではなくインターフェース (ITfEditSession) を返す
+    #[allow(clippy::new_ret_no_self)]
     pub fn new<F>(f: F) -> ITfEditSession
     where
         F: FnOnce(u32) -> windows::core::Result<()> + 'static,

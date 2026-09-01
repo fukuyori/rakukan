@@ -123,10 +123,10 @@ fn main() {
         let len = u16::from_le_bytes(mmap[base + 4..base + 6].try_into().unwrap()) as usize;
         let start = reading_heap_off + off;
         let end = start + len;
-        if end <= entries_off {
-            if let Ok(s) = std::str::from_utf8(&mmap[start..end]) {
-                println!("先頭 reading: {:?}", s);
-            }
+        if end <= entries_off
+            && let Ok(s) = std::str::from_utf8(&mmap[start..end])
+        {
+            println!("先頭 reading: {:?}", s);
         }
     }
 

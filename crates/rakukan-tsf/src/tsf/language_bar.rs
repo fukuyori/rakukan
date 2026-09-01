@@ -123,7 +123,7 @@ pub unsafe fn load_tray_icon() -> windows::core::Result<HICON> {
         .unwrap_or_default();
     let handle = LoadImageW(
         hinst,
-        windows::core::PCWSTR(1u16 as *mut u16),
+        windows::core::PCWSTR(std::ptr::dangling_mut::<u16>()),
         IMAGE_ICON,
         0,
         0,
@@ -199,7 +199,7 @@ pub fn create_mode_icon(text: &str) -> windows::core::Result<HICON> {
             biHeight: -SIZE, // top-down
             biPlanes: 1,
             biBitCount: 32,
-            biCompression: BI_RGB.0 as u32,
+            biCompression: BI_RGB.0,
             ..Default::default()
         },
         ..Default::default()

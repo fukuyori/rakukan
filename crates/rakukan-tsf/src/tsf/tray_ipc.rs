@@ -3,7 +3,7 @@
 //! TSF DLL は複数プロセスにロードされうるため、
 //! - `Local\\rakukan.mode` の共有メモリ（u32）へ現在モードを書き込み
 //! - `Local\\rakukan.mode.changed` のイベントを SetEvent
-//! という *最小IPC* でトレイアプリに通知する。
+//!   という *最小IPC* でトレイアプリに通知する。
 //!
 //! 値フォーマット：
 //! - bit0..1 : mode (0=Hiragana, 1=Katakana, 2=Alphanumeric)

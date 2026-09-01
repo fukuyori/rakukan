@@ -55,6 +55,8 @@ pub struct DisplayAttrInfo {
 }
 
 impl DisplayAttrInfo {
+    // COM の生成パターン: Self ではなくインターフェースを返す
+    #[allow(clippy::new_ret_no_self)]
     fn new(guid: GUID, attr: TF_DISPLAYATTRIBUTE, desc: &'static str) -> ITfDisplayAttributeInfo {
         Self { guid, attr, desc }.into()
     }
@@ -101,6 +103,8 @@ unsafe impl Send for EnumDisplayAttrInfo {}
 unsafe impl Sync for EnumDisplayAttrInfo {}
 
 impl EnumDisplayAttrInfo {
+    // COM の生成パターン: Self ではなくインターフェースを返す
+    #[allow(clippy::new_ret_no_self)]
     pub fn new(items: Vec<ITfDisplayAttributeInfo>) -> IEnumTfDisplayAttributeInfo {
         Self {
             items,

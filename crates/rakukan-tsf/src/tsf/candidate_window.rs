@@ -76,11 +76,11 @@ const COLOR_FG: COLORREF = COLORREF(0x00_00_00_00);
 
 thread_local! {
     /// 候補ウィンドウの HWND（null = 未作成）
-    static TL_HWND: Cell<isize> = Cell::new(0);
+    static TL_HWND: Cell<isize> = const { Cell::new(0) };
     /// 表示中の候補データ（WM_PAINT コールバックで参照）
     static TL_CAND: RefCell<CandData> = RefCell::new(CandData::default());
     /// 最後に `show_inner` で算出したウィンドウ幅。WM_PAINT でも使う。
-    static TL_WIN_WIDTH: Cell<i32> = Cell::new(WIN_WIDTH_MIN);
+    static TL_WIN_WIDTH: Cell<i32> = const { Cell::new(WIN_WIDTH_MIN) };
 
     // ─── [Live] ライブ変換セッション状態は `live_session.rs` の LiveConvSession に集約 (M4 Phase 1)。
     // 旧 TL_LIVE_CTX / TL_LIVE_TID / TL_LIVE_DM_PTR は削除済み。
@@ -89,17 +89,17 @@ thread_local! {
     // msctf._NotifyCallbacks 内で COM を触ると INVALID_POINTER_READ を誘発する
     // ケースがあるため、OnSetFocus はキューに積んで即 return し、WM_APP_FOCUS_CHANGED
     // で遅延処理する。
-    static TL_PENDING_FOCUS: RefCell<VecDeque<FocusChange>> = RefCell::new(VecDeque::new());
+    static TL_PENDING_FOCUS: RefCell<VecDeque<FocusChange>> = const { RefCell::new(VecDeque::new()) };
     /// Activate 時にキャッシュする ITfThreadMgr（set_open_close で使用）。
-    static TL_THREAD_MGR: RefCell<Option<ITfThreadMgr>> = RefCell::new(None);
+    static TL_THREAD_MGR: RefCell<Option<ITfThreadMgr>> = const { RefCell::new(None) };
     /// Activate 時にキャッシュする TSF client_id。
-    static TL_CLIENT_ID: Cell<u32> = Cell::new(0);
+    static TL_CLIENT_ID: Cell<u32> = const { Cell::new(0) };
 
     // ─── [M1.7 T-MODE2] フォーカス中 DM / HWND キャッシュ ─────────────────────────
     // `IMEState::set_mode` から呼ぶ `doc_mode_remember_current` が、モード変更の
     // 瞬間に現在の (dm_ptr, hwnd) を知るために使う。focus 処理の完了時に更新される。
-    static TL_CURRENT_DM: Cell<usize> = Cell::new(0);
-    static TL_CURRENT_HWND: Cell<usize> = Cell::new(0);
+    static TL_CURRENT_DM: Cell<usize> = const { Cell::new(0) };
+    static TL_CURRENT_HWND: Cell<usize> = const { Cell::new(0) };
 }
 
 /// 現在フォーカス中の DocumentManager ポインタと root HWND を返す。
@@ -788,15 +788,15 @@ fn process_focus_change(fc: FocusChange) {
     };
 
     // モードを適用
-    if let Ok(mut st) = crate::engine::state::ime_state_get() {
-        if st.input_mode != new_mode {
-            tracing::info!(
-                "OnSetFocus(deferred): mode {:?} → {:?}",
-                st.input_mode,
-                new_mode
-            );
-            st.set_mode(new_mode);
-        }
+    if let Ok(mut st) = crate::engine::state::ime_state_get()
+        && st.input_mode != new_mode
+    {
+        tracing::info!(
+            "OnSetFocus(deferred): mode {:?} → {:?}",
+            st.input_mode,
+            new_mode
+        );
+        st.set_mode(new_mode);
     }
 
     // KEYBOARD_OPENCLOSE を更新（ターミナル判定用）。
@@ -1342,7 +1342,8 @@ struct LiveProbe {
 /// `None`: 続行不可（caller は return）。
 ///   - busy: 一時的ロック競合 → 次 tick で再試行（タイマーは止めない）
 ///   - empty preedit: タイマー停止して終了
-///   いずれもこの関数内で `stop_live_timer()` を必要に応じて呼ぶ。
+///
+/// いずれもこの関数内で `stop_live_timer()` を必要に応じて呼ぶ。
 fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
     use crate::engine::state::engine_try_get;
     let probe = match engine_try_get() {
@@ -1490,7 +1491,7 @@ fn fetch_preview() -> Option<LivePreview> {
             tracing::warn!("[Live] on_live_timer: engine busy");
             return None;
         };
-        let Some(eng) = g.as_mut() else { return None };
+        let eng = g.as_mut()?;
         let reading = eng.hiragana_text().to_string();
         if reading.is_empty() {
             return None;
@@ -1696,14 +1697,13 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
         applied_in.store(true, std::sync::atomic::Ordering::Release);
 
         let atom = crate::tsf::display_attr::atom_input();
-        if atom != 0 {
-            if let Ok(prop) =
+        if atom != 0
+            && let Ok(prop) =
                 ctx.GetProperty(&windows::Win32::UI::TextServices::GUID_PROP_ATTRIBUTE)
-            {
-                let _ = prop.Clear(ec, &range);
-                let var = windows_core::VARIANT::from(atom as i32);
-                let _ = prop.SetValue(ec, &range, &var);
-            }
+        {
+            let _ = prop.Clear(ec, &range);
+            let var = windows_core::VARIANT::from(atom as i32);
+            let _ = prop.SetValue(ec, &range, &var);
         }
 
         if let Ok(cursor) = range.Clone() {

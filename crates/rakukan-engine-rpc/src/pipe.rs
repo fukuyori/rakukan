@@ -300,7 +300,7 @@ impl Read for PipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         let mut read: u32 = 0;
         let ok = unsafe { ReadFile(self.handle, Some(buf), Some(&mut read), None) };
-        ok.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("ReadFile: {e}")))?;
+        ok.map_err(|e| io::Error::other(format!("ReadFile: {e}")))?;
         if read == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "pipe closed"));
         }
@@ -312,7 +312,7 @@ impl Write for PipeStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut written: u32 = 0;
         let ok = unsafe { WriteFile(self.handle, Some(buf), Some(&mut written), None) };
-        ok.map_err(|e| io::Error::new(io::ErrorKind::Other, format!("WriteFile: {e}")))?;
+        ok.map_err(|e| io::Error::other(format!("WriteFile: {e}")))?;
         Ok(written as usize)
     }
     fn flush(&mut self) -> io::Result<()> {
