@@ -92,30 +92,36 @@ fn split_sentences(text: &str) -> impl Iterator<Item = &str> {
     })
 }
 
-/// 文中に「needle と一致し、かつ長さ `ECHO_RUN_MIN_CHARS` 以上の かな連続 run に
+/// 文中に「ひらがな needle と一致し、かつ長さ `ECHO_RUN_MIN_CHARS` 以上の かな連続 run に
 /// 含まれる」箇所があるか判定する。
-fn sentence_has_echo_run(sentence: &str, needle: &str, kata_needle: &str) -> bool {
-    for pat in [needle, kata_needle] {
-        let mut search_from = 0;
-        while let Some(rel) = sentence[search_from..].find(pat) {
-            let pos = search_from + rel;
-            // 一致箇所から左右に かな連続 run を伸ばして長さを測る
-            let run_start = sentence[..pos]
-                .char_indices()
-                .rev()
-                .take_while(|(_, c)| is_kana_or_prolonged(*c))
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(pos);
-            let run_len = sentence[run_start..]
-                .chars()
-                .take_while(|c| is_kana_or_prolonged(*c))
-                .count();
-            if run_len >= ECHO_RUN_MIN_CHARS {
-                return true;
-            }
-            search_from = pos + pat.len();
+///
+/// needle はひらがなのみ。以前は読みのカタカナ形（`kata_needle`）でも照合していたが、
+/// 8月ログで発動の大半（上位 10 needle すべて）が「インストーラ」「ドキュメント」
+/// 「トランプは」のような**変換済みのカタカナ語**への一致で、正当な context を捨てて
+/// いた（約 1,700 回/月）。カタカナ語の echo は出力として正しく、途切れた断片候補は
+/// 候補側の `is_kana_prefix_echo` が棄却するため、カタカナ一致は echo 源とみなさない
+/// （0.10.1 の commit 時除外がカタカナのみのテキストを対象外にしたのと同じ理屈）。
+/// F7 等でカタカナ確定した長い文が context に残るケースも、同じ理由で除去しない。
+fn sentence_has_echo_run(sentence: &str, needle: &str) -> bool {
+    let mut search_from = 0;
+    while let Some(rel) = sentence[search_from..].find(needle) {
+        let pos = search_from + rel;
+        // 一致箇所から左右に かな連続 run を伸ばして長さを測る
+        let run_start = sentence[..pos]
+            .char_indices()
+            .rev()
+            .take_while(|(_, c)| is_kana_or_prolonged(*c))
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(pos);
+        let run_len = sentence[run_start..]
+            .chars()
+            .take_while(|c| is_kana_or_prolonged(*c))
+            .count();
+        if run_len >= ECHO_RUN_MIN_CHARS {
+            return true;
         }
+        search_from = pos + needle.len();
     }
     false
 }
@@ -125,9 +131,10 @@ fn sentence_has_echo_run(sentence: &str, needle: &str, kata_needle: &str) -> boo
 ///
 /// 未変換のまま確定されたテキスト（例:「きだじゅんいちろう氏は、」）が context に
 /// 残っていると、小型 LLM は変換ではなく context からのコピー（エコー）を選び、
-/// 全ビームがエコー系に収束して漢字候補が消える。カタカナ確定（F7 等）由来の
-/// 汚染も検出する。変換済みの文中の送り仮名・助詞への偶然一致は run 長条件で
-/// 除外する（かな run が `ECHO_RUN_MIN_CHARS` 未満なら削らない）。
+/// 全ビームがエコー系に収束して漢字候補が消える。判定はひらがな needle のみで行い、
+/// カタカナ語への一致は除去対象にしない（`sentence_has_echo_run` 参照）。
+/// 変換済みの文中の送り仮名・助詞への偶然一致は run 長条件で除外する
+/// （かな run が `ECHO_RUN_MIN_CHARS` 未満なら削らない）。
 ///
 /// 純粋関数（tracing を除く）。llama 非依存で単体テスト可能。
 fn strip_echo_context<'a>(context: &'a str, reading: &str) -> std::borrow::Cow<'a, str> {
@@ -140,12 +147,11 @@ fn strip_echo_context<'a>(context: &'a str, reading: &str) -> std::borrow::Cow<'
         return Cow::Borrowed(context);
     }
     let needle: String = reading.chars().take(ECHO_NEEDLE_CHARS).collect();
-    let kata_needle = hiragana_to_katakana(&needle);
 
     let mut kept = String::new();
     let mut removed = false;
     for sentence in split_sentences(context) {
-        if sentence_has_echo_run(sentence, &needle, &kata_needle) {
+        if sentence_has_echo_run(sentence, &needle) {
             tracing::info!(
                 needle = %needle,
                 dropped_head = %sentence.chars().take(20).collect::<String>(),
@@ -669,7 +675,8 @@ mod tests {
     fn strip_echo_context_drops_hiragana_echo_sentence() {
         // 実機事例: 未変換確定「きだじゅんいちろう氏は、」が context 末尾に残ったケース。
         // エコー run（きだじゅんいちろう = 9 文字）を含む文だけが除去され、前の文は残る。
-        let context = "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、きだじゅんいちろう氏は、";
+        let context =
+            "あらゆるコレクターの涙する場面だ。場面はがの共感を呼び、きだじゅんいちろう氏は、";
         let reading = "きだじゅんいちろうしは";
         assert_eq!(
             strip_echo_context(context, reading),
@@ -678,10 +685,42 @@ mod tests {
     }
 
     #[test]
-    fn strip_echo_context_drops_katakana_echo_sentence() {
-        // F7 カタカナ確定由来の汚染も検出する
+    fn strip_echo_context_keeps_katakana_echo_sentence() {
+        // F7 カタカナ確定由来の文は除去しない（Step 8 / 2026-09-01 で方針変更）。
+        // カタカナ echo は出力として正しく、断片候補は is_kana_prefix_echo が棄却する。
+        // 以前は「前の文。」だけが残っていた。
         let context = "前の文。キダジュンイチロウは、";
         let reading = "きだじゅんいちろうしは";
+        assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn strip_echo_context_keeps_converted_katakana_word() {
+        // 8月ログの最多例: 変換済みのカタカナ語「インストーラ」を含む文を
+        // 「いんすとーら」の変換で捨てていた
+        let context = "インストーラを起動する。次の手順へ進む。";
+        let reading = "いんすとーら";
+        assert_eq!(strip_echo_context(context, reading), context);
+    }
+
+    #[test]
+    fn strip_echo_context_keeps_long_katakana_compound_and_mixed_runs() {
+        // 長いカタカナ複合語（run 11 文字）と、助詞を挟んだ混在 run
+        // （トランプはトランプは = 10 文字）も、カタカナ一致では削らない
+        let compound = "ギャラリーエクスポートを実行した。";
+        assert_eq!(
+            strip_echo_context(compound, "ぎゃらりーえくすぽーと"),
+            compound
+        );
+        let mixed = "分類方法がをトランプはトランプは、極めて重要だ。";
+        assert_eq!(strip_echo_context(mixed, "とらんぷはとらんぷは"), mixed);
+    }
+
+    #[test]
+    fn strip_echo_context_still_drops_hiragana_run_next_to_katakana() {
+        // カタカナ語の直後に未変換ひらがなが続く汚染は、ひらがな needle で従来どおり除去
+        let context = "前の文。インストーラをきどうするてじゅんは、";
+        let reading = "きどうするてじゅんは";
         assert_eq!(strip_echo_context(context, reading), "前の文。");
     }
 
