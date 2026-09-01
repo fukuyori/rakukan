@@ -879,3 +879,40 @@ cargo make test
 - 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、`cargo test --workspace --lib` は Step 1 と合わせて再実行（結果は本節末尾）。
 - 未実施（JIS 実機）: IME の ON/OFF 両方向、1 回の押下で二重に切り替わらないこと、Ctrl+Space など既存 binding を壊さないこと。
 - テスト結果（Step 1 + 2）: dict 33 / engine 165 / abi 0 / rpc 8 / tsf 69、失敗 0。
+
+### Step 12 に向けた観察（2026-09-01）
+
+- Step 1・2 導入後の実機で、同じ読みにユーザー辞書の登録があると学習した候補より常にユーザー辞書が先頭に来ることを確認（Issue #13 の再現。現行の順序 ユーザー辞書 → 学習履歴 の仕様どおり）。順序入れ替えの前倒しは行わず、計画どおり Step 12（学習履歴 v2 と同時）で対応する。
+
+### Step 3（2026-09-01）
+
+- `engine-abi/lib.rs`: ファイル存在だけで backend を決めていた `detect_best_installed_backend` を廃止し、`load_with_selection`（ロード処理を注入できる純粋な選択ロジック）に置き換えた。`auto` は `cuda` → `vulkan` → `cpu` の順に実ロードを試み、失敗理由を WARN（`backend::auto: <backend> failed: ...; trying next`）で残して次へ進む。全て失敗した場合は `all backends failed (auto): cuda: ...; vulkan: ...; cpu: ...` を返す。採用時は `Selected backend (auto|explicit): <backend> path=<dll>` を INFO で出す。
+- 明示指定（`cuda` / `vulkan` / `cpu`）は fallback せず、DLL が無い・ロードできない場合はエラー（`backend <b> (explicit, no fallback) failed`）。従来の「ファイルが無ければ cpu」の暗黙 fallback は廃止（CHANGELOG の Changed に明記）。
+- `from_dll` のロード失敗メッセージに、`ERROR_MOD_NOT_FOUND`（126）の場合だけ「依存 DLL が見つからない（CUDA ランタイム）」のヒントを付加。
+- `CHANGELOG.md` に `[Unreleased]` を追加（Issue #2 / #9 / #1 の Fixed、明示指定の Changed）。`README.md` に CUDA ランタイムが別途必要な旨を追記（Issue #2 提案 3）。
+- 追加テスト（`backend_selection_tests`、8 件）: CUDA 失敗→Vulkan 成功、CUDA/Vulkan 失敗→CPU 成功、全件失敗の集約エラー、CUDA 成功時に後続を試さない、明示 CUDA 失敗時に Vulkan を試さない、明示 Vulkan は Vulkan だけ、明示指定で DLL 欠落は cpu へ落ちない、DLL パス組み立て。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`git diff --check` OK、`cargo test -p rakukan-engine-abi --lib` 8 件通過。
+- 未実施（実機）: CUDA ランタイム未導入環境で `auto` が Vulkan へ 1 回で切り替わること（host ログの `backend::auto` 行で確認）。
+
+### Step 4（2026-09-01）
+
+- 事前調査: Issue #8 の組み合わせ（0.10.4 host + 2026-08-21 main の DLL）は、git 履歴上 8/9〜8/21 に engine / dict / abi / rpc / host を変更したコミットが無く、ABI も両方 9。辞書コードは同一で、違いは報告者のビルド方法（`cargo build -p rakukan-engine --release --features vulkan` を直接実行）のみ。DLL ログ初期化は 0.9.9 から存在し、通常環境の `rakukan-engine-dll.log` に `rakukan_dict` / `rakukan_engine` の INFO が出ていることを確認済み。Issue 本文は DLL ログファイルに言及しておらず README にも記載が無かった。実機再現は行わず（方針決定 2026-09-01）、再現結果に依存しない診断の欠落だけを実装した。
+- host / DLL の build 識別子: `build-support/git_info.rs`（両 build.rs が `include!`）で `RAKUKAN_GIT_SHA`（短縮 12 桁 + `-dirty`、git 不明なら `unknown`）を埋め込む。engine DLL に任意シンボル `engine_build_info`（JSON: version / git sha / build time / ABI / DLL ログ初期化結果）を追加（ABI 番号は据え置き。無い DLL は `load_sym_opt` で `None`）。
+- host（`engine-abi::from_dll`）: DLL 生成後に `engine DLL loaded: path=... abi=... dll_version=... dll_git=... host_version=... host_git=... dll_log=...` を INFO で記録。`build_mismatch()` が version 不一致、または両方の sha が判明していて不一致なら WARN（`unknown` は警告しない）。DLL ログ初期化が `ok` でなければ WARN。`engine_build_info` の無い古い DLL も WARN。host 起動時に自分の version / git sha を INFO で出す。
+- DLL（`ffi.rs`）: `init_dll_logging` の結果（`ok path=` / `open failed (...)` / `subscriber already set (...)`）を `LOG_STATUS` に保持し `engine_build_info` で返す。
+- TSF（`state.rs`）: 辞書 ready 待ちが 30 秒を超えたら `dict_status`（`failed at [step]: reason` 等）を `rakukan.log` に WARN で 1 回出す（`reset_ready_latches` で再武装）。
+- README にログ 3 種（TSF / host / DLL）を記載。CHANGELOG `[Unreleased]` に Added。
+- 追加テスト: `build_id_tests`（同一ビルド / version 違い / 同 version 別 sha / dirty / unknown / 旧 JSON 互換の 6 件）、`build_info_tests`（1 件）、`dict_wait_tests`（1 件）。
+- 未実施（実機）: 別ビルドの DLL を差し替えたときに host ログへ WARN が出ること、`dict_status` の WARN が 30 秒後に出ること。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`git diff --check` OK、両 build.rs が同じ `RAKUKAN_GIT_SHA`（`3878393b9cd2-dirty`）を出力することを確認。`cargo test --workspace --lib`: dict 33 / engine 166 / abi 14 / rpc 8 / tsf 70、失敗 0（engine は既知の `test_env_override_*` 競合で 1 回失敗、再実行で通過）。
+- 既知の不安定テスト `backend::tests::test_env_override_*` を修正: 3 テストが共有する環境変数 `RAKUKAN_BACKEND` の set / remove を static Mutex（`EnvGuard`）で直列化し、Drop で必ず remove する。Step 1〜4 のテスト実行 4 回中 2 回で発生していた競合を解消（ユーザー指示 2026-09-01）。
+
+### Step 5（2026-09-01）
+
+- `SessionState::LiveConv` に `preview_for`（preview を生成した reading）を追加。`set_live_conv(reading, preview, preview_for)` に変更し、全 8 呼び出しを更新: live timer 適用と Phase1B 適用は `preview_for = reading`、記号追加（LiveConv / BlockSelecting / Selecting からの遷移）と RangeSelect からの復帰は display が読み全体に対応するので `preview_for = 新 reading`、追加入力での継続は最初の BG 変換キーを引き継ぐ（fallback した場合は `new_reading`）。
+- `live_continuation_display(preview_for, preview, reading, new_reading, pending)`: 長さ比（`display_base_len * 5 < new_reading_len * 3`、12 文字以上）を撤去し、「直前の reading と `preview_for` がともに `new_reading` の prefix」なら継続表示、そうでなければ生の読みへ fallback。接尾辞の計算（`strip_prefix`）も関数内に移し、prefix でない場合を `reading_not_prefix` として fallback 対象にした（従来は `unwrap_or(new_reading)` で preview の後ろに読み全体を連結していた）。
+- fallback の WARN に `reason`（`preview_for_not_prefix` / `reading_not_prefix`）、`preview_for`、`reading`、`new_reading`、`preview` を出す。`LIVE_CONTINUATION_GUARD_MIN_READING_LEN` は削除。
+- テスト（`on_input::tests`、8 件）: 8/21 の実例「だいとうりょうからこく」+ 'い' で fallback しない、2 文字目以降の継続、旧テストの英数 12 文字入力を維持、`preview_for` が prefix でない場合の fallback、reading が prefix でない場合の fallback、未確定ローマ字は表示にだけ付く、既存の短い preview 2 件。
+- 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、`cargo test -p rakukan-tsf --lib` 75 件通過。
+- 未実施（実機）: 1 週間運用して `live_continuation_guard event=fallback` が数回/月以下になること、Backspace / 未確定ローマ字 / 連続入力で古い preview が残らないこと。
+- テスト結果（全体）: dict 33 / engine 166 / abi 14 / rpc 8 / tsf 75、失敗 0。
