@@ -10,10 +10,13 @@
 log_level = "info"
 
 # GPU バックエンド: "auto" / "cuda" / "vulkan" / "cpu"
-# "auto"   : インストール済みの DLL から cuda → vulkan → cpu の順で自動選択（デフォルト）
-# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨
+# "auto"   : cuda → vulkan → cpu の順に実際にロードを試み、最初に成功したものを使う（デフォルト）。
+#            CUDA ランタイムが無い環境では cuda の DLL があっても vulkan / cpu へ自動で切り替わる
+# "cuda"   : NVIDIA GPU (CUDA) ← RTX シリーズ推奨。CUDA ランタイムが別途必要
 # "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
+# 明示指定（cuda / vulkan / cpu）はロードに失敗しても他へ fallback しない。
+# 失敗理由は %LOCALAPPDATA%\rakukan\rakukan-engine-host.log に出る
 gpu_backend = "auto"
 
 # GPU に載せるレイヤー数

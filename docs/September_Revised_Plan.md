@@ -949,3 +949,10 @@ cargo make test
 - `repro_context.rs`（`cargo run -p rakukan-engine --example repro_context --release`、jinen-v1-small-q5 が必要）は本 Step の対象パターン（ひらがな汚染）に変更が無いため単体テストで代替した。実行結果は本節末尾に追記する（実行できた場合）。
 - 未実施（実機）: `echo sentence dropped` が数回/日以下になり、needle にカタカナ語が並ばなくなること（1 週間運用）。
 - テスト結果（全体）: dict 33 / engine 169 / abi 14 / rpc 8 / tsf 87、失敗 0。`repro_context.rs` は本環境にモデルディレクトリ（`%LOCALAPPDATA%\rakukan\models`）が無く未実行。
+
+### リリース 0.11.0（2026-09-01）
+
+- Step 1〜8 をまとめて 0.11.0 とした（Step 14 の分割案は採用せず 1 リリース）。`docs/version-update-checklist.md` を作成し、`VERSION` / `Cargo.toml` / `Cargo.lock` / `rakukan_installer.iss` / WinUI `csproj` / `CHANGELOG.md`（`[Unreleased]` → `[0.11.0]`）/ `README.md` を更新。
+- 設計文書の追随: `docs/DESIGN.md`（LiveConv の `preview_for`、候補マージの読み明示と旧 API 廃止、backend 選択の実ロード順次試行、RPC 表、config / keymap のリロード条件、Home / End、ログ 3 種）、`config/config.toml` の `gpu_backend` コメント、`CLAUDE.md`（backend 選択・ログ・バージョン更新手順）、README のキー操作表と設定の目安。
+- 実機確認は Step 1〜8 とも未実施。0.11.0 の配布前に少なくとも Step 1（辞書候補）・Step 2（JIS キー）・Step 3（backend fallback）を確認する。
+- 次の開発開始時に CHANGELOG へ `[Unreleased]` を再作成する。

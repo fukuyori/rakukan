@@ -22,7 +22,7 @@ sudo cargo make install
 ## プロジェクト構成の注意点
 
 - **out-of-process 化済み**: TSF DLL ↔ engine-host (RPC)。GPU リソースは engine-host が管理し、TSF 側は触らない。engine-host が複数起動していても GPU メモリは変換時のみ確保される。
-- **エンジン DLL は 3 variant (`cpu` / `vulkan` / `cuda`)**: `config.toml` の `gpu_backend` で選択。`"auto"` だと順に検出。
+- **エンジン DLL は 3 variant (`cpu` / `vulkan` / `cuda`)**: `config.toml` の `gpu_backend` で選択。`"auto"` は cuda → vulkan → cpu の順に実ロードして最初に成功したものを使う。明示指定は fallback しない。
 - **ユーザー辞書は WinUI 設定が直接管理**: `user_dict.toml` は手動登録専用。engine は読み取りのみ。
 - **学習履歴は別ファイル**: `%APPDATA%\rakukan\learn_history.bin` (bincode)。user_dict とは分離。
 - **設定ファイル**:
@@ -31,3 +31,5 @@ sudo cargo make install
   - `%APPDATA%\rakukan\user_dict.toml` — ユーザー辞書
   - `%APPDATA%\rakukan\learn_history.bin` — 学習履歴
   - `%LOCALAPPDATA%\rakukan\dict\rakukan.dict` — MOZC バイナリ辞書
+- **ログは 3 ファイル**（`%LOCALAPPDATA%\rakukan\`）: `rakukan.log`（TSF）、`rakukan-engine-host.log`（host。backend 選択と host/DLL のビルド一致検査）、`rakukan-engine-dll.log`（engine DLL 内。辞書ロード失敗 `dict load failed at [...]` はここ）。
+- **バージョン変更は `docs/version-update-checklist.md` に従う**。

@@ -1,4 +1,4 @@
-# rakukan v0.10.4
+# rakukan v0.11.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,8 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.10.4 では **語彙外文字（Ψ・€・絵文字など）が変換候補から消える問題を修正**しました。jinen v2 のバイトフォールバックトークンがデコード時に破棄されていたもので、「さいきくすおのさいなん」→「斉木楠雄のΨ難」が正しく出るようになります。
+v0.11.0 は 8月の運用ログと GitHub Issue にもとづく修正をまとめたリリースです。**Space 変換でユーザー辞書・学習履歴が反映されない問題**（Issue #9）、**JIS 配列の半角/全角キー**（Issue #1）、**`gpu_backend = "auto"` で CUDA DLL がロードできない環境の Vulkan / CPU への自動切替**（Issue #2）、**変換中の Home / End の素通し**（Issue #11）を修正し、host / engine DLL の別ビルド検出などの診断ログ（Issue #8）を追加しました。ログ由来では、ライブ変換プレビューのかな表示への巻き戻り、変換済みカタカナ語を含む文が文脈から捨てられる問題、モード切替時の keymap 同期再読込によるキーストールを修正しています。`gpu_backend` を明示指定した場合は他の backend へ fallback しなくなりました（fallback が必要なら `auto`）。
 
+- v0.10.4: **語彙外文字（Ψ・€・絵文字など）が変換候補から消える問題を修正**。jinen v2 のバイトフォールバックトークンがデコード時に破棄されていたもので、「さいきくすおのさいなん」→「斉木楠雄のΨ難」が正しく出るようになった。
 - v0.10.3: **jinen-v2 モデル（Qwen3 ベース）を追加**。`config.toml` の `model_variant` を `jinen-v2-xsmall-q5`（約 28 MB）/ `jinen-v2-small-q5`（約 81 MB）などに書き換えるだけで切り替え可能（f16 variant もあり。デフォルトは v1 のまま）。
 - v0.10.2: **確定テキスト消失を修正**（TS_E_READONLY 時の再試行と表示中テキストのままの確定）、**無駄なバックグラウンド変換を削減**（末尾が未確定ローマ字の間はライブ変換を起動しない）。
 - v0.10.1: **echo strip（context 汚染対策）の誤爆を削減**。エコー源判定を「8 文字以上のかな連続 run」に絞り、除去も該当文のみに限定。ひらがなのみの確定文は最初から文脈に入れない。
@@ -91,6 +92,7 @@ cargo make quick-install
 - `jinen-v2-xsmall-q5` / `jinen-v2-small-q5` は v2 世代（Qwen3 ベース）。プロンプト形式は v1 と共通で、`model_variant` を書き換えるだけで切り替えられる
 - `n_gpu_layers = 0` は CPU のみ
 - 未指定は全レイヤー GPU オフロード
+- `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果は `rakukan-engine-host.log` に出る）
 
 `n_gpu_layers` と `model_variant` は config.toml を編集したあと IME モードを切り替えるだけで即時反映されます（`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます）。
 
@@ -105,6 +107,7 @@ cargo make quick-install
 | ESC | 変換キャンセル |
 | Backspace | 1文字削除 |
 | Left / Right | 分節選択の移動 |
+| Home / End | 変換中は IME が受け取り、アプリ側のキャレットを動かさない（範囲指定中は選択範囲を先頭 / 末尾へ） |
 | Shift+Left / Shift+Right | 分節選択の縮小 / 拡張 |
 | ↑ / ↓ | 候補を前後に移動 |
 | 1〜9 | 候補を番号で選択 |

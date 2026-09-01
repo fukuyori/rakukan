@@ -1,4 +1,10 @@
 #![allow(non_snake_case, clippy::missing_safety_doc, unsafe_op_in_unsafe_fn)]
+// cdylib のリンク時に link.exe が stdout へ出す情報行（「ライブラリ ... を作成中」=
+// インポートライブラリ作成の通知）を rustc の linker_messages lint が warning として
+// 表示する。リンカ側では抑止できず、動作にも影響しないため crate 単位で allow する。
+// 実際のリンカ警告（COM エントリポイントの LNK4104）は build.rs の /IGNORE:4104 で
+// 個別に抑止しており、リンクエラーは従来どおりビルド失敗になる。
+#![allow(linker_messages)]
 
 #[macro_use]
 mod macros;

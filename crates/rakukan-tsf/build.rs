@@ -55,4 +55,14 @@ fn main() {
 
     // ICO を DLL リソースとして埋め込む
     embed_resource::compile("rakukan.rc", embed_resource::NONE);
+
+    // LNK4104 の抑止。rustc は cdylib の `#[no_mangle] extern "C"` を .def に列挙して
+    // リンクするが、link.exe は COM の予約エントリポイント（DllCanUnloadNow /
+    // DllGetClassObject / DllRegisterServer / DllUnregisterServer）が .def にあると
+    // 「エクスポートは PRIVATE になります」（LNK4104）を出す。DLL からのエクスポート自体は
+    // 行われ、インポートライブラリ（.lib）に載らないだけなので動作には影響しない。
+    // rustc の linker_messages lint がこれを警告として表示するため、リンカ側で抑止する。
+    if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
+        println!("cargo:rustc-cdylib-link-arg=/IGNORE:4104");
+    }
 }

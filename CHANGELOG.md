@@ -3,7 +3,7 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
-## [Unreleased]
+## [0.11.0] - 2026-09-01
 
 ### Fixed
 

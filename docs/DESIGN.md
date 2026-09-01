@@ -189,8 +189,11 @@ Preedit { text }          ─ ひらがな入力中
   │ BG タイマー発火
   ▼
 LiveConv {                ─ ライブ変換表示中
-  reading, preview          preview = 辞書/学習/LLM をマージしたトップ候補
-}
+  reading, preview,         preview = 辞書/学習/LLM をマージしたトップ候補
+  preview_for               preview を生成した reading。追加入力での継続表示
+}                           （preview + かな接尾辞）は、preview_for と直前の reading が
+                            ともに現在の reading の prefix のときだけ行い、
+                            そうでなければ生の読みへ戻す（v0.11.0）
   │ Space（Convert）
   ▼
 Waiting { text, pos }     ─ LLM 変換中（⏳ 表示）
@@ -392,10 +395,10 @@ State::Idle
 `bg_take_candidates(key)` でキーが一致する Done 結果を取り出す。  
 キーが不一致（変換途中に入力が変わった）の場合は `None` を返す。
 
-### 5.5 候補マージ（merge_candidates）
+### 5.5 候補マージ（merge_candidates_for_reading）
 
 ```
-merge_candidates(llm_cands, limit)
+merge_candidates_for_reading(reading, llm_cands, limit)
   │
   ├─ ユーザー辞書候補（lookup_user）       最優先
   ├─ 学習履歴候補（learn_history）
@@ -405,10 +408,14 @@ merge_candidates(llm_cands, limit)
   重複除去して返却（先着順）
 ```
 
-`merge_candidates(llm_cands, limit)` は engine が保持している現在の `hiragana_buf` を読みとして使う。
-ライブ変換 preview や TSF 側の即時辞書候補では、呼び出し時点の読みを明示する
-`merge_candidates_for_reading(reading, llm_cands, limit)` を使う。これにより、`かっことじ`
-→ `』` のようなユーザー辞書候補を、LLM 結果がまだ無い段階でも preview に反映できる。
+TSF / host からは常に `merge_candidates_for_reading(reading, llm_cands, limit)` で読みを明示する。
+`reading` は「実際に候補が取れたキー」（`bg_take_candidates` が成功した `hiragana_text()` または
+preedit、同期 fallback では現在の `hiragana_text()`）で、weak merge 判定・同期 fallback まで
+同じ値を使う。engine 内部の `hiragana_buf` を読みとして使う旧 `merge_candidates()` は、
+ホストを複数アプリで共有する構成で別の読みで辞書を引いてユーザー辞書・学習履歴が落ちる
+（Issue #9）ため v0.11.0 で RPC / host から削除した（engine DLL の ABI シンボルとエンジン内の
+テストにだけ残る）。これにより `かっことじ` → `』` のようなユーザー辞書候補を、LLM 結果が
+まだ無い段階でも preview や Space 変換に反映できる。
 
 ### 5.6 コンテキスト管理（committed）
 
@@ -434,7 +441,8 @@ TSF DLL 側は `rakukan-engine-rpc` 経由で Named Pipe ごしに呼び出す�
 | プリエディット | `preedit_display`, `preedit_is_empty`, `hiragana_text` | 表示用テキスト取得 |
 | BG 変換 | `bg_start`, `bg_status`, `bg_take_candidates`, `bg_reclaim`, `bg_wait_ms` | 非同期変換制御 |
 | 確定 | `commit`, `reset_preedit`, `force_preedit`, `reset_all` | 状態リセット |
-| 辞書 | `merge_candidates` | 辞書＋LLM 候補マージ |
+| 辞書 | `merge_candidates_for_reading` | 辞書＋LLM 候補マージ（読みを明示。旧 `merge_candidates` は host から呼ばない） |
+| 診断 | `build_info`（任意シンボル `engine_build_info`） | version / git sha / ビルド時刻 / ABI / DLL 内ログ初期化結果。host が起動時に自分の識別子と突き合わせ、別ビルドなら WARN（Issue #8） |
 | 初期化 | `start_load_model`, `start_load_dict`, `is_kanji_ready`, `is_dict_ready` | 非同期ロード |
 | 学習 | `learn` | 学習履歴 (`learn_history.bin`) への記録。MOZC/ユーザー辞書由来 surface のみ対象 |
 
@@ -443,11 +451,17 @@ TSF DLL 側は `rakukan-engine-rpc` 経由で Named Pipe ごしに呼び出す�
 ```text
 load_auto(dir, config_json)
   │
-  ├─ config_json の gpu_backend キー
-  └─ デフォルト: cpu
-  
-  → rakukan_engine_{cuda|vulkan|cpu}.dll をロード
+  ├─ config.toml の gpu_backend が cuda / vulkan / cpu（明示指定）
+  │    → その DLL だけをロード。失敗しても他の backend へ fallback しない
+  └─ 未指定 / "auto"
+       → cuda → vulkan → cpu の順に「実際にロード」を試み、最初に成功したものを採用
+         失敗理由は WARN（backend::auto: <b> failed: ...; trying next）
+         全て失敗したら各 backend の理由をまとめたエラー
 ```
+
+v0.11.0 まではファイルの有無だけで backend を決めていたため、CUDA ランタイム未導入の環境で
+`rakukan_engine_cuda.dll` が存在するとロード失敗のまま先へ進めず IME が無反応になった（Issue #2）。
+`LoadLibrary` が `ERROR_MOD_NOT_FOUND`（126）で失敗した場合は依存 DLL 不足のヒントを付ける。
 
 ---
 
@@ -489,7 +503,7 @@ RpcEngine (client)                          serve() (server)
 | `Reload { config_json }` | 既存 DynEngine を drop して新 config で再生成 |
 | `PushChar(u32) / Backspace / ResetAll / ...` | 入力操作 |
 | `BgStart / BgWaitMs / BgTakeCandidates / ...` | BG 変換 |
-| `MergeCandidates / MergeCandidatesForReading` | 候補マージ。後者は TSF 側が reading を明示する |
+| `MergeCandidatesForReading` | 候補マージ。TSF 側が reading を明示する（旧 `MergeCandidates` は `_ReservedMergeCandidates` としてスロットのみ残し、host は Error を返す） |
 | `ConvertSync / SegmentSurface / ...` | 同期変換 |
 | `Bye` | クライアント切断宣言 |
 
@@ -535,12 +549,12 @@ IME モード切替時の `engine_reload()` は以下のように動作する:
 ### config.toml
 
 配置先: `%APPDATA%\rakukan\config.toml`  
-リロードタイミング: IME モード切り替え時（`reload_on_mode_switch = true` の場合）
+リロードタイミング: IME モード切り替え時（`reload_on_mode_switch = true` の場合）。mtime が変わっていなければ読まない
 
 ```toml
 [general]
 log_level = "debug"         # error/warn/info/debug/trace
-# gpu_backend = "cuda"      # cuda/vulkan/cpu（未指定=自動検出）
+# gpu_backend = "auto"      # auto（cuda→vulkan→cpu を順に実ロード）/ cuda / vulkan / cpu（明示指定は fallback しない）
 # main_gpu = 0
 # model_variant = "jinen-v1-small-q5"
 # model_variant = "jinen-v1-xsmall-q5"
@@ -567,7 +581,10 @@ warn_on_unknown_key = true
 ### keymap.toml
 
 配置先: `%APPDATA%\rakukan\keymap.toml`  
-リロードタイミング: IME オフ→オン（Activate）時のみ
+リロードタイミング: IME オフ→オン（Activate）時は必ず読み込む。入力モード切替時は
+`keymap.toml` の mtime が変わった場合だけ読み直す（v0.11.0。以前は切替ごとに同期で
+読み直しており、8月ログで最大 931ms のキーストールを起こしていた）。更新・作成は新しい
+keymap、削除は既定 keymap、parse 失敗は直前の keymap を維持する。
 
 ```toml
 preset = "ms-ime-jis"      # ms-ime-jis/ms-ime-us/custom
@@ -579,7 +596,12 @@ action = "mode_hiragana"
 ```
 
 プリセット `MsImeJis` の主要バインド: Space=変換、Henkan=変換、Enter=ひらがな確定、  
-Escape=キャンセル、Muhenkan=CycleKana、Zenkaku=ImeToggle、Hiragana_key=ModeHiragana、etc.
+Escape=キャンセル、Muhenkan=CycleKana、Zenkaku=ImeToggle、Hiragana_key=ModeHiragana、
+Left/Right=CursorLeft/CursorRight、Home/End=CursorHome/CursorEnd、Shift+Left/Right=SegmentShrink/Extend、etc.
+
+Left / Right / Home / End は未確定文字列がある間はアプリへ渡さず IME が消費する（rakukan は
+preedit 内キャレットを持たないので位置は変えない。Home / End は RangeSelect 中のみ選択範囲の
+右端を先頭 / 末尾へ移す。Issue #11）。未確定文字列が無いときはアプリへ渡す。
 
 #### name_to_vk の VK コード対照表
 
@@ -793,8 +815,16 @@ cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名な�
 
 ### ログ確認
 
+| ファイル（`%LOCALAPPDATA%\rakukan\`） | 出所 | 主な内容 |
+|------|------|------|
+| `rakukan.log` | TSF DLL（アプリごとのプロセス） | キー処理、変換経路、`dict not ready after 30s: dict_status=...`（辞書が ready にならない場合） |
+| `rakukan-engine-host.log` | `rakukan-engine-host.exe` | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延 |
+| `rakukan-engine-dll.log` | engine DLL 内の tracing（cdylib は host と subscriber を共有しない） | `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
+
 ```powershell
 Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 30 -Wait
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-host.log" -Tail 30
+Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 ```
 
 ### ビルドパス
