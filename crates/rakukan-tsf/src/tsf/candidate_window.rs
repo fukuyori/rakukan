@@ -68,46 +68,77 @@ const PAGER_HEIGHT_BASE: i32 = 22;
 /// ステータス行の高さ
 const STATUS_HEIGHT_BASE: i32 = 22;
 
-/// 現在のフォント高さ（config.toml の [appearance] candidate_font_height）。
+/// 実効フォント高さの下限。作業領域に収めるために縮小する場合でも、
+/// これ以上は小さくしない（読めなくなるため）。
+const FONT_HEIGHT_MIN: i32 = 9;
+
+/// 設定されたフォント高さ（config.toml の [appearance] candidate_font_height）。
 #[inline]
-fn font_height() -> i32 {
+fn configured_font_height() -> i32 {
     crate::engine::config::candidate_font_height()
 }
 
-/// FONT_HEIGHT_BASE 基準の寸法を現在のフォント高さに合わせて拡大する（四捨五入）。
+/// FONT_HEIGHT_BASE 基準の寸法を、指定のフォント高さに合わせて拡大する（四捨五入）。
 #[inline]
-fn scaled(base: i32) -> i32 {
-    (base * font_height() + FONT_HEIGHT_BASE / 2) / FONT_HEIGHT_BASE
+fn scaled_to(base: i32, font_height: i32) -> i32 {
+    (base * font_height + FONT_HEIGHT_BASE / 2) / FONT_HEIGHT_BASE
 }
 
-#[inline]
-fn padding_x() -> i32 {
-    scaled(PADDING_X_BASE)
+/// 候補ウィンドウ 1 回分のレイアウト寸法。
+///
+/// 設定の再読込はバックグラウンドスレッドからも走る。描画のたびに
+/// `candidate_font_height()` を読むと、既存 HWND の寸法（前回の
+/// `show_with_status()` で決めたもの）と `draw()` が使う寸法が食い違い、
+/// 文字や行がクリップされる。そのため `show_with_status()` の開始時に
+/// ここへスナップショットし、`draw()` / 幅計測 / `window_height()` /
+/// `reposition()` はすべて同じ値を使う。新しい設定は次回の表示から効く。
+#[derive(Clone, Copy)]
+struct Layout {
+    font_height: i32,
+    padding_x: i32,
+    padding_y: i32,
+    item_height: i32,
+    pager_height: i32,
+    status_height: i32,
+    win_width_min: i32,
+    win_width_max: i32,
 }
-#[inline]
-fn padding_y() -> i32 {
-    scaled(PADDING_Y_BASE)
+
+impl Layout {
+    fn with_font_height(font_height: i32) -> Self {
+        Self {
+            font_height,
+            padding_x: scaled_to(PADDING_X_BASE, font_height),
+            padding_y: scaled_to(PADDING_Y_BASE, font_height),
+            item_height: scaled_to(ITEM_HEIGHT_BASE, font_height),
+            pager_height: scaled_to(PAGER_HEIGHT_BASE, font_height),
+            status_height: scaled_to(STATUS_HEIGHT_BASE, font_height),
+            win_width_min: scaled_to(WIN_WIDTH_MIN_BASE, font_height),
+            win_width_max: scaled_to(WIN_WIDTH_MAX_BASE, font_height),
+        }
+    }
+
+    fn window_height(&self, n: usize, has_pager: bool, has_status: bool) -> i32 {
+        let base = self.padding_y * 2 + n as i32 * self.item_height;
+        let with_pager = if has_pager {
+            base + self.pager_height
+        } else {
+            base
+        };
+        if has_status {
+            with_pager + self.status_height
+        } else {
+            with_pager
+        }
+    }
 }
+
+/// 表示中ウィンドウのレイアウト（`show_with_status()` が置いたスナップショット）。
 #[inline]
-fn item_height() -> i32 {
-    scaled(ITEM_HEIGHT_BASE)
+fn layout() -> Layout {
+    TL_LAYOUT.with(|c| c.get())
 }
-#[inline]
-fn pager_height() -> i32 {
-    scaled(PAGER_HEIGHT_BASE)
-}
-#[inline]
-fn status_height() -> i32 {
-    scaled(STATUS_HEIGHT_BASE)
-}
-#[inline]
-fn win_width_min() -> i32 {
-    scaled(WIN_WIDTH_MIN_BASE)
-}
-#[inline]
-fn win_width_max() -> i32 {
-    scaled(WIN_WIDTH_MAX_BASE)
-}
+
 /// キャレット高さの推定値（画面端反転時に使用）
 const CARET_HEIGHT_ESTIMATE: i32 = 24;
 
@@ -128,7 +159,9 @@ thread_local! {
     /// 表示中の候補データ（WM_PAINT コールバックで参照）
     static TL_CAND: RefCell<CandData> = RefCell::new(CandData::default());
     /// 最後に `show_inner` で算出したウィンドウ幅。WM_PAINT でも使う。
-    static TL_WIN_WIDTH: Cell<i32> = Cell::new(win_width_min());
+    static TL_WIN_WIDTH: Cell<i32> = Cell::new(Layout::with_font_height(configured_font_height()).win_width_min);
+    /// 表示中ウィンドウのレイアウト寸法。`show_with_status()` の開始時にのみ更新する。
+    static TL_LAYOUT: Cell<Layout> = Cell::new(Layout::with_font_height(configured_font_height()));
 
     // ─── [Live] ライブ変換セッション状態は `live_session.rs` の LiveConvSession に集約 (M4 Phase 1)。
     // 旧 TL_LIVE_CTX / TL_LIVE_TID / TL_LIVE_DM_PTR は削除済み。
@@ -277,9 +310,10 @@ unsafe extern "system" fn wnd_proc(
 ///
 /// スクリーン DC をソースに CreateCompatibleDC で measuring DC を作成し、
 /// CreateFontW で描画時と同じフォントを選択して GetTextExtentPoint32W で測る。
-/// 描画時に各行は `padding_x() + text_w + padding_x()` の幅が必要。
-/// 結果は `win_width_min()` 〜 `win_width_max()` にクランプする。
+/// 描画時に各行は `lay.padding_x + text_w + lay.padding_x` の幅が必要。
+/// 結果は `lay.win_width_min` 〜 `lay.win_width_max` にクランプする。
 unsafe fn compute_needed_width(
+    lay: &Layout,
     candidates: &[String],
     status_line: Option<&str>,
     page_info: &str,
@@ -287,17 +321,17 @@ unsafe fn compute_needed_width(
     // measuring DC
     let screen_dc = GetDC(HWND::default());
     if screen_dc.is_invalid() {
-        return win_width_min();
+        return lay.win_width_min;
     }
     let mem_dc = CreateCompatibleDC(screen_dc);
     if mem_dc.is_invalid() {
         ReleaseDC(HWND::default(), screen_dc);
-        return win_width_min();
+        return lay.win_width_min;
     }
 
     let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        font_height(),
+        lay.font_height,
         0,
         0,
         0,
@@ -353,13 +387,13 @@ unsafe fn compute_needed_width(
     ReleaseDC(HWND::default(), screen_dc);
 
     // padding + 実測 + padding + スクロールバー的余白（2px）
-    let needed = padding_x() + max_text + padding_x() + 2;
-    needed.clamp(win_width_min(), win_width_max())
+    let needed = lay.padding_x + max_text + lay.padding_x + 2;
+    needed.clamp(lay.win_width_min, lay.win_width_max)
 }
 
 /// 候補ウィンドウの幅を作業領域に収まる範囲へ抑える。
 ///
-/// `candidate_font_height` を大きくすると `win_width_min()` / `win_width_max()` も
+/// `candidate_font_height` を大きくすると `lay.win_width_min` / `lay.win_width_max` も
 /// 比例して広がる（72px 指定だと下限 1101px / 上限 3812px）。狭いモニタでは
 /// これがそのまま画面外にはみ出すため、モニタ幅を最終的な上限として被せる。
 unsafe fn clamp_width_to_work_area(x: i32, caret_bottom: i32, win_w: i32) -> i32 {
@@ -407,6 +441,8 @@ unsafe fn calc_window_x(x: i32, caret_bottom: i32, win_w: i32) -> i32 {
 }
 
 unsafe fn draw(hdc: HDC) {
+    // 寸法は show_with_status() が置いたスナップショットを使う（設定を直接読まない）
+    let lay = layout();
     let data = TL_CAND.with(|c| c.borrow().clone());
     if data.candidates.is_empty() {
         return;
@@ -414,7 +450,7 @@ unsafe fn draw(hdc: HDC) {
     let n = data.candidates.len();
     let has_pager = !data.page_info.is_empty();
     let has_status = data.status_line.is_some();
-    let win_h = window_height(n, has_pager, has_status);
+    let win_h = lay.window_height(n, has_pager, has_status);
     let win_width = TL_WIN_WIDTH.with(|c| c.get());
 
     // 背景を白で塗りつぶし
@@ -431,7 +467,7 @@ unsafe fn draw(hdc: HDC) {
     // フォント
     let face: Vec<u16> = "Meiryo UI\0".encode_utf16().collect();
     let font = CreateFontW(
-        font_height(),
+        lay.font_height,
         0,
         0,
         0,
@@ -459,50 +495,55 @@ unsafe fn draw(hdc: HDC) {
         if let Some(ref s) = data.status_line {
             let row = RECT {
                 left: 0,
-                top: padding_y(),
+                top: lay.padding_y,
                 right: win_width,
-                bottom: padding_y() + status_height(),
+                bottom: lay.padding_y + lay.status_height,
             };
             FillRect(hdc, &row, status_brush);
             SetTextColor(hdc, COLORREF(0x00_88_88_88));
             let text_w: Vec<u16> = s.encode_utf16().collect();
             let _ = TextOutW(
                 hdc,
-                padding_x(),
-                padding_y() + (status_height() - font_height()) / 2,
+                lay.padding_x,
+                lay.padding_y + (lay.status_height - lay.font_height) / 2,
                 &text_w,
             );
         }
-        status_height()
+        lay.status_height
     } else {
         0
     };
 
     // 候補行
     for (i, cand) in data.candidates.iter().enumerate() {
-        let y = padding_y() + status_offset + i as i32 * item_height();
+        let y = lay.padding_y + status_offset + i as i32 * lay.item_height;
         let row = RECT {
             left: 0,
             top: y,
             right: win_width,
-            bottom: y + item_height(),
+            bottom: y + lay.item_height,
         };
         let is_sel = i == data.selected;
         FillRect(hdc, &row, if is_sel { sel_brush } else { wht_brush });
         SetTextColor(hdc, if is_sel { COLOR_SEL_FG } else { COLOR_FG });
         let text = format!("{} {}", i + 1, cand);
         let text_w: Vec<u16> = text.encode_utf16().collect();
-        let _ = TextOutW(hdc, padding_x(), y + (item_height() - font_height()) / 2, &text_w);
+        let _ = TextOutW(
+            hdc,
+            lay.padding_x,
+            y + (lay.item_height - lay.font_height) / 2,
+            &text_w,
+        );
     }
 
     // ページインジケーター行（複数ページがある場合のみ）
     if has_pager {
-        let y = padding_y() + status_offset + n as i32 * item_height();
+        let y = lay.padding_y + status_offset + n as i32 * lay.item_height;
         let row = RECT {
             left: 0,
             top: y,
             right: win_width,
-            bottom: y + pager_height(),
+            bottom: y + lay.pager_height,
         };
         FillRect(hdc, &row, pager_brush);
         let _ = windows::Win32::Graphics::Gdi::MoveToEx(hdc, 0, y, None);
@@ -512,8 +553,8 @@ unsafe fn draw(hdc: HDC) {
         let pager_w: Vec<u16> = pager_text.encode_utf16().collect();
         let _ = TextOutW(
             hdc,
-            padding_x(),
-            y + (pager_height() - font_height()) / 2,
+            lay.padding_x,
+            y + (lay.pager_height - lay.font_height) / 2,
             &pager_w,
         );
     }
@@ -526,15 +567,76 @@ unsafe fn draw(hdc: HDC) {
     let _ = DeleteObject(font);
 }
 
-#[inline]
-fn window_height(n: usize, has_pager: bool, has_status: bool) -> i32 {
-    let base = padding_y() * 2 + n as i32 * item_height();
-    let with_pager = if has_pager { base + pager_height() } else { base };
-    if has_status {
-        with_pager + status_height()
-    } else {
-        with_pager
+/// 作業領域の高さ `work_h` に収まる最大のフォント高さを返す（`configured` を超えない）。
+///
+/// `Layout::window_height()` はフォント高さに対して単調増加なので、設定値から
+/// 1px ずつ下げて最初に収まった値を採る。候補数は最大 9 件、フォント高さも
+/// 高々数十なので線形探索で十分。どこまで下げても収まらない場合は
+/// `FONT_HEIGHT_MIN` を返す（読めない大きさにはしない）。
+fn fit_font_height(
+    configured: i32,
+    work_h: i32,
+    n: usize,
+    has_pager: bool,
+    has_status: bool,
+) -> i32 {
+    if work_h <= 0 {
+        return configured;
     }
+    let mut fh = configured;
+    while fh > FONT_HEIGHT_MIN {
+        if Layout::with_font_height(fh).window_height(n, has_pager, has_status) <= work_h {
+            return fh;
+        }
+        fh -= 1;
+    }
+    FONT_HEIGHT_MIN
+}
+
+/// 設定されたフォント高さのまま作業領域の高さに収まるかを見て、収まらなければ
+/// 収まる最大のフォント高さまで落としたレイアウトを返す。
+///
+/// `candidate_font_height = 72` で候補 9 件 + status + pager だと高さは約 1,210px に
+/// なる。横幅は `clamp_width_to_work_area` が抑えるが、縦は誰も見ていなかったため
+/// 画面外へ出ていた。`window_height()` はフォント高さに対して単調増加なので、
+/// 設定値から 1px ずつ下げて最初に収まった値を採る（下限 `FONT_HEIGHT_MIN`）。
+unsafe fn fit_layout_to_work_area(
+    x: i32,
+    caret_bottom: i32,
+    n: usize,
+    has_pager: bool,
+    has_status: bool,
+) -> Layout {
+    let configured = configured_font_height();
+    let lay = Layout::with_font_height(configured);
+
+    let pt = POINT { x, y: caret_bottom };
+    let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+    let mut mi = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(hmon, &mut mi).as_bool() {
+        return lay;
+    }
+    let work_h = mi.rcWork.bottom - mi.rcWork.top;
+    let effective = fit_font_height(configured, work_h, n, has_pager, has_status);
+    if effective == configured {
+        return lay;
+    }
+
+    let fitted = Layout::with_font_height(effective);
+    tracing::debug!(
+        "candwin::shrink_font: configured={} effective={} n={} has_pager={} has_status={} work_h={} win_h={}",
+        configured,
+        fitted.font_height,
+        n,
+        has_pager,
+        has_status,
+        work_h,
+        fitted.window_height(n, has_pager, has_status)
+    );
+    fitted
 }
 
 // ─── 公開 API ────────────────────────────────────────────────────────────────
@@ -576,11 +678,18 @@ pub fn show_with_status(
     });
 
     let n = page_candidates.len();
-    let win_h = window_height(n, has_pager, has_status);
+
+    // ここでレイアウトを 1 回だけ確定させ、以降の描画・幅計測・再配置は
+    // すべてこのスナップショットを使う。表示中に設定が変わっても寸法は
+    // 混ざらず、新しい設定は次回の show_with_status() から効く。
+    let lay = unsafe { fit_layout_to_work_area(x, y, n, has_pager, has_status) };
+    TL_LAYOUT.with(|c| c.set(lay));
+
+    let win_h = lay.window_height(n, has_pager, has_status);
 
     // 最長候補 / status 行に合わせてウィンドウ幅を動的に算出する。
     // GDI で実測するので Meiryo UI の実字幅で正確。
-    let win_width = unsafe { compute_needed_width(page_candidates, status_line, page_info) };
+    let win_width = unsafe { compute_needed_width(&lay, page_candidates, status_line, page_info) };
     let win_width = unsafe { clamp_width_to_work_area(x, y, win_width) };
     TL_WIN_WIDTH.with(|c| c.set(win_width));
 
@@ -668,6 +777,8 @@ unsafe fn calc_window_y(x: i32, caret_bottom: i32, win_h: i32) -> i32 {
 /// BlockSelecting でブロックを確定した際に、候補ウィンドウを次ブロックの
 /// 直下へ追従させるために使用する。ウィンドウが非表示の場合は何もしない。
 pub fn reposition(x: i32, y: i32) {
+    // 表示中の寸法を変えないため、設定ではなくスナップショットを使う
+    let lay = layout();
     let hwnd = get_hwnd();
     if !is_valid(hwnd) {
         return;
@@ -683,12 +794,20 @@ pub fn reposition(x: i32, y: i32) {
     if n == 0 {
         return;
     }
-    let win_h = window_height(n, has_pager, has_status);
+    let win_h = lay.window_height(n, has_pager, has_status);
     let win_w = TL_WIN_WIDTH.with(|c| c.get());
     let win_y = unsafe { calc_window_y(x, y, win_h) };
     let win_x = unsafe { calc_window_x(x, y, win_w) };
     unsafe {
-        let _ = SetWindowPos(hwnd, HWND_TOPMOST, win_x, win_y, win_w, win_h, SWP_NOACTIVATE);
+        let _ = SetWindowPos(
+            hwnd,
+            HWND_TOPMOST,
+            win_x,
+            win_y,
+            win_w,
+            win_h,
+            SWP_NOACTIVATE,
+        );
     }
 }
 
@@ -1915,7 +2034,71 @@ pub fn on_live_timer() {
 
 #[cfg(test)]
 mod tests {
-    use super::guard_preview_shrink;
+    use super::{
+        FONT_HEIGHT_BASE, FONT_HEIGHT_MIN, Layout, fit_font_height, guard_preview_shrink, scaled_to,
+    };
+
+    /// 設定なし（＝既定の 17px）では、これまでの寸法と 1px も変わらないこと。
+    #[test]
+    fn default_font_height_keeps_legacy_metrics() {
+        let lay = Layout::with_font_height(FONT_HEIGHT_BASE);
+        assert_eq!(lay.padding_x, 10);
+        assert_eq!(lay.padding_y, 4);
+        assert_eq!(lay.item_height, 26);
+        assert_eq!(lay.pager_height, 22);
+        assert_eq!(lay.status_height, 22);
+        assert_eq!(lay.win_width_min, 260);
+        assert_eq!(lay.win_width_max, 900);
+    }
+
+    /// 10 / 17 / 24 / 72 の scale 計算（四捨五入込み）。
+    #[test]
+    fn scale_calculation_for_representative_font_heights() {
+        // item_height 26 を基準に: 26*fh/17 の四捨五入
+        assert_eq!(scaled_to(26, 10), 15); // 15.29
+        assert_eq!(scaled_to(26, 17), 26);
+        assert_eq!(scaled_to(26, 24), 37); // 36.7
+        assert_eq!(scaled_to(26, 72), 110); // 110.1
+        // 幅の下限 260 も同じ比率で伸びる
+        assert_eq!(scaled_to(260, 72), 1101);
+    }
+
+    /// 候補9件 + status + pager が一般的な作業領域へ縦に収まること。
+    #[test]
+    fn nine_candidates_with_status_and_pager_fit_work_area() {
+        const WORK_H: i32 = 1040; // 1080p からタスクバーを引いた程度
+        // 設定値そのままでは収まらないことを先に確認（72px なら約 1,210px）
+        assert!(Layout::with_font_height(72).window_height(9, true, true) > WORK_H);
+
+        let fh = fit_font_height(72, WORK_H, 9, true, true);
+        assert!(fh < 72, "縮小されるはず: fh={fh}");
+        assert!(fh >= FONT_HEIGHT_MIN);
+        assert!(Layout::with_font_height(fh).window_height(9, true, true) <= WORK_H);
+        // 1px 上は収まらない＝収まる最大値を採っている
+        assert!(Layout::with_font_height(fh + 1).window_height(9, true, true) > WORK_H);
+    }
+
+    /// 収まるなら設定値を一切変えないこと。
+    #[test]
+    fn fit_font_height_is_identity_when_it_already_fits() {
+        assert_eq!(fit_font_height(17, 1040, 9, true, true), 17);
+        assert_eq!(fit_font_height(24, 1040, 9, true, true), 24);
+        // status / pager が無ければさらに余裕がある
+        assert_eq!(fit_font_height(17, 1040, 9, false, false), 17);
+    }
+
+    /// 作業領域が極端に低くても下限を下回らないこと。
+    #[test]
+    fn fit_font_height_never_goes_below_floor() {
+        assert_eq!(fit_font_height(72, 40, 9, true, true), FONT_HEIGHT_MIN);
+    }
+
+    /// モニター情報が取れない（work_h が 0 以下）ときは設定値のまま。
+    #[test]
+    fn fit_font_height_keeps_configured_without_monitor_info() {
+        assert_eq!(fit_font_height(72, 0, 9, true, true), 72);
+        assert_eq!(fit_font_height(72, -1, 9, true, true), 72);
+    }
 
     #[test]
     fn guard_preview_shrink_keeps_short_symbol_candidate() {
