@@ -1242,6 +1242,12 @@ pub enum SessionState {
     LiveConv {
         reading: String,
         preview: String,
+        /// `preview` を生成したときの reading（BG 変換のキー）。
+        ///
+        /// 追加入力での継続表示（preview + かな接尾辞）が正当かどうかは
+        /// 「`preview_for` が現在の reading の prefix か」で判定する
+        /// （長さ比の代理指標は正常な漢字圧縮で誤発動していた。8月ログ 160 回/月）。
+        preview_for: String,
     },
 }
 
@@ -1598,9 +1604,15 @@ impl SessionState {
     }
 
     /// ライブ変換表示状態へ遷移。
-    /// `reading` = hiragana_buf（変換キー）、`preview` = BG トップ候補。
-    pub fn set_live_conv(&mut self, reading: String, preview: String) {
-        *self = SessionState::LiveConv { reading, preview };
+    /// `reading` = hiragana_buf（変換キー）、`preview` = BG トップ候補（継続表示では
+    /// preview + かな接尾辞）、`preview_for` = その preview を生成した reading。
+    /// preview が reading 全体に対応する場合は `preview_for == reading` を渡す。
+    pub fn set_live_conv(&mut self, reading: String, preview: String, preview_for: String) {
+        *self = SessionState::LiveConv {
+            reading,
+            preview,
+            preview_for,
+        };
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
     }
 
@@ -1610,8 +1622,20 @@ impl SessionState {
 
     /// LiveConv の (reading, preview) を返す。
     pub fn live_conv_parts(&self) -> Option<(&str, &str)> {
-        if let SessionState::LiveConv { reading, preview } = self {
+        if let SessionState::LiveConv {
+            reading, preview, ..
+        } = self
+        {
             Some((reading.as_str(), preview.as_str()))
+        } else {
+            None
+        }
+    }
+
+    /// LiveConv の preview を生成した reading（`preview_for`）を返す。
+    pub fn live_conv_preview_for(&self) -> Option<&str> {
+        if let SessionState::LiveConv { preview_for, .. } = self {
+            Some(preview_for.as_str())
         } else {
             None
         }
@@ -2496,6 +2520,7 @@ mod tests {
         let mut live = SessionState::LiveConv {
             reading: "よみ".to_string(),
             preview: "読み".to_string(),
+            preview_for: "よみ".to_string(),
         };
         live.sync_preedit_reading("あいう");
         assert!(matches!(&live, SessionState::LiveConv { reading, .. } if reading == "よみ"));

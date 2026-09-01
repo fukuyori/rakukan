@@ -653,7 +653,8 @@ impl super::TextServiceFactory_Impl {
                 .unwrap_or_default();
             engine.push_raw(symbol);
             let display = format!("{preview}{symbol}");
-            sess.set_live_conv(format!("{reading}{symbol}"), display.clone());
+            let next_reading = format!("{reading}{symbol}");
+            sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
             update_composition(ctx, tid, sink, display)?;
@@ -666,7 +667,8 @@ impl super::TextServiceFactory_Impl {
             engine.force_preedit(full_reading.clone());
             engine.push_raw(symbol);
             let display = format!("{full_text}{symbol}");
-            sess.set_live_conv(format!("{full_reading}{symbol}"), display.clone());
+            let next_reading = format!("{full_reading}{symbol}");
+            sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
             update_composition(ctx, tid, sink, display)?;
@@ -691,7 +693,7 @@ impl super::TextServiceFactory_Impl {
             let display = format!("{prefix}{text}{symbol}{remainder}");
             let next_reading = format!("{prefix_reading}{reading}{symbol}{remainder_reading}");
             engine.force_preedit(next_reading.clone());
-            sess.set_live_conv(next_reading, display.clone());
+            sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
             update_composition(ctx, tid, sink, display)?;

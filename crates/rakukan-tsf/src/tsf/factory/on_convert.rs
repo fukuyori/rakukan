@@ -1755,7 +1755,7 @@ impl super::TextServiceFactory_Impl {
                 {
                     let reading = full_reading.clone();
                     let preview = original_preview.clone();
-                    sess.set_live_conv(reading, preview.clone());
+                    sess.set_live_conv(reading.clone(), preview.clone(), reading);
                     drop(sess);
                     candidate_window::hide();
                     drop(guard);
@@ -1865,7 +1865,7 @@ impl super::TextServiceFactory_Impl {
                 {
                     let reading = full_reading.clone();
                     let preview = original_preview.clone();
-                    sess.set_live_conv(reading, preview.clone());
+                    sess.set_live_conv(reading.clone(), preview.clone(), reading);
                     drop(sess);
                     candidate_window::hide();
                     drop(guard);

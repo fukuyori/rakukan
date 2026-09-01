@@ -1723,7 +1723,11 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
     let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
     if result.is_ok() && applied.load(std::sync::atomic::Ordering::Acquire) {
         if let Ok(mut sess) = crate::engine::state::session_get() {
-            sess.set_live_conv(snapshot.reading.clone(), snapshot.preview.clone());
+            sess.set_live_conv(
+                snapshot.reading.clone(),
+                snapshot.preview.clone(),
+                snapshot.reading.clone(),
+            );
         }
         if snapshot.keep_timer_running {
             tracing::debug!("[Live] Phase1A: keeping timer for pending BG merge");

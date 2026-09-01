@@ -49,8 +49,15 @@ impl super::TextServiceFactory_Impl {
                         llm_pending,
                         candidates.len()
                     ),
-                    SessionState::LiveConv { reading, preview } => {
-                        format!("LiveConv(r={:?} p={:?})", reading, preview)
+                    SessionState::LiveConv {
+                        reading,
+                        preview,
+                        preview_for,
+                    } => {
+                        format!(
+                            "LiveConv(r={:?} p={:?} for={:?})",
+                            reading, preview, preview_for
+                        )
                     }
                     SessionState::RangeSelect {
                         full_reading,
@@ -154,7 +161,7 @@ impl super::TextServiceFactory_Impl {
                                 pending
                             );
                             if let Ok(mut sess) = session_get() {
-                                sess.set_live_conv(reading, preview.clone());
+                                sess.set_live_conv(reading.clone(), preview.clone(), reading);
                             }
                             // engine の borrow はここで終わり（以降 engine を使わない）
                             drop(guard);

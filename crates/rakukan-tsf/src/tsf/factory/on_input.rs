@@ -19,37 +19,50 @@ use super::{
     update_composition,
 };
 
-const LIVE_CONTINUATION_GUARD_MIN_READING_LEN: usize = 12;
-
+/// LiveConv 中の追加入力で表示する文字列を決める。
+///
+/// 戻り値は `(display_hira, display_shown)`:
+/// - `display_hira`: 次の LiveConv に保持する表示ベース（preview + かな接尾辞）
+/// - `display_shown`: composition に出す文字列（display_hira + 未確定ローマ字）
+///
+/// 継続表示（preview を残して接尾辞だけ足す）が正当なのは、preview を生成した
+/// `preview_for` と直前の `reading` がともに `new_reading` の prefix である場合だけ。
+/// どちらかが prefix でなければ preview は現在の読みに対応しないので、生の読みへ
+/// フォールバックする。以前の「表示が読みの 60% 未満なら fallback」という長さ比は、
+/// 「だいとうりょうからこく」→「大統領から酷」のような正常な漢字圧縮で誤発動していた
+/// （8月ログ 160 回/月）ため撤去した。
 fn live_continuation_display(
-    reading: &str,
+    preview_for: &str,
     preview: &str,
+    reading: &str,
     new_reading: &str,
-    suffix: &str,
     pending: &str,
 ) -> (String, String) {
-    let display_base = format!("{preview}{suffix}");
-    let display_shown = format!("{display_base}{pending}");
-
-    let new_reading_len = new_reading.chars().count();
-    let display_base_len = display_base.chars().count();
-    if !suffix.is_empty()
-        && new_reading_len >= LIVE_CONTINUATION_GUARD_MIN_READING_LEN
-        && display_base_len * 5 < new_reading_len * 3
-    {
-        tracing::warn!(
-            "live_continuation_guard event=fallback old_reading_len={} new_reading_len={} preview_len={} suffix_len={} pending_len={} display_base_len={}",
-            reading.chars().count(),
-            new_reading_len,
-            preview.chars().count(),
-            suffix.chars().count(),
-            pending.chars().count(),
-            display_base_len
-        );
-        let shown = format!("{new_reading}{pending}");
-        (new_reading.to_string(), shown)
-    } else {
-        (display_base, display_shown)
+    let suffix = new_reading.strip_prefix(reading);
+    let consistent = suffix.is_some() && new_reading.starts_with(preview_for);
+    match suffix {
+        Some(suffix) if consistent => {
+            let display_base = format!("{preview}{suffix}");
+            let display_shown = format!("{display_base}{pending}");
+            (display_base, display_shown)
+        }
+        _ => {
+            tracing::warn!(
+                "live_continuation_guard event=fallback reason={} preview_for={:?} reading={:?} new_reading={:?} preview={:?} pending_len={}",
+                if suffix.is_none() {
+                    "reading_not_prefix"
+                } else {
+                    "preview_for_not_prefix"
+                },
+                preview_for,
+                reading,
+                new_reading,
+                preview,
+                pending.chars().count()
+            );
+            let shown = format!("{new_reading}{pending}");
+            (new_reading.to_string(), shown)
+        }
     }
 }
 
@@ -58,18 +71,81 @@ mod tests {
     use super::live_continuation_display;
 
     #[test]
-    fn live_continuation_falls_back_when_long_display_gets_too_short() {
-        let (display_hira, display_shown) =
-            live_continuation_display("abcdefghijkl", "ABC", "abcdefghijklm", "m", "");
+    fn live_continuation_keeps_compact_kanji_preview_on_long_reading() {
+        // 8月21日の実例: 11 文字の読みが 6 文字に圧縮された正常な preview。
+        // 旧ガード（表示 7 文字 × 5 < 読み 12 文字 × 3）は fallback していた。
+        let (display_hira, display_shown) = live_continuation_display(
+            "だいとうりょうからこく",
+            "大統領から酷",
+            "だいとうりょうからこく",
+            "だいとうりょうからこくい",
+            "",
+        );
 
-        assert_eq!(display_hira, "abcdefghijklm");
-        assert_eq!(display_shown, "abcdefghijklm");
+        assert_eq!(display_hira, "大統領から酷い");
+        assert_eq!(display_shown, "大統領から酷い");
+    }
+
+    #[test]
+    fn live_continuation_keeps_preview_across_consecutive_input() {
+        // 2 文字目以降の継続: preview_for は最初の BG 変換キーのまま、
+        // reading / preview は前回の継続結果。
+        let (display_hira, display_shown) = live_continuation_display(
+            "だいとうりょうからこく",
+            "大統領から酷い",
+            "だいとうりょうからこくい",
+            "だいとうりょうからこくいで",
+            "",
+        );
+
+        assert_eq!(display_hira, "大統領から酷いで");
+        assert_eq!(display_shown, "大統領から酷いで");
+    }
+
+    #[test]
+    fn live_continuation_keeps_long_alnum_preview() {
+        // 旧テストの入力（ローマ字 12 文字 → 3 文字）。長さ比では fallback していたが、
+        // preview_for が prefix なら正当な圧縮として維持する。
+        let (display_hira, display_shown) =
+            live_continuation_display("abcdefghijkl", "ABC", "abcdefghijkl", "abcdefghijklm", "");
+
+        assert_eq!(display_hira, "ABCm");
+        assert_eq!(display_shown, "ABCm");
+    }
+
+    #[test]
+    fn live_continuation_falls_back_when_preview_for_is_not_a_prefix() {
+        // preview は「きょうは」向けなのに、現在の読みは「きょうの…」
+        let (display_hira, display_shown) =
+            live_continuation_display("きょうは", "今日は", "きょうの", "きょうのて", "");
+
+        assert_eq!(display_hira, "きょうのて");
+        assert_eq!(display_shown, "きょうのて");
+    }
+
+    #[test]
+    fn live_continuation_falls_back_when_reading_is_not_a_prefix() {
+        // 直前の reading が new_reading の prefix でない（読みが差し替わった）
+        let (display_hira, display_shown) =
+            live_continuation_display("あ", "亜", "あい", "あう", "");
+
+        assert_eq!(display_hira, "あう");
+        assert_eq!(display_shown, "あう");
+    }
+
+    #[test]
+    fn live_continuation_appends_pending_romaji_only_to_shown_text() {
+        // 未確定ローマ字は表示にだけ付き、保持する display_hira には含めない
+        let (display_hira, display_shown) = live_continuation_display("た", "田", "た", "た", "t");
+
+        assert_eq!(display_hira, "田");
+        assert_eq!(display_shown, "田t");
     }
 
     #[test]
     fn live_continuation_keeps_short_compact_preview() {
         let (display_hira, display_shown) =
-            live_continuation_display("かっこ", "『", "かっこと", "と", "");
+            live_continuation_display("かっこ", "『", "かっこ", "かっこと", "");
 
         assert_eq!(display_hira, "『と");
         assert_eq!(display_shown, "『と");
@@ -78,7 +154,7 @@ mod tests {
     #[test]
     fn live_continuation_keeps_reasonable_preview() {
         let (display_hira, display_shown) =
-            live_continuation_display("ろぐを", "ログを", "ろぐをか", "か", "");
+            live_continuation_display("ろぐを", "ログを", "ろぐを", "ろぐをか", "");
 
         assert_eq!(display_hira, "ログをか");
         assert_eq!(display_shown, "ログをか");
@@ -154,6 +230,7 @@ impl super::TextServiceFactory_Impl {
                     .live_conv_parts()
                     .map(|(r, p)| (r.to_string(), p.to_string()))
                     .unwrap_or_default();
+                let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 crate::tsf::live_session::queue_preview_clear();
@@ -164,23 +241,27 @@ impl super::TextServiceFactory_Impl {
                     crate::engine::state::InputCharKind::Char
                 };
                 let (preedit, new_reading, _bg) = engine.input_char(c, kind, None);
-                let suffix = new_reading
-                    .strip_prefix(&reading)
-                    .unwrap_or(new_reading.as_str())
-                    .to_string();
                 let pending = text_util::suffix_after_prefix_or_empty(
                     &preedit,
                     &new_reading,
                     "live_conv input pending",
                 );
                 let (display_hira, display_shown) = live_continuation_display(
-                    &reading,
+                    &preview_for,
                     &preview,
+                    &reading,
                     &new_reading,
-                    &suffix,
                     pending.as_ref(),
                 );
-                sess.set_live_conv(new_reading.clone(), display_hira);
+                // fallback（display_hira == new_reading）した場合は preview が読み全体に
+                // 対応するので preview_for も new_reading にする。継続できた場合は
+                // 最初の BG 変換キーを引き継ぐ。
+                let next_preview_for = if display_hira == new_reading {
+                    new_reading.clone()
+                } else {
+                    preview_for
+                };
+                sess.set_live_conv(new_reading.clone(), display_hira, next_preview_for);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: display_shown.clone(),
@@ -406,19 +487,21 @@ impl super::TextServiceFactory_Impl {
                     .live_conv_parts()
                     .map(|(r, p)| (r.to_string(), p.to_string()))
                     .unwrap_or_default();
+                let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 crate::tsf::live_session::queue_preview_clear();
 
                 engine.push_raw(c);
                 let new_reading = engine.hiragana_text().to_string();
-                let suffix = new_reading
-                    .strip_prefix(&reading)
-                    .unwrap_or(new_reading.as_str())
-                    .to_string();
                 let (display, display_shown) =
-                    live_continuation_display(&reading, &preview, &new_reading, &suffix, "");
-                sess.set_live_conv(new_reading.clone(), display.clone());
+                    live_continuation_display(&preview_for, &preview, &reading, &new_reading, "");
+                let next_preview_for = if display == new_reading {
+                    new_reading.clone()
+                } else {
+                    preview_for
+                };
+                sess.set_live_conv(new_reading.clone(), display.clone(), next_preview_for);
                 let live_ready = crate::engine::state::start_live_bg_if_ready(engine, &new_reading);
                 drop(sess);
                 drop(guard);

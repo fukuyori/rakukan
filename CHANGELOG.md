@@ -9,6 +9,7 @@
 
 - **`gpu_backend = "auto"` で CUDA DLL がロードできない環境でも Vulkan / CPU へ切り替わるようにした**（[Issue #2](https://github.com/fukuyori/rakukan/issues/2)）: 従来は DLL ファイルの有無だけで `cuda` を選び、CUDA ランタイム未導入で `LoadLibrary` が失敗すると次の候補へ進まず、IME 全体が無反応になっていた。`auto` では `cuda` → `vulkan` → `cpu` の順に実際にロードを試み、失敗理由（`ERROR_MOD_NOT_FOUND` の場合は依存 DLL 不足のヒント付き）を `rakukan-engine-host.log` に WARN で残して次へ進む。全て失敗した場合は各 backend の理由をまとめたエラーを返す。
 - **Space 変換でユーザー辞書・学習履歴が反映されない問題を修正**（[Issue #9](https://github.com/fukuyori/rakukan/issues/9)、[PR #10](https://github.com/fukuyori/rakukan/pull/10) を取り込み）: 辞書マージがホスト内部の読みバッファを参照していたため、複数アプリでホストを共有する構成で別の読みで辞書を引くことがあった。すべての経路で「実際に候補が取れた読み」を明示的に渡すようにし、旧 `MergeCandidates` RPC は廃止した。
+- **ライブ変換のプレビューが追加入力でかな表示に巻き戻る問題を修正**（8月ログで 160 回/月）: LiveConv 中の追加入力で「表示が読みの 60% 未満なら生の読みへ戻す」という長さ比のガードが、「だいとうりょうからこく」→「大統領から酷」のような正常な漢字圧縮でも発動していた。LiveConv にプレビューを生成した reading（`preview_for`）を保持し、それと直前の reading がともに現在の読みの prefix である場合だけ継続表示するように判定を置き換えた。fallback 時の WARN には `preview_for` / reading / new_reading を出す。
 - **JIS 配列の半角/全角キーで IME が切り替わらない問題を修正**（[Issue #1](https://github.com/fukuyori/rakukan/issues/1)、[PR #4](https://github.com/fukuyori/rakukan/pull/4) を取り込み）: 環境によって `VK_KANJI`（0x19）ではなく `VK_DBE_SBCSCHAR`（0xF3）/ `VK_DBE_DBCSCHAR`（0xF4）が届くため、keymap 照合前に 0x19 へ正規化する。keymap に `Zenkaku` binding が無い場合の fallback も `OnTestKeyDown` / `OnKeyDown` で同じ集合を使うようにした。
 
 ### Added
