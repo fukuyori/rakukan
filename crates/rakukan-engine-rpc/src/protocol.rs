@@ -15,6 +15,8 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v2: `InputChar` / `InputCharResult` バッチ RPC を追加（0.4.5）
 /// - v3: `ConvertToSegments` / `ResizeSegment` / `SegmentCandidatesFor` を追加（Phase A）
 /// - v4: `MergeCandidatesForReading` を追加
+/// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
+///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
 pub const PROTOCOL_VERSION: u32 = 4;
 
 /// `InputChar` バッチ RPC で指定する入力モード。
@@ -100,7 +102,11 @@ pub enum Request {
     ConvertSync,
     #[deprecated = "removed in ABI v7; do not use"]
     _ReservedConvertSyncSegmented,
-    MergeCandidates {
+    /// 旧 `MergeCandidates`。エンジン内部の hiragana_buf を参照するため、複数アプリで
+    /// ホストを共有する構成では別プロセスの読みで辞書を引くことがあった（Issue #9）。
+    /// `MergeCandidatesForReading` を使う。enum の並びを保つためスロットは残す。
+    #[deprecated = "removed; use MergeCandidatesForReading"]
+    _ReservedMergeCandidates {
         llm_cands: Vec<String>,
         limit: u32,
     },

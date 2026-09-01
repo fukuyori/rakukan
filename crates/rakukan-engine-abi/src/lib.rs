@@ -120,6 +120,9 @@ struct EngineVTable {
 
     // 変換（同期）
     convert_sync: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    /// 旧 API。ABI の並びを保つためシンボルは読み込むが、host からは呼ばない
+    /// （`merge_candidates_for_reading` を使う。Issue #9）。
+    #[allow(dead_code)]
     merge_candidates: unsafe extern "C" fn(*mut c_void, *const c_char, u32) -> *mut c_char,
     merge_candidates_for_reading:
         unsafe extern "C" fn(*mut c_void, *const c_char, *const c_char, u32) -> *mut c_char,
@@ -484,18 +487,6 @@ impl DynEngine {
             let ptr = (self.vtable.convert_sync)(self.handle);
             match self.take_cstr(ptr) {
                 Some(json) => serde_json::from_str(&json).unwrap_or_default(),
-                None => vec![],
-            }
-        }
-    }
-
-    pub fn merge_candidates(&self, llm_cands: Vec<String>, limit: usize) -> Vec<String> {
-        let json = serde_json::to_string(&llm_cands).unwrap_or_else(|_| "[]".into());
-        let cjson = Self::to_cstring(&json);
-        unsafe {
-            let ptr = (self.vtable.merge_candidates)(self.handle, cjson.as_ptr(), limit as u32);
-            match self.take_cstr(ptr) {
-                Some(s) => serde_json::from_str(&s).unwrap_or_default(),
                 None => vec![],
             }
         }

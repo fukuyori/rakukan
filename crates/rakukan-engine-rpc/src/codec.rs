@@ -95,4 +95,24 @@ mod tests {
         let payload = &buf[4..];
         assert_eq!(payload.len(), 1, "Shutdown must stay a 1-byte discriminant");
     }
+
+    fn discriminant(req: &Request) -> u8 {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, req).unwrap();
+        buf[4]
+    }
+
+    /// 廃止した `MergeCandidates` は `_ReservedMergeCandidates` としてスロットを残す。
+    /// 削除してしまうと後続 variant（`MergeCandidatesForReading` 等）の discriminant が
+    /// ずれて、古い host / 新しい TSF の組み合わせで別の要求として解釈される。
+    #[test]
+    #[allow(deprecated)]
+    fn removed_merge_candidates_keeps_its_slot() {
+        let reserved = discriminant(&Request::_ReservedMergeCandidates {
+            llm_cands: vec![],
+            limit: 0,
+        });
+        // ConvertSync, _ReservedConvertSyncSegmented, _ReservedMergeCandidates の並び
+        assert_eq!(reserved, discriminant(&Request::ConvertSync) + 2);
+    }
 }

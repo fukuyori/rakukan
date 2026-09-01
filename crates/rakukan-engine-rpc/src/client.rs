@@ -190,7 +190,10 @@ impl RpcEngine {
             }
             Ok(Response::Bool(false)) => Ok(false),
             Ok(Response::Error(e)) => bail!("shutdown_if_config_differs error: {e}"),
-            Ok(other) => bail!("unexpected shutdown_if_config_differs response: {:?}", other),
+            Ok(other) => bail!(
+                "unexpected shutdown_if_config_differs response: {:?}",
+                other
+            ),
             Err(e) => {
                 // 旧ホスト（variant 未知でデコード失敗→切断）や half-dead ホスト。
                 guard.stream = None;
@@ -338,13 +341,10 @@ impl RpcEngine {
     pub fn convert_sync(&self) -> Vec<String> {
         self.call_strings(Request::ConvertSync).unwrap_or_default()
     }
-    pub fn merge_candidates(&self, llm_cands: Vec<String>, limit: usize) -> Vec<String> {
-        self.call_strings(Request::MergeCandidates {
-            llm_cands,
-            limit: limit as u32,
-        })
-        .unwrap_or_default()
-    }
+    /// 辞書・学習履歴を `reading` で引いて LLM 候補とマージする。
+    ///
+    /// 旧 `merge_candidates()`（ホスト内部の hiragana_buf を参照）は Issue #9 で削除した。
+    /// 呼び出し側は「実際に候補が取れたキー」を必ず渡すこと。
     pub fn merge_candidates_for_reading(
         &self,
         reading: &str,

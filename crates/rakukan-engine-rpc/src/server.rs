@@ -175,7 +175,8 @@ fn request_label(req: &Request) -> &'static str {
         ConvertSync => "ConvertSync",
         #[allow(deprecated)]
         _ReservedConvertSyncSegmented => "_Reserved",
-        MergeCandidates { .. } => "MergeCandidates",
+        #[allow(deprecated)]
+        _ReservedMergeCandidates { .. } => "MergeCandidates(removed)",
         #[allow(deprecated)]
         _ReservedSegmentSurface { .. } => "_Reserved",
         #[allow(deprecated)]
@@ -385,9 +386,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         ConvertSync => Response::Strings(eng.convert_sync()),
         #[allow(deprecated)]
         _ReservedConvertSyncSegmented => Response::Error("removed".into()),
-        MergeCandidates { llm_cands, limit } => {
-            Response::Strings(eng.merge_candidates(llm_cands, limit as usize))
-        }
+        #[allow(deprecated)]
+        _ReservedMergeCandidates { .. } => Response::Error(
+            "MergeCandidates has been removed; use MergeCandidatesForReading".into(),
+        ),
         #[allow(deprecated)]
         _ReservedSegmentSurface { .. } => Response::Error("removed".into()),
         #[allow(deprecated)]

@@ -1044,19 +1044,24 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
     end_composition(ctx, tid, preedit)
 }
 
+/// 同期変換 + 辞書マージ。
+///
+/// - `reading`: 辞書・学習履歴を引くキー（`hiragana_text()` 相当。未確定ローマ字を含まない）
+/// - `preedit`: 候補が 1 件も無いときに返す表示文字列
 fn engine_convert_sync_multi(
     engine: &mut crate::engine::state::DynEngine,
     llm_limit: usize,
     dict_limit: usize,
+    reading: &str,
     preedit: &str,
 ) -> Vec<String> {
     // LLM候補を取得（llm_limit 件）
     let llm_cands: Vec<String> = engine.convert_sync();
     let _ = llm_limit; // DynEngine::convert_sync は num_candidates を内部設定から読む
 
-    // 辞書候補とマージ（dict_limit 件まで）
-    let merged = engine.merge_candidates_for_reading(preedit, llm_cands, dict_limit);
-    tracing::debug!("merge_candidates → {:?}", merged);
+    // 辞書候補とマージ（dict_limit 件まで）。reading を明示的に渡す（Issue #9）。
+    let merged = engine.merge_candidates_for_reading(reading, llm_cands, dict_limit);
+    tracing::debug!("merge_candidates(reading={:?}) → {:?}", reading, merged);
     if merged.is_empty() {
         vec![preedit.to_string()]
     } else {

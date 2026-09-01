@@ -128,6 +128,7 @@ fn engine_convert_sync_multi_fallback(
     engine: &mut crate::engine::state::DynEngine,
     llm_limit: usize,
     dict_limit: usize,
+    reading: &str,
     preedit: &str,
     reason: &'static str,
     convert_start: Instant,
@@ -141,7 +142,7 @@ fn engine_convert_sync_multi_fallback(
         llm_limit,
         dict_limit
     );
-    let candidates = engine_convert_sync_multi(engine, llm_limit, dict_limit, preedit);
+    let candidates = engine_convert_sync_multi(engine, llm_limit, dict_limit, reading, preedit);
     convert_mark(reason, convert_start, convert_last);
     tracing::info!(
         "sync_fallback_probe event=finish reason={} elapsed_us={} candidates={}",
@@ -152,13 +153,34 @@ fn engine_convert_sync_multi_fallback(
     candidates
 }
 
+/// マージ結果が「読みをそのまま返しただけ」で変換候補を含まないかを判定する。
+///
+/// `merge_candidates_for_reading` は候補が無いとき reading 自身で埋めるため、
+/// reading と preedit（表示文字列）のどちらかに一致する 1 件だけなら weak と見なす。
+fn is_weak_merge(merged: &[String], reading: &str, preedit: &str) -> bool {
+    match merged {
+        [] => true,
+        [only] => only == reading || only == preedit,
+        _ => false,
+    }
+}
+
+/// 辞書・学習履歴だけで即時に出せる候補を返す（LLM 完了前の先行表示用）。
+///
+/// 辞書検索の reading は `hiragana_text()`（未確定ローマ字を含まない読み）。
+/// `preedit` は表示文字列で、reading と一致しない場合がある（末尾に未確定
+/// ローマ字がある場合）。merge は reading 自身で埋めることがあるため、
+/// 「変換候補がある」判定は preedit と reading の両方と異なるものに限る。
 fn immediate_dict_candidates(
     engine: &mut crate::engine::state::DynEngine,
     preedit: &str,
     dict_limit: usize,
 ) -> Option<Vec<String>> {
-    let candidates = engine.merge_candidates_for_reading(preedit, vec![], dict_limit);
-    let has_conversion = candidates.iter().any(|candidate| candidate != preedit);
+    let reading = engine.hiragana_text();
+    let candidates = engine.merge_candidates_for_reading(&reading, vec![], dict_limit);
+    let has_conversion = candidates
+        .iter()
+        .any(|candidate| candidate != preedit && candidate != &reading);
     if has_conversion {
         Some(candidates)
     } else {
@@ -720,8 +742,13 @@ impl super::TextServiceFactory_Impl {
                 let caret = caret_rect_get();
                 const AFFIX_DICT_LIMIT: usize = 40;
                 let llm_limit_a = crate::engine::state::get_num_candidates();
-                let candidates =
-                    engine_convert_sync_multi(engine, llm_limit_a, AFFIX_DICT_LIMIT, &target);
+                let candidates = engine_convert_sync_multi(
+                    engine,
+                    llm_limit_a,
+                    AFFIX_DICT_LIMIT,
+                    &target,
+                    &target,
+                );
                 let first = candidates
                     .first()
                     .cloned()
@@ -772,8 +799,13 @@ impl super::TextServiceFactory_Impl {
                 }
                 // engine のプリエディットをこのブロックの読みに差し替えて sync 変換
                 engine.force_preedit(reading.clone());
-                let candidates =
-                    engine_convert_sync_multi(engine, llm_limit_b, BLOCK_DICT_LIMIT, &reading);
+                let candidates = engine_convert_sync_multi(
+                    engine,
+                    llm_limit_b,
+                    BLOCK_DICT_LIMIT,
+                    &reading,
+                    &reading,
+                );
                 blocks.push(ConversionBlock {
                     reading,
                     trailing_punct,
@@ -1188,22 +1220,27 @@ impl super::TextServiceFactory_Impl {
             kanji_ready_now
         );
         // キー不一致で None が返ると Done が復元されるので、両方試した後に reclaim しておく
+        // `matched_reading` は「実際に候補が取れたキー」。辞書・学習履歴のマージ、
+        // weak merge 判定、sync fallback まで同じ reading を使う（Issue #9: preedit で
+        // 辞書を引くとユーザー辞書・学習履歴が落ちる）。取れなかった場合は現在の
+        // hiragana_buf を reading とする。
         let bg_cands_hira = engine.bg_take_candidates(&hiragana_key2);
-        let bg_cands = if bg_cands_hira.is_some() {
+        let (bg_cands, mut matched_reading) = if bg_cands_hira.is_some() {
             phase3_bg_take = "hit_hiragana";
-            bg_cands_hira
+            (bg_cands_hira, hiragana_key2.clone())
         } else if preedit != hiragana_key2 {
             tracing::debug!("Convert: hira key miss, retry preedit={:?}", preedit);
             let bg_cands_preedit = engine.bg_take_candidates(&preedit);
             if bg_cands_preedit.is_some() {
                 phase3_bg_take = "hit_preedit";
+                (bg_cands_preedit, preedit.clone())
             } else {
                 phase3_bg_take = "miss_hiragana_preedit";
+                (None, hiragana_key2.clone())
             }
-            bg_cands_preedit
         } else {
             phase3_bg_take = "miss_hiragana";
-            None
+            (None, hiragana_key2.clone())
         };
         convert_mark("bg_take_candidates", convert_start, &mut convert_last);
         tracing::debug!(
@@ -1241,11 +1278,16 @@ impl super::TextServiceFactory_Impl {
                     return Ok(true);
                 }
                 let hira3 = engine.hiragana_text().to_string();
+                matched_reading = hira3.clone();
                 let retry_cands = engine
                     .bg_take_candidates(&hira3)
                     .or_else(|| {
                         if preedit != hira3 {
-                            engine.bg_take_candidates(&preedit)
+                            let cands = engine.bg_take_candidates(&preedit);
+                            if cands.is_some() {
+                                matched_reading = preedit.clone();
+                            }
+                            cands
                         } else {
                             None
                         }
@@ -1278,15 +1320,17 @@ impl super::TextServiceFactory_Impl {
                 };
                 // bg_take_candidates 成功時に kanji が復元されているため再評価
                 let kanji_ready_now = engine.is_kanji_ready();
-                let merged = engine.merge_candidates_for_reading(&preedit, llm_cands, DICT_LIMIT);
+                let merged =
+                    engine.merge_candidates_for_reading(&matched_reading, llm_cands, DICT_LIMIT);
                 convert_mark("merge_candidates", convert_start, &mut convert_last);
                 tracing::debug!(
-                    "merge_candidates(kanji_ready={}) → {:?} [dict: {:?}]",
+                    "merge_candidates(kanji_ready={} reading={:?}) → {:?} [dict: {:?}]",
                     kanji_ready_now,
+                    matched_reading,
                     merged,
                     engine.dict_status()
                 );
-                if merged.is_empty() || (merged.len() == 1 && merged[0] == preedit) {
+                if is_weak_merge(&merged, &matched_reading, &preedit) {
                     if kanji_ready_now {
                         phase3_sync_fallback = true;
                         phase3_candidate_source = "sync_after_weak_merge";
@@ -1295,6 +1339,7 @@ impl super::TextServiceFactory_Impl {
                                 engine,
                                 llm_limit,
                                 DICT_LIMIT,
+                                &matched_reading,
                                 &preedit,
                                 "sync_after_weak_merge",
                                 convert_start,
@@ -1317,6 +1362,7 @@ impl super::TextServiceFactory_Impl {
                         engine,
                         llm_limit,
                         DICT_LIMIT,
+                        &matched_reading,
                         &preedit,
                         "sync_no_bg",
                         convert_start,
@@ -1895,5 +1941,39 @@ impl super::TextServiceFactory_Impl {
         drop(guard);
         end_composition(ctx, tid, String::new())?;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_weak_merge;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn weak_merge_when_empty() {
+        assert!(is_weak_merge(&[], "た", "た"));
+    }
+
+    #[test]
+    fn weak_merge_when_only_reading_echo() {
+        // merge_candidates_for_reading は候補が無いと reading 自身で埋める
+        assert!(is_weak_merge(&v(&["た"]), "た", "た"));
+    }
+
+    #[test]
+    fn weak_merge_when_only_preedit_echo_with_pending_romaji() {
+        // preedit（表示文字列）は未確定ローマ字を含み reading と異なることがある
+        assert!(is_weak_merge(&v(&["たt"]), "た", "たt"));
+        assert!(is_weak_merge(&v(&["た"]), "た", "たt"));
+    }
+
+    #[test]
+    fn not_weak_when_real_candidate_present() {
+        assert!(!is_weak_merge(&v(&["田"]), "た", "た"));
+        assert!(!is_weak_merge(&v(&["た", "田"]), "た", "た"));
+        assert!(!is_weak_merge(&v(&["田", "多"]), "た", "たt"));
     }
 }

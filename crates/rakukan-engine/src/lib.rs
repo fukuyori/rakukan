@@ -838,6 +838,10 @@ impl RakunEngine {
         }
     }
 
+    /// エンジン内部の `hiragana_buf` を reading として辞書をマージする。
+    ///
+    /// engine DLL の ABI シンボル（`engine_merge_candidates`）と単体テストからのみ使う。
+    /// host / TSF からは `merge_candidates_for_reading` を使う（Issue #9）。
     pub fn merge_candidates(&self, llm_candidates: Vec<String>, limit: usize) -> Vec<String> {
         self.merge_candidates_for_reading(&self.hiragana_buf, llm_candidates, limit)
     }
