@@ -720,15 +720,53 @@ fn make_run(kind: CharKind, text: String) -> Run {
     }
 }
 
+/// 数字だけで構成された文字列か（算用数字・全角数字・漢数字）。
+///
+/// かな run の候補が数そのものになっていることがある（「じゅう」→「10」）。
+/// こうした候補は、入力側の数字と一致しないかぎり数字保存の検証で落ちる。
+fn is_numeric_text(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_digit() || ('０'..='９').contains(&c) || is_kanji_number_char(c))
+}
+
+/// 位取りの単位（十・百・千・万・億・兆・京）だけで構成された漢字 run か。
+///
+/// 「万」「千万」のように単位だけの run は、それ自体では数を表さない。
+/// 数字の直後に現れた場合は「その数字に付いた単位」であって、独立した
+/// 数値ではない（`5万` の `万` は 10000 という別の数ではない）。
+fn is_unit_only_kanji_run(s: &str) -> bool {
+    !s.is_empty()
+        && s.chars()
+            .all(|c| small_kanji_unit(c).is_some() || large_kanji_unit(c).is_some())
+}
+
+/// 入力・出力から「含まれる数」を数字列として取り出す。
+///
+/// 漢数字は算用数字へ正規化して比較できるようにする（`二〇二四` → `2024`）。
+///
+/// ただし **数字 run の直後に単位だけの漢字 run が続く場合、その単位は数値として
+/// 数えない**。`5まん` → `5万` を検証するとき、素朴に数えると入力の `5` に対して
+/// 出力が `5` + `10000` になり、数字が改変されたと誤判定して正しい候補を捨てて
+/// しまうため。`5万円`・`5万5千`・`10万以上` のように単位のあとに語が続く場合も
+/// 同じ。
+///
+/// 数字に隣接していない漢数字 run は従来どおり数値として解釈する。
+/// `2024ねん` → `二千二十四年` が `2024` に正規化されて一致する挙動は変わらない。
 fn extract_digits(s: &str) -> String {
     let mut out = String::new();
     let mut kanji_run = String::new();
+    // 直前に出力した文字が数字だったか（漢字 run が数字に隣接しているかの判定用）
+    let mut after_digit = false;
 
-    let flush_kanji_run = |out: &mut String, kanji_run: &mut String| {
+    let flush_kanji_run = |out: &mut String, kanji_run: &mut String, after_digit: bool| {
         if kanji_run.is_empty() {
             return;
         }
-        if let Some(digits) = parse_kanji_number_digits(kanji_run) {
+        // 数字の直後の「万」「千」などは、その数字に付いた単位として読み飛ばす
+        if !(after_digit && is_unit_only_kanji_run(kanji_run))
+            && let Some(digits) = parse_kanji_number_digits(kanji_run)
+        {
             out.push_str(&digits);
         }
         kanji_run.clear();
@@ -736,18 +774,21 @@ fn extract_digits(s: &str) -> String {
 
     for c in s.chars() {
         if c.is_ascii_digit() {
-            flush_kanji_run(&mut out, &mut kanji_run);
+            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
             out.push(c);
+            after_digit = true;
         } else if ('０'..='９').contains(&c) {
-            flush_kanji_run(&mut out, &mut kanji_run);
+            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
             out.push(char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c));
+            after_digit = true;
         } else if is_kanji_number_char(c) {
             kanji_run.push(c);
         } else {
-            flush_kanji_run(&mut out, &mut kanji_run);
+            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
+            after_digit = false;
         }
     }
-    flush_kanji_run(&mut out, &mut kanji_run);
+    flush_kanji_run(&mut out, &mut kanji_run, after_digit);
     out
 }
 
@@ -771,29 +812,41 @@ pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
 /// 構造的に候補へ出てこないことだけを補い、どれを既定にするかは文脈を見た
 /// 変換器に任せる、という切り分け。
 ///
-/// なお、このルールが発動するのは run が `[Digit, Kana]` の 2 つで、かつ
-/// かな run が数詞に完全一致する場合だけ。「5せんのしはらい」は かな run が
-/// `"せんのしはらい"` になるため対象外で、文脈ごと LLM が変換する。
-/// つまりここで扱うのは実質「文脈が存在しない単独入力」に限られる。
+/// このルールが発動するのは、**直前の run が数字 run** で、かつ かな run が
+/// 数詞に完全一致する場合だけ。`5まん` のほか `だい5まん`・`3.5まん` のように
+/// 前に別の run があっても効く。「5せんのしはらい」は かな run が
+/// `"せんのしはらい"` になるため対象外で、文脈ごと変換器が扱う。
 ///
 /// 完全一致のみを見るのは前方一致による破壊を避けるため。前方一致にすると
 /// 「3まんが」のような読みを「3万が」に固定してしまう。
 ///
-/// なお、この救済候補を run の候補リストに差し込んで `combine_runs` に通すのは
-/// 誤り。`verify_digits_preserved` が「万」を数値 10000 と読むため
-/// 「5万」が数字改変とみなされて捨てられ、生成順の都合で候補が全滅しうる。
-/// 呼び出し側は verify の後に直接差し込むこと。
+/// この候補は かな run の候補リストへ足して `combine_runs` に通す。以前は
+/// `verify_digits_preserved` が「万」を数値 10000 と読んで「5万」を数字改変と
+/// みなすため、フィルタを迂回して後から差し込む必要があったが、
+/// `extract_digits()` が数字直後の単位を独立した数値として数えなくなったので
+/// その回避は不要になった。
 fn numeric_unit_kanji(reading: &str) -> Option<(&'static str, bool)> {
-    match reading {
-        "まん" => Some(("万", true)),
-        "おく" => Some(("億", true)),
-        "ちょう" => Some(("兆", false)),
-        "せん" => Some(("千", false)),
-        "ひゃく" => Some(("百", false)),
-        "じゅう" => Some(("十", false)),
-        _ => None,
-    }
+    NUMERIC_UNITS
+        .iter()
+        .find(|(r, _, _)| *r == reading)
+        .map(|(_, kanji, promote)| (*kanji, *promote))
 }
+
+/// (読み, 漢数詞, 第 1 候補に置いてよいか)
+///
+/// 連濁形（`3ぜん` = 3千、`3びゃく` / `3ぴゃく` = 3百）も入れる。数字の直後に
+/// 現れるこれらは数詞以外に読みようが無いが、同音語の有無は清音形に合わせる。
+const NUMERIC_UNITS: [(&str, &str, bool); 9] = [
+    ("まん", "万", true),
+    ("おく", "億", true),
+    ("ちょう", "兆", false),
+    ("せん", "千", false),
+    ("ぜん", "千", false),
+    ("ひゃく", "百", false),
+    ("びゃく", "百", false),
+    ("ぴゃく", "百", false),
+    ("じゅう", "十", false),
+];
 
 fn build_local_context(runs: &[Run], kana_index: usize, global_context: &str) -> String {
     let mut ctx = String::from(global_context);
@@ -855,7 +908,43 @@ pub fn convert_with_digit_protection(
             ));
         } else if let Run::Kana(s) = run {
             let local_context = build_local_context(&runs, i, context);
-            let cands = converter.convert(s, &local_context, num_candidates)?;
+            let mut cands = converter.convert(s, &local_context, num_candidates)?;
+            // 数字 run の直後のかな run が数詞そのものなら、漢数詞を候補に足す。
+            //
+            // かな run は数字 run と切り離して変換器へ渡るため、「まん」単独では
+            // 数詞と判断する手掛かりが無く「満」「マン」しか返らない。構造的に
+            // 候補へ出てこない分だけをここで補い、数字表記との組み合わせ・重複
+            // 排除・件数制限は combine_runs 以降の通常の経路に任せる。
+            //
+            // 足すのは単位の漢字 1 つだけ。数字表記（1/１/一/壱…）との総当たりを
+            // ここで作ると「一十」「壱十」のような候補まで生成してしまう。
+            // 組み合わせは combine_runs が第 1 表記から順に作るので、先頭に来るのは
+            // 「1十」であって「一十」ではない。
+            if i > 0 && runs[i - 1].is_digit() {
+                if let Some((unit, promote)) = numeric_unit_kanji(s) {
+                    cands.retain(|c| c != unit);
+                    // promote=false（同音異義語あり）は変換器の第 1 候補を既定のまま
+                    // 残し、数詞はその次に置く。候補として存在させることだけを保証する。
+                    //
+                    // ただし単純に 1 番目へ入れると、変換器の第 1 候補が数字だけの
+                    // 表記だったときに数詞が先頭へ繰り上がってしまう。「じゅう」は
+                    // 変換器が「10」を第 1 候補に返すが、これは数字保存の検証で
+                    // 落ちるため（入力の数字は「1」だけ）、結果として「1十」が
+                    // 先頭に立つ。落ちると分かっている候補は数えず、実際に残る
+                    // 最初の候補の後ろへ置く。
+                    let at = if promote {
+                        0
+                    } else {
+                        cands
+                            .iter()
+                            .position(|c| !is_numeric_text(c))
+                            .map(|p| p + 1)
+                            .unwrap_or(0)
+                            .min(cands.len())
+                    };
+                    cands.insert(at, unit.to_string());
+                }
+            }
             run_candidates.push(cands);
         }
     }
@@ -867,30 +956,15 @@ pub fn convert_with_digit_protection(
         .filter(|c| verify_digits_preserved(reading, c))
         .collect();
 
-    // 「5まん」→「5万」の救済。
-    //
-    // この候補は verify_digits_preserved を意図的に通していない。extract_digits() は
-    // 「万」を数値 10000 として読むため、入力「5まん」の数字 "5" と出力「5万」の
-    // "5"+"10000" が一致せず、数字が改変されたと誤判定されて捨てられてしまう。
-    // ここは数字 run と数詞をこちらで組み立てており、数字が保存されていることは
-    // 自明なので、フィルタの後に直接差し込む。
-    // 数字表記は digit_candidates_order の設定に従う。生の run テキストを
-    // そのまま使うと、arabic を除外している設定でも半角数字が先頭に出てしまう。
-    if let [Run::Digit(d), Run::Kana(k)] = runs.as_slice() {
-        if let Some((unit, promote)) = numeric_unit_kanji(k) {
-            // promote=false（同音異義語あり）は LLM の第 1 候補を既定のまま残し、
-            // 数詞はその次に置く。候補として存在させることだけを保証する。
-            let at = if promote { 0 } else { 1.min(verified.len()) };
-            for digit in digit_candidates(d, digit_candidates_order)
-                .into_iter()
-                .rev()
-            {
-                let cand = format!("{digit}{unit}");
-                verified.retain(|c| c != &cand);
-                verified.insert(at.min(verified.len()), cand);
-            }
-        }
-    }
+    // 数詞（「5まん」→「5万」）の救済は、かな run の候補へ漢数詞を足す形で
+    // 上の run ループが行う。`extract_digits()` が数字直後の単位を独立した
+    // 数値として数えなくなったため、この経路の候補も verify を素通りできる。
+    // フィルタを迂回して後から差し込む必要は無くなった。
+
+    // 重複排除と件数制限を最後に通す。
+    let mut seen = std::collections::HashSet::new();
+    verified.retain(|c| seen.insert(c.clone()));
+    verified.truncate(num_candidates);
 
     if verified.is_empty() {
         Ok(vec![reading.to_string()])
@@ -1325,12 +1399,115 @@ mod tests {
     }
 
     #[test]
-    fn digit_plus_unit_is_rejected_by_digit_verification() {
-        // 「5万」は verify_digits_preserved を通らない（万が 10000 と読まれる）。
-        // この性質があるため、救済候補は verify の後に差し込む必要がある。
-        assert!(!verify_digits_preserved("5まん", "5万"));
-        // 一方、単位を伴わない通常の候補は通る
+    fn digit_followed_by_unit_kanji_passes_verification() {
+        // 数字の直後の「万」は、その数字に付いた単位であって独立した 10000 では
+        // ない。以前はここで 10000 を加算してしまい、正しい候補を数字改変として
+        // 捨てていた。
+        assert!(verify_digits_preserved("5まん", "5万"));
+        assert!(verify_digits_preserved("5まんえん", "5万円"));
+        assert!(verify_digits_preserved("だい5まん", "第5万"));
+        assert!(verify_digits_preserved("3.5まん", "3.5万"));
+        assert!(verify_digits_preserved("3ぜん", "3千"));
+        assert!(verify_digits_preserved("1じゅう", "1十"));
+        assert!(verify_digits_preserved("5まん5せん", "5万5千"));
+        assert!(verify_digits_preserved("10まんいじょう", "10万以上"));
+        // 単位を伴わない通常の候補も従来どおり通る
         assert!(verify_digits_preserved("5まん", "5マン"));
+    }
+
+    #[test]
+    fn digit_tampering_is_still_rejected_around_units() {
+        // 単位を読み飛ばすようにしても、数字そのものの改変は捕まえる
+        assert!(!verify_digits_preserved("5まん", "50万"));
+        assert!(!verify_digits_preserved("5まん", "6万"));
+        assert!(!verify_digits_preserved("5まんえん", "5万5円"));
+
+        // 既知の限界: `extract_digits()` は小数点を拾わないので、`3.5` と `35` は
+        // 区別できない。この検証は「数字の並びが保存されているか」だけを見る。
+        // 単位の読み飛ばしとは独立した以前からの性質。
+        assert!(verify_digits_preserved("3.5まん", "35万"));
+    }
+
+    #[test]
+    fn kanji_number_not_adjacent_to_digit_is_still_a_number() {
+        // 数字に隣接していない漢数字 run は従来どおり数値として解釈する。
+        // 既存の数値表現変換（2024ねん → 二千二十四年）を壊さないこと。
+        assert!(verify_digits_preserved("2024ねん", "二千二十四年"));
+        assert!(verify_digits_preserved("2024ねん", "2024年"));
+        assert!(!verify_digits_preserved("2024ねん", "二千二十五年"));
+        // 単位だけの run でも、数字に続いていなければ数値として読む
+        assert!(!verify_digits_preserved("まん", "5万"));
+    }
+
+    #[test]
+    fn numeric_units_cover_rendaku_forms() {
+        assert_eq!(numeric_unit_kanji("ぜん").map(|(k, _)| k), Some("千"));
+        assert_eq!(numeric_unit_kanji("びゃく").map(|(k, _)| k), Some("百"));
+        assert_eq!(numeric_unit_kanji("ぴゃく").map(|(k, _)| k), Some("百"));
+        // 第 1 候補に置いてよいのは同音異義語の無い「万」「億」だけ
+        assert_eq!(numeric_unit_kanji("まん").map(|(_, p)| p), Some(true));
+        assert_eq!(numeric_unit_kanji("おく").map(|(_, p)| p), Some(true));
+        assert_eq!(numeric_unit_kanji("せん").map(|(_, p)| p), Some(false));
+        assert_eq!(numeric_unit_kanji("じゅう").map(|(_, p)| p), Some(false));
+        // 数詞でない読みは拾わない
+        assert_eq!(numeric_unit_kanji("まい"), None);
+        assert_eq!(numeric_unit_kanji("まんが"), None);
+    }
+
+    #[test]
+    fn unit_only_kanji_run_detection() {
+        assert!(is_unit_only_kanji_run("万"));
+        assert!(is_unit_only_kanji_run("千"));
+        assert!(is_unit_only_kanji_run("千万"));
+        // 数字を含む run は「単位だけ」ではない
+        assert!(!is_unit_only_kanji_run("二千"));
+        assert!(!is_unit_only_kanji_run("五"));
+        assert!(!is_unit_only_kanji_run(""));
+    }
+
+    #[test]
+    fn numeric_text_detection() {
+        assert!(is_numeric_text("10"));
+        assert!(is_numeric_text("１０"));
+        assert!(is_numeric_text("十"));
+        assert!(is_numeric_text("二千"));
+        assert!(!is_numeric_text("重"));
+        assert!(!is_numeric_text("10円"));
+        assert!(!is_numeric_text(""));
+    }
+
+    /// 数字直後の数詞を実モデルで確認する診断用プローブ。
+    ///
+    /// `convert_with_digit_protection()` は変換器を通るため純粋なユニットテストでは
+    /// 押さえられない。受入条件の読みを実際に流し、候補に何が並ぶかを目で見るための
+    /// もの。モデルのロードが入るので既定では走らせない。
+    ///
+    /// 実行: `cargo test -p rakukan-engine --lib probe_numeric_unit_candidates -- --ignored --nocapture`
+    #[test]
+    #[ignore = "実モデルのロードが必要"]
+    fn probe_numeric_unit_candidates() {
+        use crate::kanji::Backend;
+
+        let backend =
+            Backend::from_variant_id("jinen-v1-small-q5").expect("Failed to load default model");
+        let converter = KanaKanjiConverter::new(backend).expect("Failed to create converter");
+        let order = default_digit_candidates_order();
+
+        for reading in [
+            "5まん",
+            "5まんえん",
+            "だい5まん",
+            "3.5まん",
+            "3ぜん",
+            "1じゅう",
+            "10まん",
+            "3せん",
+        ] {
+            let cands =
+                convert_with_digit_protection(&converter, reading, "", 9, &order, false, false)
+                    .unwrap_or_else(|e| panic!("{reading}: {e:?}"));
+            println!("{reading:>12} -> {cands:?}");
+        }
     }
 
     #[test]
@@ -1341,7 +1518,6 @@ mod tests {
         assert_eq!(runs[0].text(), "5");
         assert_eq!(runs[1].text(), "まん");
     }
-    #[test]
     #[test]
     fn numeric_unit_promotion_depends_on_ambiguity() {
         // 数字の直後でほぼ一意 → 第 1 候補に置いてよい
