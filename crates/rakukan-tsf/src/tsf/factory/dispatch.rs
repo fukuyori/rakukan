@@ -419,6 +419,8 @@ impl super::TextServiceFactory_Impl {
             UserAction::CandidateSelect(n) => self.on_candidate_select(n, ctx, tid, sink, guard),
             UserAction::CursorLeft => self.on_segment_move_left(ctx, tid, sink, guard),
             UserAction::CursorRight => self.on_segment_move_right(ctx, tid, sink, guard),
+            UserAction::CursorHome => self.on_cursor_jump(ctx, tid, sink, guard, false),
+            UserAction::CursorEnd => self.on_cursor_jump(ctx, tid, sink, guard, true),
             UserAction::Punctuate(c) => self.on_punctuate(c, ctx, tid, sink, guard),
             UserAction::SegmentShrink => self.on_segment_shrink(ctx, tid, sink, guard),
             UserAction::SegmentExtend => self.on_segment_extend(ctx, tid, sink, guard),

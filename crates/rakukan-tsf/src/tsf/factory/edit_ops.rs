@@ -867,6 +867,60 @@ impl super::TextServiceFactory_Impl {
         Ok(!engine.preedit_is_empty())
     }
 
+    /// Home / End: 未確定文字列がある間はアプリへ渡さず IME 内で処理する（Issue #11）。
+    ///
+    /// rakukan は preedit 内にキャレットを持たない（Left / Right も消費するだけ）ため、
+    /// Preedit / LiveConv / Waiting / Selecting / BlockSelecting では消費して何もしない
+    /// （BlockSelecting は確定済みブロックへ戻れないので先頭ブロックへの移動も定義しない）。
+    /// RangeSelect では選択範囲の右端を先頭（1 文字）/ 末尾（全体）へ移す。
+    /// 未確定文字列が無ければ `false` を返してアプリへ渡す。
+    pub(super) fn on_cursor_jump(
+        &self,
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        mut guard: crate::engine::state::EngineGuard,
+        to_end: bool,
+    ) -> Result<bool> {
+        let engine = match guard.as_mut() {
+            Some(e) => e,
+            None => return Ok(false),
+        };
+        let has_preedit =
+            !engine.preedit_is_empty() || crate::engine::state::session_is_selecting_fast();
+        if !has_preedit {
+            return Ok(false);
+        }
+        let mut sess = session_get()?;
+        if sess.is_range_select() {
+            let moved = if to_end {
+                sess.range_select_to_end()
+            } else {
+                sess.range_select_to_start()
+            };
+            if !moved {
+                return Ok(true);
+            }
+            let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
+            drop(sess);
+            drop(guard);
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                selected,
+                unselected,
+            )?;
+            return Ok(true);
+        }
+        tracing::debug!(
+            "on_cursor_jump: to_end={to_end} consumed without moving (no caret model) state={:?}",
+            &*sess
+        );
+        Ok(true)
+    }
+
     /// Shift+Right: 選択範囲を右へ広げる。
     pub(super) fn on_segment_extend(
         &self,

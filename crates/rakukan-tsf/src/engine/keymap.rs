@@ -50,6 +50,10 @@ pub enum KeyAction {
     ModeAlphanumeric, // 英数キー
     CursorLeft,
     CursorRight,
+    /// Home（Issue #11: preedit 中はアプリへ渡さない）
+    CursorHome,
+    /// End（同上）
+    CursorEnd,
     /// 文節縮小（Shift+Left）
     SegmentShrink,
     /// 文節拡大（Shift+Right）
@@ -84,6 +88,8 @@ impl KeyAction {
             Self::ModeAlphanumeric => UserAction::ModeAlphanumeric,
             Self::CursorLeft => UserAction::CursorLeft,
             Self::CursorRight => UserAction::CursorRight,
+            Self::CursorHome => UserAction::CursorHome,
+            Self::CursorEnd => UserAction::CursorEnd,
             Self::SegmentShrink => UserAction::SegmentShrink,
             Self::SegmentExtend => UserAction::SegmentExtend,
         }
@@ -563,6 +569,14 @@ pub fn keymap_save_default() -> Result<()> {
             "key    = \"Right\"\n",
             "action = \"cursor_right\"\n",
             "\n",
+            "[[bindings]]\n",
+            "key    = \"Home\"\n",
+            "action = \"cursor_home\"\n",
+            "\n",
+            "[[bindings]]\n",
+            "key    = \"End\"\n",
+            "action = \"cursor_end\"\n",
+            "\n",
         );
         std::fs::write(&path, header)?;
         tracing::info!("keymap.toml created: {}", path.display());
@@ -731,6 +745,8 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("PageUp", KeyAction::CandidatePageUp),
             bind("Left", KeyAction::CursorLeft),
             bind("Right", KeyAction::CursorRight),
+            bind("Home", KeyAction::CursorHome),
+            bind("End", KeyAction::CursorEnd),
             bind("Shift+Left", KeyAction::SegmentShrink),
             bind("Shift+Right", KeyAction::SegmentExtend),
         ],
@@ -763,6 +779,8 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("Eisuu", KeyAction::ModeAlphanumeric),
             bind("Left", KeyAction::CursorLeft),
             bind("Right", KeyAction::CursorRight),
+            bind("Home", KeyAction::CursorHome),
+            bind("End", KeyAction::CursorEnd),
             bind("Shift+Left", KeyAction::SegmentShrink),
             bind("Shift+Right", KeyAction::SegmentExtend),
         ],
@@ -917,6 +935,50 @@ mod tests {
             None,
             "正規化前の VK は対象外"
         );
+    }
+
+    #[test]
+    fn default_presets_bind_home_and_end_to_cursor_jump() {
+        for preset in [KeymapPreset::MsImeJis, KeymapPreset::MsImeUs] {
+            let cfg = resolve_keymap_config(KeymapConfig {
+                preset: Some(preset),
+                inherit_preset: true,
+                bindings: vec![],
+            });
+            let keymap = Keymap::build(cfg);
+            assert_eq!(
+                keymap.resolve(0x24, false, false, false),
+                Some(&KeyAction::CursorHome),
+                "{preset:?} Home"
+            );
+            assert_eq!(
+                keymap.resolve(0x23, false, false, false),
+                Some(&KeyAction::CursorEnd),
+                "{preset:?} End"
+            );
+        }
+    }
+
+    #[test]
+    fn cursor_home_end_parse_from_keymap_toml() {
+        let cfg: KeymapConfig = toml::from_str(
+            "preset = \"custom\"\ninherit_preset = false\n[[bindings]]\nkey = \"Home\"\naction = \"cursor_home\"\n[[bindings]]\nkey = \"End\"\naction = \"cursor_end\"\n",
+        )
+        .unwrap();
+        let keymap = Keymap::build(resolve_keymap_config(cfg));
+        assert_eq!(
+            keymap.resolve(0x24, false, false, false),
+            Some(&KeyAction::CursorHome)
+        );
+        assert_eq!(
+            keymap.resolve(0x23, false, false, false),
+            Some(&KeyAction::CursorEnd)
+        );
+        assert_eq!(
+            KeyAction::CursorHome.to_user_action(),
+            UserAction::CursorHome
+        );
+        assert_eq!(KeyAction::CursorEnd.to_user_action(), UserAction::CursorEnd);
     }
 
     #[test]

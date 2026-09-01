@@ -1090,7 +1090,11 @@ fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
         | UserAction::CandidatePageDown
         | UserAction::CandidatePageUp
         | UserAction::CursorLeft
-        | UserAction::CursorRight => has_preedit,
+        | UserAction::CursorRight
+        // Home / End: 未確定文字列がある間はアプリへ渡さない（Issue #11）。
+        // 透過させるとアプリ側が未確定文字列を無視してキャレットを行頭 / 行末へ動かす。
+        | UserAction::CursorHome
+        | UserAction::CursorEnd => has_preedit,
         // Shift+Left/Right: composition がアクティブな間は必ず消費する。
         // 透過させるとアプリが composition テキストを直接編集してしまう。
         // has_preedit=false（composition なし）のときだけ透過。
@@ -1125,6 +1129,8 @@ pub(super) fn action_name(a: &UserAction) -> &'static str {
         UserAction::CandidateSelect(_) => "CandidateSelect",
         UserAction::CursorLeft => "CursorLeft",
         UserAction::CursorRight => "CursorRight",
+        UserAction::CursorHome => "CursorHome",
+        UserAction::CursorEnd => "CursorEnd",
         UserAction::Punctuate(_) => "Punctuate",
         UserAction::SegmentShrink => "SegmentShrink",
         UserAction::SegmentExtend => "SegmentExtend",
@@ -1469,5 +1475,36 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
             ));
         }
         display_attr::get_by_guid(unsafe { &*guid })
+    }
+}
+
+#[cfg(test)]
+mod key_should_eat_tests {
+    use super::key_should_eat;
+    use crate::engine::user_action::UserAction;
+
+    #[test]
+    fn home_end_are_eaten_only_while_preedit_exists() {
+        for action in [UserAction::CursorHome, UserAction::CursorEnd] {
+            assert!(key_should_eat(&action, true), "{action:?} with preedit");
+            assert!(
+                !key_should_eat(&action, false),
+                "{action:?} without preedit"
+            );
+        }
+    }
+
+    #[test]
+    fn left_right_keep_the_same_gating_as_home_end() {
+        for has_preedit in [true, false] {
+            assert_eq!(
+                key_should_eat(&UserAction::CursorLeft, has_preedit),
+                key_should_eat(&UserAction::CursorHome, has_preedit)
+            );
+            assert_eq!(
+                key_should_eat(&UserAction::CursorRight, has_preedit),
+                key_should_eat(&UserAction::CursorEnd, has_preedit)
+            );
+        }
     }
 }

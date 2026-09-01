@@ -58,6 +58,12 @@ pub enum UserAction {
     // ─── カーソル移動（プリエディット内）────────────────────────────────
     CursorLeft,
     CursorRight,
+    /// Home: 未確定文字列がある間はアプリへ渡さず IME 内で処理する（Issue #11）。
+    /// RangeSelect では選択範囲の右端を先頭へ移す。他の状態では消費して何もしない
+    /// （rakukan は preedit 内キャレットを持たない）。
+    CursorHome,
+    /// End: `CursorHome` の末尾版。RangeSelect では選択範囲を全体へ広げる。
+    CursorEnd,
 
     // ─── 文節伸縮（候補選択中）──────────────────────────────────────────
     /// Shift+Left: 文節を1文字縮めて再変換

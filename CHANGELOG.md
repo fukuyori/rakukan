@@ -15,6 +15,7 @@
 
 ### Added
 
+- **変換中の Home / End を IME 内で処理する**（[Issue #11](https://github.com/fukuyori/rakukan/issues/11)）: `cursor_home` / `cursor_end` アクションを追加し、既定キーマップ（JIS / US）で `Home` / `End` に割り当てた。未確定文字列がある間はアプリへ渡さない（渡すとアプリ側が未確定文字列を無視して行頭 / 行末へキャレットを動かし、変換対象との位置関係が壊れる）。rakukan は preedit 内キャレットを持たないため、通常の preedit・ライブ変換・候補選択中は消費するだけで位置は変えない。Shift+矢印の範囲指定中は選択範囲の右端を先頭（Home）/ 末尾（End）へ移す。未確定文字列が無いときは従来どおりアプリへ渡す。
 - **host / engine DLL の別ビルド検出と辞書停止時の診断ログ**（[Issue #8](https://github.com/fukuyori/rakukan/issues/8)）: engine DLL に `engine_build_info`（version・git sha・ビルド時刻・ABI・DLL 内ログの初期化結果、任意シンボルで ABI 番号は据え置き）を追加し、host が起動時に自分の version・git sha と突き合わせて `rakukan-engine-host.log` に記録する。version または git sha が異なれば「ABI は同じでも別ビルド」として WARN、DLL 内ログが初期化できていなければ WARN、`engine_build_info` を持たない古い DLL も WARN。TSF 側は辞書 ready 待ちが 30 秒を超えたとき DLL が記録した `dict_status`（`failed at [step]: reason`）を `rakukan.log` に WARN で 1 回出す。README にログファイル 3 種（TSF / host / DLL）を記載。
 
 ### Changed

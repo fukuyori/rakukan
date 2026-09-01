@@ -1687,6 +1687,34 @@ impl SessionState {
         false
     }
 
+    /// RangeSelect の右端を先頭（1 文字選択）へ移す（Home）。戻り値: 変化したか。
+    pub fn range_select_to_start(&mut self) -> bool {
+        if let SessionState::RangeSelect { select_end, .. } = self {
+            if *select_end > 1 {
+                *select_end = 1;
+                return true;
+            }
+        }
+        false
+    }
+
+    /// RangeSelect の右端を末尾（全選択）へ移す（End）。戻り値: 変化したか。
+    pub fn range_select_to_end(&mut self) -> bool {
+        if let SessionState::RangeSelect {
+            full_reading,
+            select_end,
+            ..
+        } = self
+        {
+            let max = full_reading.chars().count();
+            if *select_end < max {
+                *select_end = max;
+                return true;
+            }
+        }
+        false
+    }
+
     /// RangeSelect の (selected_reading, unselected_reading) を返す。
     pub fn range_select_parts(&self) -> Option<(String, String)> {
         if let SessionState::RangeSelect {
@@ -2509,6 +2537,40 @@ mod tests {
         };
         s.sync_preedit_reading("");
         assert!(matches!(s, SessionState::Idle));
+    }
+
+    #[test]
+    fn range_select_home_end_move_boundary_to_bounds() {
+        let mut s = SessionState::Idle;
+        s.set_range_select("あいうえお".to_string(), 3, String::new());
+        assert_eq!(
+            s.range_select_parts(),
+            Some(("あいう".to_string(), "えお".to_string()))
+        );
+
+        assert!(s.range_select_to_start(), "Home で先頭 1 文字へ");
+        assert_eq!(
+            s.range_select_parts(),
+            Some(("あ".to_string(), "いうえお".to_string()))
+        );
+        assert!(!s.range_select_to_start(), "既に先頭なら変化なし");
+
+        assert!(s.range_select_to_end(), "End で全選択へ");
+        assert_eq!(
+            s.range_select_parts(),
+            Some(("あいうえお".to_string(), String::new()))
+        );
+        assert!(!s.range_select_to_end(), "既に末尾なら変化なし");
+    }
+
+    #[test]
+    fn range_select_home_end_ignore_other_states() {
+        let mut preedit = SessionState::Preedit {
+            text: "あい".to_string(),
+        };
+        assert!(!preedit.range_select_to_start());
+        assert!(!preedit.range_select_to_end());
+        assert!(matches!(preedit, SessionState::Preedit { .. }));
     }
 
     #[test]
