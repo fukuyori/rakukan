@@ -654,7 +654,10 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
         }
 
         comp.EndComposition(ec).map_err(|e| {
-            tracing::warn!("end_composition: EndComposition failed text={:?}: {e}", text);
+            tracing::warn!(
+                "end_composition: EndComposition failed text={:?}: {e}",
+                text
+            );
             windows::core::Error::new(E_FAIL, format!("EndComposition: {e}"))
         })?;
         Ok(())
