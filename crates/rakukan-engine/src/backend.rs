@@ -193,6 +193,31 @@ fn vulkan_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard};
+
+    /// `RAKUKAN_BACKEND` はプロセス全体で共有される環境変数なので、
+    /// これを set / remove する 3 テストは直列化する（並列実行だと別テストの値を読んで
+    /// `left: Cuda, right: Cpu` のように稀に失敗していた）。
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 環境変数を設定してロックを保持する。Drop で必ず remove する。
+    struct EnvGuard(#[allow(dead_code)] MutexGuard<'static, ()>);
+
+    fn set_backend_env(value: &str) -> EnvGuard {
+        let guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        unsafe {
+            std::env::set_var("RAKUKAN_BACKEND", value);
+        }
+        EnvGuard(guard)
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("RAKUKAN_BACKEND");
+            }
+        }
+    }
 
     #[test]
     fn test_backend_display() {
@@ -203,37 +228,22 @@ mod tests {
 
     #[test]
     fn test_env_override_cuda() {
-        unsafe {
-            std::env::set_var("RAKUKAN_BACKEND", "cuda");
-        }
+        let _env = set_backend_env("cuda");
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cuda);
-        unsafe {
-            std::env::remove_var("RAKUKAN_BACKEND");
-        }
     }
 
     #[test]
     fn test_env_override_cpu() {
-        unsafe {
-            std::env::set_var("RAKUKAN_BACKEND", "cpu");
-        }
+        let _env = set_backend_env("cpu");
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        unsafe {
-            std::env::remove_var("RAKUKAN_BACKEND");
-        }
     }
 
     #[test]
     fn test_env_override_unknown_falls_back_to_cpu() {
-        unsafe {
-            std::env::set_var("RAKUKAN_BACKEND", "unknown_backend");
-        }
+        let _env = set_backend_env("unknown_backend");
         let selection = select_backend();
         assert_eq!(selection.backend, Backend::Cpu);
-        unsafe {
-            std::env::remove_var("RAKUKAN_BACKEND");
-        }
     }
 }
