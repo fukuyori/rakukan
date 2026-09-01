@@ -694,16 +694,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         {
             Some(a) => a,
             None => {
-                // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）
-                match vk {
-                    0x0D => UserAction::CommitRaw, // VK_RETURN
-                    0x20 => UserAction::Convert,   // VK_SPACE
-                    0x08 => UserAction::Backspace, // VK_BACK
-                    0x1B => UserAction::Cancel,    // VK_ESCAPE
-                    0x1A => UserAction::ImeOff,    // VK_IME_OFF
-                    0x16 => UserAction::ImeOn,     // VK_IME_ON
-                    0x19 => UserAction::ImeToggle, // VK_KANJI (often IME toggle)
-                    _ => return Ok(FALSE),
+                // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
+                // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
+                match crate::engine::keymap::essential_fallback_action(vk) {
+                    Some(a) => a,
+                    None => return Ok(FALSE),
                 }
             }
         };
@@ -881,6 +876,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
     }
 }
 
+/// `OnTestKeyDown` / `OnKeyDown` 共通の VK 正規化。
+///
+/// 修飾キーの状態を読んで `keymap::normalize_key_event`（純粋関数）に委ねる。
+/// VK の読み替え規則（Ctrl+Alt+Right → Ctrl+Space、JIS 半角/全角 0xF3/0xF4 → 0x19）は
+/// keymap.rs 側に集約してあり、ここでは持たない。
 fn normalize_key_event_vk(vk: u16) -> u16 {
     use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
 
@@ -889,19 +889,7 @@ fn normalize_key_event_vk(vk: u16) -> u16 {
     let alt = unsafe { GetKeyState(0x12) as u16 & 0x8000 != 0 };
     let space_down = unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 };
 
-    if vk == 0x27 && ctrl && alt && !shift && space_down {
-        return 0x20;
-    }
-
-    // JIS 配列の半角/全角キーは VK_KANJI ではなく VK_DBE_SBCSCHAR (0xF3) /
-    // VK_DBE_DBCSCHAR (0xF4) を送る（現在の IME 状態でどちらになるかが変わる）。
-    // VK_KANJI (0x19) が来るのは Alt 併用の「漢字」キーとしての用法のときだけ。
-    // keymap 側は "Zenkaku" = 0x19 で持っているので、ここで 0x19 に寄せる。
-    if vk == 0xF3 || vk == 0xF4 {
-        return 0x19;
-    }
-
-    vk
+    crate::engine::keymap::normalize_key_event(vk, ctrl, shift, alt, space_down).0
 }
 
 // ─── handle_action ───────────────────────────────────────────────────────────

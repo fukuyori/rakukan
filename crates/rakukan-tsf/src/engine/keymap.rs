@@ -286,13 +286,10 @@ impl Keymap {
         }
 
         // ①.5 重要キーは設定ファイルが壊れていても確実に動くようにフォールバックを持つ
-        // （VK_RETURN は ToUnicode で制御文字になりやすく、Input に変換されないため）
-        match vk {
-            0x0D => return Some(UserAction::CommitRaw), // VK_RETURN
-            0x20 => return Some(UserAction::Convert),   // VK_SPACE
-            0x08 => return Some(UserAction::Backspace), // VK_BACK
-            0x1B => return Some(UserAction::Cancel),    // VK_ESCAPE
-            _ => {}
+        // （VK_RETURN は ToUnicode で制御文字になりやすく、Input に変換されないため）。
+        // OnTestKeyDown の keymap 取得失敗時と同じ集合を使う（両者の判定を一致させる）。
+        if let Some(action) = essential_fallback_action(vk) {
+            return Some(action);
         }
 
         // ② 数字キー（修飾なし）→ 候補選択モード中のみ候補番号選択
@@ -643,19 +640,50 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
     }
 }
 
-fn normalize_key_event(
+/// キーイベントの VK / 修飾キーを keymap 照合前に正規化する（純粋関数）。
+///
+/// `OnTestKeyDown` / `OnKeyDown`（`factory.rs`）と `resolve_action` の両方がこれを通るので、
+/// VK の読み替えはここに集約する。
+///
+/// - Ctrl+Alt+Right（Space 押下中）→ Ctrl+Space: Windows の一部環境で Ctrl+Space が
+///   Ctrl+Alt+Right として通知されることがあるため、IME トグルの別名として吸収する。
+/// - `VK_DBE_SBCSCHAR`（0xF3）/ `VK_DBE_DBCSCHAR`（0xF4）→ `VK_KANJI`（0x19）:
+///   JIS 配列の半角/全角キーは環境によって 0x19 ではなく 0xF3 / 0xF4（現在の IME 状態で
+///   どちらかになる）を送る。keymap は `Zenkaku = 0x19` で持っているので 0x19 に寄せる。
+///   修飾キーはそのまま渡し、Shift や Ctrl 併用時の扱いは keymap 側の照合に委ねる。
+pub(crate) fn normalize_key_event(
     vk: u16,
     ctrl: bool,
     shift: bool,
     alt: bool,
     space_down: bool,
 ) -> (u16, bool, bool, bool) {
-    // Windows の一部環境では Ctrl+Space が Ctrl+Alt+Right として通知されることがある。
-    // 実入力処理では IME トグルの別名として吸収する。
     if vk == 0x27 && ctrl && alt && !shift && space_down {
         return (0x20, true, false, false);
     }
+    if vk == 0xF3 || vk == 0xF4 {
+        return (0x19, ctrl, shift, alt);
+    }
     (vk, ctrl, shift, alt)
+}
+
+/// keymap で解決できなかった場合でも必ず動かす重要キー。
+///
+/// `resolve_action` の ①.5（keymap に binding が無い / 設定ファイルが壊れている）と、
+/// `OnTestKeyDown` の keymap 取得失敗時（RefCell 競合）の両方で同じ集合を使う。
+/// 半角/全角（`VK_KANJI`）が入っているのは、keymap が壊れていても IME の ON/OFF だけは
+/// できるようにするため。
+pub(crate) fn essential_fallback_action(vk: u16) -> Option<UserAction> {
+    match vk {
+        0x0D => Some(UserAction::CommitRaw), // VK_RETURN
+        0x20 => Some(UserAction::Convert),   // VK_SPACE
+        0x08 => Some(UserAction::Backspace), // VK_BACK
+        0x1B => Some(UserAction::Cancel),    // VK_ESCAPE
+        0x1A => Some(UserAction::ImeOff),    // VK_IME_OFF
+        0x16 => Some(UserAction::ImeOn),     // VK_IME_ON
+        0x19 => Some(UserAction::ImeToggle), // VK_KANJI（半角/全角）
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -693,6 +721,72 @@ mod tests {
             Some(&KeyAction::Hiragana)
         );
         assert_eq!(keymap.resolve(0x20, false, false, false), None);
+    }
+
+    #[test]
+    fn normalize_jis_zenkaku_hankaku_to_vk_kanji() {
+        // JIS 配列の半角/全角キー: VK_DBE_SBCSCHAR / VK_DBE_DBCSCHAR → VK_KANJI
+        assert_eq!(
+            normalize_key_event(0xF3, false, false, false, false),
+            (0x19, false, false, false)
+        );
+        assert_eq!(
+            normalize_key_event(0xF4, false, false, false, false),
+            (0x19, false, false, false)
+        );
+        // VK_KANJI はそのまま
+        assert_eq!(
+            normalize_key_event(0x19, false, false, false, false),
+            (0x19, false, false, false)
+        );
+        // 修飾キーは変更せず keymap 側に委ねる
+        assert_eq!(
+            normalize_key_event(0xF3, true, true, false, false),
+            (0x19, true, true, false)
+        );
+    }
+
+    #[test]
+    fn normalize_leaves_unrelated_vks_unchanged() {
+        for vk in [0x0D_u16, 0x20, 0x41, 0x5A, 0x70, 0xF0, 0xF1, 0xF2, 0xF5] {
+            assert_eq!(
+                normalize_key_event(vk, false, false, false, false),
+                (vk, false, false, false),
+                "vk={vk:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_preset_resolves_normalized_zenkaku_to_ime_toggle() {
+        let cfg = resolve_keymap_config(KeymapConfig {
+            preset: Some(KeymapPreset::MsImeJis),
+            inherit_preset: true,
+            bindings: vec![],
+        });
+        let keymap = Keymap::build(cfg);
+        for raw in [0xF3_u16, 0xF4, 0x19] {
+            let (vk, ctrl, shift, alt) = normalize_key_event(raw, false, false, false, false);
+            assert_eq!(
+                keymap.resolve(vk, ctrl, shift, alt),
+                Some(&KeyAction::ImeToggle),
+                "raw={raw:#04x}"
+            );
+        }
+    }
+
+    #[test]
+    fn essential_fallback_covers_ime_toggle_keys() {
+        assert_eq!(essential_fallback_action(0x19), Some(UserAction::ImeToggle));
+        assert_eq!(essential_fallback_action(0x1A), Some(UserAction::ImeOff));
+        assert_eq!(essential_fallback_action(0x16), Some(UserAction::ImeOn));
+        assert_eq!(essential_fallback_action(0x0D), Some(UserAction::CommitRaw));
+        assert_eq!(essential_fallback_action(0x41), None);
+        assert_eq!(
+            essential_fallback_action(0xF3),
+            None,
+            "正規化前の VK は対象外"
+        );
     }
 
     #[test]

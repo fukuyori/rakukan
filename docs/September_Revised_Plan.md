@@ -119,25 +119,19 @@ P0はログ由来のPhaseより先に着手してよい。P1以降は変更す�
 
 `on_convert.rs` のphase 3は、候補を `hiragana_key2` で試し、失敗時に `preedit` で再試行する。しかし最新差分は、どちらで成功してもマージに `preedit` を渡す。再試行後の `hira3` / `preedit` でも同じ情報が失われる。
 
-未確定ローマ字を含む「たt」では、候補取得に使うreading「た」と未変換接尾辞「t」を区別する必要がある。両者を連結した「たt」で辞書を引くと、ユーザー辞書と学習履歴が再び落ちる。一方、接尾辞を捨てると、表示または確定時にユーザーが入力した文字が消える。
+未確定ローマ字を含む「たt」（reading「た」と接尾辞「t」の区別、接尾辞の表示・確定、末尾 n の扱い）は未確定ローマ字の扱いとして G-5 と同じ領域なので、Step 10 でまとめて扱う。本Stepでは `flush_pending_n` と接尾辞の現状挙動を変更しない。
 
 #### 修正方針
 
-- 表示用の `preedit` と、変換・辞書検索用の `reading` を別変数にする。
-- 変換対象外の未確定ローマ字を接尾辞として別に保持し、候補取得、候補表示、確定の途中でreadingへ混入させたり破棄したりしない。
 - 候補取得結果を `(matched_reading, candidates)` の組で保持する。
 - 初回取得、fallback、reclaim後の再試行、候補マージ、weak merge判定、sync fallbackまで同じ `matched_reading` を渡す。
 - `immediate_dict_candidates()` も現在は `preedit` で辞書を引いているため、同じ `matched_reading`（未変換接尾辞を除いた読み）を渡す対象に含める。
-- 前提: `hiragana_text()` を reading、`pending_romaji_buf` を未変換接尾辞として扱う。G-5（Step 10）はこの2つの意味とAPIを変えず、Backspace後の内容だけを変える。したがって本Stepは G-5 に依存しない。
-- 候補表示と確定では、候補の後ろへ未変換接尾辞を英字幅設定に従って付加する。「たt」は「た」を変換し、未変換の `t` は全角設定なら「ｔ」として残す。「やまのたn」は「山の田ｎ」となり、`n`を暗黙に「ん」へ確定したり消したりしない。
-- 学習対象は候補と変換readingだけとし、未変換接尾辞を学習キーまたは候補文字列へ含めない。
+- 前提: `hiragana_text()` を reading として扱う。未変換接尾辞（`pending_romaji_buf`）の分離と表示・確定・学習からの除外は Step 10 で行う。したがって本Stepは G-5 に依存しない。
 - TSF側から旧 `merge_candidates()` を呼べないよう、RPCクライアントAPIと不要になったprotocol要求を削除する。現在のテストで必要な場合だけ用途を限定して残す。
 
 #### 受入テスト
 
 - 完全な読みでユーザー辞書候補がSpace変換に出る。
-- 「たt」で「た」に登録したユーザー辞書候補が出て、未変換の `t` が表示・確定結果に残る。
-- 「やまのたn」で候補「山の田」と未変換接尾辞「ｎ」がともに残る。
 - 学習履歴についても同じ結果になる。
 - 初回取得とreclaim後の再試行をそれぞれ通す。
 - ライブ変換で出た辞書候補がSpace押下後に消えない。
@@ -426,6 +420,7 @@ TSF Convert p95=171ms、engine beam p95=88msの差を分解するため、RPC要
 - `romaji_input_log` の1要素は1キーとは限らないため、単純に最後の要素を削除する実装にはしない。
 - 直接入力、全角英字、数字、記号を通常ローマ字として再解釈しない。既存ログだけでは入力種別の区別が不足する場合は、別履歴を追加するのではなく既存ログの要素へ入力種別またはローマ字区間境界を持たせる。
 - F9/F10が利用する入力文字列の復元結果を維持する。
+- Space変換時の未変換接尾辞（「たt」の `t`）は、reading「た」で辞書・学習候補を取得し、接尾辞を候補表示と確定で失わず、学習キーにも含めない。接尾辞は英字幅設定に従って付加する。末尾 `n` は現状 `flush_pending_n` で「ん」に確定してから変換しており、これを維持するか接尾辞として残すかは本Stepの着手時に決める。
 
 #### テスト
 
@@ -435,6 +430,8 @@ TSF Convert p95=171ms、engine beam p95=88msの差を分解するため、RPC要
 - `kanakq` → Backspaceで従来どおり「かなk」になる。
 - `romaji_input_log + pending_romaji_buf` がユーザーの入力文字列と一致する既存の不変条件を維持する。
 - 直接入力、全角英字、数字、記号、およびF9/F10の既存テストを維持する。
+- 「たt」で「た」に登録したユーザー辞書候補が出て、未変換の `t` が表示・確定結果に残り、学習キーに含まれない。
+- 「やまのたn」の扱いは末尾 `n` の方針決定に従う。
 
 ## 8. 実施ステップとリリース単位
 
@@ -469,15 +466,11 @@ TSF Convert p95=171ms、engine beam p95=88msの差を分解するため、RPC要
 
 - 候補取得結果を `(matched_reading, candidates)` の組で保持する。
 - 初回取得、fallback、reclaim後の再試行、merge、weak merge、sync fallbackで同じreadingを使う。
-- 表示用 `preedit` と辞書検索用 `reading` を分離する。
-- 未変換ローマ字を変換対象外の接尾辞として保持し、候補表示と確定で失わない。
 - TSF側の旧 `merge_candidates()` 呼び出しを除去し、再利用を防ぐ。
 
 #### 検証
 
 - 通常の読みでユーザー辞書と学習候補を確認する。
-- 「たt」では辞書・学習候補をreading「た」で取得し、未変換接尾辞 `t` が候補表示と確定結果に残ることを確認する。
-- 「やまのたn」が「山の田ｎ」となり、`n`が「ん」へ変化したり消えたりしないことを確認する。
 - ライブ変換で表示された辞書候補がSpace押下後に消えないことを確認する。
 - 初回取得とreclaim後の再試行を別々にテストする。
 
@@ -683,6 +676,7 @@ TSF Convert p95=171ms、engine beam p95=88msの差を分解するため、RPC要
 - Backspaceで最後の入力文字を削除し、残った区間を再生して変換済み文字と未確定ローマ字を再構築する。
 - 既存ログで入力種別を区別できない箇所は、ログ要素へ種別または区間境界を追加する。
 - 再構築処理をBackspace専用の場当たり的な分岐にせず、入力文字列からローマ字状態を再生するテスト可能な処理として分離する。
+- Space変換で表示用 `preedit` と辞書検索用 `reading` を分離し、未変換接尾辞を候補表示と確定で失わず、学習キーへ含めない。
 
 #### 検証
 
@@ -855,3 +849,33 @@ cargo make test
 - PR #7の限定的な数詞テーブルを、そのまま拡張して一般解とすること。
 - Issue #13で確定した「学習履歴 → ユーザー辞書」の順序を、別の優先順位へ変更すること。
 - ログや再現結果を得ずにIssue #8のtracing基盤を推測で置き換えること。
+
+## 13. 実施記録
+
+### Step 0（2026-09-01）
+
+- ベースライン: main `e5d086a`、作業ツリーはクリーン（未追跡なし）。
+- `cargo make check` OK。`cargo test --workspace --lib`: dict 33 / engine 165（ignored 1）/ abi 0 / rpc 7 / tsf 61、失敗 0。
+- 既知の不安定テスト: `rakukan-engine` の `backend::tests::test_env_override_{cuda,cpu,unknown_falls_back_to_cpu}` は同じ環境変数 `RAKUKAN_BACKEND` をプロセス全体で並列に set / remove するため、稀に競合して失敗する（Step 1 の作業中に 1 回発生、再実行で通過）。修正するなら 3 テストを mutex で直列化する。
+
+### Step 1（2026-09-01）
+
+- PR #10 の 3 コミット（`bf370eb` `9f1d02a` `50dc1cc`）を `cherry-pick -n` で取り込み、その上で次を修正。
+  - `on_convert.rs` phase 3: `bg_take_candidates` が成功したキー（`hiragana_key2` / `preedit` / 再試行後の `hira3` / `preedit`）を `matched_reading` として保持し、`merge_candidates_for_reading`、weak merge 判定（`is_weak_merge`）、`sync_after_weak_merge` / `sync_no_bg` の同期 fallback まで同じ reading を渡す。
+  - `immediate_dict_candidates`: `hiragana_text()` を reading にし、「変換候補あり」判定は preedit と reading の両方と異なる候補に限定。
+  - `engine_convert_sync_multi`: `reading`（辞書キー）と `preedit`（空のときの表示文字列）を分離。
+  - RPC: `Request::MergeCandidates` を `_ReservedMergeCandidates`（deprecated、スロット維持）にし、host は `Error` を返す。`RpcEngine::merge_candidates()` と `engine-abi` の `DynEngine::merge_candidates()` を削除（vtable のシンボルは ABI 維持のため読み込みのみ）。
+- 追加テスト: `on_convert::tests`（`is_weak_merge` 4 件）、`codec::tests::removed_merge_candidates_keeps_its_slot`。
+- 検証: `cargo check --workspace --all-targets` 警告 0、`git diff --check` OK、`cargo test --workspace --lib`: dict 33 / engine 165 / rpc 8 / tsf 65、失敗 0。
+- 未実施（実機）: 完全な読みでユーザー辞書・学習候補が Space 変換に出る、初回取得と reclaim 後の再試行、ライブ変換候補が Space 後に消えない。
+- 接尾辞（「たt」）と末尾 `n` の扱いは Step 10 へ移した（4 節・R-1・Step 10 に反映済み）。
+
+### Step 2（2026-09-01）
+
+- PR #4 のコミット（`5c2a238`）を `cherry-pick -n` で取り込み、VK の読み替え規則を `keymap.rs` の純粋関数 `normalize_key_event` に集約（`factory.rs` の `normalize_key_event_vk` は修飾キー状態を読んで委譲するだけにした）。0xF3 / 0xF4 → 0x19 の正規化は修飾キーを変更せず、Shift / Ctrl 併用時の扱いは keymap 側の照合に委ねる。
+- R-2「差分外だが受入時に整合を取る点」: keymap 解決失敗時の fallback を `essential_fallback_action()` に一本化し、`resolve_action` ①.5（keymap に binding が無い場合）と `OnTestKeyDown` の keymap 取得失敗時で同じ集合（Enter / Space / BS / Esc / IME_OFF / IME_ON / 半角全角）を使うようにした。これにより `OnKeyDown` 側も `resolve_action` 経由で半角/全角の fallback を得る。
+- `docs/DESIGN.md` の VK 対照表に 0xF3 / 0xF4 の正規化を追記。
+- 追加テスト（`keymap::tests`）: 0xF3 / 0xF4 / 0x19 → 0x19、無関係な VK は不変、修飾キーの素通し、既定プリセットで正規化後の 0x19 が `ImeToggle` に解決される、fallback 集合。
+- 検証: `cargo check -p rakukan-tsf --all-targets` 警告 0、`git diff --check` OK、`cargo test --workspace --lib` は Step 1 と合わせて再実行（結果は本節末尾）。
+- 未実施（JIS 実機）: IME の ON/OFF 両方向、1 回の押下で二重に切り替わらないこと、Ctrl+Space など既存 binding を壊さないこと。
+- テスト結果（Step 1 + 2）: dict 33 / engine 165 / abi 0 / rpc 8 / tsf 69、失敗 0。

@@ -585,7 +585,7 @@ Escape=キャンセル、Muhenkan=CycleKana、Zenkaku=ImeToggle、Hiragana_key=M
 
 | キー名 | VK コード | 備考 |
 |--------|-----------|------|
-| `zenkaku`/`hankaku`/`kanji` | `0x19` | VK_KANJI（全角/半角キー）|
+| `zenkaku`/`hankaku`/`kanji` | `0x19` | VK_KANJI（全角/半角キー）。JIS 実機が送る `0xF3`（VK_DBE_SBCSCHAR）/ `0xF4`（VK_DBE_DBCSCHAR）は `normalize_key_event` が `0x19` に正規化する |
 | `henkan` | `0x1C` | VK_CONVERT |
 | `muhenkan` | `0x1D` | VK_NONCONVERT |
 | `eisuu` | `0xF0` | VK_DBE_ALPHANUMERIC |
