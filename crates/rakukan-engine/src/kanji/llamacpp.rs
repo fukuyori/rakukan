@@ -561,9 +561,7 @@ impl LlamaCppModel {
 
         // n_ctx / n_batch は「全 beam のフル系列を 1 decode に載せる」ぶんが必要。
         let max_seq_len = input_len.saturating_add(max_new_tokens).saturating_add(1);
-        let batch_size = max_seq_len
-            .saturating_mul(beam_size)
-            .min(u32::MAX as usize) as u32;
+        let batch_size = max_seq_len.saturating_mul(beam_size).min(u32::MAX as usize) as u32;
         let n_ctx_needed = batch_size.max(self.n_ctx);
         let ctx_params = self
             .context_params()
