@@ -26,7 +26,7 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 - **LLM + 辞書変換**: jinen モデルと Mozc 系辞書を併用
 - **ユーザー辞書学習**: 確定した変換結果を即時反映
 - **文字種変換**: `F6`〜`F10` でひらがな・カタカナ・英数を往復
-- **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応
+- **GPU アクセラレーション**: CUDA / Vulkan バックエンド対応。CUDA 版 DLL は CUDA ランタイムが別途必要（無い環境では `gpu_backend = "auto"` が Vulkan / CPU へ自動で切り替わる）
 - **out-of-process 構成**: TSF DLL と engine-host を分離し、GPU リソースや LLM 実行をホストプロセス側で管理
 
 ## 最新の変更

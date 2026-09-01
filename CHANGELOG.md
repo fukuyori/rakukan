@@ -3,6 +3,18 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [Unreleased]
+
+### Fixed
+
+- **`gpu_backend = "auto"` で CUDA DLL がロードできない環境でも Vulkan / CPU へ切り替わるようにした**（[Issue #2](https://github.com/fukuyori/rakukan/issues/2)）: 従来は DLL ファイルの有無だけで `cuda` を選び、CUDA ランタイム未導入で `LoadLibrary` が失敗すると次の候補へ進まず、IME 全体が無反応になっていた。`auto` では `cuda` → `vulkan` → `cpu` の順に実際にロードを試み、失敗理由（`ERROR_MOD_NOT_FOUND` の場合は依存 DLL 不足のヒント付き）を `rakukan-engine-host.log` に WARN で残して次へ進む。全て失敗した場合は各 backend の理由をまとめたエラーを返す。
+- **Space 変換でユーザー辞書・学習履歴が反映されない問題を修正**（[Issue #9](https://github.com/fukuyori/rakukan/issues/9)、[PR #10](https://github.com/fukuyori/rakukan/pull/10) を取り込み）: 辞書マージがホスト内部の読みバッファを参照していたため、複数アプリでホストを共有する構成で別の読みで辞書を引くことがあった。すべての経路で「実際に候補が取れた読み」を明示的に渡すようにし、旧 `MergeCandidates` RPC は廃止した。
+- **JIS 配列の半角/全角キーで IME が切り替わらない問題を修正**（[Issue #1](https://github.com/fukuyori/rakukan/issues/1)、[PR #4](https://github.com/fukuyori/rakukan/pull/4) を取り込み）: 環境によって `VK_KANJI`（0x19）ではなく `VK_DBE_SBCSCHAR`（0xF3）/ `VK_DBE_DBCSCHAR`（0xF4）が届くため、keymap 照合前に 0x19 へ正規化する。keymap に `Zenkaku` binding が無い場合の fallback も `OnTestKeyDown` / `OnKeyDown` で同じ集合を使うようにした。
+
+### Changed
+
+- **`gpu_backend` を明示指定した場合は他の backend へ fallback しない**: 従来は指定した DLL ファイルが無いと暗黙に `cpu` へ落ちていたが、指定どおりにロードできなければエラーを返す。fallback が必要な場合は `auto` を使う。
+
 ## [0.10.4] - 2026-08-09
 
 ### Fixed

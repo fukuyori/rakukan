@@ -5,8 +5,10 @@
 //!
 //! # バックエンド選択順
 //! 1. `config.toml` の `gpu_backend` キー（`cuda` / `vulkan` / `cpu` / `auto`）
-//! 2. キー未指定または `auto` の場合は、インストール済みの DLL を
-//!    `cuda` → `vulkan` → `cpu` の順で探索して採用する。
+//!    - 明示指定はその DLL だけを試し、失敗しても他の backend へ fallback しない。
+//! 2. キー未指定または `auto` の場合は、`cuda` → `vulkan` → `cpu` の順に
+//!    **実際にロードを試み**、最初に成功したものを採用する（Issue #2: DLL ファイルは
+//!    あるが CUDA ランタイムが無くロードできない環境で次へ進めるようにする）。
 //!
 //! # DLL ファイル名
 //! `rakukan_engine_<backend>.dll` がインストールディレクトリに存在すること。
@@ -254,8 +256,10 @@ impl DynEngine {
     /// 指定した DLL パスからエンジンを生成する。
     pub fn from_dll(dll_path: &Path, config_json: Option<&str>) -> Result<Self> {
         tracing::info!("Loading engine DLL: {}", dll_path.display());
-        let lib = unsafe { Library::new(dll_path) }
-            .with_context(|| format!("DLL load failed: {}", dll_path.display()))?;
+        let lib = unsafe { Library::new(dll_path) }.map_err(|e| {
+            let hint = load_failure_hint(&e);
+            anyhow::anyhow!("DLL load failed: {} ({e}){hint}", dll_path.display())
+        })?;
         let vtable = unsafe { EngineVTable::load(&lib) }?;
 
         let handle = unsafe {
@@ -274,42 +278,36 @@ impl DynEngine {
         })
     }
 
-    /// バックエンドを自動検出して適切な DLL をロードする。
+    /// `config.toml` の `gpu_backend` に従って DLL をロードする。
+    ///
+    /// - 明示指定（`cuda` / `vulkan` / `cpu`）: その DLL だけを試し、失敗はそのままエラーに
+    ///   する（fallback しない）。
+    /// - `auto` / 未指定: `cuda` → `vulkan` → `cpu` の順に実際にロードし、失敗したら理由を
+    ///   記録して次へ進む。全て失敗した場合は各 backend の理由をまとめて返す。
     ///
     /// `install_dir`: rakukan DLL が配置されているディレクトリ
     /// `config_json`: EngineConfig JSON（null の場合はデフォルト）
     pub fn load_auto(install_dir: &Path, config_json: Option<&str>) -> Result<Self> {
-        let backend = match detect_backend() {
-            BackendSelection::Explicit(b) => {
-                tracing::info!("Selected backend (explicit): {b}");
-                b
-            }
-            BackendSelection::Auto => {
-                let b = detect_best_installed_backend(install_dir);
-                tracing::info!("Selected backend (auto): {b}");
-                b
-            }
-        };
-        Self::load_backend(install_dir, &backend, config_json)
+        load_with_selection(detect_backend(), install_dir, |_backend, dll_path| {
+            Self::load_dll_checked(dll_path, config_json)
+        })
     }
 
-    /// 指定バックエンド名の DLL をロードする。
+    /// 指定バックエンド名の DLL をロードする。他の backend へは fallback しない。
     pub fn load_backend(
         install_dir: &Path,
         backend: &str,
         config_json: Option<&str>,
     ) -> Result<Self> {
-        let dll_name = format!("rakukan_engine_{}.dll", backend);
-        let dll_path = install_dir.join(&dll_name);
+        Self::load_dll_checked(&backend_dll_path(install_dir, backend), config_json)
+    }
+
+    /// ファイルの有無を確認してから DLL をロードする（1 backend ぶんの試行）。
+    fn load_dll_checked(dll_path: &Path, config_json: Option<&str>) -> Result<Self> {
         if !dll_path.exists() {
-            // フォールバック: cpu
-            if backend != "cpu" {
-                tracing::warn!("{} not found, falling back to cpu", dll_name);
-                return Self::load_backend(install_dir, "cpu", config_json);
-            }
             bail!("engine DLL not found: {}", dll_path.display());
         }
-        Self::from_dll(&dll_path, config_json)
+        Self::from_dll(dll_path, config_json)
     }
 
     // ── ヘルパー ───────────────────────────────────────────────────────────
@@ -650,17 +648,89 @@ fn detect_backend() -> BackendSelection {
     }
 }
 
-/// インストール済みの DLL を `cuda` → `vulkan` → `cpu` の順に探索して
-/// 最良のバックエンド名を返す。どれも見つからなければ `cpu` を返す
-/// （`load_backend` 側の最終フォールバックで適切なエラーになる）。
-fn detect_best_installed_backend(install_dir: &Path) -> String {
-    for backend in ["cuda", "vulkan", "cpu"] {
-        let dll = install_dir.join(format!("rakukan_engine_{}.dll", backend));
-        if dll.exists() {
-            return backend.to_string();
+/// `auto` で試す backend の順序。
+pub const AUTO_BACKEND_ORDER: [&str; 3] = ["cuda", "vulkan", "cpu"];
+
+/// backend 名から DLL のフルパスを組み立てる。
+pub fn backend_dll_path(install_dir: &Path, backend: &str) -> PathBuf {
+    install_dir.join(format!("rakukan_engine_{backend}.dll"))
+}
+
+/// 選択方針に従って backend を順に試し、最初に `try_load` が成功したものを採用する。
+///
+/// ファイルの存在確認と実ロードを別々の選択ロジックにせず、`try_load` 1 回を
+/// 「その backend の試行」とみなす。テストで実 DLL を使わずに検証できるよう、
+/// ロード処理は引数で注入する。
+///
+/// - `Explicit`: 1 回だけ試す。失敗はそのまま返す。
+/// - `Auto`: [`AUTO_BACKEND_ORDER`] の順に試す。失敗理由を WARN で残して次へ進み、
+///   全て失敗したら理由をまとめたエラーを返す。
+fn load_with_selection<T>(
+    selection: BackendSelection,
+    install_dir: &Path,
+    mut try_load: impl FnMut(&str, &Path) -> Result<T>,
+) -> Result<T> {
+    match selection {
+        BackendSelection::Explicit(backend) => {
+            let dll_path = backend_dll_path(install_dir, &backend);
+            tracing::info!(
+                "Selected backend (explicit): {backend} path={}",
+                dll_path.display()
+            );
+            try_load(&backend, &dll_path)
+                .with_context(|| format!("backend {backend} (explicit, no fallback) failed"))
+        }
+        BackendSelection::Auto => {
+            let mut failures: Vec<String> = Vec::new();
+            for backend in AUTO_BACKEND_ORDER {
+                let dll_path = backend_dll_path(install_dir, backend);
+                tracing::info!(
+                    "backend::auto: trying {backend} path={}",
+                    dll_path.display()
+                );
+                match try_load(backend, &dll_path) {
+                    Ok(engine) => {
+                        if !failures.is_empty() {
+                            tracing::warn!(
+                                "backend::auto: fell back to {backend} after: {}",
+                                failures.join("; ")
+                            );
+                        }
+                        tracing::info!(
+                            "Selected backend (auto): {backend} path={}",
+                            dll_path.display()
+                        );
+                        return Ok(engine);
+                    }
+                    Err(e) => {
+                        tracing::warn!("backend::auto: {backend} failed: {e:#}; trying next");
+                        failures.push(format!("{backend}: {e:#}"));
+                    }
+                }
+            }
+            bail!("all backends failed (auto): {}", failures.join("; "))
         }
     }
-    "cpu".to_string()
+}
+
+/// `LoadLibrary` 失敗の原因を補足するヒント。
+///
+/// `ERROR_MOD_NOT_FOUND`（126）は「DLL 自体はあるが依存 DLL が見つからない」場合にも
+/// 返るため（Issue #2: CUDA ランタイム未導入）、その旨を添える。取得できなければ空。
+fn load_failure_hint(e: &libloading::Error) -> &'static str {
+    let mut cur: Option<&(dyn std::error::Error + 'static)> = Some(e);
+    while let Some(err) = cur {
+        if let Some(io) = err.downcast_ref::<std::io::Error>() {
+            return match io.raw_os_error() {
+                Some(126) => {
+                    " [依存 DLL が見つかりません。CUDA 版なら CUDA ランタイムの有無を確認してください]"
+                }
+                _ => "",
+            };
+        }
+        cur = err.source();
+    }
+    ""
 }
 
 fn appdata_rakukan() -> Option<PathBuf> {
@@ -707,4 +777,136 @@ pub fn install_dir() -> Option<PathBuf> {
 #[cfg(not(target_os = "windows"))]
 pub fn install_dir() -> Option<PathBuf> {
     Some(PathBuf::from("/usr/local/lib/rakukan"))
+}
+
+#[cfg(test)]
+mod backend_selection_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// 指定した backend だけ成功するローダを作り、試行順を記録する。
+    fn loader<'a>(
+        ok: &'a [&'static str],
+        attempts: &'a RefCell<Vec<String>>,
+    ) -> impl FnMut(&str, &Path) -> Result<String> + 'a {
+        move |backend, dll_path| {
+            attempts.borrow_mut().push(backend.to_string());
+            assert!(
+                dll_path.ends_with(format!("rakukan_engine_{backend}.dll")),
+                "path={}",
+                dll_path.display()
+            );
+            if ok.contains(&backend) {
+                Ok(backend.to_string())
+            } else {
+                Err(anyhow::anyhow!("simulated load failure for {backend}"))
+            }
+        }
+    }
+
+    fn dir() -> PathBuf {
+        PathBuf::from("C:/install")
+    }
+
+    #[test]
+    fn auto_falls_back_from_cuda_to_vulkan() {
+        let attempts = RefCell::new(Vec::new());
+        let got = load_with_selection(
+            BackendSelection::Auto,
+            &dir(),
+            loader(&["vulkan", "cpu"], &attempts),
+        )
+        .unwrap();
+        assert_eq!(got, "vulkan");
+        assert_eq!(*attempts.borrow(), vec!["cuda", "vulkan"]);
+    }
+
+    #[test]
+    fn auto_falls_back_to_cpu_when_gpu_backends_fail() {
+        let attempts = RefCell::new(Vec::new());
+        let got = load_with_selection(BackendSelection::Auto, &dir(), loader(&["cpu"], &attempts))
+            .unwrap();
+        assert_eq!(got, "cpu");
+        assert_eq!(*attempts.borrow(), vec!["cuda", "vulkan", "cpu"]);
+    }
+
+    #[test]
+    fn auto_reports_every_failure_when_all_fail() {
+        let attempts = RefCell::new(Vec::new());
+        let err = load_with_selection(BackendSelection::Auto, &dir(), loader(&[], &attempts))
+            .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("all backends failed"), "{msg}");
+        for backend in AUTO_BACKEND_ORDER {
+            assert!(
+                msg.contains(&format!("{backend}: simulated load failure for {backend}")),
+                "{msg}"
+            );
+        }
+        assert_eq!(*attempts.borrow(), vec!["cuda", "vulkan", "cpu"]);
+    }
+
+    #[test]
+    fn auto_stops_at_first_success() {
+        let attempts = RefCell::new(Vec::new());
+        let got = load_with_selection(
+            BackendSelection::Auto,
+            &dir(),
+            loader(&["cuda", "vulkan", "cpu"], &attempts),
+        )
+        .unwrap();
+        assert_eq!(got, "cuda");
+        assert_eq!(*attempts.borrow(), vec!["cuda"]);
+    }
+
+    #[test]
+    fn explicit_backend_does_not_fall_back() {
+        let attempts = RefCell::new(Vec::new());
+        let err = load_with_selection(
+            BackendSelection::Explicit("cuda".into()),
+            &dir(),
+            loader(&["vulkan", "cpu"], &attempts),
+        )
+        .unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("explicit, no fallback"), "{msg}");
+        assert!(msg.contains("simulated load failure for cuda"), "{msg}");
+        assert_eq!(
+            *attempts.borrow(),
+            vec!["cuda"],
+            "vulkan / cpu を試してはいけない"
+        );
+    }
+
+    #[test]
+    fn explicit_backend_loads_only_that_backend() {
+        let attempts = RefCell::new(Vec::new());
+        let got = load_with_selection(
+            BackendSelection::Explicit("vulkan".into()),
+            &dir(),
+            loader(&["cuda", "vulkan", "cpu"], &attempts),
+        )
+        .unwrap();
+        assert_eq!(got, "vulkan");
+        assert_eq!(*attempts.borrow(), vec!["vulkan"]);
+    }
+
+    #[test]
+    fn load_backend_with_missing_dll_is_an_error_without_cpu_fallback() {
+        // 存在しないディレクトリ: 以前は cpu へ暗黙に fallback していたが、明示指定は失敗を返す
+        let missing = std::env::temp_dir().join("rakukan-abi-test-does-not-exist");
+        let err = match DynEngine::load_backend(&missing, "cuda", None) {
+            Ok(_) => panic!("存在しない DLL のロードが成功してはいけない"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("engine DLL not found"), "{msg}");
+        assert!(msg.contains("rakukan_engine_cuda.dll"), "{msg}");
+    }
+
+    #[test]
+    fn backend_dll_path_uses_backend_name() {
+        let p = backend_dll_path(&dir(), "vulkan");
+        assert!(p.ends_with("rakukan_engine_vulkan.dll"), "{}", p.display());
+    }
 }
