@@ -1,9 +1,16 @@
 //! キーバインド設定（MS-IME 準拠デフォルト）
 //!
 //! 設定ファイル: `%APPDATA%\rakukan\keymap.toml`
-//! リロードタイミング: IME オフ → オン（Activate）のみ。
+//! リロードタイミング:
+//! - Activate（IME オフ → オン）: 必ず読み込む（`Keymap::load`）
+//! - 入力モード切替: `keymap.toml` の mtime が変わった場合だけ読み直す
+//!   （`Keymap::reload_if_changed`）。以前は切替ごとに同期でファイル読込 + TOML parse を
+//!   行っており、8月ログで SLOW OnKeyDown の直前に `keymap loaded` が 53 回、最悪 931ms。
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -232,8 +239,10 @@ pub struct Keymap {
 }
 
 impl Keymap {
+    /// keymap.toml を必ず読み込む（Activate 用）。失敗時は既定 keymap。
+    /// 読み込み後の mtime を `reload_if_changed` の基準として記録する。
     pub fn load() -> Self {
-        match load_from_file() {
+        let km = match load_from_file() {
             Ok(km) => {
                 tracing::info!("keymap loaded");
                 km
@@ -242,7 +251,24 @@ impl Keymap {
                 tracing::warn!("keymap: load failed, using default ({e})");
                 Self::default()
             }
+        };
+        if let Ok(mut r) = KEYMAP_RELOADER.lock() {
+            r.mark_loaded();
         }
+        km
+    }
+
+    /// 入力モード切替時用: keymap.toml が前回から変わっていた場合だけ読み直す。
+    ///
+    /// 変化が無ければファイル I/O は `metadata` 1 回だけで `None` を返す。
+    /// 更新・作成なら新しい keymap、削除なら既定 keymap、parse 失敗なら `None`
+    /// （呼び出し側は直前の keymap を維持する）。
+    pub fn reload_if_changed() -> Option<Self> {
+        let mut r = match KEYMAP_RELOADER.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        r.reload_if_changed()
     }
 
     fn build(cfg: KeymapConfig) -> Self {
@@ -552,10 +578,114 @@ fn config_path() -> Result<std::path::PathBuf> {
 }
 
 fn load_from_file() -> Result<Keymap> {
-    let text = std::fs::read_to_string(config_path()?)?;
+    load_keymap_from_path(&config_path()?)
+}
+
+fn load_keymap_from_path(path: &Path) -> Result<Keymap> {
+    let text = std::fs::read_to_string(path)?;
     let cfg: KeymapConfig = toml::from_str(&text)?;
     Ok(Keymap::build(resolve_keymap_config(cfg)))
 }
+
+// ─── 変更検出（mtime gate）────────────────────────────────────────────────────
+
+/// keymap.toml の変更種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeymapChange {
+    Unchanged,
+    Created,
+    Updated,
+    Deleted,
+}
+
+/// 前回記録した mtime と現在の mtime から変更種別を判定する（純粋関数）。
+/// `None` はファイルが存在しない（または mtime を取れない）ことを表す。
+pub fn classify_change(prev: Option<SystemTime>, now: Option<SystemTime>) -> KeymapChange {
+    match (prev, now) {
+        (a, b) if a == b => KeymapChange::Unchanged,
+        (None, Some(_)) => KeymapChange::Created,
+        (Some(_), None) => KeymapChange::Deleted,
+        (Some(_), Some(_)) => KeymapChange::Updated,
+        (None, None) => KeymapChange::Unchanged,
+    }
+}
+
+fn file_modified(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).ok()?.modified().ok()
+}
+
+/// keymap.toml の path と最終更新時刻を保持し、変わったときだけ読み直す。
+///
+/// config 側の `ConfigManager::reload_if_changed` と同じ方針だが、config と keymap の
+/// 失敗を互いに巻き込まないよう独立して持つ。
+#[derive(Debug)]
+pub struct KeymapReloader {
+    path: Option<PathBuf>,
+    last_modified: Option<SystemTime>,
+}
+
+impl KeymapReloader {
+    /// 現在の mtime を基準として開始する。`path` が `None` なら何もしない reloader になる。
+    pub fn new(path: Option<PathBuf>) -> Self {
+        let last_modified = path.as_deref().and_then(file_modified);
+        Self {
+            path,
+            last_modified,
+        }
+    }
+
+    /// 読み込み直後に呼び、現在の mtime を基準にする。
+    pub fn mark_loaded(&mut self) {
+        self.last_modified = self.path.as_deref().and_then(file_modified);
+    }
+
+    pub fn reload_if_changed(&mut self) -> Option<Keymap> {
+        self.reload_if_changed_with(load_keymap_from_path)
+    }
+
+    /// 変更があれば `load(path)` で読み直す。テストで実ファイルの parse を差し替えられるよう
+    /// ロード処理は注入する。
+    ///
+    /// - `Unchanged`: `None`（ファイル I/O は `metadata` のみ）
+    /// - `Created` / `Updated`: 成功なら `Some(新 keymap)`。parse 失敗なら WARN を出して
+    ///   `None`（直前の keymap を維持）。どちらも mtime は更新し、壊れたファイルを
+    ///   切替ごとに parse し直さない
+    /// - `Deleted`: `Some(既定 keymap)`
+    pub fn reload_if_changed_with(
+        &mut self,
+        load: impl FnOnce(&Path) -> Result<Keymap>,
+    ) -> Option<Keymap> {
+        let path = self.path.as_deref()?;
+        let now = file_modified(path);
+        let change = classify_change(self.last_modified, now);
+        if change == KeymapChange::Unchanged {
+            return None;
+        }
+        self.last_modified = now;
+        match change {
+            KeymapChange::Deleted => {
+                tracing::info!("keymap.toml deleted; using default keymap");
+                Some(Keymap::default())
+            }
+            KeymapChange::Created | KeymapChange::Updated => match load(path) {
+                Ok(km) => {
+                    tracing::info!("keymap reloaded ({change:?}): {}", path.display());
+                    Some(km)
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "keymap.toml changed but failed to load; keeping previous keymap: {e}"
+                    );
+                    None
+                }
+            },
+            KeymapChange::Unchanged => None,
+        }
+    }
+}
+
+static KEYMAP_RELOADER: LazyLock<Mutex<KeymapReloader>> =
+    LazyLock::new(|| Mutex::new(KeymapReloader::new(config_path().ok())));
 
 fn resolve_keymap_config(mut cfg: KeymapConfig) -> KeymapConfig {
     let layout_preset = match super::config::keyboard_layout() {
@@ -787,6 +917,120 @@ mod tests {
             None,
             "正規化前の VK は対象外"
         );
+    }
+
+    #[test]
+    fn classify_change_covers_all_transitions() {
+        let t1 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1);
+        let t2 = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(2);
+        assert_eq!(classify_change(None, None), KeymapChange::Unchanged);
+        assert_eq!(classify_change(Some(t1), Some(t1)), KeymapChange::Unchanged);
+        assert_eq!(classify_change(None, Some(t1)), KeymapChange::Created);
+        assert_eq!(classify_change(Some(t1), None), KeymapChange::Deleted);
+        assert_eq!(classify_change(Some(t1), Some(t2)), KeymapChange::Updated);
+    }
+
+    /// テスト用の一時 keymap.toml。Drop で削除する。
+    struct TempKeymap(PathBuf);
+
+    impl TempKeymap {
+        fn create(name: &str, body: &str) -> Self {
+            let path = std::env::temp_dir().join(format!(
+                "rakukan-keymap-test-{}-{name}.toml",
+                std::process::id()
+            ));
+            std::fs::write(&path, body).unwrap();
+            Self(path)
+        }
+
+        /// 内容を書き換え、mtime を確実に前へ進める（同一秒内の書き込みでも検出できるように）。
+        fn rewrite(&self, body: &str) {
+            std::fs::write(&self.0, body).unwrap();
+            let f = std::fs::File::options().write(true).open(&self.0).unwrap();
+            let bumped = std::fs::metadata(&self.0).unwrap().modified().unwrap()
+                + std::time::Duration::from_secs(5);
+            f.set_modified(bumped).unwrap();
+        }
+    }
+
+    impl Drop for TempKeymap {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
+    const F6_HIRAGANA: &str = "preset = \"custom\"\ninherit_preset = false\n[[bindings]]\nkey = \"F6\"\naction = \"hiragana\"\n";
+    const F6_KATAKANA: &str = "preset = \"custom\"\ninherit_preset = false\n[[bindings]]\nkey = \"F6\"\naction = \"katakana\"\n";
+
+    #[test]
+    fn reloader_does_not_reload_when_mtime_is_unchanged() {
+        let tmp = TempKeymap::create("unchanged", F6_HIRAGANA);
+        let mut r = KeymapReloader::new(Some(tmp.0.clone()));
+        let mut loads = 0;
+        let got = r.reload_if_changed_with(|p| {
+            loads += 1;
+            load_keymap_from_path(p)
+        });
+        assert!(got.is_none());
+        assert_eq!(loads, 0, "mtime 不変なら parse しない");
+    }
+
+    #[test]
+    fn reloader_reloads_updated_file_with_new_bindings() {
+        let tmp = TempKeymap::create("updated", F6_HIRAGANA);
+        let mut r = KeymapReloader::new(Some(tmp.0.clone()));
+        tmp.rewrite(F6_KATAKANA);
+        let km = r
+            .reload_if_changed_with(load_keymap_from_path)
+            .expect("更新を検出する");
+        assert_eq!(
+            km.resolve(0x75, false, false, false),
+            Some(&KeyAction::Katakana)
+        );
+        // 2 回目は変化なし
+        assert!(r.reload_if_changed_with(load_keymap_from_path).is_none());
+    }
+
+    #[test]
+    fn reloader_keeps_previous_keymap_when_parse_fails_and_does_not_retry() {
+        let tmp = TempKeymap::create("broken", F6_HIRAGANA);
+        let mut r = KeymapReloader::new(Some(tmp.0.clone()));
+        tmp.rewrite("this is not toml = = =");
+        let mut loads = 0;
+        let got = r.reload_if_changed_with(|p| {
+            loads += 1;
+            load_keymap_from_path(p)
+        });
+        assert!(got.is_none(), "parse 失敗は None（直前の keymap を維持）");
+        assert_eq!(loads, 1);
+        // 壊れたままの同じファイルを次の切替で parse し直さない
+        let got2 = r.reload_if_changed_with(|p| {
+            loads += 1;
+            load_keymap_from_path(p)
+        });
+        assert!(got2.is_none());
+        assert_eq!(loads, 1);
+    }
+
+    #[test]
+    fn reloader_falls_back_to_default_when_file_is_deleted() {
+        let tmp = TempKeymap::create("deleted", F6_HIRAGANA);
+        let mut r = KeymapReloader::new(Some(tmp.0.clone()));
+        std::fs::remove_file(&tmp.0).unwrap();
+        let km = r
+            .reload_if_changed_with(|_| panic!("削除時は load を呼ばない"))
+            .expect("削除は既定 keymap を返す");
+        // 既定プリセットは Space=Convert を持つ
+        assert_eq!(
+            km.resolve(0x20, false, false, false),
+            Some(&KeyAction::Convert)
+        );
+    }
+
+    #[test]
+    fn reloader_without_path_never_reloads() {
+        let mut r = KeymapReloader::new(None);
+        assert!(r.reload_if_changed_with(|_| panic!("呼ばれない")).is_none());
     }
 
     #[test]

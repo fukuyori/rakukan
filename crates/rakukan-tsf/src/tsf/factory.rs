@@ -978,11 +978,16 @@ impl TextServiceFactory_Impl {
         }
     }
 
+    /// 入力モード切替時の設定再読込。
+    ///
+    /// config と keymap はそれぞれ mtime gate を持ち、変わっていなければファイルを
+    /// 読まない（キースレッド上の同期 I/O を避ける）。両者の失敗は互いに影響しない。
     fn maybe_reload_runtime_config(&self) {
         let config_changed = crate::engine::config::maybe_reload_on_mode_switch();
-        let new_keymap = crate::engine::keymap::Keymap::load();
-        if let Ok(mut inner) = self.inner.try_borrow_mut() {
-            inner.keymap = new_keymap;
+        if let Some(new_keymap) = crate::engine::keymap::Keymap::reload_if_changed() {
+            if let Ok(mut inner) = self.inner.try_borrow_mut() {
+                inner.keymap = new_keymap;
+            }
         }
         if config_changed {
             tracing::info!("runtime config reloaded on input mode switch");
