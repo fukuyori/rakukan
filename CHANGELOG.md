@@ -11,6 +11,10 @@
 - **Space 変換でユーザー辞書・学習履歴が反映されない問題を修正**（[Issue #9](https://github.com/fukuyori/rakukan/issues/9)、[PR #10](https://github.com/fukuyori/rakukan/pull/10) を取り込み）: 辞書マージがホスト内部の読みバッファを参照していたため、複数アプリでホストを共有する構成で別の読みで辞書を引くことがあった。すべての経路で「実際に候補が取れた読み」を明示的に渡すようにし、旧 `MergeCandidates` RPC は廃止した。
 - **JIS 配列の半角/全角キーで IME が切り替わらない問題を修正**（[Issue #1](https://github.com/fukuyori/rakukan/issues/1)、[PR #4](https://github.com/fukuyori/rakukan/pull/4) を取り込み）: 環境によって `VK_KANJI`（0x19）ではなく `VK_DBE_SBCSCHAR`（0xF3）/ `VK_DBE_DBCSCHAR`（0xF4）が届くため、keymap 照合前に 0x19 へ正規化する。keymap に `Zenkaku` binding が無い場合の fallback も `OnTestKeyDown` / `OnKeyDown` で同じ集合を使うようにした。
 
+### Added
+
+- **host / engine DLL の別ビルド検出と辞書停止時の診断ログ**（[Issue #8](https://github.com/fukuyori/rakukan/issues/8)）: engine DLL に `engine_build_info`（version・git sha・ビルド時刻・ABI・DLL 内ログの初期化結果、任意シンボルで ABI 番号は据え置き）を追加し、host が起動時に自分の version・git sha と突き合わせて `rakukan-engine-host.log` に記録する。version または git sha が異なれば「ABI は同じでも別ビルド」として WARN、DLL 内ログが初期化できていなければ WARN、`engine_build_info` を持たない古い DLL も WARN。TSF 側は辞書 ready 待ちが 30 秒を超えたとき DLL が記録した `dict_status`（`failed at [step]: reason`）を `rakukan.log` に WARN で 1 回出す。README にログファイル 3 種（TSF / host / DLL）を記載。
+
 ### Changed
 
 - **`gpu_backend` を明示指定した場合は他の backend へ fallback しない**: 従来は指定した DLL ファイルが無いと暗黙に `cpu` へ落ちていたが、指定どおりにロードできなければエラーを返す。fallback が必要な場合は `auto` を使う。

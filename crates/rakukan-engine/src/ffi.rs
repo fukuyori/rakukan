@@ -16,6 +16,10 @@ pub const ENGINE_ABI_VERSION: u32 = 9;
 
 static LOG_INIT: OnceLock<()> = OnceLock::new();
 
+/// `init_dll_logging` の結果。`engine_build_info` 経由で host に返し、
+/// 「DLL 内ログがどこにも出ない」状態を host ログから判別できるようにする（Issue #8）。
+static LOG_STATUS: OnceLock<String> = OnceLock::new();
+
 /// DLL 内の tracing subscriber を初期化する。
 ///
 /// cdylib は tracing の static をホストプロセスと共有しないため、これを
@@ -39,21 +43,62 @@ fn init_dll_logging() {
                 let _ = std::fs::rename(&path, &rotated);
             }
         }
-        if let Ok(file) = std::fs::OpenOptions::new()
+        let status = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(&path)
         {
-            let _ = tracing_subscriber::fmt()
-                .with_writer(std::sync::Mutex::new(file))
-                .with_ansi(false)
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
-                .try_init();
-        }
+            Ok(file) => {
+                let init = tracing_subscriber::fmt()
+                    .with_writer(std::sync::Mutex::new(file))
+                    .with_ansi(false)
+                    .with_env_filter(
+                        tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
+                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+                    )
+                    .try_init();
+                match init {
+                    Ok(()) => format!("ok path={}", path.display()),
+                    // rlib として静的リンクされ、呼び出し元が先に subscriber を設定した場合など
+                    Err(e) => format!("subscriber already set ({e}) path={}", path.display()),
+                }
+            }
+            Err(e) => format!("open failed ({e}) path={}", path.display()),
+        };
+        let _ = LOG_STATUS.set(status);
     });
+}
+
+/// DLL の build 識別子と診断情報（`engine_build_info` の JSON 本体）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct BuildInfo {
+    /// crate version（workspace 共通）
+    pub pkg_version: String,
+    /// ビルド元 git コミット（短縮）。`-dirty` 付きは作業ツリーに変更あり。git 不明なら `unknown`
+    pub git_sha: String,
+    /// ビルド時刻（UTC）
+    pub build_time: String,
+    /// `engine_abi_version()` と同じ値
+    pub abi_version: u32,
+    /// DLL 内 tracing subscriber の初期化結果（`engine_create` 前は `not initialized`）
+    pub log_status: String,
+}
+
+pub fn build_info() -> BuildInfo {
+    BuildInfo {
+        pkg_version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: option_env!("RAKUKAN_GIT_SHA")
+            .unwrap_or("unknown")
+            .to_string(),
+        build_time: option_env!("RAKUKAN_ENGINE_BUILD_TIME")
+            .unwrap_or("unknown")
+            .to_string(),
+        abi_version: ENGINE_ABI_VERSION,
+        log_status: LOG_STATUS
+            .get()
+            .cloned()
+            .unwrap_or_else(|| "not initialized".to_string()),
+    }
 }
 
 // ─── ヘルパー ──────────────────────────────────────────────────────────────────
@@ -118,6 +163,36 @@ pub extern "C" fn engine_free_string(s: *mut c_char) {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_abi_version() -> u32 {
     ENGINE_ABI_VERSION
+}
+
+/// DLL の build 識別子と診断情報を JSON で返す（[`BuildInfo`]）。
+///
+/// host は起動時にこれを読んで自分の version / git sha と突き合わせ、
+/// 「ABI は同じだが別ビルド」の組み合わせを WARN する（Issue #8）。
+/// 任意シンボルとして扱われるため ABI バージョンは上げない（無い DLL は「不明」扱い）。
+/// 呼び出し側が `engine_free_string` で解放すること。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_build_info() -> *mut c_char {
+    let json = serde_json::to_string(&build_info()).unwrap_or_else(|_| "{}".to_string());
+    unsafe { to_cstr(json) }
+}
+
+#[cfg(test)]
+mod build_info_tests {
+    use super::*;
+
+    #[test]
+    fn build_info_reports_version_abi_and_roundtrips_as_json() {
+        let info = build_info();
+        assert_eq!(info.pkg_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(info.abi_version, ENGINE_ABI_VERSION);
+        assert!(!info.git_sha.is_empty());
+        let json = serde_json::to_string(&info).unwrap();
+        let back: BuildInfo = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.pkg_version, info.pkg_version);
+        assert_eq!(back.abi_version, info.abi_version);
+        assert_eq!(back.git_sha, info.git_sha);
+    }
 }
 
 // ─── 文字入力 ──────────────────────────────────────────────────────────────────

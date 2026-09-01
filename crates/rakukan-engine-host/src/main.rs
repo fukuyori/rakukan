@@ -226,7 +226,13 @@ fn main() -> Result<()> {
     init_tracing(&log_path);
     install_panic_hook();
     redirect_stderr_to_log(&log_path);
-    tracing::info!("rakukan-engine-host starting (pid={})", std::process::id());
+    let build = rakukan_engine_abi::host_build_id();
+    tracing::info!(
+        "rakukan-engine-host starting (pid={}) version={} git={}",
+        std::process::id(),
+        build.pkg_version,
+        build.git_sha
+    );
     exit_if_already_running();
 
     // エンジンはまだ作らない。最初のクライアント Create リクエストで

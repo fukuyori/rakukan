@@ -152,6 +152,9 @@ struct EngineVTable {
     // 診断
     last_error: unsafe extern "C" fn() -> *mut c_char,
     dict_status: unsafe extern "C" fn() -> *mut c_char,
+
+    // 診断（任意シンボル。無い DLL は古いビルド）
+    build_info: Option<unsafe extern "C" fn() -> *mut c_char>,
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -234,6 +237,7 @@ impl EngineVTable {
             learn_force: load_sym!(lib, b"engine_learn_force\0"),
             last_error: load_sym!(lib, b"engine_last_error\0"),
             dict_status: load_sym!(lib, b"engine_dict_status\0"),
+            build_info: load_sym_opt!(lib, b"engine_build_info\0"),
         })
     }
 }
@@ -271,11 +275,68 @@ impl DynEngine {
             bail!("engine_create returned null");
         }
 
-        Ok(DynEngine {
+        let engine = DynEngine {
             handle,
             vtable,
             _lib: Arc::new(lib),
-        })
+        };
+        engine.log_build_info(dll_path);
+        Ok(engine)
+    }
+
+    /// DLL の build 識別子を読んで host のものと突き合わせ、結果をログに残す。
+    ///
+    /// - INFO: DLL path / ABI / version / git sha / build time / DLL 内ログの初期化結果
+    /// - WARN: host と DLL が別ビルド（version または git sha が異なる）
+    /// - WARN: DLL 内ログが初期化できていない（DLL 側の警告がどこにも出ない状態）
+    /// - WARN: DLL が `engine_build_info` を持たない（古いビルド。突き合わせ不能）
+    fn log_build_info(&self, dll_path: &Path) {
+        let host = host_build_id();
+        match self.build_info() {
+            Some(info) => {
+                tracing::info!(
+                    "engine DLL loaded: path={} abi={} dll_version={} dll_git={} dll_build_time={} host_version={} host_git={} dll_log={}",
+                    dll_path.display(),
+                    info.abi_version,
+                    info.pkg_version,
+                    info.git_sha,
+                    info.build_time,
+                    host.pkg_version,
+                    host.git_sha,
+                    info.log_status
+                );
+                if let Some(msg) = build_mismatch(&host, &info) {
+                    tracing::warn!("{msg}");
+                }
+                if !info.log_status.starts_with("ok") {
+                    tracing::warn!(
+                        "engine DLL logging is not active ({}); DLL-side warnings such as `dict load failed` will not be written anywhere",
+                        info.log_status
+                    );
+                }
+            }
+            None => tracing::warn!(
+                "engine DLL loaded: path={} abi={} — DLL has no engine_build_info (older build); cannot verify that host ({}@{}) and DLL come from the same build",
+                dll_path.display(),
+                EXPECTED_ENGINE_ABI_VERSION,
+                host.pkg_version,
+                host.git_sha
+            ),
+        }
+    }
+
+    /// DLL の build 識別子（`engine_build_info`）。古い DLL には無いので `None`。
+    pub fn build_info(&self) -> Option<EngineBuildInfo> {
+        let f = self.vtable.build_info?;
+        let ptr = unsafe { f() };
+        let json = unsafe { self.take_cstr(ptr) }?;
+        match serde_json::from_str::<EngineBuildInfo>(&json) {
+            Ok(info) => Some(info),
+            Err(e) => {
+                tracing::warn!("engine_build_info returned unparsable JSON ({e}): {json}");
+                None
+            }
+        }
     }
 
     /// `config.toml` の `gpu_backend` に従って DLL をロードする。
@@ -616,6 +677,139 @@ impl Drop for DynEngine {
         unsafe {
             (self.vtable.destroy)(self.handle);
         }
+    }
+}
+
+// ─── build 識別子（Issue #8）───────────────────────────────────────────────────
+
+/// engine DLL 側の build 識別子（DLL の `engine_build_info` JSON）。
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct EngineBuildInfo {
+    pub pkg_version: String,
+    pub git_sha: String,
+    #[serde(default)]
+    pub build_time: String,
+    pub abi_version: u32,
+    #[serde(default)]
+    pub log_status: String,
+}
+
+/// host 側（本 crate をリンクしたバイナリ）の build 識別子。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostBuildId {
+    pub pkg_version: String,
+    pub git_sha: String,
+}
+
+/// host 側の build 識別子を返す。git sha は `build.rs`（`build-support/git_info.rs`）が埋め込む。
+pub fn host_build_id() -> HostBuildId {
+    HostBuildId {
+        pkg_version: env!("CARGO_PKG_VERSION").to_string(),
+        git_sha: option_env!("RAKUKAN_GIT_SHA")
+            .unwrap_or("unknown")
+            .to_string(),
+    }
+}
+
+/// host と DLL が別ビルドなら WARN 用のメッセージを返す。
+///
+/// - version が異なる → 別ビルド。
+/// - version が同じでも git sha が両方判明していて異なる → 別ビルド
+///   （ABI 番号が同じでも互換性は保証しない）。
+/// - どちらかの sha が `unknown` → 判定不能なので警告しない。
+pub fn build_mismatch(host: &HostBuildId, dll: &EngineBuildInfo) -> Option<String> {
+    let describe = |v: &str, sha: &str| format!("{v}@{sha}");
+    if host.pkg_version != dll.pkg_version {
+        return Some(format!(
+            "host and engine DLL come from different versions: host={} dll={}; rebuild and install both from the same source (`cargo make build-engine` + `cargo make build-tsf` + `cargo make install`)",
+            describe(&host.pkg_version, &host.git_sha),
+            describe(&dll.pkg_version, &dll.git_sha)
+        ));
+    }
+    let known = |sha: &str| !sha.is_empty() && sha != "unknown";
+    if known(&host.git_sha) && known(&dll.git_sha) && host.git_sha != dll.git_sha {
+        return Some(format!(
+            "host and engine DLL come from different builds (same version, ABI {}): host={} dll={}; ABI equality does not guarantee compatibility — rebuild and install both from the same source",
+            dll.abi_version,
+            describe(&host.pkg_version, &host.git_sha),
+            describe(&dll.pkg_version, &dll.git_sha)
+        ));
+    }
+    None
+}
+
+#[cfg(test)]
+mod build_id_tests {
+    use super::*;
+
+    fn host(v: &str, sha: &str) -> HostBuildId {
+        HostBuildId {
+            pkg_version: v.into(),
+            git_sha: sha.into(),
+        }
+    }
+    fn dll(v: &str, sha: &str) -> EngineBuildInfo {
+        EngineBuildInfo {
+            pkg_version: v.into(),
+            git_sha: sha.into(),
+            build_time: String::new(),
+            abi_version: EXPECTED_ENGINE_ABI_VERSION,
+            log_status: "ok".into(),
+        }
+    }
+
+    #[test]
+    fn same_build_is_not_a_mismatch() {
+        assert_eq!(
+            build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.4", "abc123")),
+            None
+        );
+    }
+
+    #[test]
+    fn different_version_is_a_mismatch() {
+        let msg = build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.5", "def456")).unwrap();
+        assert!(msg.contains("different versions"), "{msg}");
+        assert!(
+            msg.contains("0.10.4@abc123") && msg.contains("0.10.5@def456"),
+            "{msg}"
+        );
+    }
+
+    #[test]
+    fn same_version_different_sha_is_a_mismatch() {
+        // Issue #8: 0.10.4 の host に、同 version・同 ABI だが別コミットの DLL
+        let msg = build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.4", "def456")).unwrap();
+        assert!(msg.contains("different builds"), "{msg}");
+        assert!(msg.contains("same version"), "{msg}");
+    }
+
+    #[test]
+    fn dirty_tree_counts_as_different_build() {
+        assert!(
+            build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.4", "abc123-dirty")).is_some()
+        );
+    }
+
+    #[test]
+    fn unknown_sha_does_not_warn() {
+        assert_eq!(
+            build_mismatch(&host("0.10.4", "unknown"), &dll("0.10.4", "abc123")),
+            None
+        );
+        assert_eq!(
+            build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.4", "unknown")),
+            None
+        );
+    }
+
+    #[test]
+    fn build_info_json_from_dll_parses_without_optional_fields() {
+        let info: EngineBuildInfo =
+            serde_json::from_str(r#"{"pkg_version":"0.10.4","git_sha":"abc","abi_version":9}"#)
+                .unwrap();
+        assert_eq!(info.abi_version, 9);
+        assert!(info.log_status.is_empty());
     }
 }
 

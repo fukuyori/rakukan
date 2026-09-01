@@ -77,7 +77,8 @@ cargo make quick-install
 ログ:
 
 - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
-- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
+- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）
+- エンジン DLL 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log`（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告はこちらに出る）
 
 > 各ステップはそれぞれ独立に実行できます。ビルド (`build-engine` / `build-tsf`) は管理者不要、`install` のみ管理者権限が必要です。
 

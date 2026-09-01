@@ -1,6 +1,12 @@
+include!("../../build-support/git_info.rs");
+
 fn main() {
-    // rerun-if-changed を書かないことで毎ビルド時に実行され、
-    // RAKUKAN_ENGINE_BUILD_TIME が常に最新のビルド時刻に更新される。
+    // build 識別子（git sha）。host 側と突き合わせて別ビルドの組み合わせを検出する（Issue #8）。
+    emit_git_sha();
+
+    // RAKUKAN_ENGINE_BUILD_TIME: ビルド時刻。
+    // （git_info.rs が HEAD への rerun-if-changed を出すため、以前の「毎ビルド更新」ではなく
+    //   HEAD かパッケージ内ファイルが変わったときに更新される）
     use std::time::{SystemTime, UNIX_EPOCH};
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)

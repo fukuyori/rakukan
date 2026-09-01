@@ -79,6 +79,38 @@ static MODEL_READY_LATCH: AtomicBool = AtomicBool::new(false);
 /// 経過時間をログする。0 の間は計測無効（起動直後など）。
 static READY_RESET_AT_MS: AtomicU64 = AtomicU64::new(0);
 
+/// 辞書 ready 待ちがこの時間を超えたら、DLL 側が記録した `dict_status`
+/// （`failed at [step]: reason` 等）を WARN で 1 回だけ出す（Issue #8）。
+const DICT_WAIT_WARN_MS: u64 = 30_000;
+/// 辞書 ready 待ちを最初に観測した時刻（UNIX epoch ms）。0 = 未観測。
+static DICT_WAIT_START_MS: AtomicU64 = AtomicU64::new(0);
+/// 上記 WARN を出したか（reset_ready_latches で戻す）。
+static DICT_WAIT_WARNED: AtomicBool = AtomicBool::new(false);
+
+/// 辞書 ready 待ちの WARN を出すべきか（純粋判定）。
+fn dict_wait_should_warn(start_ms: u64, now_ms: u64, already_warned: bool) -> bool {
+    start_ms != 0 && !already_warned && now_ms.saturating_sub(start_ms) >= DICT_WAIT_WARN_MS
+}
+
+/// 辞書が ready でないときに呼ぶ。待ち時間が閾値を超えたら `dict_status` を WARN で出す。
+fn note_dict_not_ready(eng: &DynEngine) {
+    let now = now_ms();
+    let start = DICT_WAIT_START_MS.load(AO::Acquire);
+    if start == 0 {
+        DICT_WAIT_START_MS.store(now, AO::Release);
+        return;
+    }
+    if dict_wait_should_warn(start, now, DICT_WAIT_WARNED.load(AO::Acquire))
+        && !DICT_WAIT_WARNED.swap(true, AO::AcqRel)
+    {
+        tracing::warn!(
+            "dict not ready after {}s: dict_status={:?} (DLL-side detail is in rakukan-engine-dll.log; host/DLL build check is in rakukan-engine-host.log)",
+            now.saturating_sub(start) / 1000,
+            eng.dict_status()
+        );
+    }
+}
+
 #[inline]
 fn now_ms() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -116,6 +148,8 @@ pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
             // 辞書ロード完了 → 言語バーアイコンを "ー" から "あ" へ更新する
             langbar_update_set();
         }
+    } else {
+        note_dict_not_ready(eng);
     }
     r
 }
@@ -146,6 +180,35 @@ pub fn reset_ready_latches() {
     DICT_READY_LATCH.store(false, AO::Release);
     MODEL_READY_LATCH.store(false, AO::Release);
     READY_RESET_AT_MS.store(now_ms(), AO::Release);
+    DICT_WAIT_START_MS.store(0, AO::Release);
+    DICT_WAIT_WARNED.store(false, AO::Release);
+}
+
+#[cfg(test)]
+mod dict_wait_tests {
+    use super::{DICT_WAIT_WARN_MS, dict_wait_should_warn};
+
+    #[test]
+    fn warns_once_after_threshold() {
+        assert!(
+            !dict_wait_should_warn(0, 100_000, false),
+            "未観測なら出さない"
+        );
+        assert!(!dict_wait_should_warn(
+            1_000,
+            1_000 + DICT_WAIT_WARN_MS - 1,
+            false
+        ));
+        assert!(dict_wait_should_warn(
+            1_000,
+            1_000 + DICT_WAIT_WARN_MS,
+            false
+        ));
+        assert!(
+            !dict_wait_should_warn(1_000, 1_000 + DICT_WAIT_WARN_MS * 2, true),
+            "2 回目は出さない"
+        );
+    }
 }
 
 /// M1.6 T-HOST3: 読込中 UI で「経過時間」を表示するため、直近の reset からの
@@ -486,10 +549,9 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
                     let r = eng.shutdown(Some(cfg.clone()));
                     let elapsed = t_start.elapsed();
                     match r {
-                        Ok(()) => tracing::info!(
-                            "engine_reload: host shutdown requested ({:?})",
-                            elapsed
-                        ),
+                        Ok(()) => {
+                            tracing::info!("engine_reload: host shutdown requested ({:?})", elapsed)
+                        }
                         Err(e) => tracing::warn!(
                             "engine_reload: host shutdown call returned error ({:?}): {e}",
                             elapsed
