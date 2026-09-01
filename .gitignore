@@ -13,6 +13,7 @@
 # ログ
 *.log
 rakukan_install.log
+/chatlog/
 
 # エディタ・OS
 .DS_Store
