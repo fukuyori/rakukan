@@ -1,4 +1,4 @@
-# rakukan v0.11.0
+# rakukan v0.11.1
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,7 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.11.0 は 8月の運用ログと GitHub Issue にもとづく修正をまとめたリリースです。**Space 変換でユーザー辞書・学習履歴が反映されない問題**（Issue #9）、**JIS 配列の半角/全角キー**（Issue #1）、**`gpu_backend = "auto"` で CUDA DLL がロードできない環境の Vulkan / CPU への自動切替**（Issue #2）、**変換中の Home / End の素通し**（Issue #11）を修正し、host / engine DLL の別ビルド検出などの診断ログ（Issue #8）を追加しました。ログ由来では、ライブ変換プレビューのかな表示への巻き戻り、変換済みカタカナ語を含む文が文脈から捨てられる問題、モード切替時の keymap 同期再読込によるキーストールを修正しています。`gpu_backend` を明示指定した場合は他の backend へ fallback しなくなりました（fallback が必要なら `auto`）。
+v0.11.1 は動作変更のないメンテナンスリリースです。ツールチェーンの更新（rustfmt 1.9.0 / 新しい clippy）で main の CI（Format Check / Build & Test）が落ち、すべての PR のチェックが赤くなっていた問題（[Issue #14](https://github.com/fukuyori/rakukan/issues/14)）を解消しました。rustfmt は [PR #15](https://github.com/fukuyori/rakukan/pull/15) を取り込み、workspace 全体を新しい clippy の基準（`-D warnings`）に適合させています。
+
+- v0.11.0: **8月の運用ログと GitHub Issue にもとづく修正のまとめ**。Space 変換でユーザー辞書・学習履歴が反映されない問題（Issue #9）、JIS 配列の半角/全角キー（Issue #1）、`gpu_backend = "auto"` の Vulkan / CPU への自動切替（Issue #2）、変換中の Home / End の素通し（Issue #11）、ライブ変換プレビューのかな表示への巻き戻り、変換済みカタカナ語を含む文の文脈破棄、モード切替時の keymap 同期再読込によるキーストールを修正。host / engine DLL の別ビルド検出ログ（Issue #8）を追加。
 
 - v0.10.4: **語彙外文字（Ψ・€・絵文字など）が変換候補から消える問題を修正**。jinen v2 のバイトフォールバックトークンがデコード時に破棄されていたもので、「さいきくすおのさいなん」→「斉木楠雄のΨ難」が正しく出るようになった。
 - v0.10.3: **jinen-v2 モデル（Qwen3 ベース）を追加**。`config.toml` の `model_variant` を `jinen-v2-xsmall-q5`（約 28 MB）/ `jinen-v2-small-q5`（約 81 MB）などに書き換えるだけで切り替え可能（f16 variant もあり。デフォルトは v1 のまま）。

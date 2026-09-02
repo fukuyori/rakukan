@@ -9,6 +9,13 @@
 //!                                          → 候補マージ → 返却
 //! ```
 
+// cdylib のリンク時に link.exe が stdout へ出す情報行（「ライブラリ ... を作成中」）を
+// rustc の linker_messages lint が warning 表示するため、crate 単位で allow する
+//（rakukan-tsf と同じ対処）。注意: この allow により cuda variant の LNK4098
+//（LIBCMT と動的 CRT の混在。CUDA 静的ランタイム由来の既知の警告で、動作実績あり）も
+// 表示されなくなる。CRT 統一で根本対処する場合はこの allow を外して確認すること。
+#![allow(linker_messages)]
+
 // ── 統合した karukan-engine モジュール ────────────────────────────────────────
 pub mod kana;
 pub mod kanji;

@@ -956,3 +956,9 @@ cargo make test
 - 設計文書の追随: `docs/DESIGN.md`（LiveConv の `preview_for`、候補マージの読み明示と旧 API 廃止、backend 選択の実ロード順次試行、RPC 表、config / keymap のリロード条件、Home / End、ログ 3 種）、`config/config.toml` の `gpu_backend` コメント、`CLAUDE.md`（backend 選択・ログ・バージョン更新手順）、README のキー操作表と設定の目安。
 - 実機確認は Step 1〜8 とも未実施。0.11.0 の配布前に少なくとも Step 1（辞書候補）・Step 2（JIS キー）・Step 3（backend fallback）を確認する。
 - 次の開発開始時に CHANGELOG へ `[Unreleased]` を再作成する。
+
+### リリース 0.11.1（2026-09-02）
+
+- Issue #14（rustfmt 1.9.0 / 新しい clippy の導入で main の CI が両ジョブとも落ち、全 PR のチェックが赤くなる）への対応。fmt は PR #15（nick20002005 氏）をマージ（`4b0b7ad`）、clippy は `ff05d72` で解消（35 ファイル、`cargo clippy --fix` の機械適用＋理由コメント付き `#[allow]`、挙動変更なし）。`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test --workspace`（dict 33 / engine 169 / abi 14 / rpc 8 / tsf 87、失敗 0）を確認し、CI run 33573317635 で両ジョブ success。
+- fmt が落ちていた 2 ファイル（llamacpp.rs / on_compose.rs）は、Step 3〜8 の作業中にコミットを最小に保つため rustfmt の整形を意図的に revert し続けていたことが原因。今後は fmt の差分も含めてコミットする。
+- バージョン 0.11.1: `docs/version-update-checklist.md` に従い `VERSION` / `Cargo.toml` / `Cargo.lock` / `rakukan_installer.iss` / WinUI `csproj` / `CHANGELOG.md` / `README.md` を更新。

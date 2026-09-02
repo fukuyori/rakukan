@@ -3,6 +3,12 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.11.1] - 2026-09-02
+
+### Fixed
+
+- **main の CI（Format Check / Build & Test）が落ちていた問題を修正**（[Issue #14](https://github.com/fukuyori/rakukan/issues/14)）: ツールチェーンの更新により、rustfmt 1.9.0 では `cargo fmt --all -- --check` が 2 ファイルで、新しい clippy では `cargo clippy --workspace -- -D warnings` が複数クレートで落ち、main から分岐したすべての PR のチェックが差分と無関係に赤くなっていた。rustfmt 分は [PR #15](https://github.com/fukuyori/rakukan/pull/15) を取り込み、clippy 分は機械適用（let-chains 化・`derive(Default)` 化・`div_ceil` など）と、設計上妥当な箇所への理由コメント付き `#[allow]`（FFI 境界の生ポインタ、COM の `new` がインターフェースを返すパターンなど）で解消した。挙動の変更はない。
+
 ## [0.11.0] - 2026-09-01
 
 ### Fixed
