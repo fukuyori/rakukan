@@ -424,18 +424,16 @@ unsafe fn calc_window_x(x: i32, caret_bottom: i32, win_w: i32) -> i32 {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
-    if GetMonitorInfoW(hmon, &mut mi).as_bool() {
-        if x + win_w > mi.rcWork.right {
-            let shifted = mi.rcWork.right - win_w;
-            tracing::debug!(
-                "candwin::shift_x: x={} win_w={} work_right={} → x={}",
-                x,
-                win_w,
-                mi.rcWork.right,
-                shifted
-            );
-            return shifted.max(mi.rcWork.left);
-        }
+    if GetMonitorInfoW(hmon, &mut mi).as_bool() && x + win_w > mi.rcWork.right {
+        let shifted = mi.rcWork.right - win_w;
+        tracing::debug!(
+            "candwin::shift_x: x={} win_w={} work_right={} → x={}",
+            x,
+            win_w,
+            mi.rcWork.right,
+            shifted
+        );
+        return shifted.max(mi.rcWork.left);
     }
     x
 }
