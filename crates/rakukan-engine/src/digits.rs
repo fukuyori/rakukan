@@ -920,30 +920,31 @@ pub fn convert_with_digit_protection(
             // ここで作ると「一十」「壱十」のような候補まで生成してしまう。
             // 組み合わせは combine_runs が第 1 表記から順に作るので、先頭に来るのは
             // 「1十」であって「一十」ではない。
-            if i > 0 && runs[i - 1].is_digit() {
-                if let Some((unit, promote)) = numeric_unit_kanji(s) {
-                    cands.retain(|c| c != unit);
-                    // promote=false（同音異義語あり）は変換器の第 1 候補を既定のまま
-                    // 残し、数詞はその次に置く。候補として存在させることだけを保証する。
-                    //
-                    // ただし単純に 1 番目へ入れると、変換器の第 1 候補が数字だけの
-                    // 表記だったときに数詞が先頭へ繰り上がってしまう。「じゅう」は
-                    // 変換器が「10」を第 1 候補に返すが、これは数字保存の検証で
-                    // 落ちるため（入力の数字は「1」だけ）、結果として「1十」が
-                    // 先頭に立つ。落ちると分かっている候補は数えず、実際に残る
-                    // 最初の候補の後ろへ置く。
-                    let at = if promote {
-                        0
-                    } else {
-                        cands
-                            .iter()
-                            .position(|c| !is_numeric_text(c))
-                            .map(|p| p + 1)
-                            .unwrap_or(0)
-                            .min(cands.len())
-                    };
-                    cands.insert(at, unit.to_string());
-                }
+            if i > 0
+                && runs[i - 1].is_digit()
+                && let Some((unit, promote)) = numeric_unit_kanji(s)
+            {
+                cands.retain(|c| c != unit);
+                // promote=false（同音異義語あり）は変換器の第 1 候補を既定のまま
+                // 残し、数詞はその次に置く。候補として存在させることだけを保証する。
+                //
+                // ただし単純に 1 番目へ入れると、変換器の第 1 候補が数字だけの
+                // 表記だったときに数詞が先頭へ繰り上がってしまう。「じゅう」は
+                // 変換器が「10」を第 1 候補に返すが、これは数字保存の検証で
+                // 落ちるため（入力の数字は「1」だけ）、結果として「1十」が
+                // 先頭に立つ。落ちると分かっている候補は数えず、実際に残る
+                // 最初の候補の後ろへ置く。
+                let at = if promote {
+                    0
+                } else {
+                    cands
+                        .iter()
+                        .position(|c| !is_numeric_text(c))
+                        .map(|p| p + 1)
+                        .unwrap_or(0)
+                        .min(cands.len())
+                };
+                cands.insert(at, unit.to_string());
             }
             run_candidates.push(cands);
         }
