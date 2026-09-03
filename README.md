@@ -1,4 +1,4 @@
-# rakukan v0.11.1
+# rakukan v0.11.2
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,7 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.11.1 は動作変更のないメンテナンスリリースです。ツールチェーンの更新（rustfmt 1.9.0 / 新しい clippy）で main の CI（Format Check / Build & Test）が落ち、すべての PR のチェックが赤くなっていた問題（[Issue #14](https://github.com/fukuyori/rakukan/issues/14)）を解消しました。rustfmt は [PR #15](https://github.com/fukuyori/rakukan/pull/15) を取り込み、workspace 全体を新しい clippy の基準（`-D warnings`）に適合させています。
+v0.11.2 は数字とかなが混在する読みの変換品質を修正したリリースです。「5まん」が「5満」「5マン」になり「5万」が候補に出ない問題（[Issue #6](https://github.com/fukuyori/rakukan/issues/6) / [PR #7](https://github.com/fukuyori/rakukan/pull/7)）を修正しました。「5まんえん」「だい5まん」「3.5まん」や連濁形（「3ぜん」→ 3千）にも対応し、数字保存の検証は「5えん」→「5万円」のような単位の挿入を引き続き拒否します。
+
+- v0.11.1: **CI 崩壊の解消（メンテナンス、挙動変更なし）**。ツールチェーンの更新（rustfmt 1.9.0 / 新しい clippy）で main の CI が落ち、すべての PR のチェックが赤くなっていた問題（Issue #14）を修正。
 
 - v0.11.0: **8月の運用ログと GitHub Issue にもとづく修正のまとめ**。Space 変換でユーザー辞書・学習履歴が反映されない問題（Issue #9）、JIS 配列の半角/全角キー（Issue #1）、`gpu_backend = "auto"` の Vulkan / CPU への自動切替（Issue #2）、変換中の Home / End の素通し（Issue #11）、ライブ変換プレビューのかな表示への巻き戻り、変換済みカタカナ語を含む文の文脈破棄、モード切替時の keymap 同期再読込によるキーストールを修正。host / engine DLL の別ビルド検出ログ（Issue #8）を追加。
 

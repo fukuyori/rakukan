@@ -962,3 +962,12 @@ cargo make test
 - Issue #14（rustfmt 1.9.0 / 新しい clippy の導入で main の CI が両ジョブとも落ち、全 PR のチェックが赤くなる）への対応。fmt は PR #15（nick20002005 氏）をマージ（`4b0b7ad`）、clippy は `ff05d72` で解消（35 ファイル、`cargo clippy --fix` の機械適用＋理由コメント付き `#[allow]`、挙動変更なし）。`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test --workspace`（dict 33 / engine 169 / abi 14 / rpc 8 / tsf 87、失敗 0）を確認し、CI run 33573317635 で両ジョブ success。
 - fmt が落ちていた 2 ファイル（llamacpp.rs / on_compose.rs）は、Step 3〜8 の作業中にコミットを最小に保つため rustfmt の整形を意図的に revert し続けていたことが原因。今後は fmt の差分も含めてコミットする。
 - バージョン 0.11.1: `docs/version-update-checklist.md` に従い `VERSION` / `Cargo.toml` / `Cargo.lock` / `rakukan_installer.iss` / WinUI `csproj` / `CHANGELOG.md` / `README.md` を更新。
+
+### Step 9（2026-09-03）
+
+- PR #7（nick20002005 氏の再設計版）を採用した。数詞表の後挿しをやめ、根本原因である `extract_digits()` の境界（数字 run の直後に単位だけの漢字 run が続く場合、その単位を独立した数値として数えない）を修正。数詞候補はかな run の候補リストへ 1 つ足して `combine_runs` の通常経路（重複排除・順位付け・件数制限・生読み fallback）を通す。発動条件は「直前の run が数字 run かつ かな run が数詞に完全一致」で、`だい5まん` / `3.5まん` にも効き、連濁形（ぜん・びゃく・ぴゃく）も対応。「一十」「壱十」は生成されない。数字に隣接しない漢数字 run は従来どおり数値として解釈し、`2024ねん` → `二千二十四年` の正規化は不変。
+- レビューで verify の弱化を発見: 単位を無条件に読み飛ばすと「5えん」→「5万円」のような単位の挿入（数を 1 万倍に変える改変）を見逃す。`maintainerCanModify` を使いフォークブランチへ直接 push した `c4d9ece`（main では `dc2a96b`）で修正。`reading_licenses_units()` が単位の読み飛ばしを「入力読みに対応する数詞かなが含まれる場合」に限定する。照合は単位の値で行い大字（拾 = 十）も正当化、`NUMERIC_UNITS` に読みが無い「京」は正当化されない。
+- CI（run 33700036048）両ジョブ success を確認し rebase マージ。main は `dc2a96b`（5 コミット直線）。
+- 完了条件との関係: 「個別読みの例外表追加ではなく共通経路で解決」は、verify 側を `extract_digits()` の共通修正で満たした。`NUMERIC_UNITS`（9 エントリ）は位取り単位という閉集合の候補補完で、読みごとの救済表とは性質が異なると判断。作業項目「かな run でも辞書候補を参照できる構造を検討する」は検討の結果、辞書を run 単位の変換へ配線する設計が別途必要として Issue #16 へ切り出した（PR #7 のスコープ外、コントリビューターの提案どおり）。
+- テスト結果（全体）: dict 33 / engine 178 / abi 14 / rpc 8 / tsf 87、失敗 0。`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` もクリーン。実モデル（jinen-v1-small-q5）の実測は PR #7 コメントの表を参照（`#[ignore]` 付き診断プローブ `probe_numeric_unit_candidates` を同梱）。
+- 実機確認済み（2026-09-03）: `5まん` / `5まんえん` / `だい5まん` / `3.5まん` / `3ぜん` / `1じゅう` / `10まん` / `3せん` の候補確認と、`2024ねん` 等の既存数値表現の維持確認。確認後に Issue #6 をクローズした（実装コミット引用コメント付き、構造課題は Issue #16 で追跡）。
