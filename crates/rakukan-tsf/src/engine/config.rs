@@ -396,6 +396,42 @@ pub fn candidate_font_height() -> i32 {
     CANDIDATE_FONT_HEIGHT.load(Ordering::Relaxed)
 }
 
+/// `refresh_appearance_if_changed` 用の mtime キャッシュ。
+/// 外側の Option は「未チェック」、内側の Option は「ファイルが無い」を表す。
+/// CONFIG_MANAGER の last_modified とは独立に持つ（下記コメント参照）。
+static APPEARANCE_MTIME: Mutex<Option<Option<SystemTime>>> = Mutex::new(None);
+
+/// 候補ウィンドウの表示直前に呼ぶ軽量チェック。config.toml の mtime が変わって
+/// いれば読み直し、描画用アトミック（フォントサイズ）だけを更新する。
+///
+/// 設定アプリの保存は名前付きイベント `Local\rakukan.engine.reload` で通知されるが、
+/// これは auto-reset イベントで、SetEvent が起こすのは待機スレッド 1 本だけ。
+/// TSF DLL はアプリごとに別プロセスで動くため、イベントを受け取れなかった
+/// プロセスでは `publish_atomics` が走らず、フォントサイズの変更が反映されない
+/// ことがあった。表示 1 回につき stat 1 回のコストで、表示するプロセス自身が
+/// 最新値を拾う。
+///
+/// CONFIG_MANAGER の current や last_modified は**意図的に触らない**。ここで
+/// 消費すると、手編集された config.toml をモード切替時の `reload_if_changed` が
+/// 「変更なし」と誤判定し、エンジン再起動がスキップされてしまうため。
+pub fn refresh_appearance_if_changed() {
+    let Ok(path) = config_path() else {
+        return;
+    };
+    let modified = file_modified(&path);
+    let Ok(mut last) = APPEARANCE_MTIME.lock() else {
+        return;
+    };
+    if *last == Some(modified) {
+        return;
+    }
+    *last = Some(modified);
+    match load_app_config_from_path(&path) {
+        Ok(cfg) => publish_atomics(&cfg),
+        Err(e) => tracing::warn!("refresh_appearance: config.toml load failed: {e}"),
+    }
+}
+
 static CONFIG_MANAGER: LazyLock<Mutex<ConfigManager>> =
     LazyLock::new(|| Mutex::new(ConfigManager::new()));
 
@@ -565,9 +601,9 @@ beam_size = 6
 # num_candidates = 6
 
 [appearance]
-# 候補ウィンドウのフォント高さ（ピクセル）。既定 17
+# 候補ウィンドウのフォントサイズ（ピクセル）。既定 17
 # 行の高さ・余白・最小幅も同じ比率で拡大するので、この値だけ変えればよい。
-# 10〜72 にクランプされる。IME をオフ→オンで反映。
+# 10〜72 にクランプされる。次回の候補表示から反映。
 candidate_font_height = 17
 
 [diagnostics]

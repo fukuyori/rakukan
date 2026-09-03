@@ -61,6 +61,12 @@ prefer_dictionary_first = true
 # ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
 beam_size = 3
 
+[appearance]
+# 候補ウィンドウのフォントサイズ（ピクセル）。既定 17
+# 行の高さ・余白・最小幅も同じ比率で拡大するので、この値だけ変えればよい。
+# 10〜72 にクランプされる。次回の候補表示から反映。
+candidate_font_height = 17
+
 [diagnostics]
 dump_active_config = false
 warn_on_unknown_key = true

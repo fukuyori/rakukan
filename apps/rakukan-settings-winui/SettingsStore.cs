@@ -63,6 +63,7 @@ internal sealed class SettingsData
     public string? ModelVariant { get; set; }
     public uint? NumCandidates { get; set; }
     public uint ConversionBeamSize { get; set; } = 6;
+    public int CandidateFontHeight { get; set; } = 17;
     public string KeyboardLayout { get; set; } = "jis";
     public bool ReloadOnModeSwitch { get; set; } = true;
     public string DefaultMode { get; set; } = "alphanumeric";
@@ -233,6 +234,9 @@ internal sealed class SettingsStore
 
         [conversion]
         beam_size = 6
+
+        [appearance]
+        candidate_font_height = 17
 
         [diagnostics]
         dump_active_config = true
@@ -450,6 +454,7 @@ internal sealed class SettingsStore
         var input = GetOrCreateTable(root, "input");
         var live = GetOrCreateTable(root, "live_conversion");
         var conversion = GetOrCreateTable(root, "conversion");
+        var appearance = GetOrCreateTable(root, "appearance");
 
         return new SettingsData
         {
@@ -460,6 +465,8 @@ internal sealed class SettingsStore
             ModelVariant = NormalizeOptional(GetString(general, "model_variant")),
             NumCandidates = GetUInt(conversion, "num_candidates") ?? GetUInt(root, "num_candidates"),
             ConversionBeamSize = GetUInt(conversion, "beam_size") ?? 6,
+            // TSF 側 (config.rs) と同じ既定 17 / クランプ 10〜72
+            CandidateFontHeight = Math.Clamp(GetInt(appearance, "candidate_font_height") ?? 17, 10, 72),
             KeyboardLayout = GetString(keyboard, "layout") ?? "jis",
             ReloadOnModeSwitch = GetBool(keyboard, "reload_on_mode_switch") ?? true,
             DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
@@ -484,6 +491,7 @@ internal sealed class SettingsStore
         var input = GetOrCreateTable(root, "input");
         var live = GetOrCreateTable(root, "live_conversion");
         var conversion = GetOrCreateTable(root, "conversion");
+        var appearance = GetOrCreateTable(root, "appearance");
 
         general["log_level"] = data.LogLevel;
         SetOptional(general, "gpu_backend", data.GpuBackend);
@@ -510,6 +518,7 @@ internal sealed class SettingsStore
 
         SetOptional(conversion, "num_candidates", data.NumCandidates);
         conversion["beam_size"] = data.ConversionBeamSize;
+        appearance["candidate_font_height"] = data.CandidateFontHeight;
         root.Remove("num_candidates");
     }
 

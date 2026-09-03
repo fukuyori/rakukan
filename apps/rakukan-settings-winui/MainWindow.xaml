@@ -166,6 +166,19 @@
                                         <NumberBox x:Name="ConversionBeamSizeBox" SmallChange="1" Minimum="1" Maximum="30" SpinButtonPlacementMode="Inline" ValueChanged="ConversionBeamSizeBox_ValueChanged" />
                                     </StackPanel>
                                 </Grid>
+                                <Grid ColumnSpacing="20">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Grid.Column="0" Spacing="8">
+                                        <TextBlock Text="フォントサイズ px (10-72)" />
+                                        <NumberBox x:Name="CandidateFontHeightBox" SmallChange="1" Minimum="10" Maximum="72" SpinButtonPlacementMode="Inline" />
+                                    </StackPanel>
+                                    <StackPanel Grid.Column="1" Spacing="8" VerticalAlignment="Bottom">
+                                        <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="行間や余白も同じ比率で拡大されます。次回の候補表示から反映。" />
+                                    </StackPanel>
+                                </Grid>
                             </StackPanel>
                         </Border>
                     </StackPanel>

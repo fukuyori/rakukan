@@ -46,6 +46,7 @@ public sealed partial class MainWindow : Window
         _settings = _store.Load();
         UserDictList.ItemsSource = _userDictEntries;
         ApplySettingsToUi(_settings);
+        WireStatusBarDismissal();
 
         if (RootNavigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault() is { } first)
         {
@@ -76,6 +77,7 @@ public sealed partial class MainWindow : Window
             // スピンボタンが動作せず、値が空で表示される問題があるため常に数値を入れる。
             NumCandidatesBox.Value = bundle.Config.NumCandidates ?? 6;
             ConversionBeamSizeBox.Value = Math.Max(bundle.Config.ConversionBeamSize, (uint)NumCandidatesBox.Value);
+            CandidateFontHeightBox.Value = bundle.Config.CandidateFontHeight;
 
             SelectComboValue(KeyboardLayoutCombo, bundle.Config.KeyboardLayout);
             ReloadOnModeSwitchToggle.IsOn = bundle.Config.ReloadOnModeSwitch;
@@ -134,6 +136,7 @@ public sealed partial class MainWindow : Window
         }
         var beamSize = ParseUInt(BeamSizeBox.Value, "beam_size", 1, 9);
         var minChars = ParseUInt(MinCharsBox.Value, "開始文字数", 1, 9);
+        var candidateFontHeight = (int)ParseUInt(CandidateFontHeightBox.Value, "候補フォントサイズ", 10, 72);
 
         var config = new SettingsData
         {
@@ -144,6 +147,7 @@ public sealed partial class MainWindow : Window
             ModelVariant = NormalizeOptional(ReadModelVariantFromCombo(), string.Empty),
             NumCandidates = numCandidates,
             ConversionBeamSize = conversionBeamSize,
+            CandidateFontHeight = candidateFontHeight,
             KeyboardLayout = SelectedComboValue(KeyboardLayoutCombo),
             ReloadOnModeSwitch = ReloadOnModeSwitchToggle.IsOn,
             DefaultMode = SelectedComboValue(DefaultModeCombo),
@@ -678,6 +682,60 @@ public sealed partial class MainWindow : Window
             args.Cancel = true;
             await ShowDialogAsync("設定を保存できませんでした", error);
         }
+    }
+
+    /// <summary>
+    /// 保存後に表示した「反映しました」等の InfoBar を、ユーザーが設定を
+    /// 変更した時点で閉じる。前回の表示が残ったままだと、次の保存で
+    /// 反映されたのかどうか分からなくなるため。
+    /// </summary>
+    private void WireStatusBarDismissal()
+    {
+        void Dismiss()
+        {
+            if (!_isApplyingSettings)
+            {
+                StatusBar.IsOpen = false;
+            }
+        }
+
+        NumberBox[] numberBoxes =
+        [
+            NGpuLayersBox, MainGpuBox, NumCandidatesBox, ConversionBeamSizeBox,
+            CandidateFontHeightBox, DebounceMsBox, BeamSizeBox, MinCharsBox,
+        ];
+        foreach (var box in numberBoxes)
+        {
+            box.ValueChanged += (_, _) => Dismiss();
+        }
+
+        ComboBox[] combos =
+        [
+            LogLevelCombo, GpuBackendCombo, ModelVariantCombo, KeyboardLayoutCombo,
+            DefaultModeCombo, DigitWidthCombo, AlphaWidthCombo, SymbolWidthCombo,
+            KeymapPresetCombo,
+        ];
+        foreach (var combo in combos)
+        {
+            combo.SelectionChanged += (_, _) => Dismiss();
+        }
+
+        ToggleSwitch[] toggles =
+        [
+            ReloadOnModeSwitchToggle, RememberKanaModeToggle, AutoLearnToggle,
+            KeymapInheritToggle, LiveEnabledToggle, UseLlmToggle, PreferDictionaryFirstToggle,
+        ];
+        foreach (var toggle in toggles)
+        {
+            toggle.Toggled += (_, _) => Dismiss();
+        }
+
+        foreach (var field in _keyFields.Values)
+        {
+            field.TextChanged += (_, _) => Dismiss();
+        }
+
+        _userDictEntries.CollectionChanged += (_, _) => Dismiss();
     }
 
     private bool TrySaveAndApply(out string error)

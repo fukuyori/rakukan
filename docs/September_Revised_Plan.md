@@ -971,3 +971,11 @@ cargo make test
 - 完了条件との関係: 「個別読みの例外表追加ではなく共通経路で解決」は、verify 側を `extract_digits()` の共通修正で満たした。`NUMERIC_UNITS`（9 エントリ）は位取り単位という閉集合の候補補完で、読みごとの救済表とは性質が異なると判断。作業項目「かな run でも辞書候補を参照できる構造を検討する」は検討の結果、辞書を run 単位の変換へ配線する設計が別途必要として Issue #16 へ切り出した（PR #7 のスコープ外、コントリビューターの提案どおり）。
 - テスト結果（全体）: dict 33 / engine 178 / abi 14 / rpc 8 / tsf 87、失敗 0。`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` もクリーン。実モデル（jinen-v1-small-q5）の実測は PR #7 コメントの表を参照（`#[ignore]` 付き診断プローブ `probe_numeric_unit_candidates` を同梱）。
 - 実機確認済み（2026-09-03）: `5まん` / `5まんえん` / `だい5まん` / `3.5まん` / `3ぜん` / `1じゅう` / `10まん` / `3せん` の候補確認と、`2024ねん` 等の既存数値表現の維持確認。確認後に Issue #6 をクローズした（実装コミット引用コメント付き、構造課題は Issue #16 で追跡）。
+
+### Step 11（2026-09-03）
+
+- PR #5（nick20002005 氏）を採用した。`[appearance] candidate_font_height`（10〜72px、既定 17）でフォントサイズを変更でき、行高・余白・最小幅は 17px 基準の同比率で `scaled_to()` がスケールする。レビュー指摘の 2 点は対応済み: 寸法を `Layout` 構造体に集約し `show_with_status()` 開始時に 1 回だけスナップショット（表示中の設定変更で寸法が混ざらない）、`fit_font_height()` が作業領域の高さに収まる最大のフォント高さを算出（下限 9px、単調性を利用した線形探索）。幅と X 位置も `clamp_width_to_work_area` / `calc_window_x` で作業領域内に収める。ユニットテスト 6 件（既定 17px で従来寸法と完全一致、10/17/24/72 の scale 検算、9 候補 + status + pager の収まりと最大性、下限、モニター情報なし）。
+- 0.11.2 の main へローカルで rebase し、`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --check` / `cargo test --workspace`（tsf 93 passed）を確認後、rebase マージ（main `0381599`、4 コミット直線）。Issue #3 はコミットメッセージの Closes で自動クローズ。
+- 追加対応（ユーザー要望）: WinUI 設定アプリの「候補表示」カードにフォントサイズ項目を追加（`SettingsStore` が `[appearance]` を読み書き、10〜72 の範囲検証付き）。表記は「フォント高さ」ではなく「フォントサイズ px」とした（config キーは `candidate_font_height` のまま）。保存後の「反映しました」InfoBar は、設定を 1 つでも変更した時点で閉じるようにした（`WireStatusBarDismissal()`）。
+- 「フォントサイズ変更が反映しないときがある」の原因を特定: 保存通知の `Local\rakukan.engine.reload` は auto-reset イベントで、SetEvent が起こすのは待機スレッド 1 本だけ。TSF DLL はアプリごとに別プロセスのため、イベントを受け取れなかったプロセスでは atomic が更新されなかった。`refresh_appearance_if_changed()`（候補表示直前に config.toml の mtime を確認して appearance だけ更新、表示 1 回につき stat 1 回）で修正。CONFIG_MANAGER の mtime キャッシュは意図的に消費しない（モード切替時の `reload_if_changed` が「変更なし」と誤判定してエンジン再起動をスキップするのを防ぐ）。
+- 実機確認済み（2026-09-03）: フォントサイズ変更の反映、設定 GUI からの保存、InfoBar の消去。複数モニター・画面端（大きいフォントサイズでの位置補正・作業領域への収まり）も確認し問題なし。Step 11 の検証項目はすべて完了。

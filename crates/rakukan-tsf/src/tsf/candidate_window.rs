@@ -677,6 +677,11 @@ pub fn show_with_status(
 
     let n = page_candidates.len();
 
+    // 設定アプリの保存イベント（auto-reset で 1 プロセスにしか届かない）を
+    // 受け取れなかったプロセスでも最新のフォントサイズを拾えるよう、
+    // 表示のたびに config.toml の mtime を確認して appearance だけ更新する。
+    crate::engine::config::refresh_appearance_if_changed();
+
     // ここでレイアウトを 1 回だけ確定させ、以降の描画・幅計測・再配置は
     // すべてこのスナップショットを使う。表示中に設定が変わっても寸法は
     // 混ざらず、新しい設定は次回の show_with_status() から効く。
