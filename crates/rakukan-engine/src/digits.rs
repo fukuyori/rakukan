@@ -741,19 +741,45 @@ fn is_unit_only_kanji_run(s: &str) -> bool {
             .all(|c| small_kanji_unit(c).is_some() || large_kanji_unit(c).is_some())
 }
 
+/// 数字直後の単位漢字 run `units` の読み飛ばしを、入力読み `reading` が正当化するか。
+///
+/// run 内のすべての単位について、対応する数詞かな（まん/せん/ぜん…）が入力読みに
+/// 含まれている場合のみ true。この条件が無いと、単位を無条件に読み飛ばすことになり、
+/// 「5えん」→「5万円」のように変換器が単位を勝手に挿入した候補（数を 1 万倍に変える
+/// 改変）を数字保存の検証で見逃してしまう。
+///
+/// 大字は単位の値で照合する（「拾」は「じゅう」で正当化される）。
+/// `NUMERIC_UNITS` に読みが無い「京」は正当化されず、従来どおり数値として数える。
+fn reading_licenses_units(reading: &str, units: &str) -> bool {
+    let unit_value = |c: char| small_kanji_unit(c).or_else(|| large_kanji_unit(c));
+    units.chars().all(|u| {
+        let Some(val) = unit_value(u) else {
+            return false;
+        };
+        NUMERIC_UNITS.iter().any(|(r, kanji, _)| {
+            kanji.chars().next().and_then(unit_value) == Some(val) && reading.contains(r)
+        })
+    })
+}
+
 /// 入力・出力から「含まれる数」を数字列として取り出す。
 ///
 /// 漢数字は算用数字へ正規化して比較できるようにする（`二〇二四` → `2024`）。
 ///
-/// ただし **数字 run の直後に単位だけの漢字 run が続く場合、その単位は数値として
-/// 数えない**。`5まん` → `5万` を検証するとき、素朴に数えると入力の `5` に対して
+/// ただし **数字 run の直後に単位だけの漢字 run が続き、かつ入力読み `reading` に
+/// 対応する数詞かなが含まれる場合、その単位は数値として数えない**。
+/// `5まん` → `5万` を検証するとき、素朴に数えると入力の `5` に対して
 /// 出力が `5` + `10000` になり、数字が改変されたと誤判定して正しい候補を捨てて
 /// しまうため。`5万円`・`5万5千`・`10万以上` のように単位のあとに語が続く場合も
 /// 同じ。
 ///
+/// 読み飛ばしを入力読み側の数詞かなで正当化するのは、無条件に読み飛ばすと
+/// 「5えん」→「5万円」のような単位の挿入（数の改変）まで通してしまうため
+/// （`reading_licenses_units` を参照）。
+///
 /// 数字に隣接していない漢数字 run は従来どおり数値として解釈する。
 /// `2024ねん` → `二千二十四年` が `2024` に正規化されて一致する挙動は変わらない。
-fn extract_digits(s: &str) -> String {
+fn extract_digits(s: &str, reading: &str) -> String {
     let mut out = String::new();
     let mut kanji_run = String::new();
     // 直前に出力した文字が数字だったか（漢字 run が数字に隣接しているかの判定用）
@@ -763,8 +789,11 @@ fn extract_digits(s: &str) -> String {
         if kanji_run.is_empty() {
             return;
         }
-        // 数字の直後の「万」「千」などは、その数字に付いた単位として読み飛ばす
-        if !(after_digit && is_unit_only_kanji_run(kanji_run))
+        // 数字の直後の「万」「千」などは、入力読みに対応する数詞かなが
+        // ある場合に限り、その数字に付いた単位として読み飛ばす
+        if !(after_digit
+            && is_unit_only_kanji_run(kanji_run)
+            && reading_licenses_units(reading, kanji_run))
             && let Some(digits) = parse_kanji_number_digits(kanji_run)
         {
             out.push_str(&digits);
@@ -793,7 +822,9 @@ fn extract_digits(s: &str) -> String {
 }
 
 pub fn verify_digits_preserved(input: &str, output: &str) -> bool {
-    extract_digits(input) == extract_digits(output)
+    // 単位の読み飛ばしは、入力読み（かな）に対応する数詞があるときだけ許す。
+    // どちら側の抽出にも同じ入力読みを渡す。
+    extract_digits(input, input) == extract_digits(output, input)
 }
 
 /// 数字 run の直後に単独で現れたとき、数詞（位取りの単位）として解釈すべき読み。
@@ -1412,6 +1443,8 @@ mod tests {
         assert!(verify_digits_preserved("1じゅう", "1十"));
         assert!(verify_digits_preserved("5まん5せん", "5万5千"));
         assert!(verify_digits_preserved("10まんいじょう", "10万以上"));
+        // 大字は単位の値で照合する（拾 = 十）
+        assert!(verify_digits_preserved("5じゅう", "5拾"));
         // 単位を伴わない通常の候補も従来どおり通る
         assert!(verify_digits_preserved("5まん", "5マン"));
     }
@@ -1422,6 +1455,15 @@ mod tests {
         assert!(!verify_digits_preserved("5まん", "50万"));
         assert!(!verify_digits_preserved("5まん", "6万"));
         assert!(!verify_digits_preserved("5まんえん", "5万5円"));
+
+        // 単位の「挿入」も改変として捕まえる。読み飛ばしてよいのは、入力読みに
+        // 対応する数詞かなが含まれる場合だけ。5えん → 5万円 は数を 1 万倍に
+        // 変える改変であり、通してはいけない。
+        assert!(!verify_digits_preserved("5えん", "5万円"));
+        assert!(!verify_digits_preserved("5", "5万"));
+        // 照合は単位ごと。「おく」が正当化するのは 億 だけで、万 は通さない
+        assert!(!verify_digits_preserved("5おく", "5万"));
+        assert!(!verify_digits_preserved("5まん", "5億"));
 
         // 既知の限界: `extract_digits()` は小数点を拾わないので、`3.5` と `35` は
         // 区別できない。この検証は「数字の並びが保存されているか」だけを見る。
