@@ -75,6 +75,20 @@ const LEARN_HALF_LIFE_DAYS: f64 = 30.0;
 /// 頻度項の重み。`1 freq` を「1 日分の last_access_time」に換算。
 const LEARN_W_FREQ: f64 = 86_400.0;
 
+/// `last_access_time` から `now` までの経過に対する頻度の減衰係数 (0.0, 1.0]。
+///
+/// 確定時 (`learn_inner`) は「`f` を `now` まで減衰させてから +1 する」ために、
+/// スコア計算 (`LearnEntry::score`) は「`last_access_time` 時点の `f` を `now` まで
+/// 延長する」ために、どちらもこの係数を使う。両者で同じ関数を通すので、片方だけ
+/// 式が変わって二重減衰・減衰漏れになることがない。
+///
+/// `now < last_access_time`（時刻の巻き戻り）は `saturating_sub` で経過 0 に潰れ、
+/// 係数は 1.0 になる。増幅は起こらない。
+fn decay_factor(last_access_time: u64, now: u64) -> f64 {
+    let dt_days = now.saturating_sub(last_access_time) as f64 / 86_400.0;
+    0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS)
+}
+
 impl LearnEntry {
     /// mozc 準拠のスコア。大きいほど上位。
     ///
@@ -87,9 +101,7 @@ impl LearnEntry {
     /// `- chars_count` は秒単位のスコアに対して 1〜10 しか効かないため、実質的には
     /// 完全同点時に短い表記を先に出すタイブレークとしてのみ機能する。
     pub fn score(&self, now: u64) -> f64 {
-        let dt_secs = now.saturating_sub(self.last_access_time) as f64;
-        let dt_days = dt_secs / 86_400.0;
-        let decay = 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
+        let decay = decay_factor(self.last_access_time, now);
         let chars_penalty = self.surface.chars().count() as f64;
         self.last_access_time as f64 + LEARN_W_FREQ * (self.suggestion_freq as f64) * decay
             - chars_penalty
@@ -354,7 +366,9 @@ impl DictStore {
     ///
     /// 動作:
     /// - `learn_history[reading]` に `LearnEntry` を追加 or 既存エントリを更新。
-    /// - 既存エントリ: `last_access_time = now`, `suggestion_freq += 1`。
+    /// - 既存エントリ: 前回確定からの経過ぶんだけ減衰させてから +1 する
+    ///   (`suggestion_freq ← suggestion_freq * 0.5^(Δdays/30) + 1`)、`last_access_time = now`。
+    ///   生のカウンタではないので、長期間使っていない語の過去の回数が復活しない。
     /// - `user_dict.toml` には一切書き込まない（Phase 2b 以降、手動登録専用）。
     /// - 更新後に `learn_history.bin` へ同期書き込みする（確定時に数 ms 程度の I/O）。
     pub fn learn(&self, reading: &str, surface: &str) {
@@ -387,9 +401,7 @@ impl DictStore {
                 // score() 側の減衰と同じ係数なので、f は常に「last_access_time 時点の
                 // 減衰済み回数」を表し、score() がそれを now まで延長する形になる。
                 // 生カウンタだと 1 回使うだけで過去の回数が満額で復活してしまう。
-                let dt_days = now.saturating_sub(e.last_access_time) as f64 / 86_400.0;
-                let decayed =
-                    e.suggestion_freq as f64 * 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
+                let decayed = e.suggestion_freq as f64 * decay_factor(e.last_access_time, now);
                 e.last_access_time = now;
                 e.suggestion_freq = (decayed + 1.0) as f32;
             } else {
@@ -1198,21 +1210,63 @@ mod tests {
     #[test]
     fn test_learn_decays_freq_before_incrementing() {
         // 30 日（半減期ちょうど）空けて 2 回目を確定すると 1 * 0.5 + 1 = 1.5 になる。
-        // 生カウンタなら 2 になるところ。
-        let mut e = LearnEntry {
-            surface: "森の".into(),
+        // 生カウンタなら 2 になるところ。減衰式をテスト内に写経すると learn_inner の
+        // 実装が変わっても落ちないので、learn_force から本体を通して確かめる。
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learn.bin");
+        let now = now_unix_secs();
+        save_single(
+            &path,
+            "もりの",
+            LearnEntry {
+                surface: "森の".into(),
+                last_access_time: now - 30 * 86_400,
+                suggestion_freq: 1.0,
+                shown_freq: 0,
+            },
+        );
+
+        let store = DictStore::load(None, None, Some(&path)).unwrap();
+        store.learn_force("もりの", "森の");
+
+        let reloaded = load_learn_history_file(&path).unwrap();
+        let f = reloaded["もりの"][0].suggestion_freq;
+        assert!((f - 1.5).abs() < 1e-3, "1 * 0.5 + 1 = 1.5 のはず: f={f}");
+    }
+
+    #[test]
+    fn test_decay_factor_is_shared_by_score_and_learn() {
+        let day = 86_400_u64;
+        assert!(
+            (decay_factor(0, 0) - 1.0).abs() < 1e-12,
+            "経過 0 なら減衰しない"
+        );
+        assert!(
+            (decay_factor(0, 30 * day) - 0.5).abs() < 1e-12,
+            "半減期ちょうどで 1/2"
+        );
+        assert!(
+            (decay_factor(0, 60 * day) - 0.25).abs() < 1e-12,
+            "半減期 2 回ぶんで 1/4"
+        );
+        assert!(
+            (decay_factor(100 * day, 0) - 1.0).abs() < 1e-12,
+            "時刻が巻き戻っても増幅しない"
+        );
+
+        // score() の頻度項が decay_factor と同じ係数で減衰していること。
+        let e = LearnEntry {
+            surface: "森".into(),
             last_access_time: 0,
-            suggestion_freq: 1.0,
+            suggestion_freq: 4.0,
             shown_freq: 0,
         };
-        let now = 30 * 86_400_u64;
-        let dt_days = now.saturating_sub(e.last_access_time) as f64 / 86_400.0;
-        let decayed = e.suggestion_freq as f64 * 0.5_f64.powf(dt_days / LEARN_HALF_LIFE_DAYS);
-        e.suggestion_freq = (decayed + 1.0) as f32;
+        let chars_penalty = e.surface.chars().count() as f64;
+        let freq_term = e.score(30 * day) - e.last_access_time as f64 + chars_penalty;
+        let expected = LEARN_W_FREQ * 4.0 * decay_factor(0, 30 * day);
         assert!(
-            (e.suggestion_freq - 1.5).abs() < 1e-5,
-            "got {}",
-            e.suggestion_freq
+            (freq_term - expected).abs() < 1e-6,
+            "score() の頻度項が decay_factor と一致しない: got {freq_term}, want {expected}"
         );
     }
 
