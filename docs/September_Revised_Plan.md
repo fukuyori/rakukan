@@ -1033,3 +1033,22 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 - 軽微指摘 3 件: ①`learn()` の doc コメントが「`suggestion_freq += 1`」のまま ②`test_learn_decays_freq_before_incrementing` が減衰式をテスト内で再記述しており本体を通らない → `score()` と `learn_inner` で重複する減衰係数を `decay_factor(last_access_time, now)` へ切り出して両者から使う提案 ③v1 破棄が bincode のフィールド長一致（u32 と f32 が同じ 4 バイト）に依存し、将来フィールド長が変わる版では「load failed」の別経路で破棄される → version を先に読む形が堅牢（マージ条件にはしない）。①②の対応確認後に rebase マージ予定。
 - 未決の運用判断: v1 ファイルはバックアップされず初回学習で上書きされる。旧ファイルの退避要否はプロダクト判断。
 - Step 12 設計へ持ち越し: 収束値 f≈44 の常用語に対し別候補を 1 回明示選択しても順位は入れ替わらず（新 = now + 1 日、旧 = now + 約 42 日）、毎日選び続けても逆転まで約 30 日（※式からの机上計算）。「別候補を明示選択すると学習候補が上位になる」を学習エントリ同士にも適用するなら `LEARN_W_FREQ` の重みか明示選択時の扱いを E と合わせて設計で決める。有限極端値（f32::MAX 等）を残す方針は、v2 の更新式では約 370 万を超えられないため上限クランプの要否が残るが、180 日で stale 削除されるので実害は小さい。
+
+### PR #12 マージ・Issue #18 回答・不具合修正 PR 群の一次レビュー（2026-09-04）
+
+- **PR #12 マージ**: レビュー指摘 1・2 への対応コミット `0b76cdd`（`decay_factor()` の切り出し、`learn()` doc の更新、減衰テストを `learn_force` 経由に書き直し、共有係数テストの追加）をローカルで検証（`cargo test -p rakukan-dict --lib` 43 件通過、clippy 警告 0、fmt / diff-check OK）し、2 コミットのまま rebase マージした（main `4b2391f`）。指摘 3（version 先読み）は Step 12 の作業で対応する。
+- **Issue #18 の回答（nick20002005 氏）と決定**:
+  - B（Backspace 後の子音戻し）は「ログからの再生」ではなく Backspace 専用の後処理（`reclaim_pending_consonant()`）と回答があった。計画どおり Step 10 はこちらで実装し、先方に rebase してもらう。参考差分 `6a1b1cc` のテスト期待値（`kt` → BS → `a` = 「か」等）は Step 10 の受け入れテストに使う。
+  - I（数詞の挿入位置）は現行 main で再現せず取り下げ（フォーク評価の発見 1 と一致）。「末尾ローマ字の脱落」もフォーク専用関数起因で取り下げ、D の段で改めて提示される。
+  - E（学習 3 件）は設計意図と参考コミット（`1aa9e65` 予測確定を元の長いキーで学習 / `0c0109f` 明示選択時は表記＝読みでも学習 / `dc28767` 同じ読みは最後に確定した表記を先頭）を受領。**E-1 は誤エントリが確定のたびに自己増幅する経路を塞ぐものなので、Step 12 では順位パラメータの設計より先に取り込む**ことを決めた。E-3（頻度か直近の意思か）は Step 12 の設計で判断し結果を本書に書く。
+  - F は PR #26 として提出されたが、`romaji_input_log` を再生する実装で Step 10 と再生ロジックが二重になるため、**Step 10 完了後に出し直してもらう**判断にした。復元する／しないの判定表（`google` / `claude` / `seedreamtsukau`）と「境界は未確定バッファを引いた位置で取る」「読みの途中の英単語は対象外」の観察は Step 10 の設計材料として引き取る。
+  - 取り込み順を #19 → #20 → #21 → #22 → #24 → #25 → #23 と指定した。
+- **Issue #13**: G-4（Step 12）の完了で閉じる。エントリ単位の `priority = "low"` は Step 12 の範囲外とし、別 Issue に切り出して 0.12 系で判断する。
+- **PR #19（変換が追いつく前の Enter）**: 要修正 1 件を投稿。結果が既にある場合の早期 return が「preview は結果を反映済み」を前提にしているが、ライブタイマーは最終打鍵から `debounce_ms`（既定 80ms）経過まで発火しないため、その間の Enter で壊れた preview を `unconverged = false` で確定・学習してしまう（※机上分析）。peek した結果をマージして返す形を提案。`bg_wait_ms` → `wait_done_timeout` は pending（現在の読み）がある限り旧キーの Done で返らないことを確認済み。UI スレッドの最大 400ms ブロックは既存の inline 待ちと同性質で許容。
+- **PR #21（Enter で読点入り文が細切れ確定）**: マージ条件 2 件を投稿。①`current_index` を進める経路が旧 Enter の処理だけだったため、一括確定にすると 2 ブロック目以降を選び直せなくなる（Space / 候補送りは現在ブロックの候補を回すだけ、← / → は消費して何もしない）。← / → でブロック移動を追加する案 (a) を推奨。②新設の `block_selecting_pending_text()` が prefix を落としており、composition は prefix 込みで表示されているためブロック移動を入れた途端に先頭ブロックが消える → `end_composition` にも `block_selecting_full_text()` を渡す。あわせて未使用コードの削除と状態 doc コメントの更新を依頼。フォーク評価の発見 2（`7e391e8` は ← / → 文節移動が前提）の指摘が的中した。
+- **PR #22（IME 切り替えで未確定テキストが消える）**: 現行 main にブロッカー無し。Selecting / RangeSelect / Waiting / BlockSelecting の各分岐が `update_composition_candidate_parts` で表示している内容と一致することを裏取り。#21 マージ後の rebase で BlockSelecting 分岐を `block_selecting_full_text()` に置き換える依頼（先に「`pending_text()` へ寄せて」と書いたのを訂正）。`punct_pending` は set 元が無く無視して問題なし。
+- **PR #25（`KEYBOARD_OPENCLOSE` 外部変更への追随）**: ブロッカー無し。条件 1 件: `WM_APP_FOCUS_CHANGED` と `WM_APP_OPENCLOSE_CHANGED` の処理順が入れ替わると、`doc_mode_remember_current` が前の DM に記憶し、続くフォーカス処理が新 DM の記憶モードでコンパートメントを書き戻して症状が再現する（※順序はアプリ依存の机上分析）。`process_openclose_change` の先頭で `handle_pending_focus_changes()` を呼ぶ提案。ループしない根拠（rakukan 側の全切替経路で遅延ハンドラ実行時にはモードと値が一致）を裏取り済み。軽微 4 件（ロック失敗時の warn、Deactivate 後の参照解放、変換中に外部から閉じられた場合の composition、カタカナからの復帰先）。
+- **PR #23（#17 のコメント訂正）**: 訂正内容は実態と一致（`suggestion` モジュールは不在、`caret_rect_get()` の読み手は候補ウィンドウ位置のみ、書き手は 3 か所）。「非同期の EditSession を投げるだけ」は `TF_ES_SYNC` 無しでもロックが取れれば同期実行されるため表現を弱める提案（任意）を添えて rebase マージした（main `a81de74`）。
+- **PR #20 / #24**: それぞれ #19 / #22 の上に積まれているため先行 PR の対応後にレビューする。
+- 検証手順はいずれも共通: PR head を一時 worktree に展開し、PowerShell で `cargo test -p rakukan-tsf --lib`（93 件）、`cargo clippy -p rakukan-tsf --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` を実行。全 PR のベースは main `3116134` で rebase 衝突なし。
+- 未実施: 不具合修正リリース時の実機確認項目 — 新プロセス初回打鍵での候補ウィンドウ位置（#17）、クリスタのテキストツールでの直接入力（#25）、変換中の AHK `IMC_SETOPENSTATUS`（#25）、#19 の catch-up ログの発生頻度。
