@@ -384,7 +384,9 @@ impl super::TextServiceFactory_Impl {
         Ok(true)
     }
 
-    pub(super) fn on_ime_toggle(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
+    /// IME の ON/OFF を切り替える前に、画面に出ている合成文字列を確定して
+    /// 候補ウィンドウを閉じる（ImeToggle / ImeOff 共通）。
+    fn commit_composition_before_mode_switch(&self, ctx: &ITfContext, tid: u32) -> Result<()> {
         {
             let mut guard = engine_try_get_or_create()?;
             if let Some(engine) = guard.as_mut() {
@@ -449,6 +451,11 @@ impl super::TextServiceFactory_Impl {
                 }
             }
         }
+        Ok(())
+    }
+
+    pub(super) fn on_ime_toggle(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
+        self.commit_composition_before_mode_switch(&ctx, tid)?;
         let (from, to, now_open) = if let Ok(mut st) = crate::engine::state::ime_state_get() {
             use crate::engine::input_mode::InputMode;
             let was_alpha = st.input_mode == InputMode::Alphanumeric;
@@ -490,36 +497,10 @@ impl super::TextServiceFactory_Impl {
     }
 
     pub(super) fn on_ime_off(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
-        {
-            let mut guard = engine_try_get_or_create()?;
-            if let Some(engine) = guard.as_mut() {
-                // LiveConv 中は preview をコミットしてから IME をオフにする
-                let commit_text = {
-                    let sess = session_get();
-                    if let Ok(s) = &sess {
-                        if s.is_live_conv() {
-                            s.live_conv_parts().map(|(_, p)| p.to_string())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-                let preedit = commit_text.unwrap_or_else(|| engine.preedit_display());
-                if !preedit.is_empty() {
-                    engine.bg_reclaim();
-                    engine.commit(&preedit.clone());
-                    engine.reset_preedit();
-                    drop(guard);
-                    if let Ok(mut sess) = session_get() {
-                        sess.set_idle();
-                    }
-                    candidate_window::stop_live_timer();
-                    end_composition(ctx.clone(), tid, preedit)?;
-                }
-            }
-        }
+        // 候補選択中でも「画面に出ている合成文字列」を確定し、候補ウィンドウを
+        // 閉じる（従来は engine の読みを確定していたため、選んだ候補ではなく
+        // 読みが入り、候補ウィンドウも残っていた）。
+        self.commit_composition_before_mode_switch(&ctx, tid)?;
         if let Ok(mut st) = crate::engine::state::ime_state_get() {
             let from = format!("{:?}", st.input_mode);
             st.set_mode(crate::engine::input_mode::InputMode::Alphanumeric);
