@@ -1200,28 +1200,23 @@ pub enum SessionState {
     /// 区読点分割変換モード。
     ///
     /// Space 押下時に読みが区読点（、。！？）を含む場合に遷移する。
-    /// 全ブロックを事前に変換し、Enter キーで 1 ブロックずつ確定する。
+    /// 全ブロックを事前に変換し、← / → でブロックを選び直して Enter で全体を確定する。
     ///
     /// - `blocks`: 分割・変換済みブロック一覧
     /// - `current_index`: 現在フォーカス中のブロックインデックス
     /// - `full_reading`: ESC で戻るための元の全体読み
-    /// - `pos_x`, `pos_y`: 候補ウィンドウ表示位置
     ///
     /// 遷移:
     ///   Space / CandidateNext → 現在ブロックの次候補へ
     ///   CandidatePrev         → 現在ブロックの前候補へ
-    ///   Enter  → 現在ブロック確定。次ブロックへ移行。最終ブロックなら全確定。
+    ///   CursorLeft / CursorRight → フォーカスするブロックを前後へ移動
+    ///   Enter  → 全ブロックをまとめて確定。
     ///   ESC    → 全ブロック解除、full_reading をプリエディットへ復元。
     ///   Input  → 現在状態を確定してから文字を通常入力（Selecting 相当）。
     BlockSelecting {
         blocks: Vec<ConversionBlock>,
         current_index: usize,
         full_reading: String,
-        /// Enter で1ブロックずつ確定した際に積算するコミット済みテキスト。
-        /// 学習・最終コミット時に全体テキストとして使う。
-        committed_prefix: String,
-        pos_x: i32,
-        pos_y: i32,
     },
     /// ライブ変換表示中。
     ///
@@ -1294,20 +1289,11 @@ fn candidate_views_from_strings(
 impl SessionState {
     // ── BlockSelecting ──────────────────────────────────────────────────────
 
-    pub fn set_block_selecting(
-        &mut self,
-        blocks: Vec<ConversionBlock>,
-        full_reading: String,
-        pos_x: i32,
-        pos_y: i32,
-    ) {
+    pub fn set_block_selecting(&mut self, blocks: Vec<ConversionBlock>, full_reading: String) {
         *self = SessionState::BlockSelecting {
             blocks,
             current_index: 0,
             full_reading,
-            committed_prefix: String::new(),
-            pos_x,
-            pos_y,
         };
         SESSION_SELECTING.store(true, std::sync::atomic::Ordering::Release);
     }
@@ -1403,7 +1389,7 @@ impl SessionState {
 
     /// BlockSelecting: composition 表示用の (prefix, cand_text, remainder) を返す。
     ///
-    /// - `prefix`   : current_index より前のブロックのテキスト（確定済みイメージ）
+    /// - `prefix`   : current_index より前のブロックのテキスト（composition に載る）
     /// - `cand_text`: 現在ブロックの選択候補
     /// - `remainder`: current_index より後のブロックのテキスト（区読点含む）+ 現在の区読点
     pub fn block_selecting_composition_parts(&self) -> Option<(String, String, String)> {
@@ -1471,15 +1457,6 @@ impl SessionState {
         }
     }
 
-    /// BlockSelecting: pos_x, pos_y を返す。
-    pub fn block_selecting_pos(&self) -> Option<(i32, i32)> {
-        if let SessionState::BlockSelecting { pos_x, pos_y, .. } = self {
-            Some((*pos_x, *pos_y))
-        } else {
-            None
-        }
-    }
-
     /// BlockSelecting: full_reading を返す（ESC 用）。
     pub fn block_selecting_full_reading(&self) -> Option<String> {
         if let SessionState::BlockSelecting { full_reading, .. } = self {
@@ -1511,9 +1488,9 @@ impl SessionState {
         false
     }
 
-    /// BlockSelecting: 次のブロックへ進む（Enter 押下時）。
-    /// 最終ブロックの場合は false を返す（呼び出し元は全確定処理を行う）。
-    pub fn block_selecting_advance(&mut self) -> bool {
+    /// BlockSelecting: フォーカスを次のブロックへ移す（→ 押下時）。
+    /// 最終ブロックで呼ぶと移動せず false を返す。
+    pub fn block_selecting_move_next(&mut self) -> bool {
         if let SessionState::BlockSelecting {
             blocks,
             current_index,
@@ -1527,45 +1504,16 @@ impl SessionState {
         false
     }
 
-    /// BlockSelecting: 現在ブロックのコミットテキスト（candidate + trailing_punct）を
-    /// `committed_prefix` に積算し、そのテキストを返す。
-    ///
-    /// Enter でブロックを1つずつ確定する際に呼ぶ。`advance()` の前に呼ぶこと。
-    pub fn block_selecting_commit_current(&mut self) -> Option<String> {
-        if let SessionState::BlockSelecting {
-            blocks,
-            current_index,
-            committed_prefix,
-            ..
-        } = self
+    /// BlockSelecting: フォーカスを前のブロックへ移す（← 押下時）。
+    /// 先頭ブロックで呼ぶと移動せず false を返す。
+    pub fn block_selecting_move_prev(&mut self) -> bool {
+        if let SessionState::BlockSelecting { current_index, .. } = self
+            && *current_index > 0
         {
-            let block = blocks.get(*current_index)?;
-            let cand = block.current_candidate().to_string();
-            let punct = block
-                .trailing_punct
-                .map(|c| c.to_string())
-                .unwrap_or_default();
-            let text = format!("{cand}{punct}");
-            committed_prefix.push_str(&text);
-            Some(text)
-        } else {
-            None
+            *current_index -= 1;
+            return true;
         }
-    }
-
-    /// BlockSelecting: 積算済みコミット済みテキスト（`committed_prefix`）を返す。
-    ///
-    /// 最終ブロック確定時に `block_selecting_commit_current()` を呼んだ後に参照すると
-    /// 全ブロックのテキストが得られる（学習・engine.commit 用）。
-    pub fn block_selecting_accumulated_text(&self) -> Option<String> {
-        if let SessionState::BlockSelecting {
-            committed_prefix, ..
-        } = self
-        {
-            Some(committed_prefix.clone())
-        } else {
-            None
-        }
+        false
     }
 
     // ── 共通 ────────────────────────────────────────────────────────────────
@@ -2469,6 +2417,71 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {
+        ConversionBlock {
+            reading: reading.to_string(),
+            trailing_punct: punct,
+            candidates: vec![candidate.to_string()],
+            selected: 0,
+        }
+    }
+
+    fn two_block_session() -> SessionState {
+        let mut sess = SessionState::Idle;
+        sess.set_block_selecting(
+            vec![
+                conv_block("いちどにできるときと", "一度にできる時と", Some('、')),
+                conv_block("さいごまで", "最後まで", None),
+            ],
+            "いちどにできるときと、さいごまで".to_string(),
+        );
+        sess
+    }
+
+    #[test]
+    fn block_selecting_focus_moves_both_ways_and_stops_at_ends() {
+        let mut sess = two_block_session();
+        // 先頭ブロックでは ← は動かない
+        assert!(!sess.block_selecting_move_prev());
+        assert_eq!(
+            sess.block_selecting_composition_parts(),
+            Some((
+                String::new(),
+                "一度にできる時と".to_string(),
+                "、最後まで".to_string()
+            ))
+        );
+        // → で 2 ブロック目へフォーカスが移り、手前のブロックは prefix になる
+        assert!(sess.block_selecting_move_next());
+        assert_eq!(
+            sess.block_selecting_composition_parts(),
+            Some((
+                "一度にできる時と、".to_string(),
+                "最後まで".to_string(),
+                String::new()
+            ))
+        );
+        // 最終ブロックでは → は動かない
+        assert!(!sess.block_selecting_move_next());
+        // ← で戻る
+        assert!(sess.block_selecting_move_prev());
+        assert_eq!(sess.block_selecting_index_of(), Some((0, 2)));
+    }
+
+    #[test]
+    fn block_selecting_full_text_is_independent_of_focus() {
+        // Enter は composition 全体を確定するので、どのブロックにフォーカスが
+        // あっても確定する文字列は変わらない。
+        let mut sess = two_block_session();
+        let expected = Some("一度にできる時と、最後まで".to_string());
+        assert_eq!(sess.block_selecting_full_text(), expected);
+        assert!(sess.block_selecting_move_next());
+        assert_eq!(sess.block_selecting_full_text(), expected);
+        // composition の表示（prefix + cand + remainder）とも一致する
+        let (prefix, cand, remainder) = sess.block_selecting_composition_parts().unwrap();
+        assert_eq!(Some(format!("{prefix}{cand}{remainder}")), expected);
+    }
 
     #[test]
     fn live_conversion_reading_ready_starts_at_min_chars() {
