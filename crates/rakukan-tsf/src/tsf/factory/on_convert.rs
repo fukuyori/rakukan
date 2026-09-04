@@ -822,7 +822,7 @@ impl super::TextServiceFactory_Impl {
             let comp_parts: (String, String, String);
             {
                 let mut sess = session_get()?;
-                sess.set_block_selecting(blocks, full_reading, caret.left, caret.bottom);
+                sess.set_block_selecting(blocks, full_reading);
                 page_cands = sess.block_selecting_page_candidates();
                 page_sel = sess.block_selecting_page_selected();
                 comp_parts = sess.block_selecting_composition_parts().unwrap_or_default();
@@ -1535,56 +1535,38 @@ impl super::TextServiceFactory_Impl {
                 commit_then_start_composition(ctx, tid, sink, selected, preedit)?;
                 return Ok(true);
             }
-            // ── BlockSelecting（区読点分割変換）: Enter → 現在ブロック確定、次へ ──
+            // ── BlockSelecting（区読点分割変換）: Enter → 全ブロックまとめて確定 ──
+            //
+            // Enter は composition 全体を確定する（MS-IME / Google 日本語入力と同じ）。
+            //
+            // 以前は「現在ブロックだけ確定して次へ進む」実装だったため、読点を含む文を
+            // Space で変換すると必ずブロック数ぶんの Enter が要り、そのたびに断片が
+            // アプリへ書き込まれていた（ライブ変換のまま Enter なら一文が一度に入るのに、
+            // 途中で Space を挟んだ時だけ細切れになる）。
+            //
+            // 部分確定の経路が無くなったので composition には常に全ブロックが載っている
+            // （`update_composition_candidate_parts` の prefix ＝ current_index より前の
+            // ブロック）。`end_composition` にも全体を渡すこと。
             if sess.is_block_selecting() {
-                // advance() の前に現在ブロックのテキストを取得・積算する
-                let just_committed = sess.block_selecting_commit_current().unwrap_or_default();
-                let can_advance = sess.block_selecting_advance();
-                if can_advance {
-                    // まだ次のブロックがある:
-                    //   1. 確定したブロックをドキュメントへコミット（1 EditSession）
-                    //   2. 残りブロックで新しい composition を開始
-                    // NOTE: commit_then_start_composition + update_composition_candidate_parts の
-                    //       二段呼び出しは、二つ目のセッションが古い composition range に
-                    //       SetText を走らせてテキストを消す競合を起こす場合があるため、
-                    //       commit_then_start_composition 一発で完結させる。
-                    //       新 composition は uniform input underline で表示される。
-                    let page_cands = sess.block_selecting_page_candidates();
-                    let page_sel = sess.block_selecting_page_selected();
-                    // advance後の残りテキスト (prefix は無視して cand + rem のみ)
-                    let (_, new_cand, new_rem) =
-                        sess.block_selecting_composition_parts().unwrap_or_default();
-                    let (px, py) = sess.block_selecting_pos().unwrap_or_default();
-                    drop(sess);
-                    drop(guard);
-                    candidate_window::show(&page_cands, page_sel, "", px, py);
-                    // 確定済みブロックをコミットし、残りで新 composition 開始（1セッション）
-                    let new_full = format!("{new_cand}{new_rem}");
-                    commit_then_start_composition(ctx, tid, sink, just_committed, new_full)?;
-                } else {
-                    // 最終ブロック: commit_current で accumulated_text が完成している
-                    let full_text = sess.block_selecting_accumulated_text().unwrap_or_default();
-                    let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
-                    sess.set_idle();
-                    drop(sess);
-                    candidate_window::hide();
-                    if crate::engine::state::is_auto_learn_enabled()
-                        && full_text != full_reading
-                        && !full_reading.is_empty()
-                    {
-                        engine.learn(&full_reading, &full_text);
-                    }
-                    engine.commit(&full_text);
-                    engine.reset_preedit();
-                    drop(guard);
-                    tracing::info!(
-                        "on_commit_raw[BlockSelecting]: commit last={:?} full={:?}",
-                        just_committed,
-                        full_text
-                    );
-                    // 最終ブロックは composition に残っているテキスト (just_committed) を確定
-                    end_composition(ctx, tid, just_committed)?;
+                let full_text = sess.block_selecting_full_text().unwrap_or_default();
+                let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
+                sess.set_idle();
+                drop(sess);
+                candidate_window::hide();
+                if crate::engine::state::is_auto_learn_enabled()
+                    && full_text != full_reading
+                    && !full_reading.is_empty()
+                {
+                    engine.learn(&full_reading, &full_text);
                 }
+                engine.commit(&full_text);
+                engine.reset_preedit();
+                drop(guard);
+                tracing::info!("on_commit_raw[BlockSelecting]: commit full={:?}", full_text);
+                diag::event(DiagEvent::CommitRaw {
+                    preedit: full_text.clone(),
+                });
+                end_composition(ctx, tid, full_text)?;
                 return Ok(true);
             }
             // ── Waiting（⏳変換中）: ひらがなのままコミット ──

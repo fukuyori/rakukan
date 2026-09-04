@@ -717,19 +717,59 @@ impl super::TextServiceFactory_Impl {
         Ok(true)
     }
 
-    /// Left: 選択文節を左へ移動する。
+    /// Left: BlockSelecting ではフォーカスを前のブロックへ移す。
+    /// それ以外の状態では消費するだけ（rakukan は preedit 内にキャレットを持たない）。
     pub(super) fn on_segment_move_left(
         &self,
-        _ctx: ITfContext,
-        _tid: u32,
-        _sink: ITfCompositionSink,
-        mut guard: crate::engine::state::EngineGuard,
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
-        let engine = match guard.as_mut() {
-            Some(e) => e,
+        self.on_block_focus_move(ctx, tid, sink, guard, false)
+    }
+
+    /// ← / → で BlockSelecting のフォーカスブロックを移動する。
+    ///
+    /// `current_index` を動かす経路はここだけ。Space / CandidateNext / CandidatePrev は
+    /// 現在ブロックの `selected` を回すだけなので、これが無いと 2 ブロック目以降は
+    /// 先頭候補で固定され、選び直せなくなる。
+    fn on_block_focus_move(
+        &self,
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        guard: crate::engine::state::EngineGuard,
+        forward: bool,
+    ) -> Result<bool> {
+        let has_pre = match guard.as_ref() {
+            Some(e) => !e.preedit_is_empty(),
             None => return Ok(false),
         };
-        Ok(!engine.preedit_is_empty())
+        drop(guard);
+        let mut sess = session_get()?;
+        if !sess.is_block_selecting() {
+            return Ok(has_pre);
+        }
+        let moved = if forward {
+            sess.block_selecting_move_next()
+        } else {
+            sess.block_selecting_move_prev()
+        };
+        if !moved {
+            // 端でこれ以上動けない場合もアプリへは渡さない（composition 中のため）。
+            return Ok(true);
+        }
+        let page_cands = sess.block_selecting_page_candidates();
+        let page_sel = sess.block_selecting_page_selected();
+        let (prefix, cand_text, remainder) =
+            sess.block_selecting_composition_parts().unwrap_or_default();
+        let caret = caret_rect_get();
+        drop(sess);
+        candidate_window::update_selection(page_sel, "");
+        candidate_window::show(&page_cands, page_sel, "", caret.left, caret.bottom);
+        update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+        Ok(true)
     }
 
     /// Shift+Left: 選択範囲を左側から縮めるのではなく、右端を左へ戻す。
@@ -849,26 +889,24 @@ impl super::TextServiceFactory_Impl {
         Ok(!engine.preedit_is_empty())
     }
 
-    /// Right: 選択文節を右へ移動する。
+    /// Right: BlockSelecting ではフォーカスを次のブロックへ移す。
+    /// それ以外の状態では消費するだけ（rakukan は preedit 内にキャレットを持たない）。
     pub(super) fn on_segment_move_right(
         &self,
-        _ctx: ITfContext,
-        _tid: u32,
-        _sink: ITfCompositionSink,
-        mut guard: crate::engine::state::EngineGuard,
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        guard: crate::engine::state::EngineGuard,
     ) -> Result<bool> {
-        let engine = match guard.as_mut() {
-            Some(e) => e,
-            None => return Ok(false),
-        };
-        Ok(!engine.preedit_is_empty())
+        self.on_block_focus_move(ctx, tid, sink, guard, true)
     }
 
     /// Home / End: 未確定文字列がある間はアプリへ渡さず IME 内で処理する（Issue #11）。
     ///
-    /// rakukan は preedit 内にキャレットを持たない（Left / Right も消費するだけ）ため、
-    /// Preedit / LiveConv / Waiting / Selecting / BlockSelecting では消費して何もしない
-    /// （BlockSelecting は確定済みブロックへ戻れないので先頭ブロックへの移動も定義しない）。
+    /// rakukan は preedit 内にキャレットを持たない（BlockSelecting を除き Left / Right も
+    /// 消費するだけ）ため、Preedit / LiveConv / Waiting / Selecting / BlockSelecting では
+    /// 消費して何もしない（BlockSelecting のブロック移動は ← / → に割り当ててあり、
+    /// Home / End で先頭 / 末尾ブロックへ飛ばすかは未定）。
     /// RangeSelect では選択範囲の右端を先頭（1 文字）/ 末尾（全体）へ移す。
     /// 未確定文字列が無ければ `false` を返してアプリへ渡す。
     pub(super) fn on_cursor_jump(
