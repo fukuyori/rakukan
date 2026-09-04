@@ -219,11 +219,16 @@ pub(super) fn update_composition(
         }
 
         // 打鍵のたびにキャレット矩形を更新する。
-        // 予測ウィンドウ（`suggestion::show`）と候補ウィンドウは `caret_rect_get()` を
-        // 見るが、CARET_RECT を更新するのは Space 押下（`update_caret_rect`）と
-        // `commit_then_start_composition` だけだった。そのため、プロセス内で
-        // 一度も変換・確定を挟んでいない入力では初期値 (0,0,0,0) のままになり、
-        // 予測ウィンドウがプライマリモニタの左上に出てしまう。
+        //
+        // 候補ウィンドウの表示位置は `caret_rect_get()` を読むが、CARET_RECT を
+        // 更新するのは Space 押下時の `update_caret_rect()` と
+        // `commit_then_start_composition()` だけだった。`update_caret_rect()` は
+        // 非同期の EditSession を投げるだけなので、同じ Space の処理内で
+        // `caret_rect_get()` を読む側はまだ更新前の値を見る。プロセス内で最初の
+        // 変換ではそれが初期値 (0,0,0,0) にあたり、候補ウィンドウがプライマリ
+        // モニタの左上に出てしまう。
+        //
+        // ここで更新しておけば、Space が来る前に必ず正しい矩形が入っている。
         if let Ok(view) = ctx.GetActiveView() {
             use windows::Win32::Foundation::RECT;
             let mut rect = RECT::default();
