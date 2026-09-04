@@ -42,15 +42,18 @@ use windows::{
         UI::{
             Input::KeyboardAndMouse::GetKeyState,
             TextServices::{
-                CLSID_TF_CategoryMgr, IEnumTfDisplayAttributeInfo, ITfCategoryMgr, ITfComposition,
-                ITfCompositionSink, ITfCompositionSink_Impl, ITfContext, ITfDisplayAttributeInfo,
-                ITfDisplayAttributeProvider, ITfDisplayAttributeProvider_Impl, ITfDocumentMgr,
-                ITfKeyEventSink, ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem,
-                ITfLangBarItem_Impl, ITfLangBarItemButton, ITfLangBarItemButton_Impl,
-                ITfLangBarItemSink, ITfMenu, ITfSource, ITfSource_Impl, ITfTextInputProcessor,
-                ITfTextInputProcessor_Impl, ITfThreadFocusSink, ITfThreadFocusSink_Impl,
-                ITfThreadMgr, ITfThreadMgrEventSink, ITfThreadMgrEventSink_Impl, TF_ES_READWRITE,
-                TF_LANGBARITEMINFO, TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
+                CLSID_TF_CategoryMgr, GUID_COMPARTMENT_KEYBOARD_OPENCLOSE,
+                IEnumTfDisplayAttributeInfo, ITfCategoryMgr, ITfCompartment,
+                ITfCompartmentEventSink, ITfCompartmentEventSink_Impl, ITfCompartmentMgr,
+                ITfComposition, ITfCompositionSink, ITfCompositionSink_Impl, ITfContext,
+                ITfDisplayAttributeInfo, ITfDisplayAttributeProvider,
+                ITfDisplayAttributeProvider_Impl, ITfDocumentMgr, ITfKeyEventSink,
+                ITfKeyEventSink_Impl, ITfKeystrokeMgr, ITfLangBarItem, ITfLangBarItem_Impl,
+                ITfLangBarItemButton, ITfLangBarItemButton_Impl, ITfLangBarItemSink, ITfMenu,
+                ITfSource, ITfSource_Impl, ITfTextInputProcessor, ITfTextInputProcessor_Impl,
+                ITfThreadFocusSink, ITfThreadFocusSink_Impl, ITfThreadMgr, ITfThreadMgrEventSink,
+                ITfThreadMgrEventSink_Impl, TF_ES_READWRITE, TF_LANGBARITEMINFO,
+                TF_LBMENUF_RADIOCHECKED, TF_LBMENUF_SEPARATOR, TfLBIClick,
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, GA_ROOT, GetAncestor,
@@ -321,6 +324,10 @@ pub struct TextServiceState {
     pub threadmgr_cookie: u32,
     /// ITfThreadFocusSink の登録クッキー（Deactivate で解除）
     pub threadfocus_cookie: u32,
+    /// KEYBOARD_OPENCLOSE コンパートメントの ITfCompartmentEventSink 登録
+    /// （Deactivate で解除。解除には登録先のコンパートメントが要る）
+    pub openclose_cookie: u32,
+    pub openclose_comp: Option<ITfCompartment>,
 }
 
 // Safety: TSF は STA。RefCell + COM オブジェクトを持つが
@@ -340,6 +347,7 @@ unsafe impl Send for TextServiceState {}
     ITfSource,
     ITfThreadMgrEventSink,
     ITfThreadFocusSink,
+    ITfCompartmentEventSink,
     ITfDisplayAttributeProvider
 )]
 pub struct TextServiceFactory {
@@ -512,6 +520,32 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             }
         }
 
+        // KEYBOARD_OPENCLOSE コンパートメントの変更を受け取る。IMM アプリ
+        // （クリスタ等）の ImmSetOpenStatus や AHK の IMC_SETOPENSTATUS は
+        // CtfImm 経由でここに来る。処理は candidate_window の遅延ハンドラで行う。
+        unsafe {
+            let registered = (|| -> windows::core::Result<(u32, ITfCompartment)> {
+                let mgr: ITfCompartmentMgr = tm.cast()?;
+                let comp = mgr.GetCompartment(&GUID_COMPARTMENT_KEYBOARD_OPENCLOSE)?;
+                let src: ITfSource = comp.cast()?;
+                let sink: ITfCompartmentEventSink = self.cast()?;
+                let unk: IUnknown = sink.cast()?;
+                let cookie = src.AdviseSink(&ITfCompartmentEventSink::IID, &unk)?;
+                Ok((cookie, comp))
+            })();
+            match registered {
+                Ok((cookie, comp)) => {
+                    if let Ok(mut inner) = self.inner.try_borrow_mut() {
+                        inner.openclose_cookie = cookie;
+                        inner.openclose_comp = Some(comp);
+                    }
+                    tracing::debug!(
+                        "ITfCompartmentEventSink(OPENCLOSE) registered cookie={cookie}"
+                    );
+                }
+                Err(e) => tracing::warn!("AdviseSink(CompartmentEventSink) failed: {e}"),
+            }
+        }
         diag::event(DiagEvent::Activate { tid });
         tracing::info!("rakukan Activate client_id={tid}");
 
@@ -604,7 +638,21 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                     let _ = src.UnadviseSink(inner.threadfocus_cookie);
                     tracing::debug!("ITfThreadFocusSink unregistered");
                 }
+                // ITfCompartmentEventSink 登録解除（inner は不変借用なので値だけ読む）
+                if inner.openclose_cookie != 0
+                    && let Some(comp) = inner.openclose_comp.as_ref()
+                    && let Ok(src) = comp.cast::<ITfSource>()
+                {
+                    let _ = src.UnadviseSink(inner.openclose_cookie);
+                    tracing::debug!("ITfCompartmentEventSink unregistered");
+                }
             }
+        }
+        // 解除したコンパートメントの参照は落とす（Activate で登録し直される）。
+        drop(inner);
+        if let Ok(mut inner) = self.inner.try_borrow_mut() {
+            inner.openclose_cookie = 0;
+            inner.openclose_comp = None;
         }
         let _ = composition_set(None);
         if let Ok(mut g) = engine_get()
@@ -1390,6 +1438,16 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
 // フォーカス遷移で発火する。ITfThreadMgrEventSink::OnSetFocus は TSF 対応
 // アプリ間でしか呼ばれないため、非対応アプリへ抜けたときの候補ウィンドウ
 // 残留を防ぐためにこちらも必要。
+
+impl ITfCompartmentEventSink_Impl for TextServiceFactory_Impl {
+    fn OnChange(&self, rguid: *const GUID) -> windows::core::Result<()> {
+        // msctf のコールバック内。ここで msctf に再入しない（OnSetFocus と同じ方針）。
+        if !rguid.is_null() && unsafe { *rguid } == GUID_COMPARTMENT_KEYBOARD_OPENCLOSE {
+            candidate_window::post_openclose_changed();
+        }
+        Ok(())
+    }
+}
 
 impl ITfThreadFocusSink_Impl for TextServiceFactory_Impl {
     fn OnSetThreadFocus(&self) -> windows::core::Result<()> {
