@@ -4,6 +4,7 @@ using Microsoft.UI.Xaml.Controls;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Reflection;
+using System.Runtime.InteropServices;
 using System.Threading;
 using Windows.Graphics;
 
@@ -25,7 +26,7 @@ public sealed partial class MainWindow : Window
     {
         InitializeComponent();
         SetWindowIcon();
-        AppWindow.Resize(new SizeInt32(1080, 760));
+        ResizeToDefaultSize();
         AppWindow.Closing += AppWindow_Closing;
 
         var ver = Assembly.GetEntryAssembly()?.GetName().Version;
@@ -786,4 +787,20 @@ public sealed partial class MainWindow : Window
         }
     }
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hwnd);
+
+    // AppWindow.Resize は物理ピクセル指定なので、表示先のスケーリングに合わせて
+    // 拡大しないと高 DPI 環境でウィンドウが小さくなり中身が収まらない。
+    private void ResizeToDefaultSize()
+    {
+        const int baseWidth = 1080;
+        const int baseHeight = 760;
+
+        var hwnd = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        var dpi = GetDpiForWindow(hwnd);
+        var scale = dpi == 0 ? 1.0 : dpi / 96.0;
+
+        AppWindow.Resize(new SizeInt32((int)(baseWidth * scale), (int)(baseHeight * scale)));
+    }
 }
