@@ -13,10 +13,19 @@ $env:NUGET_PACKAGES = Join-Path $repoRoot '.nuget-packages'
 New-Item -ItemType Directory -Force -Path $env:APPDATA | Out-Null
 New-Item -ItemType Directory -Force -Path $env:NUGET_PACKAGES | Out-Null
 
-$msbuild = @(
-    "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe",
-    "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\amd64\MSBuild.exe"
-) | Where-Object { Test-Path $_ } | Select-Object -First 1
+# Locate MSBuild via vswhere first: hard-coded edition paths miss e.g. VS 2022 Community.
+$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+$msbuild = $null
+if (Test-Path -LiteralPath $vswhere) {
+    $msbuild = & $vswhere -latest -products * -requires Microsoft.Component.MSBuild -find 'MSBuild\**\Bin\amd64\MSBuild.exe' |
+        Select-Object -First 1
+}
+if (-not $msbuild) {
+    $msbuild = @(
+        "C:\Program Files\Microsoft Visual Studio\18\Community\MSBuild\Current\Bin\amd64\MSBuild.exe",
+        "C:\Program Files\Microsoft Visual Studio\2022\Professional\MSBuild\Current\Bin\amd64\MSBuild.exe"
+    ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+}
 
 if (-not $msbuild) {
     throw "Visual Studio MSBuild (amd64) was not found."
