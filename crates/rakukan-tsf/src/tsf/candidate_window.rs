@@ -203,6 +203,9 @@ struct FocusChange {
 
 /// カスタムメッセージ: OnSetFocus を msctf コールバック外で実行する。
 const WM_APP_FOCUS_CHANGED: u32 = WM_APP + 1;
+/// KEYBOARD_OPENCLOSE コンパートメントが外部（アプリの ImmSetOpenStatus /
+/// CtfImm）から変えられたときの遅延処理
+const WM_APP_OPENCLOSE_CHANGED: u32 = WM_APP + 2;
 
 #[derive(Default, Clone)]
 struct CandData {
@@ -298,6 +301,11 @@ unsafe extern "system" fn wnd_proc(
         // OnSetFocus 遅延処理: msctf コールバックから抜けた後にここで処理する
         m if m == WM_APP_FOCUS_CHANGED => {
             handle_pending_focus_changes();
+            LRESULT(0)
+        }
+        // ITfCompartmentEventSink::OnChange 遅延処理
+        m if m == WM_APP_OPENCLOSE_CHANGED => {
+            process_openclose_change();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -933,6 +941,65 @@ pub fn invalidate_live_context_for_dm(dm_ptr: usize) {
     if matched {
         tracing::debug!("[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}");
     }
+}
+
+/// `ITfCompartmentEventSink::OnChange`（KEYBOARD_OPENCLOSE）から呼ばれる。
+/// msctf のコールバック内では何もせず、WM_APP_OPENCLOSE_CHANGED を PostMessage
+/// して抜ける（OnSetFocus と同じ理由）。
+pub fn post_openclose_changed() {
+    let hwnd = ensure_hwnd();
+    if is_valid(hwnd) {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_APP_OPENCLOSE_CHANGED, WPARAM(0), LPARAM(0));
+        }
+    }
+}
+
+/// コンパートメントの現在値（開＝1）を rakukan の入力モードに反映する。
+///
+/// クリスタ（IMM アプリ）は文字編集に入ると `ImmSetOpenStatus(TRUE)`、Esc で
+/// `FALSE` を呼び、CtfImm がそれを KEYBOARD_OPENCLOSE に書く。AHK 等の
+/// `IMC_SETOPENSTATUS` も同じ経路。rakukan 自身の切替も同じコンパートメントに
+/// 書くが（`set_open_close`）、そのときは値とモードが一致するので何もしない＝
+/// ループしない。
+fn process_openclose_change() {
+    use crate::engine::input_mode::InputMode;
+    // 溜まっているフォーカス変化を先に消化する。フォーカス移動（OnSetFocus）と
+    // ImmSetOpenStatus は同じスレッドのキューに積まれ、どちらが先に処理されるかは
+    // アプリ次第。OPENCLOSE が先に走ると、まだ更新されていない TL_CURRENT_DM に
+    // モードを記憶してしまい、続く process_focus_change が前の DM の記憶モードで
+    // 上書きする（クリスタでテキストツールに入っても直接入力のまま戻る）。
+    handle_pending_focus_changes();
+    let tm_opt = TL_THREAD_MGR.with(|c| c.borrow().clone());
+    let Some(tm) = tm_opt else {
+        return;
+    };
+    let open = crate::tsf::language_bar::get_open_close(&tm);
+    let Ok(mut st) = crate::engine::state::ime_state_get() else {
+        tracing::warn!("compartment OPENCLOSE changed but ime_state is locked; ignored");
+        return;
+    };
+    let currently_open = st.input_mode != InputMode::Alphanumeric;
+    if open == currently_open {
+        return;
+    }
+    let new_mode = if open {
+        InputMode::Hiragana
+    } else {
+        InputMode::Alphanumeric
+    };
+    tracing::info!(
+        "compartment OPENCLOSE changed externally: open={} → mode {:?} → {:?}",
+        open,
+        st.input_mode,
+        new_mode
+    );
+    st.set_mode(new_mode);
+    drop(st);
+    hide();
+    stop_live_timer();
+    crate::engine::state::langbar_update_set();
+    crate::tsf::tray_ipc::publish(open, new_mode);
 }
 
 /// OnSetFocus から呼ばれる。イベントをキューに積み、WM_APP_FOCUS_CHANGED を
