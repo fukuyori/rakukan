@@ -1052,3 +1052,15 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 - **PR #20 / #24**: それぞれ #19 / #22 の上に積まれているため先行 PR の対応後にレビューする。
 - 検証手順はいずれも共通: PR head を一時 worktree に展開し、PowerShell で `cargo test -p rakukan-tsf --lib`（93 件）、`cargo clippy -p rakukan-tsf --all-targets -- -D warnings`、`cargo fmt --all -- --check`、`git diff --check` を実行。全 PR のベースは main `3116134` で rebase 衝突なし。
 - 未実施: 不具合修正リリース時の実機確認項目 — 新プロセス初回打鍵での候補ウィンドウ位置（#17）、クリスタのテキストツールでの直接入力（#25）、変換中の AHK `IMC_SETOPENSTATUS`（#25）、#19 の catch-up ログの発生頻度。
+
+### PR #19 / #21 / #25 の修正版マージ（2026-09-06）
+
+- nick20002005 が 09-05 に 3 件を force push し、いずれも一次レビューの依頼どおりに対応していた。ベースは変わらず main `3116134`。
+- **PR #19（`6f40f5c` → `ea8df48`）**: 先頭の早期 return を廃し、bg に結果がある場合も `merge_candidates_for_reading` を通した値を返す形（提案コードそのまま）。ログは merged と preview が異なるときだけ出す。doc コメントに、`pass_debounce()` の猶予内の Enter と `LIVE_PREVIEW_QUEUE` 経由で「結果があるのに preview が古い」ケースが生じる理由を記載。指摘の経路は nick 側の実機では未再現。main `700a588` として rebase マージ。
+- **PR #21（`fbbe83d` → `4869ed8`）**: 案 (a) を採用。← / → に BlockSelecting 分岐を足し `on_block_focus_move` で `current_index` を ±1 して composition と候補ウィンドウを張り直す（端では消費のみ）。`pending_text()` を削除し Enter は engine と `end_composition` の両方に `block_selecting_full_text()` を渡す。未使用の `commit_current` / `accumulated_text` / `pos` / `committed_prefix` / `pos_x` / `pos_y` を削除し `set_block_selecting` の引数を 2 つに。遷移表と doc を新仕様に更新（Home / End は据え置き）。`state.rs` にユニットテスト 2 件追加（93 → 95 件）。← / → が BlockSelecting 中に消費される経路（`SESSION_SELECTING` → `key_should_eat`）を裏取りした。main `b5d7f5d` として rebase マージ。実機は nick 側で未確認。
+- **PR #25（`beef2f7` → `0e0dae7`）**: `process_openclose_change` の先頭で `handle_pending_focus_changes()` を呼ぶ変更と、その理由のコメント。任意項目のうち try_lock 失敗時の warn と Deactivate 後の `openclose_comp` / `openclose_cookie` の解放も対応。変換中に外部から閉じられた場合は `process_focus_change` と揃えて据え置き。main `99d935b` として rebase マージ。実機は nick 側で未確認。
+- 検証は一次レビューと同じ手順。#21 と #25 は先行 PR マージ後の main に試しマージした状態で fmt / clippy `-D warnings` / `cargo test -p rakukan-tsf --lib`（95 件）/ `git diff --check` を通した。
+- **PR #20**: `on_convert.rs` が新 main と衝突するため rebase を依頼。
+- **PR #22**: テキスト衝突は無いが、合意どおり BlockSelecting 分岐を `block_selecting_full_text()` に置き換えたうえで rebase を依頼。**PR #24** はその後にレビュー。
+- **新着 PR #27 / #28（09-04、設定アプリ）**: #27 は `app.manifest` に PerMonitorV2 の DPI awareness を宣言し、ウィンドウ初期サイズを `GetDpiForWindow` のスケールで補正する（スケーリング 100% 以外でマウスホイールが効かない不具合）。#28 は `build-settings-winui.ps1` の MSBuild 探索を vswhere 優先にし、従来のパス一覧へフォールバック。どちらも入力系の PR 群とは独立で急がない。#28 はスクリプトの読み合わせで済むが、#27 は設定アプリをビルドしてスケーリングを変えた実機確認が要る。
+- 不具合修正リリース時の実機確認項目に追加: ← / → でのブロック移動と移動後の Enter が全体を 1 回で確定すること（#21）、`[Live] commit catch-up:` の出現頻度（#19）、クリスタでの `OnSetFocus(deferred)` と `compartment OPENCLOSE changed externally` の前後関係（#25）。
