@@ -1064,3 +1064,11 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 - **PR #22**: テキスト衝突は無いが、合意どおり BlockSelecting 分岐を `block_selecting_full_text()` に置き換えたうえで rebase を依頼。**PR #24** はその後にレビュー。
 - **新着 PR #27 / #28（09-04、設定アプリ）**: #27 は `app.manifest` に PerMonitorV2 の DPI awareness を宣言し、ウィンドウ初期サイズを `GetDpiForWindow` のスケールで補正する（スケーリング 100% 以外でマウスホイールが効かない不具合）。#28 は `build-settings-winui.ps1` の MSBuild 探索を vswhere 優先にし、従来のパス一覧へフォールバック。どちらも入力系の PR 群とは独立で急がない。#28 はスクリプトの読み合わせで済むが、#27 は設定アプリをビルドしてスケーリングを変えた実機確認が要る。
 - 不具合修正リリース時の実機確認項目に追加: ← / → でのブロック移動と移動後の Enter が全体を 1 回で確定すること（#21）、`[Live] commit catch-up:` の出現頻度（#19）、クリスタでの `OnSetFocus(deferred)` と `compartment OPENCLOSE changed externally` の前後関係（#25）。
+
+### PR #28 マージ・PR #27 検証・Issue #29 切り出し・README 追随（2026-09-06）
+
+- **PR #28（MSBuild を vswhere 経由で探索）**: この環境（VS 18 Community のみ）で PR と同じ vswhere 呼び出しが従来のハードコードと同じパスを返すこと、PR head の worktree で `build-settings-winui.ps1` が exit 0 で出力ディレクトリまで到達すること（約 18 秒）を確認し、main `6b39278` として rebase マージ。
+- **PR #27（設定画面のホイールスクロール）**: 差分は `app.manifest` への PerMonitorV2 宣言と、`GetDpiForWindow` のスケールによる初期サイズ補正。前提の検証として、インストール済み 0.11.3 の設定アプリを起動し `GetProcessDpiAwareness` が 0（unaware）であることを確認（指摘どおり）。一方、主モニターを 125%（`GetDpiForMonitor` で DPI 120）にした状態でも各ページはマウスホイールでスクロールできた（100% でも同様）。「unaware ＋ 100% 以外 → ホイール不能」という因果はこの環境（Windows 11 26200、4 モニター、通常のマウス）では再現しない。この事実と、nick 側の環境情報（スケーリング値・モニター構成・Windows ビルド・ホイールのデバイス・修正前後の比較条件）の確認依頼を投稿。manifest の宣言自体は WinUI 3 の前提に沿うためマージ自体は可能と見ているが、こちらで修正版を 125% でビルド確認してから判断する。※測定上の注意: DPI unaware な PowerShell からの `GetDpiForSystem` は常に 96 を返すため、スケーリングの測定は PerMonitorV2 を宣言した子プロセスから行った。
+- **Issue #29**: `priority = "low"`（常用しない大量登録語をシステム辞書より後ろへ置く）を Issue #13 から切り出して作成。G-4 適用後の想定順序（学習 → user normal → システム → user low → LLM）、nick の参考ブランチが G-4 前提であること、WinUI 設定側の対応など判断が要る点、Step 12 完了後に着手する依存関係を記載。#13 は当初の予定どおり G-4（Step 12）完了で閉じる（G-4 は未適用: `lib.rs` の候補マージでは今もユーザー辞書が学習履歴より先）。
+- **README 追随**: PR #21 で区読点分割変換の Enter が全ブロック一括確定になり ← / → がブロック移動になったため、README の機能一覧・キー操作表（Enter / Left / Right）・注記の 4 か所を新仕様に合わせた。CHANGELOG は従来どおりリリース時（0.11.4）にまとめて書く。
+- 未追随のドキュメント: `handoff.md` の「位置づけ」が v0.9.12 で止まっている（今回の変更とは別の古さ）。DESIGN.md には #25 の外部変更 sink の記述が無いが設計書の粒度としては省略の範囲。
