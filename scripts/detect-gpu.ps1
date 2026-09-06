@@ -1,6 +1,6 @@
 ﻿# scripts/detect-gpu.ps1
 # GPU を自動検出し、最適な llama.cpp バックエンドを提案する
-# 単体でも実行可能、verify-karukan.ps1 からも呼び出される
+# 単体でも実行可能、build-engine.ps1 からも呼び出される
 #
 # 出力: $env:RAKUKAN_BACKEND に選択結果をセットする
 # 戻り値: "cpu" | "vulkan" | "cuda"

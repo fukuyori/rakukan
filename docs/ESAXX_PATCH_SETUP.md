@@ -9,19 +9,7 @@
 
 `[patch.crates-io]` で `esaxx-rs` を上書きし、`static_crt(false)` に変更する。
 
-## セットアップ手順（初回のみ）
+## セットアップ手順
 
-```powershell
-# 1. まず cargo fetch でキャッシュを確保
-cargo fetch
-
-# 2. esaxx.cpp をキャッシュからパッチディレクトリへコピー
-.\scripts\setup-esaxx-patch.ps1
-
-# 3. 通常通りビルド
-.\scripts\build-engine.ps1 -Profile release
-```
-
-## 確認
-
-`patches\esaxx-rs\src\esaxx.cpp` が存在すればセットアップ完了。
+パッチ版のソース一式は `patches/esaxx-rs/` としてリポジトリに含まれているため、追加のセットアップは不要。
+`cargo make build-engine` でそのままビルドできる。

@@ -65,10 +65,6 @@ v0.11.3 は候補ウィンドウのフォントサイズ変更に対応したリ
 ビルド → 署名 → インストールを **4 ステップ** に分離しています。**DLL を掴んでいるプロセスがあると ④ が失敗する** ため、ビルドを済ませてからサインアウト→サインインし、IME を使う前に ④ を実行します:
 
 ```powershell
-# 初回: esaxx-rs パッチのセットアップ
-cargo fetch
-.\scripts\setup-esaxx-patch.ps1
-
 # ① engine DLL をビルド (cpu/vulkan/cuda)
 cargo make build-engine
 
