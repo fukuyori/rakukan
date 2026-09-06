@@ -96,6 +96,25 @@ function Stop-ProcSilent([string]$name) {
     Get-Process -Name $name -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 }
 
+# DLL をロック解放待ちのリトライ付きでコピーする。
+#
+# 直前に kill した ctfmon / TextInputHost / engine-host がファイルを解放するまで
+# 1.2 秒では足りないことがあり、その場合は同じコマンドをもう一度実行するだけで
+# 通る（2026-09-06 実機）。1 回目で通るように、IOException なら少し待って
+# 数回やり直す。最後まで失敗したら例外をそのまま投げ、既存のロック案内へ落とす。
+function Copy-DllWithRetry([string]$Source, [string]$Destination, [int]$Attempts = 5, [int]$WaitMs = 1000) {
+    for ($i = 1; $i -le $Attempts; $i++) {
+        try {
+            Copy-Item -LiteralPath $Source -Destination $Destination -Force
+            return
+        } catch [System.IO.IOException] {
+            if ($i -ge $Attempts) { throw }
+            Write-Host "  (locked) $([IO.Path]::GetFileName($Destination)) - retry $i/$($Attempts - 1) in ${WaitMs}ms" -ForegroundColor DarkGray
+            Start-Sleep -Milliseconds $WaitMs
+        }
+    }
+}
+
 function Invoke-Regsvr32Strict([string]$DllPath) {
     Assert-NotEmpty "DllPath" $DllPath
     $regsvr64 = Join-Path $env:WINDIR "System32\regsvr32.exe"
@@ -212,7 +231,7 @@ Start-Sleep -Milliseconds 1200
 
 # TSF DLL
 $dst = Join-Path $installDir "rakukan_tsf.dll"
-Copy-Item -LiteralPath $srcDll -Destination $dst -Force
+Copy-DllWithRetry -Source $srcDll -Destination $dst
 Write-Host "  -> $dst"
 
 # 古いタイムスタンプ付き DLL を削除
@@ -231,7 +250,7 @@ Get-ChildItem -Path $installDir -Filter "rakukan_tsf_????????_??????.dll" -Error
 foreach ($engineDll in $engineDlls) {
     $dllName = [IO.Path]::GetFileName($engineDll)
     $engineDst = Join-Path $installDir $dllName
-    Copy-Item -LiteralPath $engineDll -Destination $engineDst -Force
+    Copy-DllWithRetry -Source $engineDll -Destination $engineDst
     Write-Host "  -> $engineDst"
 }
 
