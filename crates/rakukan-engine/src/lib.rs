@@ -19,6 +19,7 @@
 // ── 統合した karukan-engine モジュール ────────────────────────────────────────
 pub mod kana;
 pub mod kanji;
+pub mod latin_run;
 pub mod romaji;
 
 pub use kana::{
@@ -588,6 +589,27 @@ impl RakunEngine {
         }
     }
 
+    /// 変換器へ渡す読み。
+    ///
+    /// ひらがなモードのまま打った先頭の英単語は、読みの上ではローマ字が
+    /// 潰れた姿（`せえdれあm`）になっている。これをそのままリテラル保護
+    /// レイヤーに渡すと素の `d` / `m` だけがアルファベット run になり、
+    /// 日本語がぶつ切りで LLM に渡って壊れる。打鍵ログから英単語を復元して
+    /// `seedreamのぺーすはどう` の形にしてから変換へ回す。
+    ///
+    /// 復元できない読み（普通の日本語 / 読み全体が英単語 / F9-F10 で
+    /// force_preedit した後）はそのまま返す。
+    pub fn conv_reading(&self) -> String {
+        crate::latin_run::normalize_leading_latin(&self.romaji_log_str(), &self.hiragana_buf)
+            .inspect(|normalized| {
+                info!(
+                    "engine::conv_reading: latin run restored {:?} -> {:?}",
+                    self.hiragana_buf, normalized
+                );
+            })
+            .unwrap_or_else(|| self.hiragana_buf.clone())
+    }
+
     pub fn convert(&self, num_candidates: usize) -> Result<Vec<String>, EngineError> {
         if self.hiragana_buf.is_empty() {
             return Ok(vec![]);
@@ -598,7 +620,7 @@ impl RakunEngine {
             .ok_or(EngineError::ModelNotInitialized)?;
         digits::convert_with_digit_protection(
             kanji,
-            &self.hiragana_buf,
+            &self.conv_reading(),
             &self.committed,
             num_candidates,
             &self.config.digit_candidates_order,
@@ -862,6 +884,7 @@ impl RakunEngine {
         }
 
         let hiragana = self.hiragana_buf.clone();
+        let conv_reading = self.conv_reading();
         let committed = self.committed.clone();
         if hiragana.is_empty() {
             return false;
@@ -873,6 +896,7 @@ impl RakunEngine {
         if let Some(conv) = self.kanji.take() {
             match conv_cache::start(
                 hiragana,
+                conv_reading,
                 committed,
                 conv,
                 n_cands,
