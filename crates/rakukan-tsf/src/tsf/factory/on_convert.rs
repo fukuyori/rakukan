@@ -1932,6 +1932,10 @@ impl super::TextServiceFactory_Impl {
 /// 存在しない」ときだけ。通常はここに入らず即座に確定する。
 const LIVE_COMMIT_CATCHUP_MS: u64 = 400;
 
+/// bg をこの場で起動し直した場合の待ち上限。先頭から変換するぶん長く見る
+/// (実測: 24 文字で 149ms、beam_size=3)。
+const LIVE_COMMIT_RESTART_CATCHUP_MS: u64 = 1_000;
+
 /// ライブ変換の preview を、必要なら bg 変換の完了を待って取り直す。
 ///
 /// ライブ変換の preview は変換が追いつかない間 `live_continuation_display` が
@@ -1941,6 +1945,9 @@ const LIVE_COMMIT_CATCHUP_MS: u64 = 400;
 ///
 /// 現在の読みに対する変換結果が無い場合だけ短時間待って拾い直し、結果が既に
 /// ある場合も含めて、必ず `merge_candidates_for_reading` を通した値を返す。
+/// 待つのは bg が走っているときだけでなく、走っていない場合はその読みで bg を
+/// 起動してから待つ（打鍵が速いと `on_live_timer` が FIRED しないまま Enter が
+/// 来るため、bg=done のまま「一度も変換されていない読み」が確定していた）。
 /// 「結果があるなら preview はそれを反映済み」とは限らないためで、ライブ
 /// タイマーは `pass_debounce()` で最終打鍵から `debounce_ms` 経過するまで
 /// 発火せず、その猶予の内に Enter が来ると伸ばしたままの preview が残る
@@ -1957,15 +1964,41 @@ fn catch_up_live_preview(
     let top = match engine.bg_peek_top_candidate(reading) {
         Some(top) => top,
         None => {
-            if engine.bg_status() != "running" {
-                return (preview, false);
-            }
-            let completed = engine.bg_wait_ms(LIVE_COMMIT_CATCHUP_MS);
+            // bg が running でない ＝ 現在の読みは一度も変換に渡されていない。打鍵が
+            // 速いと on_live_timer が FIRED しないまま Enter が来るため（2026-09-01:
+            // 1.2 秒間 preview が更新されず「これ、漫画ではコマを分けてひょうげんして
+            // いるけど」が確定した）、ここで自分から bg を起動して待つ。
+            let restarted = if engine.bg_status() == "running" {
+                false
+            } else {
+                let Some(n_cands) = crate::engine::state::live_bg_start_n_cands(reading) else {
+                    tracing::info!("[Live] commit catch-up: bg not startable for {:?}", reading);
+                    return (preview, true);
+                };
+                if !engine.bg_start(n_cands) {
+                    tracing::info!(
+                        "[Live] commit catch-up: bg_start refused for {:?} (status={})",
+                        reading,
+                        engine.bg_status()
+                    );
+                    return (preview, true);
+                }
+                tracing::info!("[Live] commit catch-up: started bg for {:?}", reading);
+                true
+            };
+            // 起動し直した場合は先頭から変換するので待ち上限を伸ばす。
+            let budget = if restarted {
+                LIVE_COMMIT_RESTART_CATCHUP_MS
+            } else {
+                LIVE_COMMIT_CATCHUP_MS
+            };
+            let completed = engine.bg_wait_ms(budget);
             let Some(top) = engine.bg_peek_top_candidate(reading) else {
                 tracing::info!(
-                    "[Live] commit catch-up: no result for {:?} (completed={})",
+                    "[Live] commit catch-up: no result for {:?} (completed={} budget={}ms)",
                     reading,
-                    completed
+                    completed,
+                    budget
                 );
                 return (preview, true);
             };
