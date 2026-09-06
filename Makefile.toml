@@ -16,6 +16,8 @@
 #   cargo make build-engine-full  engine DLL フルクリーンビルド (llama CUDA キャッシュも削除、低速)
 #   cargo make check              型チェック (高速)
 #   cargo make test               エンジン単体テスト
+#   cargo make check-env          ビルドに必要な開発環境の確認
+#   cargo make setup-env          開発環境を winget で導入 (管理者推奨)
 
 [config]
 default_to_workspace = false
@@ -79,6 +81,16 @@ args = ["check", "-p", "rakukan-tsf"]
 description = "エンジン単体テスト"
 command = "cargo"
 args = ["test", "-p", "rakukan-engine", "--", "--nocapture"]
+
+[tasks.check-env]
+description = "ビルドに必要な開発環境を確認 (Rust / VS Build Tools / LLVM / .NET SDK など)"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\check-env.ps1"]
+
+[tasks.setup-env]
+description = "開発環境を winget で導入 (管理者推奨)"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\setup-env.ps1"]
 
 [tasks.default]
 alias = "quick-install"

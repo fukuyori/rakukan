@@ -60,6 +60,24 @@ v0.11.3 は候補ウィンドウのフォントサイズ変更に対応したリ
 
 インストーラーは旧 DLL が使用中かを確認し、使用中なら上の手順を案内します。上書きに失敗した場合は前のバージョンに戻したうえで同じ手順を表示します。インストール後に言語バーへ表示されない場合は、一度サインアウトして再度サインインしてください。PC の再起動は不要です。
 
+## ビルド前提
+
+ソースからビルドする場合に必要なもの。`cargo make check-env` で一括確認でき、不足分は `cargo make setup-env`（winget 使用、管理者推奨）で導入できます。
+
+| 必須 | 用途 |
+|---|---|
+| Rust 1.85 以上（`x86_64-pc-windows-msvc`）と cargo-make | 全クレートのビルド、`Makefile.toml` の実行 |
+| Visual Studio 2022 Build Tools（C++ ツール、CMake / Ninja、MSBuild） | llama.cpp のビルド、設定アプリのビルド |
+| LLVM（libclang） | `llama-cpp-sys-2` の bindgen |
+| .NET SDK 8 以上 | 設定アプリ `apps/rakukan-settings-winui`（Windows App SDK は NuGet で自動取得） |
+| Git | ソース取得 |
+
+| 任意 | 用途 |
+|---|---|
+| CUDA Toolkit（nvcc） | `rakukan_engine_cuda.dll` を作る場合。無ければ cuda variant はスキップ |
+| Vulkan SDK（環境変数 `VULKAN_SDK`） | `rakukan_engine_vulkan.dll` を作る場合。無ければ vulkan variant はスキップ |
+| Inno Setup 6、Windows SDK の signtool | 配布パッケージ作成と署名（`scripts/build-installer.ps1`、`cargo make sign`） |
+
 ## インストール（ソースから）
 
 ビルド → 署名 → インストールを **4 ステップ** に分離しています。**DLL を掴んでいるプロセスがあると ④ が失敗する** ため、ビルドを済ませてからサインアウト→サインインし、IME を使う前に ④ を実行します:
