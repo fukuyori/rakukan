@@ -46,7 +46,7 @@
   - **学習フィルタ (E):** `is_candidate_learning_target(CandidateViewSource)` + `should_learn_and_log` ヘルパで 4 つの Selecting 確定経路を統合。`Bg` / `Dict` / `LivePreview` は学習、`Preedit` / `Fallback` は学習対象外。
   - **decay/forget (F):** `STALE_ENTRY_MAX_AGE_DAYS = 180` で起動時 stale エントリ削除。`DictStore::forget(reading, surface) -> bool` 公開 API 追加。ファイル形式変更なし。
   - **literal 回帰テスト:** `is_dict_surface` が `200` → `二百` / `USB-C` / `(test)` 等の literal 候補を弾く invariant を 3 テストで lock。
-  - **Phase 9 設計:** `docs/PHASE9_DESIGN.md` 新規作成（10 セクション、未決事項 8 項目、LLM × segmentation の 3 案、Phase 9.1〜9.3 段階構成）。CLEANUP_PLAN の Phase 9 から相互参照。
+  - **Phase 9 設計:** `docs/archive/PHASE9_DESIGN.md` 新規作成（10 セクション、未決事項 8 項目、LLM × segmentation の 3 案、Phase 9.1〜9.3 段階構成）。CLEANUP_PLAN の Phase 9 から相互参照。
 - **v0.9.0 の内容（Phase 6b 完結）:**
   - **第1段:** `CandidateView.suffix` を `Selecting.remainder` から populate。RangeSelect 由来の Selecting では未変換 hiragana が `suffix` に入り `candidate_display_probe` の `suffix_len` で識別可能。描画経路は `.text` のみ参照するため動作変化なし。
   - **第2段:** WM_TIMER (`on_waiting_timer` Selecting 分岐) 経路の pending update に `candidate_display_probe event=wm_timer_pending_update composition_updated=false` ログ追加。WndProc コンテキスト制約で TSF composition を更新できない設計上のラグを可視化。
@@ -95,11 +95,11 @@
 ## 関連資料
 
 - [DESIGN.md](DESIGN.md) — 全体設計書
-- [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — 変換パイプライン / 文節編集 再設計
-- [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針
+- [CONVERTER_REDESIGN.md](archive/CONVERTER_REDESIGN.md) — 変換パイプライン / 文節編集 再設計
+- [SEGMENT_EDIT_REDESIGN.md](archive/SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針
 - [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) — engine-host 多重起動時の GPU メモリ実態（**「GPU 浪費」と論じない**根拠）
-- [ROADMAP.md](ROADMAP.md) — **post v0.6.6 の作業計画書**（リファクタリング + LIVE_CONV_REDESIGN 採用検討の段取り）
-- [LIVE_CONV_REDESIGN_REVISED.md](LIVE_CONV_REDESIGN_REVISED.md) — ライブ変換再設計案（§18 で採否仕分け済み）
+- [ROADMAP.md](archive/ROADMAP.md) — **post v0.6.6 の作業計画書**（リファクタリング + LIVE_CONV_REDESIGN 採用検討の段取り）
+- [LIVE_CONV_REDESIGN_REVISED.md](archive/LIVE_CONV_REDESIGN_REVISED.md) — ライブ変換再設計案（§18 で採否仕分け済み）
 
 ## 0.4.4 の目玉: エンジン別プロセス化
 

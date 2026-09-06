@@ -201,7 +201,7 @@ v0.6.6 以降、実機運用で **Explorer の異常終了は 0 件**（2026-04-
 
 ### M5 として保留中の対策
 
-`docs/ROADMAP.md §8` に保留:
+`docs/archive/ROADMAP.md §8` に保留:
 
 - **WM_TIMER → PostMessage 化**: `WM_RAKUKAN_LIVE_READY` を `RegisterWindowMessageW` で取得し、worker 完了時に `PostMessage` に変更。WM_TIMER ベースの 50ms ポーリング廃止
 - **Explorer シェルクラスで Phase1A 無効化**: `GetClassNameW` で `Shell_TrayWnd` / `Progman` / `WorkerW` / `CabinetWClass` / `ExploreWClass` を検出し Phase1A をスキップ

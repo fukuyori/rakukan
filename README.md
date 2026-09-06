@@ -146,7 +146,6 @@ cargo make quick-install
 
 - TSF 層だけの変更確認: `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
 - engine DLL を含む変更確認: `cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
-- 同梱 Vibrato 辞書: `assets/vibrato/system.dic`
 - 生成ログ確認:
 
 ```powershell
@@ -166,14 +165,9 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 - [ ] ホストプロセスのヘルスチェックとクラッシュカウント
 - [ ] Preedit / LiveConv / Selecting の display_attr 拡張
 
-### 過去のスナップショット
+### 過去の設計書・計画書
 
-v0.2.0 の状態を記録した以下の資料は **過去のスナップショット** であり、現在進行中のタスクではありません。
-
-- [PHASE1_SUMMARY.md](docs/archive/PHASE1_SUMMARY.md) — v0.2.0 時点の Phase 1 要約
-- [PHASE2_PREP.md](docs/archive/PHASE2_PREP.md) — v0.2.0 先行の Phase 2 着手前メモ
-- [PHASE2_STATUS.md](docs/archive/PHASE2_STATUS.md) — v0.2.0 時点の Phase 2 状況
-- [WARNING_FIXES.md](docs/archive/WARNING_FIXES.md) — v0.2.0 に含まれる warning 修正メモ
+役目を終えた設計書・計画書は [docs/archive/](docs/archive/README.md) に移してあります。どの作業で使用したかは同ディレクトリの README.md にまとめています。現在進行中のタスクではありません。
 
 ## ライセンス
 

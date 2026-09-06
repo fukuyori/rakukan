@@ -4,7 +4,7 @@
 
 対象: v0.10.5 以降
 
-位置づけ: `AUGUST_LOG_IMPROVEMENT_PLAN.md` の内容を保持し、2026-08-30 時点の GitHub Issue / PR とコードレビュー結果を統合した実行計画
+位置づけ: `archive/AUGUST_LOG_IMPROVEMENT_PLAN.md` の内容を保持し、2026-08-30 時点の GitHub Issue / PR とコードレビュー結果を統合した実行計画
 
 方針決定反映: 2026-09-01（学習優先順位、旧学習履歴の破棄、auto backend fallback）
 

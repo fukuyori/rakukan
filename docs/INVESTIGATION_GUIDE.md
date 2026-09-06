@@ -8,7 +8,7 @@
 関連資料:
 
 - [EXPLORER_CRASH_HISTORY.md](EXPLORER_CRASH_HISTORY.md) — これまでの crash 対策の年表と学習
-- [ROADMAP.md](ROADMAP.md) — M5 の開封条件
+- [ROADMAP.md](archive/ROADMAP.md) — M5 の開封条件
 - [handoff.md](handoff.md) — 現在の状態と既知の問題
 
 ---
@@ -236,7 +236,7 @@ sudo cargo make install
 - **M5.1** WM_TIMER → `PostMessage` 化（`WM_RAKUKAN_LIVE_READY` 導入）
 - **M5.2** Explorer シェルクラスで Phase1A 無効化
 
-詳細は [ROADMAP.md §8](ROADMAP.md) 参照。
+詳細は [ROADMAP.md §8](archive/ROADMAP.md) 参照。
 
 ---
 

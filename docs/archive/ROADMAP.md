@@ -1,5 +1,7 @@
 # 作業ロードマップ — 0.7.x / 0.8.x / 0.9.x シリーズ（クローズ済み）
 
+> **アーカイブ（2026-09-07 移動）**: 0.7.x〜0.9.x（2026-04-22〜06-24）の作業計画書。post v0.6.6 のリファクタリングとライブ変換再設計の採否検討に使用し、v0.9.12 でクローズ。一覧は [README.md](README.md) を参照。
+
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: マイルストーンごとに「目的」「作業」「完了条件」「リスク」等を繰り返す構造のため無効化 -->
 
@@ -12,7 +14,7 @@
 - 通常の未完了ロードマップ項目はなし。
 - M5（Explorer crash 再発時のみの追加対策）は、実機再発がないため active backlog から外し、調査メモとして archive 扱いにする。
 - 本文中の古い「未実装」「予定」「繰り延べ」「残タスク」は、当時の設計・計画メモとして残す。現在の作業指示ではない。
-- 以降の新規作業は [CHANGELOG.md](../CHANGELOG.md)、[handoff.md](handoff.md)、または個別設計資料へ記録する。
+- 以降の新規作業は [CHANGELOG.md](../../CHANGELOG.md)、[handoff.md](../handoff.md)、または個別設計資料へ記録する。
 
 **v0.7.0 リリース済み（2026-04-24）**: 以下 5 件 + 候補幅の user-facing bug fix を同梱。
 
@@ -233,9 +235,9 @@
 
 関連資料:
 
-- [handoff.md](handoff.md) — 現在の状態と既知の問題
+- [handoff.md](../handoff.md) — 現在の状態と既知の問題
 - [LIVE_CONV_REDESIGN_REVISED.md](LIVE_CONV_REDESIGN_REVISED.md) — ライブ変換再設計案（§18 で採否仕分け済み）
-- [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) — engine-host 多重起動時の GPU 実態
+- [GPU_MEMORY_LIFECYCLE.md](../GPU_MEMORY_LIFECYCLE.md) — engine-host 多重起動時の GPU 実態
 
 ---
 
@@ -431,7 +433,7 @@ formal PASS（1 日連続 crash 0 件）は**運用の中で自然に積み上�
 
 ### 作業ガイドライン（再現テストを改めて走らせる場合）
 
-1. WerFault フルダンプ設定（[handoff.md §既知の問題 §1](handoff.md) のコマンド参照）
+1. WerFault フルダンプ設定（[handoff.md §既知の問題 §1](../handoff.md) のコマンド参照）
 2. `cargo make build-engine && cargo make build-tsf && cargo make sign && cargo make install`
 3. サインアウト → 再ログオン
 4. Explorer 主体で 30 分以上連続使用（リネーム / アドレスバー / フォルダ移動 / Alt+Tab）
@@ -685,13 +687,13 @@ WinUI 設定保存や外部エディタでの `config.toml` 変更で `engine_re
 
 現状の Request enum（[protocol.rs:31-48](../crates/rakukan-engine-rpc/src/protocol.rs#L31-L48)）は `Hello` / `Create` / `Reload` / `Bye` のみで、**`Shutdown` バリアントは未実装**。クライアント側 [client.rs:116](../crates/rakukan-engine-rpc/src/client.rs#L116) も `reload()` のみで `shutdown()` 未実装。
 
-詳細は [CLAUDE.md の auto-memory `feedback_engine_dll_bg_threads.md`](../memory/feedback_engine_dll_bg_threads.md) および [CHANGELOG 0.6.5](../CHANGELOG.md) の "Phase 2c 初版では…" を参照。
+詳細は [CLAUDE.md の auto-memory `feedback_engine_dll_bg_threads.md`](../memory/feedback_engine_dll_bg_threads.md) および [CHANGELOG 0.6.5](../../CHANGELOG.md) の "Phase 2c 初版では…" を参照。
 
 ### 採用方針: host プロセス再起動
 
 DLL 内で drop→reload を頑張らず、**host プロセスを終了させて再 spawn** する。OS がプロセス終了時に全スレッドと DLL マッピングをまとめて回収するため、unmap race が原理的に起きない。
 
-TSF 側の「pipe 切断検知 → `CreateProcessW` で host 再 spawn → `Hello` → `Create { config_json }`」経路は 0.4.4 で実装済み（[handoff.md §ホストプロセスのライフサイクル](handoff.md)）。再利用する。
+TSF 側の「pipe 切断検知 → `CreateProcessW` で host 再 spawn → `Hello` → `Create { config_json }`」経路は 0.4.4 で実装済み（[handoff.md §ホストプロセスのライフサイクル](../handoff.md)）。再利用する。
 
 ### 作業
 
@@ -1665,4 +1667,4 @@ M5 は実機再発時の調査メモとして archive し、active backlog か�
 ## 12. 進捗トラッキング（終了）
 
 本 ROADMAP.md の進捗トラッキングは v0.9.12 で終了。
-以降の作業は [CHANGELOG.md](../CHANGELOG.md)、[handoff.md](handoff.md)、または個別設計資料へ記録する。
+以降の作業は [CHANGELOG.md](../../CHANGELOG.md)、[handoff.md](../handoff.md)、または個別設計資料へ記録する。

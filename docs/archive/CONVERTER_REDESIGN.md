@@ -1,12 +1,14 @@
 # 変換パイプライン / 文節編集 再設計メモ
 
+> **アーカイブ（2026-09-07 移動）**: 0.4.5〜0.6.4（2026-04-13〜21）の変換パイプライン再設計。Phase A（数値保護・Segments 型）を v0.5.0 で実装。Phase B〜E は vibrato 削除（v0.5.1）で無効化。一覧は [README.md](README.md) を参照。
+
 バージョン: draft-3
 作成日: 2026-04-13（Phase A 実装済み: 2026-04-16 v0.5.0）
 前提: v0.6.4 時点の rakukan コードベース
 関連資料:
 - [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — 分節編集の基本方針（Segment 列を正とする）
 - ~~[VIBRATO_PHASE1.md](VIBRATO_PHASE1.md) — vibrato 形態素解析器の導入~~ （v0.5.1 で vibrato 完全削除済み）
-- [DESIGN.md](DESIGN.md) — 全体設計書
+- [DESIGN.md](../DESIGN.md) — 全体設計書
 - Mozc: `src/converter/segments.h`, `src/converter/converter.cc`, `src/session/session_converter.cc`
 
 > **注意（v0.5.1 以降）:** v0.5.1 で vibrato を完全削除し、文節分割ベースの SplitPreedit を RangeSelect 方式に転換した。

@@ -1,5 +1,7 @@
 # 分節編集ロジック再設計メモ
 
+> **アーカイブ（2026-09-07 移動）**: 0.4.x（2026-03-30）の分節編集ロジック再設計メモ。2026-04-13 に CONVERTER_REDESIGN.md へ継承。一覧は [README.md](README.md) を参照。
+
 更新日: 2026-03-30
 
 > **本文書は 2026-04-13 に [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) に継承・拡張されました。**

@@ -1,5 +1,7 @@
 # Phase 9: 分節解析を含む変換方式の見直し — 設計ドラフト
 
+> **アーカイブ（2026-09-07 移動）**: v0.9.1（2026-05-12）の分節解析を含む変換方式見直しの設計ドラフト。設計検討段階のまま未着手。一覧は [README.md](README.md) を参照。
+
 バージョン: draft-1  
 作成日: 2026-05-12  
 前提: v0.9.0 時点の rakukan コードベース（Phase 6b 完結後）  
@@ -10,7 +12,7 @@
 - [CONVERSION_PIPELINE_CLEANUP_PLAN.md](CONVERSION_PIPELINE_CLEANUP_PLAN.md) — Phase 1〜8 の現行整理計画（Phase 9 が本書で扱う対象）
 - [CONVERTER_REDESIGN.md](CONVERTER_REDESIGN.md) — 2026-04 起草の Mozc 流 Segments 設計（Phase A のみ実装、Phase B〜E は **vibrato 削除により orphaned**）
 - [SEGMENT_EDIT_REDESIGN.md](SEGMENT_EDIT_REDESIGN.md) — Segment 列を正とする編集モデルの基礎方針
-- [DESIGN.md](DESIGN.md) — 現行アーキテクチャ全体図
+- [DESIGN.md](../DESIGN.md) — 現行アーキテクチャ全体図
 - `docs/azookey-analysis/`（ローカル参考資料、リポジトリ未収載）— azooKey 内部構造の分析メモ 10 章
 
 ## 1. 目的とスコープ

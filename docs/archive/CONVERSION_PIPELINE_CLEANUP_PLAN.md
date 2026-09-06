@@ -1,5 +1,7 @@
 # Conversion Pipeline Cleanup Plan
 
+> **アーカイブ（2026-09-07 移動）**: 0.8.11〜0.9.x（2026-05-01〜06-22）の変換パイプライン整理計画（Phase 1〜9）。ROADMAP クローズ（v0.9.12）と同時に更新停止。一覧は [README.md](README.md) を参照。
+
 バージョン: draft-1
 作成日: 2026-05-01
 前提: v0.8.11 時点の rakukan コードベース
