@@ -228,7 +228,21 @@ fn show_langbar_popup_menu(
     let current_mode = current_langbar_mode(open);
 
     unsafe {
+        use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
         use windows::Win32::UI::WindowsAndMessaging::MENU_ITEM_FLAGS;
+
+        // 言語バーのクリックがここまで届いたか、どの座標・所有ウィンドウで
+        // メニューを出そうとしたかを残す（DPI 変更後にメニューが出なくなる
+        // 報告の切り分け用。2026-09-06: 150% へ変更後にメニューが出なくなった）。
+        let owner = GetForegroundWindow();
+        tracing::info!(
+            "langbar OnClick: pt=({}, {}) owner_hwnd={:#x} open={} mode={:?}",
+            pt.x,
+            pt.y,
+            owner.0 as usize,
+            open,
+            current_mode
+        );
 
         let menu = CreatePopupMenu()?;
         let hiragana = to_wide_menu_text("ひらがな");
@@ -287,19 +301,29 @@ fn show_langbar_popup_menu(
             windows::core::PCWSTR(reload.as_ptr()),
         );
 
+        // TPM_RETURNCMD 指定時はキャンセルも失敗も戻り値 0 なので、直前に
+        // last error を 0 にしておき、0 が返ったときに GetLastError で区別する。
+        SetLastError(WIN32_ERROR(0));
         let cmd = TrackPopupMenu(
             menu,
             TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
             pt.x,
             pt.y,
             0,
-            GetForegroundWindow(),
+            owner,
             None,
         );
+        let last_error = GetLastError();
         let _ = DestroyMenu(menu);
 
         if cmd.0 != 0 {
+            tracing::info!("langbar menu: selected cmd={}", cmd.0);
             handle_langbar_menu_command(factory, cmd.0 as u32);
+        } else {
+            tracing::info!(
+                "langbar menu: closed without selection (last_error={})",
+                last_error.0
+            );
         }
     }
 
