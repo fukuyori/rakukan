@@ -47,9 +47,22 @@ v0.11.3 は候補ウィンドウのフォントサイズ変更に対応したリ
 
 過去の変更履歴は [CHANGELOG.md](CHANGELOG.md) を参照してください。
 
-## インストール
+## インストール（パッケージから）
 
-ビルド → 署名 → インストールを **4 ステップ** に分離しています:
+[Releases](https://github.com/fukuyori/rakukan/releases) の `rakukan-<version>-setup.exe` を実行します。管理者権限（UAC）が求められます。インストール先は `%LOCALAPPDATA%\rakukan\` で、終了時に言語リストへ rakukan が追加されます。
+
+**すでに旧版が入っている場合** は、DLL を掴んでいるプロセスを無くしてから実行してください:
+
+1. 言語バーで rakukan 以外の IME（例: Microsoft IME）に切り替える
+2. サインアウトする
+3. サインインする
+4. インストーラーを実行する
+
+インストーラーは旧 DLL が使用中かを確認し、使用中なら上の手順を案内します。上書きに失敗した場合は前のバージョンに戻したうえで同じ手順を表示します。インストール後に言語バーへ表示されない場合は、一度サインアウトして再度サインインしてください。PC の再起動は不要です。
+
+## インストール（ソースから）
+
+ビルド → 署名 → インストールを **4 ステップ** に分離しています。**DLL を掴んでいるプロセスがあると ④ が失敗する** ため、ビルドを済ませてからサインアウト→サインインし、IME を使う前に ④ を実行します:
 
 ```powershell
 # 初回: esaxx-rs パッチのセットアップ
@@ -65,9 +78,13 @@ cargo make build-tsf
 # ③ 電子署名 (任意; 配布用)
 cargo make sign
 
+# --- ここでサインアウト → サインイン (TSF DLL を全プロセスから解放する) ---
+
 # ④ %LOCALAPPDATA%\rakukan\ にコピー + TSF 登録 + tray 起動 (★管理者権限)
 cargo make install
 ```
+
+手順の順序は **ビルド → サインアウト → サインイン → install** です。`cargo make install` はビルドを行わないので、ビルドを飛ばすと古い成果物が再インストールされるだけになります。サインアウトせずに ④ を実行すると、DLL のコピーで「ファイルがロックされています」と表示されて中断することがあります（直前に停止したプロセスの解放待ちによる失敗は、スクリプト内で数回リトライして吸収します）。
 
 まとめ実行:
 
@@ -78,6 +95,8 @@ cargo make full-install
 # 開発時の高速再インストール (engine 使いまわし、署名なし)
 cargo make quick-install
 ```
+
+まとめ実行はビルドと install の間にサインアウトを挟めないため、DLL がどこにもロードされていない状態（初回インストール、またはサインイン直後に IME を使う前）でのみ通ります。通常の更新では上の分割手順を使ってください。
 
 インストール先: `%LOCALAPPDATA%\rakukan\`  
 設定: `%APPDATA%\rakukan\config.toml`  
@@ -129,8 +148,8 @@ cargo make quick-install
 
 ## 開発メモ
 
-- TSF 層だけの変更確認: `cargo make quick-install` (= `build-tsf` + `install`)
-- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make quick-install`
+- TSF 層だけの変更確認: `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
+- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
 - 同梱 Vibrato 辞書: `assets/vibrato/system.dic`
 - 生成ログ確認:
 
