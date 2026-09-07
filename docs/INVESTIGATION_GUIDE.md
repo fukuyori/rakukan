@@ -207,7 +207,7 @@ sudo cargo make install
 
 - ブラウザなら Chrome / Edge / Firefox どれか
 - タブ切替 / ページ遷移 / リンククリック / Alt+Tab のどれで発生するか
-- `config.input.default_mode` の設定値
+- `config.input.default_mode` の設定値（`on` / `off`。旧値 `hiragana` / `alphanumeric` も同じ意味）
 - `config.input.remember_last_kana_mode` の設定値
 
 ### 変換 / 文字消失系

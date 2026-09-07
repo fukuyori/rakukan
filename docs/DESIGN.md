@@ -96,7 +96,7 @@ ABI 境界は引き続き C の FFI（`extern "C"` 関数ポインタのテー�
   UserAction（Input / Convert / CommitRaw / ...）
     │
   ┌─────────────────────────────────────────────────────┐
-  │ IME オン（Hiragana / Katakana モード）               │
+  │ IME オン（ImeMode::On）                              │
   │                                                     │
   │  Input(c) ──▶ engine.push_char(c)                  │
   │                 │                                   │
@@ -174,7 +174,7 @@ pub enum ImeMode {
 ```
 
 入力状態はこの 2 値だけで表す。「ひらがなモード」「カタカナモード」「英数モード」という
-独立した概念は持たない（v0.12 で廃止。カタカナは F7 / 無変換 cycle_kana で入力する）。
+独立した概念は持たない（v0.11.4 で廃止。カタカナは F7 / 無変換 cycle_kana で入力する）。
 
 `Off` ではキーをそのまま素通りさせ（`OnTestKeyDown` が `FALSE` を返す）、アプリが直接処理する。
 
@@ -588,7 +588,7 @@ warn_on_unknown_key = true
 ### keymap.toml
 
 配置先: `%APPDATA%\rakukan\keymap.toml`  
-リロードタイミング: IME オフ→オン（Activate）時は必ず読み込む。入力モード切替時は
+リロードタイミング: IME オフ→オン（Activate）時は必ず読み込む。IME オン/オフ切替時は
 `keymap.toml` の mtime が変わった場合だけ読み直す（v0.11.0。以前は切替ごとに同期で
 読み直しており、8月ログで最大 931ms のキーストールを起こしていた）。更新・作成は新しい
 keymap、削除は既定 keymap、parse 失敗は直前の keymap を維持する。
@@ -603,7 +603,7 @@ action = "ime_on"
 ```
 
 修飾キーは `Ctrl+` / `Shift+` / `Alt+`（左右どちらでも一致）に加え、`LCtrl+` / `RCtrl+` /
-`LShift+` / `RShift+` / `LAlt+` / `RAlt+` で左右を区別できる（v0.12）。照合は `Keymap::resolve_mods`
+`LShift+` / `RShift+` / `LAlt+` / `RAlt+` で左右を区別できる（v0.11.4）。照合は `Keymap::resolve_mods`
 が「実際の押下状態に一致しうる要求」を限定的なものから順に試すため、左右指定と汎用指定が両方
 あれば左右指定が勝つ。
 
