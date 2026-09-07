@@ -66,7 +66,8 @@ internal sealed class SettingsData
     public int CandidateFontHeight { get; set; } = 17;
     public string KeyboardLayout { get; set; } = "jis";
     public bool ReloadOnModeSwitch { get; set; } = true;
-    public string DefaultMode { get; set; } = "alphanumeric";
+    /// <summary>起動時の IME 状態。"on" / "off"（旧値 "hiragana" / "alphanumeric" は読み込み時に変換）。</summary>
+    public string DefaultMode { get; set; } = "off";
     public bool RememberLastKanaMode { get; set; } = true;
     public string DigitWidth { get; set; } = "halfwidth";
     public string AlphaWidth { get; set; } = "fullwidth";
@@ -83,13 +84,12 @@ internal sealed class SettingsData
 internal enum ManagedKeyAction
 {
     ImeToggle,
+    ImeOn,
+    ImeOff,
     Convert,
     CommitRaw,
     Cancel,
     CancelAll,
-    ModeHiragana,
-    ModeKatakana,
-    ModeAlphanumeric,
 }
 
 internal sealed class KeymapSettings
@@ -144,59 +144,60 @@ internal static class ManagedKeyActions
     public static IReadOnlyList<ManagedKeyAction> All { get; } =
     [
         ManagedKeyAction.ImeToggle,
+        ManagedKeyAction.ImeOn,
+        ManagedKeyAction.ImeOff,
         ManagedKeyAction.Convert,
         ManagedKeyAction.CommitRaw,
         ManagedKeyAction.Cancel,
         ManagedKeyAction.CancelAll,
-        ManagedKeyAction.ModeHiragana,
-        ManagedKeyAction.ModeKatakana,
-        ManagedKeyAction.ModeAlphanumeric,
     ];
 
     public static string ActionName(ManagedKeyAction action) => action switch
     {
         ManagedKeyAction.ImeToggle => "ime_toggle",
+        ManagedKeyAction.ImeOn => "ime_on",
+        ManagedKeyAction.ImeOff => "ime_off",
         ManagedKeyAction.Convert => "convert",
         ManagedKeyAction.CommitRaw => "commit_raw",
         ManagedKeyAction.Cancel => "cancel",
         ManagedKeyAction.CancelAll => "cancel_all",
-        ManagedKeyAction.ModeHiragana => "mode_hiragana",
-        ManagedKeyAction.ModeKatakana => "mode_katakana",
-        ManagedKeyAction.ModeAlphanumeric => "mode_alphanumeric",
         _ => throw new ArgumentOutOfRangeException(nameof(action)),
     };
 
+    /// <summary>
+    /// keymap.toml のアクション名を管理対象アクションへ写す。
+    /// 旧名称 mode_hiragana / mode_alphanumeric は ime_on / ime_off として扱う
+    /// （保存時は新名称で書き出す）。mode_katakana はエンジン側で katakana（F7 変換）
+    /// の別名として読まれるため、ここでは管理対象外（詳細編集扱い）として残す。
+    /// </summary>
     public static ManagedKeyAction? FromActionName(string? actionName) => actionName switch
     {
         "ime_toggle" => ManagedKeyAction.ImeToggle,
+        "ime_on" or "mode_hiragana" => ManagedKeyAction.ImeOn,
+        "ime_off" or "mode_alphanumeric" => ManagedKeyAction.ImeOff,
         "convert" => ManagedKeyAction.Convert,
         "commit_raw" => ManagedKeyAction.CommitRaw,
         "cancel" => ManagedKeyAction.Cancel,
         "cancel_all" => ManagedKeyAction.CancelAll,
-        "mode_hiragana" => ManagedKeyAction.ModeHiragana,
-        "mode_katakana" => ManagedKeyAction.ModeKatakana,
-        "mode_alphanumeric" => ManagedKeyAction.ModeAlphanumeric,
         _ => null,
     };
 
     public static string DefaultKey(ManagedKeyAction action, string preset) => (preset, action) switch
     {
         ("ms-ime-us", ManagedKeyAction.ImeToggle) => "Ctrl+Space",
+        ("ms-ime-us", ManagedKeyAction.ImeOn) => "Ctrl+J",
+        ("ms-ime-us", ManagedKeyAction.ImeOff) => "Ctrl+L",
         ("ms-ime-us", ManagedKeyAction.Convert) => "Space",
         ("ms-ime-us", ManagedKeyAction.CommitRaw) => "Enter",
         ("ms-ime-us", ManagedKeyAction.Cancel) => "Escape",
         ("ms-ime-us", ManagedKeyAction.CancelAll) => "Ctrl+Backspace",
-        ("ms-ime-us", ManagedKeyAction.ModeHiragana) => "Ctrl+J",
-        ("ms-ime-us", ManagedKeyAction.ModeKatakana) => "Ctrl+K",
-        ("ms-ime-us", ManagedKeyAction.ModeAlphanumeric) => "Ctrl+L",
         ("ms-ime-jis", ManagedKeyAction.ImeToggle) => "Zenkaku",
+        ("ms-ime-jis", ManagedKeyAction.ImeOn) => "Hiragana_key",
+        ("ms-ime-jis", ManagedKeyAction.ImeOff) => "Eisuu",
         ("ms-ime-jis", ManagedKeyAction.Convert) => "Space",
         ("ms-ime-jis", ManagedKeyAction.CommitRaw) => "Enter",
         ("ms-ime-jis", ManagedKeyAction.Cancel) => "Escape",
         ("ms-ime-jis", ManagedKeyAction.CancelAll) => "Ctrl+Backspace",
-        ("ms-ime-jis", ManagedKeyAction.ModeHiragana) => "Hiragana_key",
-        ("ms-ime-jis", ManagedKeyAction.ModeKatakana) => "Katakana",
-        ("ms-ime-jis", ManagedKeyAction.ModeAlphanumeric) => "Eisuu",
         _ => string.Empty,
     };
 }
@@ -215,7 +216,7 @@ internal sealed class SettingsStore
         reload_on_mode_switch = true
 
         [input]
-        default_mode = "alphanumeric"
+        default_mode = "off"
         remember_last_kana_mode = true
         digit_width = "halfwidth"
         alpha_width = "fullwidth"
@@ -469,7 +470,7 @@ internal sealed class SettingsStore
             CandidateFontHeight = Math.Clamp(GetInt(appearance, "candidate_font_height") ?? 17, 10, 72),
             KeyboardLayout = GetString(keyboard, "layout") ?? "jis",
             ReloadOnModeSwitch = GetBool(keyboard, "reload_on_mode_switch") ?? true,
-            DefaultMode = GetString(input, "default_mode") ?? "alphanumeric",
+            DefaultMode = NormalizeDefaultMode(GetString(input, "default_mode")),
             RememberLastKanaMode = GetBool(input, "remember_last_kana_mode") ?? true,
             DigitWidth = GetString(input, "digit_width") ?? "halfwidth",
             AlphaWidth = GetString(input, "alpha_width") ?? "fullwidth",
@@ -521,6 +522,16 @@ internal sealed class SettingsStore
         appearance["candidate_font_height"] = data.CandidateFontHeight;
         root.Remove("num_candidates");
     }
+
+    /// <summary>
+    /// 旧値 "hiragana" / "alphanumeric" を "on" / "off" に写す。未知の値は "off"。
+    /// </summary>
+    private static string NormalizeDefaultMode(string? value) => value?.Trim().ToLowerInvariant() switch
+    {
+        "on" or "hiragana" => "on",
+        "off" or "alphanumeric" => "off",
+        _ => "off",
+    };
 
     private static KeymapSettings LoadKeymap(TomlTable root)
     {

@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-use super::input_mode::InputMode;
+use super::ime_mode::ImeMode;
 
 #[derive(Debug, PartialEq)]
 pub enum ClientAction {
@@ -14,7 +14,7 @@ pub enum ClientAction {
 
     SetSelection(SetSelectionType),
 
-    SetIMEMode(InputMode),
+    SetIMEMode(ImeMode),
 }
 
 #[derive(Debug, PartialEq)]

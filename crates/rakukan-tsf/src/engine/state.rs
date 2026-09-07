@@ -5,7 +5,7 @@
 //! - ホットパス: `try_lock()` のみ使用。取れなければ即リターン。
 //! - 非ホットパス（Activate, BG スレッド): `lock()` を使用可。
 
-use super::input_mode::InputMode;
+use super::ime_mode::ImeMode;
 // RpcEngine は DynEngine と同じメソッドシグネチャを露出するので、
 // 既存コードの大部分が触らないよう `DynEngine` の名前で re-export する。
 // 実体は `rakukan-engine-rpc` を通じて `rakukan-engine-host.exe` へ Named Pipe で
@@ -22,30 +22,28 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::{GUID, Interface};
 
-// ─── INPUT_MODE_ATOMIC ────────────────────────────────────────────────────────
-// IMEState.input_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
+// ─── IME_MODE_ATOMIC ──────────────────────────────────────────────────────────
+// IMEState.ime_mode の鏡。ロックなしでホットパス（OnTestKeyDown / OnKeyDown）
 // から安全に読み取れるよう AtomicU8 で持つ。
-// 値: 0=Hiragana, 1=Katakana, 2=Alphanumeric
-// IMEState::set_mode が呼ばれるたびに同期更新される。
+// 値: 0=On, 1=Off
+// IMEState::set_ime_mode が呼ばれるたびに同期更新される。
 
-static INPUT_MODE_ATOMIC: AtomicU8 = AtomicU8::new(0);
+static IME_MODE_ATOMIC: AtomicU8 = AtomicU8::new(0);
 
-pub fn input_mode_set_atomic(mode: InputMode) {
+pub fn ime_mode_set_atomic(mode: ImeMode) {
     let v = match mode {
-        InputMode::Hiragana => 0u8,
-        InputMode::Katakana => 1u8,
-        InputMode::Alphanumeric => 2u8,
+        ImeMode::On => 0u8,
+        ImeMode::Off => 1u8,
     };
-    INPUT_MODE_ATOMIC.store(v, AO::Release);
+    IME_MODE_ATOMIC.store(v, AO::Release);
 }
 
 /// ロックなし高速読み取り（ホットパス用）
 #[inline]
-pub fn input_mode_get_atomic() -> InputMode {
-    match INPUT_MODE_ATOMIC.load(AO::Acquire) {
-        1 => InputMode::Katakana,
-        2 => InputMode::Alphanumeric,
-        _ => InputMode::Hiragana,
+pub fn ime_mode_get_atomic() -> ImeMode {
+    match IME_MODE_ATOMIC.load(AO::Acquire) {
+        1 => ImeMode::Off,
+        _ => ImeMode::On,
     }
 }
 
@@ -915,14 +913,14 @@ pub type EngineGuard = std::sync::MutexGuard<'static, EngineWrapper>;
 
 #[derive(Debug)]
 pub struct IMEState {
-    pub input_mode: InputMode,
+    pub ime_mode: ImeMode,
     #[allow(dead_code)]
     pub cookies: HashMap<GUID, u32>,
 }
 
 pub static IME_STATE: LazyLock<Mutex<IMEState>> = LazyLock::new(|| {
     Mutex::new(IMEState {
-        input_mode: InputMode::default(),
+        ime_mode: ImeMode::default(),
         cookies: HashMap::new(),
     })
 });
@@ -939,11 +937,11 @@ impl IMEState {
             .map_err(|_| anyhow::anyhow!("ime_state busy"))
     }
 
-    pub fn set_mode(&mut self, mode: InputMode) {
-        tracing::info!("input mode: {:?} → {:?}", self.input_mode, mode);
-        self.input_mode = mode;
+    pub fn set_ime_mode(&mut self, mode: ImeMode) {
+        tracing::info!("ime mode: {:?} → {:?}", self.ime_mode, mode);
+        self.ime_mode = mode;
         // ホットパス用アトミックも同期更新
-        input_mode_set_atomic(mode);
+        ime_mode_set_atomic(mode);
         // M1.7 T-MODE2: doc_mode store を即時更新。focus-out を待たずに
         // 現在の DM / HWND に mode を紐付ける。これがないと、同じ DM 内で
         // モードを変えても store 側は「前回 focus-in 時のモード」のままで、
@@ -2184,7 +2182,7 @@ pub fn is_conversion_ready() -> bool {
 
 // ─── DocumentManager モードストア ────────────────────────────────────────────
 //
-// MS-IME準拠: アプリ（DocumentManager）ごとに InputMode を記憶する。
+// MS-IME準拠: アプリ（DocumentManager）ごとに IME オン/オフを記憶する。
 //
 // # キー戦略
 // Edge・Firefox 等のブラウザはページ遷移やタブ切り替えのたびに
@@ -2206,9 +2204,9 @@ pub fn is_conversion_ready() -> bool {
 //   - なければ config.input.default_mode を返す
 
 struct ModeStore {
-    dm_modes: HashMap<usize, InputMode>,   // DM ptr → mode
-    hwnd_modes: HashMap<usize, InputMode>, // HWND → mode（DM 再作成時フォールバック）
-    dm_to_hwnd: HashMap<usize, usize>,     // DM ptr → HWND（保存時の HWND 特定用）
+    dm_modes: HashMap<usize, ImeMode>,   // DM ptr → mode
+    hwnd_modes: HashMap<usize, ImeMode>, // HWND → mode（DM 再作成時フォールバック）
+    dm_to_hwnd: HashMap<usize, usize>,   // DM ptr → HWND（保存時の HWND 特定用）
 }
 
 static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
@@ -2225,21 +2223,21 @@ static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
 /// - `next_dm_ptr`: フォーカスを得た DocumentManager のポインタ（0 = なし）
 /// - `next_hwnd`: フォーカス先ウィンドウの HWND（ターミナル判定用）
 ///
-/// 返り値: フォーカス先に適用すべき InputMode
+/// 返り値: フォーカス先に適用すべき ImeMode
 pub fn doc_mode_on_focus_change(
     prev_dm_ptr: usize,
     next_dm_ptr: usize,
     next_hwnd: usize,
-) -> Option<InputMode> {
-    use super::config::{DefaultInputMode, current_config};
+) -> Option<ImeMode> {
+    use super::config::{DefaultImeMode, current_config};
 
     let cfg = current_config();
     let remember = cfg.input.remember_last_kana_mode;
 
-    // config.input.default_mode → InputMode へ変換
+    // config.input.default_mode → ImeMode へ変換
     let config_default = match cfg.input.default_mode {
-        DefaultInputMode::Alphanumeric => InputMode::Alphanumeric,
-        DefaultInputMode::Hiragana => InputMode::Hiragana,
+        DefaultImeMode::Off => ImeMode::Off,
+        DefaultImeMode::On => ImeMode::On,
     };
 
     let mut store = match DOC_MODE_STORE.try_lock() {
@@ -2249,7 +2247,7 @@ pub fn doc_mode_on_focus_change(
 
     // 前の DocumentManager のモードを保存
     if prev_dm_ptr != 0 && remember {
-        let mode = input_mode_get_atomic();
+        let mode = ime_mode_get_atomic();
         store.dm_modes.insert(prev_dm_ptr, mode);
         // HWND も更新（ブラウザが DM を再作成しても HWND 経由で復元できるように）
         if let Some(&hwnd) = store.dm_to_hwnd.get(&prev_dm_ptr) {
@@ -2274,11 +2272,11 @@ pub fn doc_mode_on_focus_change(
     }
 
     // 初回フォーカス時のデフォルトモードを決定
-    // ターミナルは config に関わらず常に Alphanumeric
-    let resolve_default = |hwnd: usize| -> InputMode {
+    // ターミナルは config に関わらず常に IME オフ
+    let resolve_default = |hwnd: usize| -> ImeMode {
         if is_terminal_hwnd(hwnd) {
-            tracing::debug!("doc_mode: terminal detected (hwnd={hwnd:#x}), default=Alphanumeric");
-            InputMode::Alphanumeric
+            tracing::debug!("doc_mode: terminal detected (hwnd={hwnd:#x}), default=Off");
+            ImeMode::Off
         } else {
             tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
             config_default
@@ -2320,12 +2318,12 @@ pub fn doc_mode_on_focus_change(
 /// DM が破棄されると最新モードが永久に失われていた（特に Firefox で DM が
 /// 頻繁に再作成されるケースで、タブ切替時にモードが反転する原因）。
 ///
-/// 呼び出し元は [IMEState::set_mode]。TL_CURRENT_DM / TL_CURRENT_HWND は
+/// 呼び出し元は [IMEState::set_ime_mode]。TL_CURRENT_DM / TL_CURRENT_HWND は
 /// focus 切替の deferred 処理で更新される。
 ///
 /// TSF スレッド以外（例: WinUI → 設定反映）からの呼び出しでは TL が 0 を返すため
 /// save を skip する。
-pub fn doc_mode_remember_current(mode: InputMode) {
+pub fn doc_mode_remember_current(mode: ImeMode) {
     let (dm, hwnd) = crate::tsf::candidate_window::current_dm_hwnd();
     if dm == 0 && hwnd == 0 {
         return;

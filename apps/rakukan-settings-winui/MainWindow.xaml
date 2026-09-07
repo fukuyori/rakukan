@@ -215,10 +215,10 @@
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
                                     <StackPanel Grid.Column="0" Spacing="8">
-                                        <TextBlock Text="初期入力モード" />
+                                        <TextBlock Text="起動時の IME 状態" />
                                         <ComboBox x:Name="DefaultModeCombo">
-                                            <x:String>alphanumeric</x:String>
-                                            <x:String>hiragana</x:String>
+                                            <x:String>off</x:String>
+                                            <x:String>on</x:String>
                                         </ComboBox>
                                     </StackPanel>
                                     <StackPanel Grid.Column="1" Spacing="8">
@@ -249,7 +249,7 @@
                                         </ComboBox>
                                     </StackPanel>
                                 </Grid>
-                                <ToggleSwitch x:Name="RememberKanaModeToggle" Header="前回のかなモードをアプリごとに記憶する" />
+                                <ToggleSwitch x:Name="RememberKanaModeToggle" Header="前回の IME オン/オフをアプリごとに記憶する" />
                             </StackPanel>
                         </Border>
 
@@ -288,7 +288,38 @@
                         <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="16">
                             <StackPanel Spacing="14">
                                 <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="主要ショートカット" />
-                                <TextBlock Opacity="0.7" Text="対応するキー名を直接入力してください。例: Ctrl+Space, Henkan, Zenkaku" />
+                                <StackPanel Orientation="Horizontal" Spacing="12" VerticalAlignment="Center">
+                                    <TextBlock Opacity="0.7" VerticalAlignment="Center" Text="対応するキー名を直接入力してください。例: Ctrl+Space, Henkan, Zenkaku" />
+                                    <Button Content="キー名の一覧と注意" Padding="10,4">
+                                        <Button.Flyout>
+                                            <Flyout Placement="Bottom">
+                                                <!-- FlyoutPresenter の既定 MaxWidth は 456px で等幅の一覧が切れるため広げる -->
+                                                <Flyout.FlyoutPresenterStyle>
+                                                    <Style TargetType="FlyoutPresenter">
+                                                        <Setter Property="MaxWidth" Value="820" />
+                                                        <Setter Property="MaxHeight" Value="640" />
+                                                        <Setter Property="Padding" Value="16" />
+                                                    </Style>
+                                                </Flyout.FlyoutPresenterStyle>
+                                                <ScrollViewer MaxHeight="600" Width="760" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto">
+                                                    <StackPanel Spacing="10" Padding="4">
+                                                        <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="使えるキー名" />
+                                                        <TextBlock TextWrapping="Wrap" Text="大文字小文字は区別しません。修飾キーは「+」でつなげます（例: Ctrl+Space, Shift+Tab, RAlt+Caps）。" />
+                                                        <TextBlock IsTextSelectionEnabled="True" FontFamily="Consolas" TextWrapping="Wrap" Text="修飾キー  : Ctrl(Control), Shift, Alt  … 左右どちらでも一致&#x0a;            LCtrl, RCtrl, LShift, RShift, LAlt, RAlt  … 左右を区別&#x0a;基本      : Backspace(BS), Tab, Enter(Return), Escape(Esc), Space, Delete(Del)&#x0a;移動      : Left, Right, Up, Down, Home, End, PageUp(PgUp), PageDown(PgDn)&#x0a;ファンクション: F1 〜 F12&#x0a;記号      : Backquote(Grave), Semicolon, Equal, Comma, Minus, Period, Slash,&#x0a;            LeftBracket, Backslash, RightBracket, Quote&#x0a;日本語キー: Zenkaku(Hankaku, Kanji), Henkan, Muhenkan, Eisuu(Alphanumeric),&#x0a;            Katakana, Hiragana_key, Caps&#x0a;英字      : A 〜 Z の 1 文字" />
+                                                        <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="注意" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• 数字キー 0〜9 は候補選択に使うため割り当てできません。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• Insert, PrintScreen, ScrollLock, Pause, Apps, F13 以降, テンキー, メディアキー, Win キーは使えません。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• 修飾キー単独（Ctrl だけ等）は割り当てできません。修飾キーなしの英字 1 文字は書式上通りますが、その文字の入力を上書きします。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• 左右指定（LCtrl 等）と汎用指定（Ctrl）の両方に同じキーがあるときは、左右指定が優先されます。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• 日本語キー（Zenkaku, Henkan, Muhenkan, Eisuu, Katakana, Hiragana_key）は日本語キーボードでのみ使えます。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• Alt+Tab や Win キーの組み合わせなど Windows が先に処理するキー、ブラウザの Ctrl+L のようにアプリが IME より先に処理するキーは、設定しても効きません。" />
+                                                        <TextBlock TextWrapping="Wrap" Text="• 一つのアクションに複数のキーを割り当てたい場合や、ここに無いアクションは「詳細編集」から keymap.toml を編集してください。" />
+                                                    </StackPanel>
+                                                </ScrollViewer>
+                                            </Flyout>
+                                        </Button.Flyout>
+                                    </Button>
+                                </StackPanel>
 
                                 <Grid ColumnSpacing="16" RowSpacing="12">
                                     <Grid.ColumnDefinitions>
@@ -304,40 +335,35 @@
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
-                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
 
                                     <TextBlock Grid.Row="0" VerticalAlignment="Center" Text="IME 切替" />
                                     <TextBox Grid.Row="0" Grid.Column="1" x:Name="ImeToggleBox" PlaceholderText="Ctrl+Space / Zenkaku" />
                                     <Button Grid.Row="0" Grid.Column="2" Tag="ImeToggle" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="1" VerticalAlignment="Center" Text="変換開始" />
-                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="ConvertBox" PlaceholderText="Space / Henkan" />
-                                    <Button Grid.Row="1" Grid.Column="2" Tag="Convert" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="1" VerticalAlignment="Center" Text="IME ON" />
+                                    <TextBox Grid.Row="1" Grid.Column="1" x:Name="ImeOnBox" PlaceholderText="Hiragana_key / Ctrl+J" />
+                                    <Button Grid.Row="1" Grid.Column="2" Tag="ImeOn" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="2" VerticalAlignment="Center" Text="ひらがな確定" />
-                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="CommitRawBox" PlaceholderText="Enter" />
-                                    <Button Grid.Row="2" Grid.Column="2" Tag="CommitRaw" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="2" VerticalAlignment="Center" Text="IME OFF" />
+                                    <TextBox Grid.Row="2" Grid.Column="1" x:Name="ImeOffBox" PlaceholderText="Eisuu / Ctrl+L" />
+                                    <Button Grid.Row="2" Grid.Column="2" Tag="ImeOff" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="3" VerticalAlignment="Center" Text="取消" />
-                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="CancelBox" PlaceholderText="Escape" />
-                                    <Button Grid.Row="3" Grid.Column="2" Tag="Cancel" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="3" VerticalAlignment="Center" Text="変換開始" />
+                                    <TextBox Grid.Row="3" Grid.Column="1" x:Name="ConvertBox" PlaceholderText="Space / Henkan" />
+                                    <Button Grid.Row="3" Grid.Column="2" Tag="Convert" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="4" VerticalAlignment="Center" Text="全取消" />
-                                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="CancelAllBox" PlaceholderText="Ctrl+Backspace" />
-                                    <Button Grid.Row="4" Grid.Column="2" Tag="CancelAll" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="4" VerticalAlignment="Center" Text="ひらがな確定" />
+                                    <TextBox Grid.Row="4" Grid.Column="1" x:Name="CommitRawBox" PlaceholderText="Enter" />
+                                    <Button Grid.Row="4" Grid.Column="2" Tag="CommitRaw" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="5" VerticalAlignment="Center" Text="ひらがなモード" />
-                                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="ModeHiraganaBox" PlaceholderText="Hiragana_key / Ctrl+J" />
-                                    <Button Grid.Row="5" Grid.Column="2" Tag="ModeHiragana" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="5" VerticalAlignment="Center" Text="取消" />
+                                    <TextBox Grid.Row="5" Grid.Column="1" x:Name="CancelBox" PlaceholderText="Escape" />
+                                    <Button Grid.Row="5" Grid.Column="2" Tag="Cancel" Click="ClearKeyButton_Click" Content="解除" />
 
-                                    <TextBlock Grid.Row="6" VerticalAlignment="Center" Text="カタカナモード" />
-                                    <TextBox Grid.Row="6" Grid.Column="1" x:Name="ModeKatakanaBox" PlaceholderText="Katakana / Ctrl+K" />
-                                    <Button Grid.Row="6" Grid.Column="2" Tag="ModeKatakana" Click="ClearKeyButton_Click" Content="解除" />
-
-                                    <TextBlock Grid.Row="7" VerticalAlignment="Center" Text="英数モード" />
-                                    <TextBox Grid.Row="7" Grid.Column="1" x:Name="ModeAlphanumericBox" PlaceholderText="Eisuu / Ctrl+L" />
-                                    <Button Grid.Row="7" Grid.Column="2" Tag="ModeAlphanumeric" Click="ClearKeyButton_Click" Content="解除" />
+                                    <TextBlock Grid.Row="6" VerticalAlignment="Center" Text="全取消" />
+                                    <TextBox Grid.Row="6" Grid.Column="1" x:Name="CancelAllBox" PlaceholderText="Ctrl+Backspace" />
+                                    <Button Grid.Row="6" Grid.Column="2" Tag="CancelAll" Click="ClearKeyButton_Click" Content="解除" />
                                 </Grid>
                             </StackPanel>
                         </Border>

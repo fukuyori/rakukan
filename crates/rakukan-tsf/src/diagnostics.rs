@@ -216,10 +216,10 @@ pub fn dump_snapshot() {
 fn dump_state() {
     tracing::info!("─── Current State ───────────────────────");
 
-    // InputMode
+    // ImeMode
     match crate::engine::state::ime_state_get() {
-        Ok(s) => tracing::info!("  input_mode  = {:?}", s.input_mode),
-        Err(e) => tracing::warn!("  input_mode  = LOCK ERROR: {e}"),
+        Ok(s) => tracing::info!("  ime_mode    = {:?}", s.ime_mode),
+        Err(e) => tracing::warn!("  ime_mode    = LOCK ERROR: {e}"),
     }
 
     // Engine

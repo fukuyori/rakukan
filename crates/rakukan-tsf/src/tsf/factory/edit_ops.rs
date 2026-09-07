@@ -1,5 +1,5 @@
 //! 編集操作系ハンドラ。F6-F10 のかな・英数変換、CycleKana、候補ナビゲーション、
-//! IME トグル、モード切替、文節操作、句読点入力を集約。
+//! IME オン/オフ切替、文節操作、句読点入力を集約。
 //!
 //! M3 (T1-A) で factory.rs から純粋切り出し。動作変更なし。
 
@@ -7,10 +7,11 @@ use anyhow::Result;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
+use crate::engine::ime_mode::ImeMode;
 use crate::engine::state::{SessionState, caret_rect_get, engine_try_get_or_create, session_get};
 use crate::engine::text_util;
 use crate::tsf::candidate_window;
-use crate::tsf::language_bar;
+use crate::tsf::ime_sync;
 
 use super::{
     CandidateDir, commit_then_start_composition, end_composition, update_composition,
@@ -384,259 +385,113 @@ impl super::TextServiceFactory_Impl {
         Ok(true)
     }
 
-    pub(super) fn on_ime_toggle(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
-        {
-            let mut guard = engine_try_get_or_create()?;
-            if let Some(engine) = guard.as_mut() {
-                // IME を切り替える前に、**画面に出ている合成文字列** を確定する。
-                //
-                // 🔴 `engine.preedit_display()` だけを見てはいけない。候補選択中や
-                // ブロック分割変換中は、表示中のテキストをセッション側が持っており、
-                // engine の preedit はそれと一致しない。実害（2026-08-31）:
-                // 読点入りの 39 文字を Space でブロック分割変換したあと半角/全角キーを
-                // 押したところ、engine の preedit が 1 ブロック目のままだったため
-                // `end_composition(_, "また")` が走り、composition に残っていた
-                // 37 文字が丸ごと消えた。
-                let commit_text = {
-                    let sess = session_get();
-                    let text = match &sess {
-                        Ok(s) if s.is_live_conv() => {
-                            s.live_conv_parts().map(|(_, p)| p.to_string())
-                        }
-                        // composition には常に全ブロックが載っている（部分確定の経路が
-                        // 無いため）。`on_commit_raw[BlockSelecting]` の Enter と同じく
-                        // 全体を確定する。現在ブロック以降だけを渡すと、← / → で
-                        // ブロックを移動したあとに先頭ブロックが消える。
-                        Ok(s) if s.is_block_selecting() => s.block_selecting_full_text(),
-                        Ok(s) if s.is_selecting() => {
-                            let cand = s
-                                .current_candidate()
-                                .or_else(|| s.original_preedit())
-                                .unwrap_or("");
-                            Some(format!(
-                                "{}{}{}",
-                                s.selecting_prefix_clone(),
-                                cand,
-                                s.selecting_remainder_clone()
-                            ))
-                        }
-                        Ok(s) if s.is_range_select() => s
-                            .range_select_parts()
-                            .map(|(selected, unselected)| format!("{selected}{unselected}")),
-                        Ok(s) if s.is_waiting() => s.preedit_text().map(|t| t.to_string()),
-                        _ => None,
-                    };
-                    text.filter(|t| !t.is_empty())
-                };
-                let from_session = commit_text.is_some();
-                let preedit = commit_text.unwrap_or_else(|| engine.preedit_display());
-                if !preedit.is_empty() {
-                    tracing::info!(
-                        "on_ime_toggle: commit {:?} (from_session={})",
-                        preedit,
-                        from_session
-                    );
-                    engine.bg_reclaim();
-                    engine.commit(&preedit.clone());
-                    engine.reset_preedit();
-                    drop(guard);
-                    if let Ok(mut sess) = session_get() {
-                        sess.set_idle();
-                    }
-                    candidate_window::hide();
-                    candidate_window::stop_live_timer();
-                    end_composition(ctx.clone(), tid, preedit)?;
-                }
-            }
-        }
-        let (from, to, now_open) = if let Ok(mut st) = crate::engine::state::ime_state_get() {
-            use crate::engine::input_mode::InputMode;
-            let was_alpha = st.input_mode == InputMode::Alphanumeric;
-            let new_mode = if was_alpha {
-                InputMode::Hiragana
-            } else {
-                InputMode::Alphanumeric
-            };
-            let from = format!("{:?}", st.input_mode);
-            st.set_mode(new_mode);
-            (
-                from,
-                if was_alpha {
-                    "Hiragana"
-                } else {
-                    "Alphanumeric"
-                },
-                was_alpha,
-            )
-        } else {
-            ("unknown".into(), "unknown", true)
+    /// 画面に出ている合成文字列を確定し、セッションを Idle に戻す。
+    ///
+    /// IME オン/オフを切り替える前に呼ぶ。
+    ///
+    /// 🔴 `engine.preedit_display()` だけを見てはいけない。候補選択中や
+    /// ブロック分割変換中は、表示中のテキストをセッション側が持っており、
+    /// engine の preedit はそれと一致しない。実害（2026-08-31）:
+    /// 読点入りの 39 文字を Space でブロック分割変換したあと半角/全角キーを
+    /// 押したところ、engine の preedit が 1 ブロック目のままだったため
+    /// `end_composition(_, "また")` が走り、composition に残っていた
+    /// 37 文字が丸ごと消えた。
+    fn commit_visible_composition(&self, ctx: &ITfContext, tid: u32) -> Result<()> {
+        let mut guard = engine_try_get_or_create()?;
+        let Some(engine) = guard.as_mut() else {
+            return Ok(());
         };
-        if let Ok(inner) = self.inner.try_borrow()
-            && let Some(tm) = &inner.thread_mgr
-            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, now_open) }
-        {
-            tracing::warn!("ImeToggle: set_open_close({}) failed: {e}", now_open);
-            diag::event(DiagEvent::Error {
-                site: "set_open_close/toggle",
-                msg: e.to_string(),
-            });
+        let commit_text = {
+            let sess = session_get();
+            let text = match &sess {
+                Ok(s) if s.is_live_conv() => s.live_conv_parts().map(|(_, p)| p.to_string()),
+                // composition には常に全ブロックが載っている（部分確定の経路が
+                // 無いため）。`on_commit_raw[BlockSelecting]` の Enter と同じく
+                // 全体を確定する。現在ブロック以降だけを渡すと、← / → で
+                // ブロックを移動したあとに先頭ブロックが消える。
+                Ok(s) if s.is_block_selecting() => s.block_selecting_full_text(),
+                Ok(s) if s.is_selecting() => {
+                    let cand = s
+                        .current_candidate()
+                        .or_else(|| s.original_preedit())
+                        .unwrap_or("");
+                    Some(format!(
+                        "{}{}{}",
+                        s.selecting_prefix_clone(),
+                        cand,
+                        s.selecting_remainder_clone()
+                    ))
+                }
+                Ok(s) if s.is_range_select() => s
+                    .range_select_parts()
+                    .map(|(selected, unselected)| format!("{selected}{unselected}")),
+                Ok(s) if s.is_waiting() => s.preedit_text().map(|t| t.to_string()),
+                _ => None,
+            };
+            text.filter(|t| !t.is_empty())
+        };
+        let from_session = commit_text.is_some();
+        let preedit = commit_text.unwrap_or_else(|| engine.preedit_display());
+        if preedit.is_empty() {
+            return Ok(());
         }
-        diag::event(DiagEvent::ModeChange { from, to });
+        tracing::info!(
+            "switch_ime: commit {:?} (from_session={})",
+            preedit,
+            from_session
+        );
+        engine.bg_reclaim();
+        engine.commit(&preedit.clone());
+        engine.reset_preedit();
+        drop(guard);
+        if let Ok(mut sess) = session_get() {
+            sess.set_idle();
+        }
+        candidate_window::hide();
+        candidate_window::stop_live_timer();
+        end_composition(ctx.clone(), tid, preedit)
+    }
+
+    /// IME オン/オフ切替の共通経路（キー操作・言語バーメニュー）。
+    ///
+    /// 1. `ctx` があれば表示中の合成文字列を確定する。
+    /// 2. `ime_sync::apply` で内部状態・コンパートメント・トレイ通知を同期する。
+    /// 3. 言語バーを即時更新し、`ctx` があればキャレット位置にインジケーターを出す。
+    /// 4. 設定ファイルの変更を遅延リロードする。
+    pub(super) fn switch_ime(
+        &self,
+        ctx: Option<ITfContext>,
+        tid: u32,
+        new: ImeMode,
+    ) -> Result<bool> {
+        if let Some(ctx) = ctx.as_ref() {
+            self.commit_visible_composition(ctx, tid)?;
+        }
+        let tm = self
+            .inner
+            .try_borrow()
+            .ok()
+            .and_then(|i| i.thread_mgr.clone());
+        ime_sync::apply(tm.as_ref(), tid, new, true, "switch_ime");
         self.notify_langbar_update();
-        self.notify_tray_update(tid);
-        self.show_mode_indicator(to, ctx, tid);
+        if let Some(ctx) = ctx {
+            self.show_mode_indicator(new, ctx, tid);
+        }
         self.maybe_reload_runtime_config();
         Ok(true)
+    }
+
+    pub(super) fn on_ime_toggle(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
+        let new = crate::engine::state::ime_mode_get_atomic().toggled();
+        self.switch_ime(Some(ctx), tid, new)
     }
 
     pub(super) fn on_ime_off(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
-        {
-            let mut guard = engine_try_get_or_create()?;
-            if let Some(engine) = guard.as_mut() {
-                // LiveConv 中は preview をコミットしてから IME をオフにする
-                let commit_text = {
-                    let sess = session_get();
-                    if let Ok(s) = &sess {
-                        if s.is_live_conv() {
-                            s.live_conv_parts().map(|(_, p)| p.to_string())
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                };
-                let preedit = commit_text.unwrap_or_else(|| engine.preedit_display());
-                if !preedit.is_empty() {
-                    engine.bg_reclaim();
-                    engine.commit(&preedit.clone());
-                    engine.reset_preedit();
-                    drop(guard);
-                    if let Ok(mut sess) = session_get() {
-                        sess.set_idle();
-                    }
-                    candidate_window::stop_live_timer();
-                    end_composition(ctx.clone(), tid, preedit)?;
-                }
-            }
-        }
-        if let Ok(mut st) = crate::engine::state::ime_state_get() {
-            let from = format!("{:?}", st.input_mode);
-            st.set_mode(crate::engine::input_mode::InputMode::Alphanumeric);
-            diag::event(DiagEvent::ModeChange {
-                from,
-                to: "Alphanumeric",
-            });
-        }
-        if let Ok(inner) = self.inner.try_borrow()
-            && let Some(tm) = &inner.thread_mgr
-            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, false) }
-        {
-            tracing::warn!("ImeOff: set_open_close(false) failed: {e}");
-            diag::event(DiagEvent::Error {
-                site: "set_open_close/off",
-                msg: e.to_string(),
-            });
-        }
-        self.notify_langbar_update();
-        self.notify_tray_update(tid);
-        self.show_mode_indicator("Alphanumeric", ctx, tid);
-        self.maybe_reload_runtime_config();
-        Ok(true)
+        self.switch_ime(Some(ctx), tid, ImeMode::Off)
     }
 
     pub(super) fn on_ime_on(&self, ctx: ITfContext, tid: u32) -> Result<bool> {
-        if let Ok(mut st) = crate::engine::state::ime_state_get() {
-            let from = format!("{:?}", st.input_mode);
-            st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
-            diag::event(DiagEvent::ModeChange {
-                from,
-                to: "Hiragana",
-            });
-        }
-        if let Ok(inner) = self.inner.try_borrow()
-            && let Some(tm) = &inner.thread_mgr
-            && let Err(e) = unsafe { language_bar::set_open_close(tm, tid, true) }
-        {
-            tracing::warn!("ImeOn: set_open_close(true) failed: {e}");
-            diag::event(DiagEvent::Error {
-                site: "set_open_close/on",
-                msg: e.to_string(),
-            });
-        }
-        self.notify_langbar_update();
-        self.notify_tray_update(tid);
-        self.show_mode_indicator("Hiragana", ctx, tid);
-        self.maybe_reload_runtime_config();
-        Ok(true)
-    }
-
-    pub(super) fn on_mode_hiragana(
-        &self,
-        ctx: ITfContext,
-        tid: u32,
-        mut guard: crate::engine::state::EngineGuard,
-    ) -> Result<bool> {
-        if let Some(engine) = guard.as_mut() {
-            let preedit = engine.preedit_display();
-            if !preedit.is_empty() {
-                let t = preedit.clone();
-                engine.bg_reclaim();
-                engine.commit(&t);
-                engine.reset_preedit();
-                drop(guard);
-                end_composition(ctx.clone(), tid, t)?;
-            } else {
-                drop(guard);
-            }
-        }
-        if let Ok(mut st) = crate::engine::state::ime_state_get() {
-            let from = format!("{:?}", st.input_mode);
-            st.set_mode(crate::engine::input_mode::InputMode::Hiragana);
-            diag::event(DiagEvent::ModeChange {
-                from,
-                to: "Hiragana",
-            });
-        }
-        self.notify_langbar_update();
-        self.notify_tray_update(tid);
-        self.show_mode_indicator("Hiragana", ctx, tid);
-        self.maybe_reload_runtime_config();
-        Ok(true)
-    }
-
-    pub(super) fn on_mode_katakana(
-        &self,
-        ctx: ITfContext,
-        tid: u32,
-        mut guard: crate::engine::state::EngineGuard,
-    ) -> Result<bool> {
-        if let Some(engine) = guard.as_mut() {
-            let preedit = engine.preedit_display();
-            if !preedit.is_empty() {
-                let t = text_util::to_katakana(&preedit);
-                engine.bg_reclaim();
-                engine.commit(&t);
-                engine.reset_preedit();
-                drop(guard);
-                end_composition(ctx.clone(), tid, t)?;
-            } else {
-                drop(guard);
-            }
-        }
-        if let Ok(mut st) = crate::engine::state::ime_state_get() {
-            let from = format!("{:?}", st.input_mode);
-            st.set_mode(crate::engine::input_mode::InputMode::Katakana);
-            diag::event(DiagEvent::ModeChange {
-                from,
-                to: "Katakana",
-            });
-        }
-        self.notify_langbar_update();
-        self.notify_tray_update(tid);
-        self.show_mode_indicator("Katakana", ctx, tid);
-        self.maybe_reload_runtime_config();
-        Ok(true)
+        self.switch_ime(Some(ctx), tid, ImeMode::On)
     }
 
     /// 記号入力:

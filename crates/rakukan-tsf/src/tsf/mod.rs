@@ -4,6 +4,7 @@ pub mod registration;
 
 pub(crate) mod candidate_window;
 pub(crate) mod display_attr;
+pub(crate) mod ime_sync;
 pub(crate) mod language_bar;
 pub(crate) mod live_session;
 pub(crate) mod mode_indicator;

@@ -68,6 +68,7 @@ use windows::{
 use crate::{
     diagnostics::{self as diag, DiagEvent},
     engine::{
+        ime_mode::ImeMode,
         keymap::Keymap,
         state::{
             composition_set, doc_mode_on_focus_change, engine_get, engine_try_get_or_create,
@@ -77,8 +78,8 @@ use crate::{
     },
     globals::{GUID_DISPLAY_ATTRIBUTE, GUID_DISPLAY_ATTRIBUTE_INPUT},
     tsf::{
-        candidate_window, display_attr,
-        language_bar::{self, LANGBAR_SINK_COOKIE, get_open_close},
+        candidate_window, display_attr, ime_sync,
+        language_bar::{self, LANGBAR_SINK_COOKIE},
         settings_launcher, tray_ipc,
     },
 };
@@ -95,22 +96,10 @@ use on_compose::{
     update_caret_rect, update_composition, update_composition_candidate_parts,
 };
 
-const ID_MENU_MODE_HIRAGANA: u32 = 1;
-const ID_MENU_MODE_KATAKANA: u32 = 2;
-const ID_MENU_MODE_ALPHANUMERIC: u32 = 3;
+const ID_MENU_IME_ON: u32 = 1;
+const ID_MENU_IME_OFF: u32 = 2;
 const ID_MENU_SETTINGS: u32 = 10;
 const ID_MENU_ENGINE_RELOAD: u32 = 11;
-
-fn current_langbar_mode(open: bool) -> crate::engine::input_mode::InputMode {
-    if !open {
-        crate::engine::input_mode::InputMode::Alphanumeric
-    } else {
-        crate::engine::state::ime_state_get()
-            .ok()
-            .map(|state| state.input_mode)
-            .unwrap_or(crate::engine::input_mode::InputMode::Hiragana)
-    }
-}
 
 /// M1.6 T-HOST3: 読込中インジケータの記号とメッセージを決める。
 ///
@@ -151,56 +140,28 @@ fn foreground_root_hwnd() -> usize {
     }
 }
 
-fn apply_langbar_mode(
-    factory: &TextServiceFactory_Impl,
-    new_mode: crate::engine::input_mode::InputMode,
-) {
-    let (tm, tid) = factory
+/// 言語バーメニューからの IME オン/オフ。キー操作と同じ `switch_ime` を通す。
+/// メニュー経由では ITfContext が無いため合成文字列の確定とインジケーター表示は行わない。
+fn apply_langbar_mode(factory: &TextServiceFactory_Impl, new_mode: ImeMode) {
+    let tid = factory
         .inner
         .try_borrow()
         .ok()
-        .and_then(|inner| inner.thread_mgr.clone().map(|tm| (tm, inner.client_id)))
-        .unzip();
-
-    if let (Some(tm), Some(tid)) = (tm, tid) {
-        unsafe {
-            let _ = language_bar::set_open_close(
-                &tm,
-                tid,
-                new_mode != crate::engine::input_mode::InputMode::Alphanumeric,
-            );
-        }
+        .map(|inner| inner.client_id)
+        .unwrap_or_default();
+    tracing::info!("langbar menu: ime {:?}", new_mode);
+    if let Err(e) = factory.switch_ime(None, tid, new_mode) {
+        tracing::warn!("langbar menu: switch_ime failed: {e}");
     }
-
-    if let Ok(mut state) = crate::engine::state::ime_state_get() {
-        let from = format!("{:?}", state.input_mode);
-        state.set_mode(new_mode);
-        tracing::info!("langbar menu: input mode {} -> {:?}", from, new_mode);
-        diag::event(DiagEvent::ModeChange {
-            from,
-            to: match new_mode {
-                crate::engine::input_mode::InputMode::Hiragana => "Hiragana",
-                crate::engine::input_mode::InputMode::Katakana => "Katakana",
-                crate::engine::input_mode::InputMode::Alphanumeric => "Alphanumeric",
-            },
-        });
-    }
-
-    factory.notify_langbar_update();
-    factory.notify_tray_update(tid.unwrap_or_default());
-    factory.maybe_reload_runtime_config();
 }
 
 fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
     match id {
-        ID_MENU_MODE_HIRAGANA => {
-            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Hiragana);
+        ID_MENU_IME_ON => {
+            apply_langbar_mode(factory, ImeMode::On);
         }
-        ID_MENU_MODE_KATAKANA => {
-            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Katakana);
-        }
-        ID_MENU_MODE_ALPHANUMERIC => {
-            apply_langbar_mode(factory, crate::engine::input_mode::InputMode::Alphanumeric);
+        ID_MENU_IME_OFF => {
+            apply_langbar_mode(factory, ImeMode::Off);
         }
         ID_MENU_SETTINGS => {
             settings_launcher::launch_settings_app();
@@ -219,13 +180,7 @@ fn show_langbar_popup_menu(
     factory: &TextServiceFactory_Impl,
     pt: &POINT,
 ) -> windows::core::Result<()> {
-    let open = factory
-        .inner
-        .try_borrow()
-        .ok()
-        .and_then(|inner| inner.thread_mgr.clone().map(|tm| get_open_close(&tm)))
-        .unwrap_or(true);
-    let current_mode = current_langbar_mode(open);
+    let current_mode = crate::engine::state::ime_mode_get_atomic();
 
     unsafe {
         use windows::Win32::Foundation::{GetLastError, SetLastError, WIN32_ERROR};
@@ -236,56 +191,38 @@ fn show_langbar_popup_menu(
         // 報告の切り分け用。2026-09-06: 150% へ変更後にメニューが出なくなった）。
         let owner = GetForegroundWindow();
         tracing::info!(
-            "langbar OnClick: pt=({}, {}) owner_hwnd={:#x} open={} mode={:?}",
+            "langbar OnClick: pt=({}, {}) owner_hwnd={:#x} mode={:?}",
             pt.x,
             pt.y,
             owner.0 as usize,
-            open,
             current_mode
         );
 
         let menu = CreatePopupMenu()?;
-        let hiragana = to_wide_menu_text("ひらがな");
-        let katakana = to_wide_menu_text("カタカナ");
-        let alnum = to_wide_menu_text("英数");
+        let ime_on = to_wide_menu_text("IME オン");
+        let ime_off = to_wide_menu_text("IME オフ");
         let settings = to_wide_menu_text("設定...");
         let reload = to_wide_menu_text("エンジン再起動");
 
         let _ = AppendMenuW(
             menu,
-            MENU_ITEM_FLAGS(
-                if current_mode == crate::engine::input_mode::InputMode::Hiragana {
-                    TF_LBMENUF_RADIOCHECKED
-                } else {
-                    0
-                },
-            ),
-            ID_MENU_MODE_HIRAGANA as usize,
-            windows::core::PCWSTR(hiragana.as_ptr()),
+            MENU_ITEM_FLAGS(if current_mode == ImeMode::On {
+                TF_LBMENUF_RADIOCHECKED
+            } else {
+                0
+            }),
+            ID_MENU_IME_ON as usize,
+            windows::core::PCWSTR(ime_on.as_ptr()),
         );
         let _ = AppendMenuW(
             menu,
-            MENU_ITEM_FLAGS(
-                if current_mode == crate::engine::input_mode::InputMode::Katakana {
-                    TF_LBMENUF_RADIOCHECKED
-                } else {
-                    0
-                },
-            ),
-            ID_MENU_MODE_KATAKANA as usize,
-            windows::core::PCWSTR(katakana.as_ptr()),
-        );
-        let _ = AppendMenuW(
-            menu,
-            MENU_ITEM_FLAGS(
-                if current_mode == crate::engine::input_mode::InputMode::Alphanumeric {
-                    TF_LBMENUF_RADIOCHECKED
-                } else {
-                    0
-                },
-            ),
-            ID_MENU_MODE_ALPHANUMERIC as usize,
-            windows::core::PCWSTR(alnum.as_ptr()),
+            MENU_ITEM_FLAGS(if current_mode == ImeMode::Off {
+                TF_LBMENUF_RADIOCHECKED
+            } else {
+                0
+            }),
+            ID_MENU_IME_OFF as usize,
+            windows::core::PCWSTR(ime_off.as_ptr()),
         );
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, windows::core::PCWSTR::null());
         let _ = AppendMenuW(
@@ -466,14 +403,11 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             }
         }
 
-        // KEYBOARD_OPENCLOSE を保存済み InputMode に合わせて設定する。
-        // 常に true (on) にリセットすると、Alphanumeric モードでウィンドウを
+        // KEYBOARD_OPENCLOSE を保存済みの IME オン/オフに合わせて設定する。
+        // 常に true (on) にリセットすると、IME オフでウィンドウを
         // 切り替えて戻るたびにターミナルが IME ON と誤認し、かな入力が再開する。
         // アトミックを使うことでロック競合なく正確なモードを読む。
-        let is_open = {
-            use crate::engine::input_mode::InputMode;
-            crate::engine::state::input_mode_get_atomic() != InputMode::Alphanumeric
-        };
+        let is_open = crate::engine::state::ime_mode_get_atomic().is_on();
         unsafe {
             let ok = match language_bar::set_open_close(tm, tid, is_open) {
                 Ok(()) => {
@@ -497,13 +431,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         }
 
         // トレイ常駐プロセスへ現在モードを通知（失敗してもIMEは継続）
-        {
-            let mode = crate::engine::state::ime_state_get()
-                .ok()
-                .map(|s| s.input_mode)
-                .unwrap_or_default();
-            tray_ipc::publish(is_open, mode);
-        }
+        tray_ipc::publish(crate::engine::state::ime_mode_get_atomic());
 
         // ITfThreadMgrEventSink を登録してフォーカス変化を受け取る
         unsafe {
@@ -593,7 +521,6 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // ITfThreadMgrEventSink の OnSetFocus は最初のフォーカスに対して呼ばれないことがある
         // ため、ここで config.input.default_mode を確定・適用する。
         {
-            use crate::engine::input_mode::InputMode;
             let hwnd_val = foreground_root_hwnd();
             let focused_dm_ptr = {
                 let inner = self.inner.try_borrow().ok();
@@ -609,19 +536,14 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             if let Some(dm_ptr) = focused_dm_ptr
                 && let Some(mode) = doc_mode_on_focus_change(0, dm_ptr, hwnd_val)
             {
-                if let Ok(mut st) = crate::engine::state::ime_state_get() {
-                    tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
-                    st.set_mode(mode);
-                }
-                // KEYBOARD_OPENCLOSE を正しいモードで再設定
-                let is_open2 = mode != InputMode::Alphanumeric;
-                if let Ok(inner) = self.inner.try_borrow()
-                    && let Some(tm) = &inner.thread_mgr
-                {
-                    unsafe {
-                        let _ = language_bar::set_open_close(tm, tid, is_open2);
-                    }
-                }
+                tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
+                // 内部状態と KEYBOARD_OPENCLOSE を同時に揃える
+                let tm = self
+                    .inner
+                    .try_borrow()
+                    .ok()
+                    .and_then(|i| i.thread_mgr.clone());
+                ime_sync::apply(tm.as_ref(), tid, mode, true, "activate");
             }
         }
 
@@ -761,21 +683,14 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         };
 
         // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
-        let mode = crate::engine::state::input_mode_get_atomic();
-        // コンパートメントは外部アプリへの「通知」であり、真の状態ではない。
-        // 起動直後はコンパートメントが 0（オフ）のまま mode=Hiragana になる場合があり、
+        // コンパートメントは内部状態から導出して書く「通知」であり、真の状態ではない。
+        // 起動直後はコンパートメントが 0（オフ）のまま内部が On になる場合があり、
         // コンパートメントを参照すると ImeToggle が逆方向に動くバグを引き起こす。
-        // → mode アトミックのみを正とし、コンパートメントは参照しない。
-        let ime_off = mode == crate::engine::input_mode::InputMode::Alphanumeric;
-        if ime_off {
+        // → 内部状態のアトミックのみを正とし、コンパートメントは参照しない。
+        if !crate::engine::state::ime_mode_get_atomic().is_on() {
             let eat = matches!(
                 action,
-                UserAction::ImeToggle
-                    | UserAction::ImeOn
-                    | UserAction::ImeOff
-                    | UserAction::ModeHiragana
-                    | UserAction::ModeKatakana
-                    | UserAction::ModeAlphanumeric
+                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
             );
             return Ok(if eat { TRUE } else { FALSE });
         }
@@ -868,28 +783,20 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // モードインジケーターを非表示（キー入力があれば消す）
         crate::tsf::mode_indicator::hide();
 
-        // ── 英数モードガード（最終防衛線）─────────────────────────────────
+        // ── IME オフガード（最終防衛線）───────────────────────────────────
         // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
         // アトミックなのでロック競合なし。
-        {
-            use crate::engine::input_mode::InputMode;
-            if crate::engine::state::input_mode_get_atomic() == InputMode::Alphanumeric {
-                let is_ime_ctrl = matches!(
-                    action,
-                    UserAction::ImeToggle
-                        | UserAction::ImeOn
-                        | UserAction::ImeOff
-                        | UserAction::ModeHiragana
-                        | UserAction::ModeKatakana
-                        | UserAction::ModeAlphanumeric
-                );
-                if !is_ime_ctrl {
-                    diag::event(DiagEvent::KeyIgnored {
-                        vk,
-                        reason: "alphanumeric_mode",
-                    });
-                    return Ok(FALSE);
-                }
+        if !crate::engine::state::ime_mode_get_atomic().is_on() {
+            let is_ime_ctrl = matches!(
+                action,
+                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
+            );
+            if !is_ime_ctrl {
+                diag::event(DiagEvent::KeyIgnored {
+                    vk,
+                    reason: "ime_off",
+                });
+                return Ok(FALSE);
             }
         }
 
@@ -965,30 +872,15 @@ impl TextServiceFactory_Impl {
     }
 
     fn notify_tray_update(&self, tid: u32) {
-        let open = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
-            .unwrap_or_else(|| {
-                crate::engine::state::ime_state_get()
-                    .ok()
-                    .map(|s| s.input_mode != crate::engine::input_mode::InputMode::Alphanumeric)
-                    .unwrap_or(true)
-            });
-        let mode = crate::engine::state::ime_state_get()
-            .ok()
-            .map(|s| s.input_mode)
-            .unwrap_or_default();
         let _ = tid;
-        tray_ipc::publish(open, mode);
+        tray_ipc::publish(crate::engine::state::ime_mode_get_atomic());
     }
 
     /// モード切替時にキャレット近くにインジケーターを表示する。
     ///
     /// mozc と同じアプローチで TSF の `GetSelection` → `GetTextExt` を使い
     /// キャレット位置をリアルタイムに取得する。取得できない場合は表示しない。
-    fn show_mode_indicator(&self, mode_name: &str, ctx: ITfContext, tid: u32) {
+    fn show_mode_indicator(&self, mode: ImeMode, ctx: ITfContext, tid: u32) {
         use crate::tsf::edit_session::EditSession;
         use crate::tsf::mode_indicator;
 
@@ -1003,22 +895,10 @@ impl TextServiceFactory_Impl {
         }
 
         let ready = crate::engine::state::is_conversion_ready();
-        let mode_char: &'static str = match mode_name {
-            "Hiragana" => {
-                if ready {
-                    "あ"
-                } else {
-                    return;
-                }
-            }
-            "Katakana" => {
-                if ready {
-                    "ア"
-                } else {
-                    return;
-                }
-            }
-            _ => "A",
+        let mode_char: &'static str = match mode {
+            // エンジン準備前は「あ」を出さない（変換できない状態を誤認させないため）
+            ImeMode::On if !ready => return,
+            m => m.label(),
         };
 
         let ctx2 = ctx.clone();
@@ -1126,12 +1006,7 @@ fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
         UserAction::Input(_) | UserAction::InputRaw(_) | UserAction::FullWidthSpace => true,
         UserAction::Backspace => has_preedit,
         UserAction::Convert => true,
-        UserAction::ImeToggle
-        | UserAction::ImeOff
-        | UserAction::ImeOn
-        | UserAction::ModeHiragana
-        | UserAction::ModeKatakana
-        | UserAction::ModeAlphanumeric => true,
+        UserAction::ImeToggle | UserAction::ImeOff | UserAction::ImeOn => true,
         UserAction::CommitRaw
         | UserAction::Cancel
         | UserAction::CancelAll
@@ -1193,9 +1068,6 @@ pub(super) fn action_name(a: &UserAction) -> &'static str {
         UserAction::ImeToggle => "ImeToggle",
         UserAction::ImeOn => "ImeOn",
         UserAction::ImeOff => "ImeOff",
-        UserAction::ModeHiragana => "ModeHiragana",
-        UserAction::ModeKatakana => "ModeKatakana",
-        UserAction::ModeAlphanumeric => "ModeAlphanumeric",
         _ => "Other",
     }
 }
@@ -1240,55 +1112,36 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
             return Ok(());
         };
 
-        let open = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|inner| inner.thread_mgr.clone().map(|tm| get_open_close(&tm)))
-            .unwrap_or(true);
-        let current_mode = current_langbar_mode(open);
+        let current_mode = crate::engine::state::ime_mode_get_atomic();
 
         unsafe {
-            let hiragana = "ひらがな".encode_utf16().collect::<Vec<_>>();
-            let katakana = "カタカナ".encode_utf16().collect::<Vec<_>>();
-            let alnum = "英数".encode_utf16().collect::<Vec<_>>();
+            let ime_on = "IME オン".encode_utf16().collect::<Vec<_>>();
+            let ime_off = "IME オフ".encode_utf16().collect::<Vec<_>>();
             let settings = "設定...".encode_utf16().collect::<Vec<_>>();
             let reload = "エンジン再起動".encode_utf16().collect::<Vec<_>>();
 
             let _ = menu.AddMenuItem(
-                ID_MENU_MODE_HIRAGANA,
-                if current_mode == crate::engine::input_mode::InputMode::Hiragana {
+                ID_MENU_IME_ON,
+                if current_mode == ImeMode::On {
                     TF_LBMENUF_RADIOCHECKED
                 } else {
                     0
                 },
                 HBITMAP::default(),
                 HBITMAP::default(),
-                &hiragana,
+                &ime_on,
                 std::ptr::null_mut(),
             );
             let _ = menu.AddMenuItem(
-                ID_MENU_MODE_KATAKANA,
-                if current_mode == crate::engine::input_mode::InputMode::Katakana {
+                ID_MENU_IME_OFF,
+                if current_mode == ImeMode::Off {
                     TF_LBMENUF_RADIOCHECKED
                 } else {
                     0
                 },
                 HBITMAP::default(),
                 HBITMAP::default(),
-                &katakana,
-                std::ptr::null_mut(),
-            );
-            let _ = menu.AddMenuItem(
-                ID_MENU_MODE_ALPHANUMERIC,
-                if current_mode == crate::engine::input_mode::InputMode::Alphanumeric {
-                    TF_LBMENUF_RADIOCHECKED
-                } else {
-                    0
-                },
-                HBITMAP::default(),
-                HBITMAP::default(),
-                &alnum,
+                &ime_off,
                 std::ptr::null_mut(),
             );
             let _ = menu.AddMenuItem(
@@ -1323,84 +1176,34 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
         Ok(())
     }
     fn GetIcon(&self) -> windows::core::Result<HICON> {
-        let open = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
-            .unwrap_or(true);
-        let mode_char = if !open {
-            "A"
-        } else {
-            use crate::engine::state::{ime_state_get, is_conversion_ready};
-            let ready = is_conversion_ready();
-            ime_state_get()
-                .ok()
-                .map(|s| match s.input_mode {
-                    crate::engine::input_mode::InputMode::Hiragana => {
-                        if ready {
-                            "あ"
-                        } else {
-                            "ー"
-                        }
-                    }
-                    crate::engine::input_mode::InputMode::Katakana => {
-                        if ready {
-                            "ア"
-                        } else {
-                            "ー"
-                        }
-                    }
-                    crate::engine::input_mode::InputMode::Alphanumeric => "A",
-                })
-                .unwrap_or(if ready { "あ" } else { "ー" })
-        };
+        let mode_char = langbar_mode_char();
         language_bar::create_mode_icon(mode_char)
             .or_else(|_| unsafe { language_bar::load_tray_icon() })
     }
     fn GetText(&self) -> windows::core::Result<BSTR> {
         // トレイは1〜2文字しか表示できないためモード文字のみ返す
         // バックエンド情報は GetTooltipString に集約
-        let open = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|i| i.thread_mgr.clone().map(|tm| get_open_close(&tm)))
-            .unwrap_or(true);
-        let mode_char = if !open {
-            "A"
-        } else {
-            use crate::engine::state::{ime_state_get, is_conversion_ready};
-            let ready = is_conversion_ready();
-            ime_state_get()
-                .ok()
-                .map(|s| match s.input_mode {
-                    crate::engine::input_mode::InputMode::Hiragana => {
-                        if ready {
-                            "あ"
-                        } else {
-                            "ー"
-                        }
-                    }
-                    crate::engine::input_mode::InputMode::Katakana => {
-                        if ready {
-                            "ア"
-                        } else {
-                            "ー"
-                        }
-                    }
-                    crate::engine::input_mode::InputMode::Alphanumeric => "A",
-                })
-                .unwrap_or(if ready { "あ" } else { "ー" })
-        };
-        Ok(BSTR::from(mode_char))
+        Ok(BSTR::from(langbar_mode_char()))
+    }
+}
+
+/// 言語バーのアイコン / テキストに使う 1 文字。
+///
+/// 内部状態（`ime_mode`）だけを見る。コンパートメントは参照しない
+/// （コンパートメントは内部状態から導出して書く側であり、読むと片方だけ
+/// 更新された瞬間に表示がずれる）。IME オンでエンジン準備前は「ー」。
+fn langbar_mode_char() -> &'static str {
+    match crate::engine::state::ime_mode_get_atomic() {
+        ImeMode::Off => "A",
+        ImeMode::On if !crate::engine::state::is_conversion_ready() => "ー",
+        ImeMode::On => "あ",
     }
 }
 
 // ─── ITfThreadMgrEventSink ────────────────────────────────────────────────────
 //
 // フォーカスが変わるたびに OnSetFocus が呼ばれる。
-// DocumentManager ポインタをキーに InputMode を記憶し、
+// DocumentManager ポインタをキーに IME オン/オフを記憶し、
 // 次回フォーカス時に復元する（MS-IME準拠）。
 
 impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {

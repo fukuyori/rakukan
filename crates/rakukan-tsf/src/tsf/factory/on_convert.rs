@@ -216,14 +216,14 @@ impl super::TextServiceFactory_Impl {
             );
         }
         if preedit_empty {
-            use crate::engine::input_mode::InputMode;
+            use crate::engine::ime_mode::ImeMode;
             drop(guard);
-            match crate::engine::state::input_mode_get_atomic() {
-                InputMode::Hiragana | InputMode::Katakana => {
+            match crate::engine::state::ime_mode_get_atomic() {
+                ImeMode::On => {
                     commit_text(ctx, tid, "　".into())?;
                     return Ok(true);
                 }
-                InputMode::Alphanumeric => {
+                ImeMode::Off => {
                     commit_text(ctx, tid, " ".into())?;
                     return Ok(true);
                 }

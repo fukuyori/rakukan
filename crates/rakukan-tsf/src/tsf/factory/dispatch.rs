@@ -427,7 +427,7 @@ impl super::TextServiceFactory_Impl {
                 drop(guard);
                 self.on_ime_toggle(ctx, tid)
             }
-            UserAction::ImeOff | UserAction::ModeAlphanumeric => {
+            UserAction::ImeOff => {
                 drop(guard);
                 self.on_ime_off(ctx, tid)
             }
@@ -435,8 +435,6 @@ impl super::TextServiceFactory_Impl {
                 drop(guard);
                 self.on_ime_on(ctx, tid)
             }
-            UserAction::ModeHiragana => self.on_mode_hiragana(ctx, tid, guard),
-            UserAction::ModeKatakana => self.on_mode_katakana(ctx, tid, guard),
             _ => Ok(false),
         }
     }

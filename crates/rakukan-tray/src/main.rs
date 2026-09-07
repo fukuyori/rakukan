@@ -60,21 +60,10 @@ fn to_wide_z(s: &str) -> Vec<u16> {
     v
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Mode {
-    Hiragana,
-    Katakana,
-    Alnum,
-}
-
-fn decode(v: u32) -> (bool, Mode) {
-    let open = ((v >> 8) & 1) != 0;
-    let m = match v & 0b11 {
-        1 => Mode::Katakana,
-        2 => Mode::Alnum,
-        _ => Mode::Hiragana,
-    };
-    (open, m)
+/// 共有メモリの値から IME オン/オフを取り出す（bit8 = open）。
+/// bit0..1 は旧版の入力モード欄で、現在は常に 0。
+fn decode(v: u32) -> bool {
+    ((v >> 8) & 1) != 0
 }
 
 struct Shared {
@@ -301,13 +290,8 @@ fn main() -> Result<()> {
                 if !RUNNING.load(Ordering::Acquire) {
                     break;
                 }
-                let (open, mode) = decode(shared.read());
-                let mode_id = match mode {
-                    Mode::Hiragana => 0u32,
-                    Mode::Katakana => 1u32,
-                    Mode::Alnum => 2u32,
-                };
-                let w = WPARAM((mode_id << 16 | (open as u32)) as usize);
+                let open = decode(shared.read());
+                let w = WPARAM(open as usize);
                 let hwnd_send = HWND(hwnd2 as *mut core::ffi::c_void);
                 let _ = PostMessageW(hwnd_send, WM_MODE_UPDATE, w, LPARAM(0));
             }

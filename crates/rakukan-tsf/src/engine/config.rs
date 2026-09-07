@@ -127,17 +127,21 @@ impl Default for KeyboardConfig {
     }
 }
 
-/// 起動時・初回フォーカス時のデフォルト入力モード。
-/// カタカナモードは廃止（F7 変換は引き続き動作する）。
+/// 起動時・初回フォーカス時の IME オン/オフ。
+///
+/// 旧設定値 `"hiragana"` / `"alphanumeric"` は互換のため受け付け、
+/// それぞれ `on` / `off` として扱う。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum DefaultInputMode {
-    Hiragana,
-    Alphanumeric,
+pub enum DefaultImeMode {
+    #[serde(alias = "hiragana")]
+    On,
+    #[serde(alias = "alphanumeric")]
+    Off,
 }
 
-fn default_input_mode() -> DefaultInputMode {
-    DefaultInputMode::Alphanumeric
+fn default_ime_mode() -> DefaultImeMode {
+    DefaultImeMode::Off
 }
 fn default_remember_last_kana_mode() -> bool {
     true
@@ -194,8 +198,8 @@ pub enum DigitCandidateKind {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InputConfig {
-    #[serde(default = "default_input_mode")]
-    pub default_mode: DefaultInputMode,
+    #[serde(default = "default_ime_mode")]
+    pub default_mode: DefaultImeMode,
     #[serde(default = "default_remember_last_kana_mode")]
     pub remember_last_kana_mode: bool,
     #[serde(default)]
@@ -228,7 +232,7 @@ fn default_auto_learn() -> bool {
 impl Default for InputConfig {
     fn default() -> Self {
         Self {
-            default_mode: default_input_mode(),
+            default_mode: default_ime_mode(),
             remember_last_kana_mode: true,
             digit_width: DigitWidth::default(),
             alpha_width: AlphaWidth::default(),
@@ -561,7 +565,9 @@ layout = "jis"
 reload_on_mode_switch = true
 
 [input]
-default_mode = "alphanumeric"
+# 起動時の IME 状態: "off" = 直接入力, "on" = かな漢字変換
+default_mode = "off"
+# 前回の IME オン/オフをアプリ（ウィンドウ）ごとに記憶する
 remember_last_kana_mode = true
 # 数字の入力幅: "halfwidth" = 半角 (012), "fullwidth" = 全角 (０１２)
 digit_width = "halfwidth"

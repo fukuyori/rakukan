@@ -139,7 +139,7 @@ ABI 境界は引き続き C の FFI（`extern "C"` 関数ポインタのテー�
 | `engine/state.rs` | グローバル IME 状態（エンジン・セッション・モード等） |
 | `engine/config.rs` | 設定ファイル管理（`AppConfig`・`ConfigManager`） |
 | `engine/keymap.rs` | キーバインド管理（`Keymap`・`KeySpec`・プリセット） |
-| `engine/input_mode.rs` | 入力モード列挙型（`InputMode`） |
+| `engine/ime_mode.rs` | IME オン/オフ列挙型（`ImeMode`） |
 | `engine/user_action.rs` | ユーザーアクション列挙型（`UserAction`） |
 | `engine/text_util.rs` | 文字種変換（F6〜F10 用） |
 | `diagnostics.rs` | ログイベント集約（`DiagEvent`） |
@@ -152,8 +152,8 @@ Mutex の取得はすべて `try_lock()` を使用する。
 
 | 変数 | 型 | 用途 |
 |------|----|------|
-| `INPUT_MODE_ATOMIC` | `AtomicU8` | 現在の入力モード（ロックなし高速読み取り用） |
-| `IME_STATE` | `Mutex<IMEState>` | 入力モードの正式な保持場所 |
+| `IME_MODE_ATOMIC` | `AtomicU8` | 現在の IME オン/オフ（ロックなし高速読み取り用） |
+| `IME_STATE` | `Mutex<IMEState>` | IME オン/オフの正式な保持場所 |
 | `RAKUKAN_ENGINE` | `Mutex<EngineWrapper>` | エンジン DLL インスタンス |
 | `ENGINE_INIT_STARTED` | `AtomicBool` | BG 初期化の二重スポーン防止フラグ |
 | `SESSION_STATE` | `Mutex<SessionState>` | TSF 層の論理状態（Idle / Preedit / Waiting / ...） |
@@ -161,21 +161,29 @@ Mutex の取得はすべて `try_lock()` を使用する。
 | `COMPOSITION` | `Mutex<CompositionWrapper>` | 現在の `ITfComposition` オブジェクト |
 | `CARET_RECT` | `Mutex<CaretRect>` | キャレット矩形（候補ウィンドウ位置計算用） |
 | `LANGBAR_UPDATE_PENDING` | `AtomicBool` | BG 初期化完了後の言語バー更新フラグ |
-| `DOC_MODE_STORE` | `Mutex<HashMap<usize, InputMode>>` | DocumentManager ごとの入力モード記憶 |
+| `DOC_MODE_STORE` | `Mutex<HashMap<usize, ImeMode>>` | DocumentManager ごとの IME オン/オフ記憶 |
 | `CONFIG_MANAGER` | `Mutex<ConfigManager>` | 設定ファイルの読み込み・キャッシュ |
 
-#### IME 状態（InputMode）
+#### IME 状態（ImeMode）
 
 ```rust
-pub enum InputMode {
-    Hiragana,      // 0 (AtomicU8)
-    Katakana,      // 1
-    Alphanumeric,  // 2
+pub enum ImeMode {
+    On,   // 0 (AtomicU8) かな漢字変換
+    Off,  // 1            直接入力
 }
 ```
 
-`Alphanumeric` は実質的な「IME オフ」状態。  
-キーをそのまま素通りさせ（`OnTestKeyDown` が `FALSE` を返す）、アプリが直接処理する。
+入力状態はこの 2 値だけで表す。「ひらがなモード」「カタカナモード」「英数モード」という
+独立した概念は持たない（v0.12 で廃止。カタカナは F7 / 無変換 cycle_kana で入力する）。
+
+`Off` ではキーをそのまま素通りさせ（`OnTestKeyDown` が `FALSE` を返す）、アプリが直接処理する。
+
+**唯一の正は内部状態**（`IME_STATE.ime_mode` とそのアトミック鏡）。TSF コンパートメント
+`KEYBOARD_OPENCLOSE` は内部状態から導出して書くだけで、表示（言語バー・インジケーター・
+トレイ通知）もキー処理もコンパートメントは読まない。状態変更はすべて
+`tsf/ime_sync::apply` を通る（キー操作 / 言語バーメニュー / フォーカス移動時の復元 /
+Activate 初期化 / 外部アプリによるコンパートメント変更の取り込み）。経路ごとに片方だけ
+更新して表示がずれる不具合（v0.11.3 で「A」表示のまま かな入力になる）を構造的に防ぐ。
 
 ### 4.3 セッション状態（SessionState）
 
@@ -244,7 +252,7 @@ Idle
 ```
 OnKeyDown(wparam=VK)
   │
-  ├─ Alphanumeric モード → キーを素通り（FALSE）
+  ├─ IME オフ → キーを素通り（FALSE）
   │
   ├─ keymap.resolve_action(vk) → UserAction
   │     ├─ keymap.toml + プリセット（MsImeUs / MsImeJis）
@@ -258,7 +266,7 @@ OnKeyDown(wparam=VK)
        ├─ Cancel           → reset_preedit → end_composition
        ├─ CandidateNext/Prev → SessionState を更新 → candidate_window 更新
        ├─ F6〜F10          → text_util::to_xxx → force_preedit
-       ├─ ImeToggle        → InputMode 切り替え → KEYBOARD_OPENCLOSE 更新
+       ├─ ImeToggle / ImeOn / ImeOff → switch_ime → ime_sync::apply（内部状態 → KEYBOARD_OPENCLOSE）
        └─ ...
 ```
 
@@ -311,10 +319,9 @@ OnSetFocus(prev_dm, next_dm)
   │    └─ next_ptr の復元:
   │         ├─ store に存在: 前回モードを返す
   │         └─ 初回: config.input.default_mode を返す
-  │              ※ ターミナル（CASCADIA_HOSTING_WINDOW_CLASS 等）は常に Alphanumeric
+  │              ※ ターミナル（CASCADIA_HOSTING_WINDOW_CLASS 等）は常に Off
   │
-  └─ st.set_mode(new_mode)
-     set_open_close(KEYBOARD_OPENCLOSE)
+  └─ ime_sync::apply(new_mode)  ← 内部状態と KEYBOARD_OPENCLOSE を同時に揃える
 ```
 
 `Activate` 末尾でも `tm.GetFocus()` で現在の DM を取得し初期モードを適用。  
@@ -564,8 +571,8 @@ layout = "jis"              # us/jis/custom（デフォルト: jis）
 reload_on_mode_switch = true
 
 [input]
-default_mode = "alphanumeric"   # alphanumeric/hiragana
-remember_last_kana_mode = true  # ウィンドウごとにモードを記憶
+default_mode = "off"            # off/on（旧値 alphanumeric/hiragana も受け付ける）
+remember_last_kana_mode = true  # ウィンドウごとに IME オン/オフを記憶
 
 [live_conversion]
 enabled = false
@@ -592,11 +599,19 @@ inherit_preset = true       # プリセットを基底として [[bindings]] で
 
 [[bindings]]
 key    = "Ctrl+J"
-action = "mode_hiragana"
+action = "ime_on"
 ```
 
-プリセット `MsImeJis` の主要バインド: Space=変換、Henkan=変換、Enter=ひらがな確定、  
-Escape=キャンセル、Muhenkan=CycleKana、Zenkaku=ImeToggle、Hiragana_key=ModeHiragana、
+修飾キーは `Ctrl+` / `Shift+` / `Alt+`（左右どちらでも一致）に加え、`LCtrl+` / `RCtrl+` /
+`LShift+` / `RShift+` / `LAlt+` / `RAlt+` で左右を区別できる（v0.12）。照合は `Keymap::resolve_mods`
+が「実際の押下状態に一致しうる要求」を限定的なものから順に試すため、左右指定と汎用指定が両方
+あれば左右指定が勝つ。
+
+IME 制御アクションは `ime_toggle` / `ime_on` / `ime_off` の 3 つ。旧アクション名は互換のため
+別名として読む: `mode_hiragana`→`ime_on`、`mode_alphanumeric`→`ime_off`、`mode_katakana`→`katakana`（F7 変換）。
+
+プリセット `MsImeJis` の主要バインド: Space=変換、Henkan=変換、Enter=ひらがな確定、
+Escape=キャンセル、Muhenkan=CycleKana、Zenkaku=ImeToggle、Hiragana_key=ImeOn、Eisuu=ImeOff、Katakana=Katakana(F7)、
 Left/Right=CursorLeft/CursorRight、Home/End=CursorHome/CursorEnd、Shift+Left/Right=SegmentShrink/Extend、etc.
 
 Left / Right / Home / End は未確定文字列がある間はアプリへ渡さず IME が消費する（rakukan は

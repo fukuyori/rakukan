@@ -6,8 +6,8 @@
 //!   という *最小IPC* でトレイアプリに通知する。
 //!
 //! 値フォーマット：
-//! - bit0..1 : mode (0=Hiragana, 1=Katakana, 2=Alphanumeric)
-//! - bit8    : open (1=open, 0=closed)
+//! - bit0..1 : 予約（常に 0。旧版の入力モード欄）
+//! - bit8    : open (1=IME オン, 0=IME オフ)
 
 use std::sync::OnceLock;
 
@@ -22,7 +22,7 @@ use windows::Win32::{
     },
 };
 
-use crate::engine::input_mode::InputMode;
+use crate::engine::ime_mode::ImeMode;
 
 const MAP_NAME: &str = "Local\\rakukan.mode";
 const EVT_NAME: &str = "Local\\rakukan.mode.changed";
@@ -45,13 +45,8 @@ fn to_wide_z(s: &str) -> Vec<u16> {
     v
 }
 
-fn encode(open: bool, mode: InputMode) -> u32 {
-    let m = match mode {
-        InputMode::Hiragana => 0u32,
-        InputMode::Katakana => 1u32,
-        InputMode::Alphanumeric => 2u32,
-    };
-    m | ((open as u32) << 8)
+fn encode(mode: ImeMode) -> u32 {
+    (mode.is_on() as u32) << 8
 }
 
 /// 共有メモリとイベントを初期化する。
@@ -93,14 +88,14 @@ pub fn init() -> windows::core::Result<()> {
     Ok(())
 }
 
-/// 現在モードを共有し、トレイへ通知する。
-pub fn publish(open: bool, mode: InputMode) {
+/// 現在の IME オン/オフを共有し、トレイへ通知する。
+pub fn publish(mode: ImeMode) {
     let _ = init();
     let Some(ipc) = IPC.get().copied() else {
         return;
     };
     unsafe {
-        (ipc.view.Value as *mut u32).write_volatile(encode(open, mode));
+        (ipc.view.Value as *mut u32).write_volatile(encode(mode));
         let _ = SetEvent(ipc.evt);
     }
 }

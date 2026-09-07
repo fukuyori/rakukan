@@ -35,13 +35,12 @@ public sealed partial class MainWindow : Window
         _keyFields = new Dictionary<ManagedKeyAction, TextBox>
         {
             [ManagedKeyAction.ImeToggle] = ImeToggleBox,
+            [ManagedKeyAction.ImeOn] = ImeOnBox,
+            [ManagedKeyAction.ImeOff] = ImeOffBox,
             [ManagedKeyAction.Convert] = ConvertBox,
             [ManagedKeyAction.CommitRaw] = CommitRawBox,
             [ManagedKeyAction.Cancel] = CancelBox,
             [ManagedKeyAction.CancelAll] = CancelAllBox,
-            [ManagedKeyAction.ModeHiragana] = ModeHiraganaBox,
-            [ManagedKeyAction.ModeKatakana] = ModeKatakanaBox,
-            [ManagedKeyAction.ModeAlphanumeric] = ModeAlphanumericBox,
         };
 
         _settings = _store.Load();
@@ -546,13 +545,12 @@ public sealed partial class MainWindow : Window
     private static string ActionLabel(ManagedKeyAction action) => action switch
     {
         ManagedKeyAction.ImeToggle => "IME 切替",
+        ManagedKeyAction.ImeOn => "IME ON",
+        ManagedKeyAction.ImeOff => "IME OFF",
         ManagedKeyAction.Convert => "変換開始",
         ManagedKeyAction.CommitRaw => "ひらがな確定",
         ManagedKeyAction.Cancel => "取消",
         ManagedKeyAction.CancelAll => "全取消",
-        ManagedKeyAction.ModeHiragana => "ひらがなモード",
-        ManagedKeyAction.ModeKatakana => "カタカナモード",
-        ManagedKeyAction.ModeAlphanumeric => "英数モード",
         _ => action.ToString(),
     };
 
@@ -567,7 +565,7 @@ public sealed partial class MainWindow : Window
         if (!IsValidKeyBinding(trimmed))
         {
             throw new InvalidOperationException(
-                $"{label} は対応しているキー名で入力してください。例: Ctrl+Space, Henkan, Zenkaku, F6");
+                $"{label} は対応しているキー名で入力してください。例: Ctrl+Space, Henkan, Zenkaku, F6, RAlt+Caps（「キー名の一覧と注意」を参照）");
         }
 
         return trimmed;
@@ -584,7 +582,9 @@ public sealed partial class MainWindow : Window
                 return false;
             }
 
-            if (token is "ctrl" or "control" or "shift" or "alt")
+            if (token is "ctrl" or "control" or "lctrl" or "lcontrol" or "rctrl" or "rcontrol"
+                or "shift" or "lshift" or "rshift"
+                or "alt" or "lalt" or "ralt")
             {
                 continue;
             }

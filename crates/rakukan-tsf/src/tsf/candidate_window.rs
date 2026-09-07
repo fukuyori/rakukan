@@ -963,7 +963,7 @@ pub fn post_openclose_changed() {
 /// 書くが（`set_open_close`）、そのときは値とモードが一致するので何もしない＝
 /// ループしない。
 fn process_openclose_change() {
-    use crate::engine::input_mode::InputMode;
+    use crate::engine::ime_mode::ImeMode;
     // 溜まっているフォーカス変化を先に消化する。フォーカス移動（OnSetFocus）と
     // ImmSetOpenStatus は同じスレッドのキューに積まれ、どちらが先に処理されるかは
     // アプリ次第。OPENCLOSE が先に走ると、まだ更新されていない TL_CURRENT_DM に
@@ -974,32 +974,21 @@ fn process_openclose_change() {
     let Some(tm) = tm_opt else {
         return;
     };
-    let open = crate::tsf::language_bar::get_open_close(&tm);
-    let Ok(mut st) = crate::engine::state::ime_state_get() else {
-        tracing::warn!("compartment OPENCLOSE changed but ime_state is locked; ignored");
-        return;
-    };
-    let currently_open = st.input_mode != InputMode::Alphanumeric;
-    if open == currently_open {
+    let new_mode = ImeMode::from_open(crate::tsf::language_bar::get_open_close(&tm));
+    let current = crate::engine::state::ime_mode_get_atomic();
+    if new_mode == current {
         return;
     }
-    let new_mode = if open {
-        InputMode::Hiragana
-    } else {
-        InputMode::Alphanumeric
-    };
     tracing::info!(
-        "compartment OPENCLOSE changed externally: open={} → mode {:?} → {:?}",
-        open,
-        st.input_mode,
+        "compartment OPENCLOSE changed externally: {:?} → {:?}",
+        current,
         new_mode
     );
-    st.set_mode(new_mode);
-    drop(st);
+    // 外部がコンパートメントを書いた側なので、ここではコンパートメントを書き戻さない。
+    let tid = TL_CLIENT_ID.with(|c| c.get());
+    crate::tsf::ime_sync::apply(Some(&tm), tid, new_mode, false, "external_openclose");
     hide();
     stop_live_timer();
-    crate::engine::state::langbar_update_set();
-    crate::tsf::tray_ipc::publish(open, new_mode);
 }
 
 /// OnSetFocus から呼ばれる。イベントをキューに積み、WM_APP_FOCUS_CHANGED を
@@ -1042,8 +1031,6 @@ fn handle_pending_focus_changes() {
 /// msctf._NotifyCallbacks コールバックの外で実行されるため、
 /// COM 再入 (set_open_close) や ITfContext の Drop (stop_live_timer) が安全。
 fn process_focus_change(fc: FocusChange) {
-    use crate::engine::input_mode::InputMode;
-
     tracing::debug!(
         "OnSetFocus(deferred): prev_dm={:#x} next_dm={:#x} hwnd={:#x}",
         fc.prev_ptr,
@@ -1074,31 +1061,20 @@ fn process_focus_change(fc: FocusChange) {
         return;
     };
 
-    // モードを適用
-    if let Ok(mut st) = crate::engine::state::ime_state_get()
-        && st.input_mode != new_mode
-    {
+    // モードを適用し、KEYBOARD_OPENCLOSE も同じ値に揃える（ターミナル判定用）。
+    // この SetValue は msctf への再入だが、既に _NotifyCallbacks を抜けているので安全。
+    // モードが変わらない場合もコンパートメントは書き直す（アプリ側で閉じられている
+    // 可能性があるため）。
+    let tm_opt = TL_THREAD_MGR.with(|c| c.borrow().clone());
+    let tid = TL_CLIENT_ID.with(|c| c.get());
+    let from = crate::tsf::ime_sync::apply(tm_opt.as_ref(), tid, new_mode, true, "focus_change");
+    if from.is_some_and(|f| f != new_mode) {
         tracing::info!(
             "OnSetFocus(deferred): mode {:?} → {:?}",
-            st.input_mode,
+            from.unwrap(),
             new_mode
         );
-        st.set_mode(new_mode);
     }
-
-    // KEYBOARD_OPENCLOSE を更新（ターミナル判定用）。
-    // この SetValue は msctf への再入だが、既に _NotifyCallbacks を抜けているので安全。
-    let is_open = new_mode != InputMode::Alphanumeric;
-    let tm_opt = TL_THREAD_MGR.with(|c| c.borrow().clone());
-    if let Some(tm) = tm_opt {
-        let tid = TL_CLIENT_ID.with(|c| c.get());
-        unsafe {
-            let _ = crate::tsf::language_bar::set_open_close(&tm, tid, is_open);
-        }
-    }
-
-    // トレイアイコン更新
-    crate::tsf::tray_ipc::publish(is_open, new_mode);
 }
 
 // ─── LLM待機タイマー ──────────────────────────────────────────────────────────

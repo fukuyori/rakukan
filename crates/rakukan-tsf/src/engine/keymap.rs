@@ -26,10 +26,12 @@ pub enum KeyAction {
     Convert,   // Space, 変換キー
     CommitRaw, // Enter（ひらがなのまま確定）
     Backspace,
-    CancelAll,         // Ctrl+Backspace（プリエディット全破棄）
-    Cancel,            // Escape
-    Hiragana,          // F6
-    Katakana,          // F7
+    CancelAll, // Ctrl+Backspace（プリエディット全破棄）
+    Cancel,    // Escape
+    Hiragana,  // F6
+    /// F7。旧 `mode_katakana`（カタカナモード）は廃止し、この変換に読み替える。
+    #[serde(alias = "mode_katakana")]
+    Katakana,
     HalfKatakana,      // F8
     FullLatin,         // F9
     HalfLatin,         // F10
@@ -40,14 +42,14 @@ pub enum KeyAction {
     CandidatePageDown, // PageDown
     CandidatePageUp,   // PageUp
     CandidateN(u8),    // 数字 1–9
-    // IME オン/オフ
-    ImeOff,    // 英数キー（IME オン中）
-    ImeOn,     // 英数キー以外（IME オフ中）
+    // IME オン/オフ（入力状態はこの 2 値だけ。旧 mode_* は別名として読む）
+    /// IME オフ = 直接入力。旧 `mode_alphanumeric` を含む。
+    #[serde(alias = "mode_alphanumeric")]
+    ImeOff, // 英数キー, Ctrl+L
+    /// IME オン = かな漢字変換。旧 `mode_hiragana` を含む。
+    #[serde(alias = "mode_hiragana")]
+    ImeOn, // ひらがなキー, Ctrl+Caps, Ctrl+J
     ImeToggle, // 全角/半角, Ctrl+Space
-    // 入力モード切り替え（IME オン中）
-    ModeHiragana,     // ひらがなキー, Ctrl+Caps
-    ModeKatakana,     // カタカナキー, Alt+Caps
-    ModeAlphanumeric, // 英数キー
     CursorLeft,
     CursorRight,
     /// Home（Issue #11: preedit 中はアプリへ渡さない）
@@ -83,9 +85,6 @@ impl KeyAction {
             Self::ImeOff => UserAction::ImeOff,
             Self::ImeOn => UserAction::ImeOn,
             Self::ImeToggle => UserAction::ImeToggle,
-            Self::ModeHiragana => UserAction::ModeHiragana,
-            Self::ModeKatakana => UserAction::ModeKatakana,
-            Self::ModeAlphanumeric => UserAction::ModeAlphanumeric,
             Self::CursorLeft => UserAction::CursorLeft,
             Self::CursorRight => UserAction::CursorRight,
             Self::CursorHome => UserAction::CursorHome,
@@ -98,25 +97,137 @@ impl KeyAction {
 
 // ─── KeySpec ─────────────────────────────────────────────────────────────────
 
+/// binding 側が要求する修飾キーの状態。
+///
+/// - `Off`    : 押されていないこと
+/// - `Either` : 左右どちらでも押されていればよい（`Ctrl+` / `Shift+` / `Alt+`）
+/// - `Left` / `Right` : その側が押されていること（`LCtrl+` / `RCtrl+` など）
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ModReq {
+    Off,
+    Either,
+    Left,
+    Right,
+}
+
+/// 実際の修飾キーの押下状態（左右を区別）。
+///
+/// `Both` は左右両方が押されている場合と、左右が判別できない場合
+/// （bool だけ渡された旧 API、SendInput で汎用 VK だけが押された場合）に使う。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum ModState {
+    #[default]
+    None,
+    Left,
+    Right,
+    Both,
+}
+
+impl ModState {
+    fn from_bool(pressed: bool) -> Self {
+        if pressed { Self::Both } else { Self::None }
+    }
+
+    pub fn is_pressed(self) -> bool {
+        self != Self::None
+    }
+
+    /// この状態に一致しうる binding 側の要求を、限定的なものから順に返す。
+    fn candidates(self) -> &'static [ModReq] {
+        match self {
+            Self::None => &[ModReq::Off],
+            Self::Left => &[ModReq::Left, ModReq::Either],
+            Self::Right => &[ModReq::Right, ModReq::Either],
+            Self::Both => &[ModReq::Left, ModReq::Right, ModReq::Either],
+        }
+    }
+}
+
+/// 3 つの修飾キーの押下状態。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct Modifiers {
+    pub ctrl: ModState,
+    pub shift: ModState,
+    pub alt: ModState,
+}
+
+impl Modifiers {
+    pub fn from_bools(ctrl: bool, shift: bool, alt: bool) -> Self {
+        Self {
+            ctrl: ModState::from_bool(ctrl),
+            shift: ModState::from_bool(shift),
+            alt: ModState::from_bool(alt),
+        }
+    }
+
+    /// `normalize_key_event` が返した bool（正規化後に有効な修飾キー）で絞り込む。
+    /// bool が false の修飾キーは `None`、true なのに元の状態が `None` なら `Both`。
+    fn masked(self, ctrl: bool, shift: bool, alt: bool) -> Self {
+        fn m(state: ModState, keep: bool) -> ModState {
+            match (keep, state) {
+                (false, _) => ModState::None,
+                (true, ModState::None) => ModState::Both,
+                (true, s) => s,
+            }
+        }
+        Self {
+            ctrl: m(self.ctrl, ctrl),
+            shift: m(self.shift, shift),
+            alt: m(self.alt, alt),
+        }
+    }
+
+    /// `GetKeyState` で現在の修飾キー状態を左右込みで読む。
+    pub(crate) fn current() -> Self {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            GetKeyState, VK_CONTROL, VK_LCONTROL, VK_LMENU, VK_LSHIFT, VK_MENU, VK_RCONTROL,
+            VK_RMENU, VK_RSHIFT, VK_SHIFT,
+        };
+        let down = |vk: u16| unsafe { GetKeyState(vk as i32) as u16 & 0x8000 != 0 };
+        let side = |generic: u16, left: u16, right: u16| -> ModState {
+            match (down(left), down(right)) {
+                (true, true) => ModState::Both,
+                (true, false) => ModState::Left,
+                (false, true) => ModState::Right,
+                // 左右のどちらも立っていないのに汎用 VK だけ押されている
+                // （SendInput 等）場合は側が分からないので Both 扱い
+                (false, false) if down(generic) => ModState::Both,
+                (false, false) => ModState::None,
+            }
+        };
+        Self {
+            ctrl: side(VK_CONTROL.0, VK_LCONTROL.0, VK_RCONTROL.0),
+            shift: side(VK_SHIFT.0, VK_LSHIFT.0, VK_RSHIFT.0),
+            alt: side(VK_MENU.0, VK_LMENU.0, VK_RMENU.0),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct KeySpec {
     pub vk: u16,
-    pub ctrl: bool,
-    pub shift: bool,
-    pub alt: bool,
+    pub ctrl: ModReq,
+    pub shift: ModReq,
+    pub alt: ModReq,
 }
 
 impl KeySpec {
     pub fn parse(s: &str) -> Option<Self> {
-        let mut ctrl = false;
-        let mut shift = false;
-        let mut alt = false;
+        let mut ctrl = ModReq::Off;
+        let mut shift = ModReq::Off;
+        let mut alt = ModReq::Off;
         let mut vk: Option<u16> = None;
         for part in s.split('+') {
             match part.trim().to_lowercase().as_str() {
-                "ctrl" | "control" => ctrl = true,
-                "shift" => shift = true,
-                "alt" => alt = true,
+                "ctrl" | "control" => ctrl = ModReq::Either,
+                "lctrl" | "lcontrol" => ctrl = ModReq::Left,
+                "rctrl" | "rcontrol" => ctrl = ModReq::Right,
+                "shift" => shift = ModReq::Either,
+                "lshift" => shift = ModReq::Left,
+                "rshift" => shift = ModReq::Right,
+                "alt" => alt = ModReq::Either,
+                "lalt" => alt = ModReq::Left,
+                "ralt" => alt = ModReq::Right,
                 name => vk = Some(name_to_vk(name)?),
             }
         }
@@ -289,14 +400,33 @@ impl Keymap {
         Self { table }
     }
 
-    /// ホットパス — HashMap::get のみ
+    /// 左右を区別しない照合（テスト・旧 API 用）。
+    /// `true` は「どちらの側か不明で押されている」として扱う。
     pub fn resolve(&self, vk: u16, ctrl: bool, shift: bool, alt: bool) -> Option<&KeyAction> {
-        self.table.get(&KeySpec {
-            vk,
-            ctrl,
-            shift,
-            alt,
-        })
+        self.resolve_mods(vk, Modifiers::from_bools(ctrl, shift, alt))
+    }
+
+    /// ホットパス — 左右込みの修飾キー状態で照合する。
+    ///
+    /// 各修飾キーについて「実際の状態に一致しうる要求」を限定的なものから順に
+    /// 試す（例: 右 Alt 押下 → `RAlt+` の binding を先に、無ければ `Alt+`）。
+    /// 最大でも 3×3×3 = 27 回の HashMap::get で済む。
+    pub fn resolve_mods(&self, vk: u16, mods: Modifiers) -> Option<&KeyAction> {
+        for &ctrl in mods.ctrl.candidates() {
+            for &shift in mods.shift.candidates() {
+                for &alt in mods.alt.candidates() {
+                    if let Some(a) = self.table.get(&KeySpec {
+                        vk,
+                        ctrl,
+                        shift,
+                        alt,
+                    }) {
+                        return Some(a);
+                    }
+                }
+            }
+        }
+        None
     }
 
     /// VK + 現在の修飾キー状態 → UserAction
@@ -304,16 +434,22 @@ impl Keymap {
     /// キーマップにあればそのアクション、なければ ToUnicode で文字変換。
     pub fn resolve_action(&self, vk: u16) -> Option<UserAction> {
         use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetKeyState, GetKeyboardState, ToUnicode, VK_CONTROL, VK_MENU, VK_SHIFT,
+            GetKeyState, GetKeyboardState, ToUnicode,
         };
-        let ctrl = unsafe { GetKeyState(VK_CONTROL.0 as i32) as u16 & 0x8000 != 0 };
-        let shift = unsafe { GetKeyState(VK_SHIFT.0 as i32) as u16 & 0x8000 != 0 };
-        let alt = unsafe { GetKeyState(VK_MENU.0 as i32) as u16 & 0x8000 != 0 };
+        let mods = Modifiers::current();
         let space_down = unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 };
-        let (vk, ctrl, shift, alt) = normalize_key_event(vk, ctrl, shift, alt, space_down);
+        let (vk, ctrl, shift, alt) = normalize_key_event(
+            vk,
+            mods.ctrl.is_pressed(),
+            mods.shift.is_pressed(),
+            mods.alt.is_pressed(),
+            space_down,
+        );
+        // 正規化で落ちた修飾キー（Ctrl+Alt+Right → Ctrl+Space の Alt など）を反映
+        let mods = mods.masked(ctrl, shift, alt);
 
-        // ① キーマップ優先
-        if let Some(ka) = self.resolve(vk, ctrl, shift, alt) {
+        // ① キーマップ優先（左右込み）
+        if let Some(ka) = self.resolve_mods(vk, mods) {
             return Some(ka.to_user_action());
         }
 
@@ -435,12 +571,10 @@ pub fn keymap_save_default() -> Result<()> {
             "#     candidate_page_up   -- 前ページ (Shift+Tab, PageUp)\n",
             "#   [IME オン/オフ]\n",
             "#     ime_toggle        -- オン↔オフ切り替え (全角/半角)\n",
-            "#     ime_off           -- IME をオフ (英数パススルー)\n",
-            "#     ime_on            -- IME をオン (ひらがなモードへ)\n",
-            "#   [入力モード切り替え]\n",
-            "#     mode_hiragana     -- ひらがなモードへ\n",
-            "#     mode_katakana     -- カタカナモードへ (全角)\n",
-            "#     mode_alphanumeric -- 英数モードへ\n",
+            "#     ime_on            -- IME をオン (かな漢字変換)\n",
+            "#     ime_off           -- IME をオフ (直接入力)\n",
+            "#     ※ 旧 mode_hiragana / mode_alphanumeric は ime_on / ime_off として、\n",
+            "#        mode_katakana は katakana (F7 変換) として読み込まれます。\n",
             "#\n",
             "# キー名:\n",
             "#   通常キー : Enter, Space, Escape, Backspace, Tab, Delete\n",
@@ -455,8 +589,10 @@ pub fn keymap_save_default() -> Result<()> {
             "#     Katakana     -- カタカナ\n",
             "#     Eisuu        -- 英数\n",
             "#     Caps         -- Caps Lock\n",
-            "#   修飾キー : Ctrl+, Shift+, Alt+（組み合わせ可）\n",
-            "#   例: \"Ctrl+Space\", \"Shift+Tab\", \"Alt+Caps\"\n",
+            "#   修飾キー : Ctrl+, Shift+, Alt+（左右どちらでも一致。組み合わせ可）\n",
+            "#              LCtrl+/RCtrl+, LShift+/RShift+, LAlt+/RAlt+（左右を区別）\n",
+            "#              左右指定と汎用指定が両方あるときは左右指定を優先\n",
+            "#   例: \"Ctrl+Space\", \"Shift+Tab\", \"Alt+Caps\", \"RAlt+Caps\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Space\"\n",
@@ -544,23 +680,23 @@ pub fn keymap_save_default() -> Result<()> {
             "\n",
             "[[bindings]]\n",
             "key    = \"Hiragana_key\"\n",
-            "action = \"mode_hiragana\"\n",
+            "action = \"ime_on\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Ctrl+Caps\"\n",
-            "action = \"mode_hiragana\"\n",
+            "action = \"ime_on\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Katakana\"\n",
-            "action = \"mode_katakana\"\n",
+            "action = \"katakana\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Alt+Caps\"\n",
-            "action = \"mode_katakana\"\n",
+            "action = \"katakana\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Eisuu\"\n",
-            "action = \"mode_alphanumeric\"\n",
+            "action = \"ime_off\"\n",
             "\n",
             "[[bindings]]\n",
             "key    = \"Left\"\n",
@@ -724,9 +860,9 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
     match preset {
         KeymapPreset::MsImeUs => vec![
             bind("Ctrl+Space", KeyAction::ImeToggle),
-            bind("Ctrl+J", KeyAction::ModeHiragana),
-            bind("Ctrl+K", KeyAction::ModeKatakana),
-            bind("Ctrl+L", KeyAction::ModeAlphanumeric),
+            bind("Ctrl+J", KeyAction::ImeOn),
+            bind("Ctrl+K", KeyAction::Katakana),
+            bind("Ctrl+L", KeyAction::ImeOff),
             bind("Space", KeyAction::Convert),
             bind("Enter", KeyAction::CommitRaw),
             bind("Escape", KeyAction::Cancel),
@@ -773,11 +909,11 @@ fn preset_bindings(preset: KeymapPreset) -> Vec<KeyBinding> {
             bind("PageUp", KeyAction::CandidatePageUp),
             bind("Zenkaku", KeyAction::ImeToggle),
             bind("Ctrl+Space", KeyAction::ImeToggle),
-            bind("Hiragana_key", KeyAction::ModeHiragana),
-            bind("Ctrl+Caps", KeyAction::ModeHiragana),
-            bind("Katakana", KeyAction::ModeKatakana),
-            bind("Alt+Caps", KeyAction::ModeKatakana),
-            bind("Eisuu", KeyAction::ModeAlphanumeric),
+            bind("Hiragana_key", KeyAction::ImeOn),
+            bind("Ctrl+Caps", KeyAction::ImeOn),
+            bind("Katakana", KeyAction::Katakana),
+            bind("Alt+Caps", KeyAction::Katakana),
+            bind("Eisuu", KeyAction::ImeOff),
             bind("Left", KeyAction::CursorLeft),
             bind("Right", KeyAction::CursorRight),
             bind("Home", KeyAction::CursorHome),
@@ -846,12 +982,134 @@ mod tests {
             inherit_preset: true,
             bindings: vec![KeyBinding {
                 key: "Ctrl+Space".to_string(),
-                action: KeyAction::ModeAlphanumeric,
+                action: KeyAction::ImeOff,
             }],
         });
         let keymap = Keymap::build(cfg);
         let action = keymap.resolve(0x20, true, false, false);
-        assert_eq!(action, Some(&KeyAction::ModeAlphanumeric));
+        assert_eq!(action, Some(&KeyAction::ImeOff));
+    }
+
+    /// 旧アクション名（mode_*）は互換のため新アクションに読み替える。
+    #[test]
+    fn legacy_mode_action_names_are_aliases() {
+        let cfg: KeymapConfig = toml::from_str(
+            r#"
+preset = "custom"
+inherit_preset = false
+[[bindings]]
+key = "Ctrl+J"
+action = "mode_hiragana"
+[[bindings]]
+key = "Ctrl+K"
+action = "mode_katakana"
+[[bindings]]
+key = "Ctrl+L"
+action = "mode_alphanumeric"
+"#,
+        )
+        .unwrap();
+        let keymap = Keymap::build(resolve_keymap_config(cfg));
+        assert_eq!(
+            keymap.resolve(0x4A, true, false, false),
+            Some(&KeyAction::ImeOn)
+        );
+        assert_eq!(
+            keymap.resolve(0x4B, true, false, false),
+            Some(&KeyAction::Katakana)
+        );
+        assert_eq!(
+            keymap.resolve(0x4C, true, false, false),
+            Some(&KeyAction::ImeOff)
+        );
+    }
+
+    /// 左右指定の修飾キー: RAlt+ は右 Alt でだけ一致し、汎用 Alt+ は左右どちらでも一致する。
+    /// 両方の binding があるときは左右指定を優先する。
+    #[test]
+    fn side_specific_modifiers_resolve() {
+        let cfg = KeymapConfig {
+            preset: Some(KeymapPreset::Custom),
+            inherit_preset: false,
+            bindings: vec![
+                bind("RAlt+Caps", KeyAction::ImeOff),
+                bind("Alt+Caps", KeyAction::Katakana),
+                bind("LShift+Space", KeyAction::FullWidthSpace),
+            ],
+        };
+        let km = Keymap::build(resolve_keymap_config(cfg));
+        let mods = |ctrl, shift, alt| Modifiers { ctrl, shift, alt };
+
+        // 右 Alt → 左右指定が優先
+        assert_eq!(
+            km.resolve_mods(0x14, mods(ModState::None, ModState::None, ModState::Right)),
+            Some(&KeyAction::ImeOff)
+        );
+        // 左 Alt → 汎用 Alt+ にフォールバック
+        assert_eq!(
+            km.resolve_mods(0x14, mods(ModState::None, ModState::None, ModState::Left)),
+            Some(&KeyAction::Katakana)
+        );
+        // 側不明（旧 bool API）→ 左右指定を含めて一致。RAlt が先に試される
+        assert_eq!(
+            km.resolve(0x14, false, false, true),
+            Some(&KeyAction::ImeOff)
+        );
+        // 修飾キーなしでは一致しない
+        assert_eq!(km.resolve_mods(0x14, Modifiers::default()), None);
+
+        // LShift+Space は左 Shift のみ。右 Shift では一致しない
+        assert_eq!(
+            km.resolve_mods(0x20, mods(ModState::None, ModState::Left, ModState::None)),
+            Some(&KeyAction::FullWidthSpace)
+        );
+        assert_eq!(
+            km.resolve_mods(0x20, mods(ModState::None, ModState::Right, ModState::None)),
+            None
+        );
+    }
+
+    #[test]
+    fn side_specific_modifier_names_parse() {
+        let spec = KeySpec::parse("LCtrl+RShift+RAlt+F1").unwrap();
+        assert_eq!(spec.vk, 0x70);
+        assert_eq!(spec.ctrl, ModReq::Left);
+        assert_eq!(spec.shift, ModReq::Right);
+        assert_eq!(spec.alt, ModReq::Right);
+        let generic = KeySpec::parse("Ctrl+Space").unwrap();
+        assert_eq!(generic.ctrl, ModReq::Either);
+        assert_eq!(generic.shift, ModReq::Off);
+        assert_eq!(
+            KeySpec::parse("lcontrol+rcontrol+a").unwrap().ctrl,
+            ModReq::Right
+        );
+    }
+
+    /// 新アクション名でも同じ結果になる。
+    #[test]
+    fn ime_on_off_action_names_parse() {
+        let cfg: KeymapConfig = toml::from_str(
+            r#"
+preset = "custom"
+inherit_preset = false
+[[bindings]]
+key = "Ctrl+J"
+action = "ime_on"
+[[bindings]]
+key = "Ctrl+L"
+action = "ime_off"
+"#,
+        )
+        .unwrap();
+        let keymap = Keymap::build(resolve_keymap_config(cfg));
+        assert_eq!(
+            keymap.resolve(0x4A, true, false, false),
+            Some(&KeyAction::ImeOn)
+        );
+        assert_eq!(
+            keymap.resolve(0x4C, true, false, false),
+            Some(&KeyAction::ImeOff)
+        );
     }
 
     #[test]
