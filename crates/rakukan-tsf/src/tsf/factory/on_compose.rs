@@ -453,6 +453,7 @@ unsafe fn set_display_attr_prop(
 /// 先に全体を atom_converted で塗り、その後 remainder 部分のみ atom_input で上書きする。
 ///
 /// `remainder` が空の場合は通常の `update_composition` と同じ動作になる。
+/// キャレットは composition 全体の末尾に置く。
 pub(super) fn update_composition_candidate_parts(
     ctx: ITfContext,
     tid: u32,
@@ -460,6 +461,58 @@ pub(super) fn update_composition_candidate_parts(
     prefix: String,
     converted: String,
     suffix: String,
+) -> Result<()> {
+    update_composition_parts_impl(
+        ctx,
+        tid,
+        sink,
+        prefix,
+        converted,
+        suffix,
+        CaretPlacement::CompositionEnd,
+    )
+}
+
+/// 範囲指定変換（RangeSelect）用: 先頭から `selected` までを選択範囲として表示する。
+///
+/// 表示属性は `update_composition_candidate_parts` と同じ（選択範囲＝実線、残り＝点線）だが、
+/// キャレットを選択範囲の末尾に置く。下線を描画しないアプリでも、Shift+Right / Left で
+/// キャレットが動くことで範囲の変化が分かるようにするため。
+pub(super) fn update_composition_range_select(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    selected: String,
+    unselected: String,
+) -> Result<()> {
+    update_composition_parts_impl(
+        ctx,
+        tid,
+        sink,
+        String::new(),
+        selected,
+        unselected,
+        CaretPlacement::ConvertedEnd,
+    )
+}
+
+/// composition 内でのキャレットの置き場所。
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaretPlacement {
+    /// composition 全体の末尾（通常の候補表示）
+    CompositionEnd,
+    /// `converted` 部分の末尾（範囲指定変換）
+    ConvertedEnd,
+}
+
+fn update_composition_parts_impl(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    prefix: String,
+    converted: String,
+    suffix: String,
+    caret: CaretPlacement,
 ) -> Result<()> {
     use windows::Win32::Foundation::E_FAIL;
 
@@ -538,6 +591,7 @@ pub(super) fn update_composition_candidate_parts(
         // ── Step2: 属性セット ──
         // 全体を atom_input（点線）で塗り、選択中ブロックのみ atom_converted（太実線）で上書きする
         set_display_attr_prop(&ctx, ec, &range, display_attr::atom_input());
+        let mut converted_range = None;
         if let Ok(sel_range) = range.Clone() {
             let mut actual = 0i32;
             let suffix_utf16: i32 = suffix.encode_utf16().count() as i32;
@@ -556,10 +610,17 @@ pub(super) fn update_composition_candidate_parts(
                 );
             }
             set_display_attr_prop(&ctx, ec, &sel_range, display_attr::atom_converted());
+            converted_range = Some(sel_range);
         }
 
-        // ── Step3: カーソルを末尾に ──
-        if let Ok(cursor) = range.Clone() {
+        // ── Step3: キャレットを置く ──
+        // CompositionEnd: composition 全体の末尾（従来どおり）
+        // ConvertedEnd  : converted 部分の末尾（範囲指定変換。converted 範囲が取れなければ末尾）
+        let cursor_base = match (caret, converted_range) {
+            (CaretPlacement::ConvertedEnd, Some(r)) => Ok(r),
+            _ => range.Clone(),
+        };
+        if let Ok(cursor) = cursor_base {
             let _ = cursor.Collapse(ec, TF_ANCHOR_END);
             let sel = TF_SELECTION {
                 range: std::mem::ManuallyDrop::new(Some(cursor)),

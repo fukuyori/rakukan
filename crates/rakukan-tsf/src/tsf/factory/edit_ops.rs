@@ -15,7 +15,7 @@ use crate::tsf::ime_sync;
 
 use super::{
     CandidateDir, commit_then_start_composition, end_composition, update_composition,
-    update_composition_candidate_parts,
+    update_composition_candidate_parts, update_composition_range_select,
 };
 
 fn is_numeric_digit(c: char) -> bool {
@@ -695,14 +695,7 @@ impl super::TextServiceFactory_Impl {
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
 
@@ -714,14 +707,7 @@ impl super::TextServiceFactory_Impl {
             let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
             drop(sess);
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
 
@@ -740,14 +726,7 @@ impl super::TextServiceFactory_Impl {
             engine.bg_reclaim();
             engine.force_preedit(reading);
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
 
@@ -762,14 +741,7 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 engine.bg_reclaim();
                 drop(guard);
-                update_composition_candidate_parts(
-                    ctx,
-                    tid,
-                    sink,
-                    String::new(),
-                    selected,
-                    unselected,
-                )?;
+                update_composition_range_select(ctx, tid, sink, selected, unselected)?;
                 return Ok(true);
             }
         }
@@ -828,14 +800,7 @@ impl super::TextServiceFactory_Impl {
             let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
             drop(sess);
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
         tracing::debug!(
@@ -875,14 +840,7 @@ impl super::TextServiceFactory_Impl {
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
 
@@ -894,14 +852,7 @@ impl super::TextServiceFactory_Impl {
             let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
             drop(sess);
             drop(guard);
-            update_composition_candidate_parts(
-                ctx,
-                tid,
-                sink,
-                String::new(),
-                selected,
-                unselected,
-            )?;
+            update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
         }
 
@@ -917,14 +868,7 @@ impl super::TextServiceFactory_Impl {
                 engine.bg_reclaim();
                 engine.force_preedit(reading);
                 drop(guard);
-                update_composition_candidate_parts(
-                    ctx,
-                    tid,
-                    sink,
-                    String::new(),
-                    selected,
-                    unselected,
-                )?;
+                update_composition_range_select(ctx, tid, sink, selected, unselected)?;
                 return Ok(true);
             }
         }
@@ -939,14 +883,7 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 engine.bg_reclaim();
                 drop(guard);
-                update_composition_candidate_parts(
-                    ctx,
-                    tid,
-                    sink,
-                    String::new(),
-                    selected,
-                    unselected,
-                )?;
+                update_composition_range_select(ctx, tid, sink, selected, unselected)?;
                 return Ok(true);
             }
         }
