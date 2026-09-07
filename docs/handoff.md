@@ -207,6 +207,8 @@ IME モード切替で `reload_if_changed()` が mtime チェックを行い、�
 - `Space` で選択範囲を LLM 変換して候補表示
 - `Enter` で選択範囲を確定、残りの reading で LiveConv を再開
 - `ESC` で LiveConv に戻る
+- 範囲指定中はキャレットを選択範囲の末尾に置く（2026-09-07。下線を描画しないアプリでも範囲の変化が分かるように）
+- Left / Right での文節移動は未対応。課題は [Segment_Edit_Plan.md](Segment_Edit_Plan.md)
 - vibrato / SplitPreedit は完全削除済み（分節アライメント問題を根本解決）
 
 ### 開発運用
@@ -466,7 +468,9 @@ rg '\[\.\.\d'        crates/rakukan-tsf/src/tsf/    crates/rakukan-tsf/src/engin
 - **[Engine-Host-2] ヘルスチェックとクラッシュカウント**
   - ホストが短時間に連続クラッシュしたら TSF 側で諦めて fallback する
 - **[Live-2] display_attr 拡張**
-  - RangeSelect の選択範囲表示の改善
+  - RangeSelect の選択範囲表示の改善。キャレットを選択範囲末尾に置く対応は 2026-09-07 に実施済み（`6c8a2fe`）が、入力先によってはキャレットも判別できない。自前ウィンドウでの表示など改善案は [Segment_Edit_Plan.md](Segment_Edit_Plan.md) の 6. を参照
+- **[Live-4] 範囲指定変換の文節編集モード化**
+  - RangeSelect 中に Left / Right で変換対象（文節）を移動できるようにする。RangeSelect を BlockSelecting に統合する案と論点は [Segment_Edit_Plan.md](Segment_Edit_Plan.md) を参照。着手時期は未定
 
 ### 優先度: 低
 

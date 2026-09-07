@@ -668,6 +668,8 @@ TSF Convert p95=171ms、engine beam p95=88msの差を分解するため、RPC要
 
 対象: G-5（P1。Step 8–9 と同じ engine DLL の変更としてまとめる）
 
+詳細設計: [Step10_Romaji_Rebuild_Plan.md](Step10_Romaji_Rebuild_Plan.md)（2026-09-07。現状の仕組み、問題の分析、入力種別付きログと再生関数の設計、着手前に決める 4 点、テスト一覧）
+
 負荷: 中〜大 — Backspaceの再生自体は小さいが、`romaji_input_log` の要素に入力種別（通常ローマ字 / 数字 / 記号 / 区切り / Shift英字）を持たせる表現変更が本体。`push_char` の5経路、`flush_pending_n`、`force_preedit`、F6〜F10の復元関数（`hiragana_from_romaji_log` / `romaji_log_str`）が対象。engine内に閉じる。
 
 #### 作業
