@@ -1,8 +1,9 @@
 # Step 10 詳細設計: ローマ字入力状態を入力文字列から再構築する
 
-作成: 2026-09-07
+作成: 2026-09-07（2026-09-09 更新: Issue #18 の 9/8 回答と、TSF 記号経路の追い越しを反映）
 位置づけ: `September_Revised_Plan.md` の Step 10（G-5、P1）の詳細。計画本文の「作業 / 検証 / 完了条件」を、現行コード（main `6c8a2fe` 時点）に即して具体化する
 対象クレート: `rakukan-engine`（engine DLL 内に閉じる）。Space 変換時の接尾辞表示だけ `rakukan-tsf` に及ぶ
+関連 Issue: #34（本 Step の問題点の記録）、#38（英単語の破壊・右端。PR #26 の置き場）、#35（`z` 系キー列の扱い）、#18（B / F）
 着手: 未定。Issue #18 の不具合修正フェーズ（C / H / I / F の一部）の後
 
 ## 1. 背景と経緯
@@ -12,6 +13,8 @@
 - Issue #18 の F のうち「Shift+英字が未確定ローマ字を追い越す」は Step 10 に合流。PR #26 は `romaji_input_log` を再生する実装で Step 10 と二重になるため、Step 10 完了後に出し直してもらう。PR #26 の観察（復元する / しないの判定表 `google` / `claude` / `seedreamtsukau`、「境界は未確定バッファを引いた位置で取る」「読みの途中の英単語は対象外」）は本設計の材料
 - Step 1（PR #10）は `hiragana_text()` を reading として扱う前提で完了しており、未変換接尾辞（「たt」の `t`）の分離・表示・確定・学習除外は本 Step に持ち越し
 - Step 5（L-1）の Backspace テストは「`kt` → Backspace で reading が `k` から空に変わる」を期待している。本 Step で期待値を再確認する
+- 2026-09-08: nick20002005 から本計画書 §5 への回答（Issue #18 コメント）。5-2 / 5-4 は推奨どおりで合意、5-1 は逆引き表を 2 段にする提案、5-3 は **§4.4 の記述がコードと食い違う**との指摘（→ §4.4 で訂正済み）。B の参考差分はテスト期待値だけ使えば十分とのこと
+- 2026-09-09: TSF が `.` `,` `/` `[` `]` を記号入力経路へ先に回すため、未確定ローマ字がある状態でこれらを打つと記号が先に確定して未確定分が後ろに残る（`z` + `,` → 「、z」、`j` + `.` → 「j。」。ログで確認）。§3.3 の追い越し経路の 3 つ目として本 Step に取り込む。trie の `z.` `z,` `z/` `z[` `z]` が到達不能になっている原因でもある。リーダー記号の方式そのものは `docs/Symbol_Leader_Input_Plan.md` で別途検討中
 
 ## 2. 現状の仕組み（`crates/rakukan-engine/src/lib.rs`）
 
@@ -38,6 +41,8 @@
 5. 英字と `,./[]\-` → trie。`pending_romaji_buf` に積んで `romaji.push`、`output` / `buffer` の差分から確定分と未確定分を判定する
 
 `push_raw`（テンキー記号など。かなルール登録文字を直接）と `push_fullwidth_alpha`（Shift+英字。`alpha_width` に従う。log には ASCII 大文字を記録）は **pending の有無を見ずに** `hiragana_buf` へ追記する。
+
+**TSF 側の記号経路**（`crates/rakukan-tsf/src/tsf/factory/dispatch.rs`）: キーボードの `.` `,` `/` `[` `]` は `Input(c)` として届いたあと、engine に渡る前に `text_util::direct_input_symbol` で `。` `、` `・` `「` `」` に変換され、`on_punctuate` → `push_raw` で積まれる。つまり **これらのキーは経路 5（trie）に届かない**。通常入力はすべてこの経路を通るので、`push_raw` の「pending を見ない」性質がキーボード入力に直接現れる。
 
 `flush_pending_n` は Convert / CommitRaw の直前に末尾の `n` を「ん」にする。log に `"n"` を積み、変換器を作り直す。
 `force_preedit`（F6〜F10、RangeSelect、BlockSelecting）は `hiragana_buf` を差し替え、pending と変換器を捨て、**log は保持する**。
@@ -72,9 +77,19 @@
 
 - `RemovedOutput` で `hiragana_buf` を 1 文字、log を 1 要素消す。log 要素は 1 文字とは限らない（`"kya"` → 「きゃ」）。「きゃ」から「ゃ」だけ消すと log から `"kya"` 全体が消え、`hiragana_buf = "き"` に対して log は空になる。この状態で F9 を押すと `k i` が復元されない（※コード上の読み。実機未確認）
 
-### 3.3 未確定ローマ字を追い越す入力（Issue #18 F）
+### 3.3 未確定ローマ字を追い越す入力（Issue #18 F、および TSF 記号経路）
 
 `push_raw` と `push_fullwidth_alpha` は pending を見ない。`k` → Shift+`A` で `hiragana_buf = "A"`、`pending = "k"` となり、表示は `"Ak"`、原本は `kA`。順序が入れ替わる。
+
+キーボードの `.` `,` `/` `[` `]` も §2.2 の TSF 記号経路で `push_raw` に落ちるため同じ構造になる。ログで確認した実例（2026-09-09）:
+
+| 打鍵 | 表示 | 期待 |
+|---|---|---|
+| `z` `,` | 「、z」 | 「‥」（trie の `z,`）または「z、」 |
+| `z` `.` | 「。z」 | 「…」（trie の `z.`）または「z。」 |
+| `j` `.` | 「j。」ではなく「。j」 | 「j。」 |
+
+`n` + `.` の実例はログに無く、「ん。」になるか「。n」になるかは未確認。§4.4 の閉じ方で「ん。」に確定させる。
 
 ### 3.4 復元関数の入力種別の欠落
 
@@ -145,7 +160,14 @@ pending の有無で分ける。
 | `tt` → BS | hira 「っ」/ pending 空 | hira 空 / pending `t` → `a` で「た」 |
 | `kanakq` → BS | 「かなk」（`k` は確定側） | 「かなk」（`k` は pending 側）。表示は同じ |
 
-**pending が空のとき**: 表示上の 1 文字を消す現行動作を維持する（「きゃ」→「き」）。ただし log を要素ごと捨てず、消した後に残るかなに対応する打鍵に書き換える（`"kya"` → `"ki"`）。かな → ローマ字の逆引き表が要る。逆引きできない場合（直接入力の記号など）は typed をそのまま 1 文字削る。
+**pending が空のとき**: 表示上の 1 文字を消す現行動作を維持する（「きゃ」→「き」）。ただし log を要素ごと捨てず、消した後に残るかなに対応する打鍵に書き換える（`"kya"` → `"ki"`）。逆引きできない場合（直接入力の記号など）は typed をそのまま 1 文字削る。
+
+残骸の打鍵列の作り方は 2 段にする（2026-09-08 の提案を採用候補とする）:
+
+1. **typed の接頭辞を再生して残骸に一致するものを探す。** 促音由来（`tta` → 「った」→ BS → 「っ」）は `tt` を再生すると output が「っ」になるので、打鍵に沿った綴りが得られる。逆引きだと `xtu` / `ltu` になり打鍵と無関係になる
+2. **見つからなければ かな → ローマ字の逆引き表を引く。** 拗音由来（`kya` → 「きゃ」→ BS → 「き」）は typed の接頭辞（`k` / `ky`）が出力を持たないので逆引きが要る。`rules.rs` は多対一（`ci` / `si` / `shi` → 「し」）なので、**元の綴りと接頭辞を共有する候補を優先する**（`sha` → BS → `shi`。`si` にしない）
+
+この方式では §2.1 の不変条件は「打鍵原本」から「現在の表示を再生できる打鍵列」へ意味が変わり、**F9 / F10 が打った綴りをそのまま返さなくなる**場合がある（`sha` → BS → F9 は `shi`）。挙動変更なのでテストで固定する（§7.1）。
 
 この分岐が本 Step で決める最大の UX 判断（5. の 1 参照）。「1 打鍵戻す」に統一すると「きゃ」→ BS が `ky`（表示 `ky`）になり、MS-IME の「ゃ」だけ消える挙動から離れる。
 
@@ -153,7 +175,19 @@ pending の有無で分ける。
 
 ### 4.4 未確定ローマ字を追い越す入力（`push_raw` / `push_fullwidth_alpha`）
 
-pending が空でない状態でこれらが呼ばれたら、先に pending を閉じてから追記する。閉じ方は `RomajiConverter::flush`（`n` → 「ん」、`k` → `k` 素通し）で、エントリに `closes_run = true` を付ける。これで表示順と原本の順が一致する（`k` → Shift+`A` = `kA`）。
+pending が空でない状態でこれらが呼ばれたら、先に pending を閉じてから追記する。閉じ方は次の順（エントリに `closes_run = true` を付ける）。
+
+1. `flush_pending_n`（pending がちょうど `n` なら「ん」）
+2. 残った pending を `RomajiConverter::flush` で閉じる（`k` → `k` 素通し）
+3. 記号 / Shift+英字を追記
+
+**訂正（2026-09-08 指摘）**: 旧版は「`flush` が `n` を「ん」にする」と書いていたが誤り。`rules.rs` に `n` 単独の規則は無く（`nn` / `n'` / `xn` のみ）、`flush()` は一致しない先頭文字をそのまま素通しするので、`flush` だけで閉じると `n` → Shift+`A` は「nA」になる。「ん」にしているのは engine の `flush_pending_n()` だけ。上記 1 → 2 の順で「んA」「ん。」にする（§5 の 3）。
+
+これで表示順と原本の順が一致する（`k` → Shift+`A` = `kA`、`k` + `.` = 「k。」、`j` + `.` = 「j。」）。
+
+対象は `push_raw` / `push_fullwidth_alpha` の engine 内部で行う（TSF 記号経路も `push_raw` に落ちるので自動的に直る）。engine の公開 API は `flush_pending_n` しか無く、素通しで閉じる API を TSF 側から呼ぶには ABI 追加が要るため、engine 内部に置く方が小さい（§4.6）。
+
+**`z` + 記号の例外**: trie の `z.` `z,` `z/` `z[` `z]` を生かす場合は、pending がちょうど `z` で `.` `,` `/` `[` `]` が続くときだけ、閉じずに trie へ流す（TSF `dispatch.rs` で `on_punctuate` ではなく `on_input` に回す）。採用するかは `docs/Symbol_Leader_Input_Plan.md` §5 の判断に従う。採用しない場合は `z` も上記 1 → 3 で「z、」になる。
 
 PR #26 の観察（`google` / `claude` は英単語として復元、`seedreamtsukau` は途中の英単語を対象外）は、この「閉じる」処理ではなく F9 / F10 の復元側の話なので、本 Step では扱わず、PR #26 の出し直し時に判断する。
 
@@ -172,16 +206,21 @@ engine 側は既に reading（`hiragana_text()`）と接尾辞（`pending_romaji
 
 ## 5. 着手前に決めること
 
-1. **pending が空のときの Backspace**: 「表示 1 文字を消す（現行、log は逆引きで書き換え）」か「1 打鍵戻す（`きゃ` → `ky`）」か。推奨は前者（4.3）
-2. **末尾 `n`**: `flush_pending_n` で「ん」に確定する現行維持（推奨）か、接尾辞として残すか
-3. **`push_raw` / `push_fullwidth_alpha` で pending を閉じるとき** `n` を「ん」にするか素通し `n` にするか。推奨は `flush`（「ん」）
-4. **`force_preedit` 後の Backspace**: 現行の単純 pop で据え置く（推奨）か、log から再構築するか
+2026-09-08 の nick20002005 の回答（Issue #18）を併記。最終判断は未定。
+
+1. **pending が空のときの Backspace**: 「表示 1 文字を消す（現行、log は書き換え）」か「1 打鍵戻す（`きゃ` → `ky`）」か。推奨は前者（4.3）。**先方も前者に賛成**。打鍵列の作り方は「typed の接頭辞再生 → 逆引き」の 2 段（4.3）を提案。F9 / F10 の挙動変更をテストで固定することも提案
+2. **末尾 `n`**: `flush_pending_n` で「ん」に確定する現行維持（推奨）か、接尾辞として残すか。**先方も現行維持に賛成**
+3. **`push_raw` / `push_fullwidth_alpha` で pending を閉じるとき** `n` を「ん」にするか素通し `n` にするか。推奨は `flush_pending_n` → `flush` の順で「ん」（4.4 で訂正済み。旧記述の「`flush` で「ん」」はコードと不一致）。**先方も「んA」を推奨**
+4. **`force_preedit` 後の Backspace**: 現行の単純 pop で据え置く（推奨）か、log から再構築するか。**先方も据え置きに賛成**
+5. **`z` + 記号を trie に流す例外（4.4）を入れるか**: `docs/Symbol_Leader_Input_Plan.md` §5 の 1 に従う。未定
+6. **TSF 記号経路の修正を Step 10 本体と切り離して先行させるか**: `push_raw` 内で閉じる変更（4.4 の 1 → 3）は engine の 1 関数で済み、ABI 変更なし。`j` + `.` → 「。j」の実害があるため先行も可。未定
 
 ## 6. 変更対象
 
 - `crates/rakukan-engine/src/lib.rs`: `InputEntry` / `InputKind` の導入、`push_char` 5 経路と `push_raw` / `push_fullwidth_alpha` / `flush_pending_n` / `force_preedit` の log 更新、`backspace` の書き直し、`replay_romaji_run` の追加、`hiragana_from_romaji_log` の種別対応、かな → ローマ字逆引き表（5. の 1 で前者を採る場合）
 - `crates/rakukan-engine/src/romaji/converter.rs`: 変更なしの見込み。必要なら区間再生用のヘルパーを足す
 - `crates/rakukan-tsf/src/tsf/factory/on_convert.rs`: 接尾辞の表示・確定・学習除外（4.5）
+- `crates/rakukan-tsf/src/tsf/factory/dispatch.rs`: `z` + 記号の例外（5. の 5 で採用した場合のみ）
 - `docs/September_Revised_Plan.md`: Step 10 の進捗記録
 
 ## 7. テスト
@@ -200,7 +239,9 @@ engine 側は既に reading（`hiragana_text()`）と接尾辞（`pending_romaji
 
 - `kya` → BS = 「き」、log が `ki` 相当になり F9 で `ki` が出る（5. の 1 で前者を採る場合）
 - `kon` → `flush_pending_n` → BS = 「こ」（「ん」を消す。再生で `n` が未確定に戻らない）
-- `k` → Shift+`A` の表示が `kA`（順序が入れ替わらない）。`n` → Shift+`A` は 5. の 3 に従う
+- `k` → Shift+`A` の表示が `kA`（順序が入れ替わらない）。`n` → Shift+`A` は「んA」（5. の 3）
+- `k` + `.` = 「k。」、`j` + `.` = 「j。」、`n` + `.` = 「ん。」（TSF 記号経路。§3.3 の実例）。`z` + `,` は 5. の 5 に従い「‥」または「z、」
+- `sha` → BS → F9 = `shi`（`si` にしない。4.3 の接頭辞優先）、`tta` → BS → F9 = `tt`（逆引きの `xtu` にしない）
 - 数字・記号・数値区切り・欧文句読点・直接入力の後の Backspace が現行どおり 1 文字消え、log と一致する
 - Shift+英字 `A` と数値区切り `,` を含む log から `hiragana_from_romaji_log` が「あ」「、」を作らない
 - `force_preedit` 後の Backspace が現行どおり 1 文字消す
