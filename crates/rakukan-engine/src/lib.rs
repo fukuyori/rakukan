@@ -251,6 +251,9 @@ pub struct EngineConfig {
     /// 詳細は `kanji::ConversionConfig::min_top_confidence` を参照。
     #[serde(default)]
     pub min_top_confidence: Option<f32>,
+    /// 記号の連打を三点リーダー `⋯` へ畳む（`。。。` / `・・・` / `、、、`）。既定 off。
+    #[serde(default)]
+    pub symbol_repeat_ellipsis: bool,
 }
 
 fn default_confidence_margin() -> Option<f32> {
@@ -274,6 +277,7 @@ impl Default for EngineConfig {
             convert_beam_size: 30,
             confidence_margin: default_confidence_margin(),
             min_top_confidence: None,
+            symbol_repeat_ellipsis: false,
         }
     }
 }
@@ -355,6 +359,22 @@ fn alpha_symbol_separator_auto(
     }
 }
 
+/// 記号の連打を 1 文字へ畳む規則（読みの末尾一致 → 置換）。上から順に試す。
+///
+/// `。。。` は三点リーダーの代用として最も多く打たれる形で、`・・・` / `、、、` も
+/// 同じ意図。`...` / `．．．` は英字直後（`alpha_symbol_separator_auto` が `.` を
+/// 和文の `。` にしない経路）で出る形。出力は中央寄せの `⋯`（U+22EF）。
+/// `…`（U+2026）は欧文フォントでベースラインに沈むので使わない。
+/// 二点リーダー `‥` は `z,` で打てるのでここでは扱わない（`、、` を畳むと
+/// 読点 2 連の打ち間違いを巻き込む）。
+const SYMBOL_REPEAT_RULES: &[(&str, &str)] = &[
+    ("。。。", "⋯"),
+    ("・・・", "⋯"),
+    ("、、、", "⋯"),
+    ("．．．", "⋯"),
+    ("...", "⋯"),
+];
+
 pub struct RakunEngine {
     romaji: RomajiConverter,
     kanji: Option<KanaKanjiConverter>,
@@ -433,6 +453,52 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
+        let before = self.hiragana_buf.len();
+        self.push_char_inner(c);
+        // 読みが伸びた打鍵だけを見る。force_preedit で置かれた末尾を、無関係な
+        // 次の打鍵で遡って畳まないため。
+        if self.hiragana_buf.len() > before {
+            self.collapse_symbol_repeat();
+        }
+        self.current_preedit()
+    }
+
+    /// 記号の連打を 1 文字へ畳む（`。。。` → `⋯`）。`symbol_repeat_ellipsis` が
+    /// off（既定）なら何もしない。
+    ///
+    /// `。。。` のような読みは変換に載らない。TSF 側の `split_by_punctuation` が
+    /// 句読点で読みを切るので、記号だけのブロックは候補ゼロで捨てられる
+    /// （ユーザー辞書に `。。。` を登録しても引かれない）。ローマ字テーブルに
+    /// `...` を足す案も、`.` に子ノードができて `。` の表示が 1 打鍵遅れるので不可。
+    /// 入力段で hiragana_buf の末尾を見て置き換えるのが唯一の経路。
+    ///
+    /// romaji converter の output と打鍵ログも同じ幅で縮める。これで Backspace が
+    /// `⋯` を 1 回で消し、F6〜F10 の復元（打鍵ログの再生）も `⋯` を再現する。
+    fn collapse_symbol_repeat(&mut self) -> bool {
+        if !self.config.symbol_repeat_ellipsis {
+            return false;
+        }
+        let Some((pattern, output)) = SYMBOL_REPEAT_RULES
+            .iter()
+            .find(|(pattern, _)| self.hiragana_buf.ends_with(pattern))
+        else {
+            return false;
+        };
+        let n = pattern.chars().count();
+        let keep = self.hiragana_buf.len() - pattern.len();
+        self.hiragana_buf.truncate(keep);
+        self.hiragana_buf.push_str(output);
+        self.romaji.replace_output_tail(pattern, output);
+        // 記号は 1 文字 = 1 エントリで積まれている（trie / push_raw / separator の
+        // どの経路でも）ので、末尾 n 件をまとめて置き換える。
+        let keep = self.romaji_input_log.len().saturating_sub(n);
+        self.romaji_input_log.truncate(keep);
+        self.romaji_input_log.push(output.to_string());
+        debug!("engine::push: symbol repeat {:?} → {:?}", pattern, output);
+        true
+    }
+
+    fn push_char_inner(&mut self, c: char) -> PreeditState {
         if self.config.digit_separator_auto
             && self.pending_romaji_buf.is_empty()
             && let Some(separator) =
@@ -543,6 +609,9 @@ impl RakunEngine {
     pub fn push_raw(&mut self, c: char) {
         self.hiragana_buf.push(c);
         self.romaji_input_log.push(c.to_string());
+        // TSF は `.` `,` `/` を `direct_input_symbol` で和文記号に変えてから
+        // この経路で積む（`push_char` を通らない）ので、ここでも畳む。
+        self.collapse_symbol_repeat();
     }
 
     /// Shift+アルファベット用: alpha_width 設定に従って全角 or 半角の大文字を hiragana_buf に追加。
@@ -1143,6 +1212,123 @@ mod symbol_input_tests {
         e.force_preedit("2".to_string());
         e.push_char(',');
         assert_eq!(e.hiragana_text(), "2、");
+    }
+
+    // ─── 記号の連打を三点リーダーへ畳む（input.symbol_repeat_ellipsis） ────────
+
+    fn ellipsis_config() -> crate::EngineConfig {
+        crate::EngineConfig {
+            symbol_repeat_ellipsis: true,
+            ..Default::default()
+        }
+    }
+
+    fn push_ellipsis(buf_init: &str, c: char) -> String {
+        let mut e = RakunEngine::new(ellipsis_config());
+        e.force_preedit(buf_init.to_string());
+        e.push_char(c);
+        e.hiragana_text().to_string()
+    }
+
+    #[test]
+    fn symbol_repeat_is_not_collapsed_by_default() {
+        // 既定 off。設定を入れていない利用者の入力は一切変わらない。
+        let mut e = RakunEngine::new(crate::EngineConfig::default());
+        for _ in 0..3 {
+            e.push_char('.');
+        }
+        assert_eq!(e.hiragana_text(), "。。。");
+        e.push_raw('。');
+        assert_eq!(e.hiragana_text(), "。。。。");
+    }
+
+    #[test]
+    fn three_maru_collapse_to_midline_ellipsis() {
+        let mut e = RakunEngine::new(ellipsis_config());
+        e.push_char('.');
+        e.push_char('.');
+        assert_eq!(e.hiragana_text(), "。。");
+        e.push_char('.');
+        assert_eq!(e.hiragana_text(), "⋯");
+        // 6 連で 2 つ
+        for _ in 0..3 {
+            e.push_char('.');
+        }
+        assert_eq!(e.hiragana_text(), "⋯⋯");
+    }
+
+    #[test]
+    fn push_raw_repeat_collapses_and_backspaces_as_one() {
+        // TSF の on_punctuate 経路（ローマ字変換を通らない）
+        let mut e = RakunEngine::new(ellipsis_config());
+        for c in "sou".chars() {
+            e.push_char(c);
+        }
+        for _ in 0..3 {
+            e.push_raw('。');
+        }
+        assert_eq!(e.hiragana_text(), "そう⋯");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "そう");
+        assert_eq!(e.hiragana_from_romaji_log(), "そう");
+    }
+
+    #[test]
+    fn nakaten_touten_and_western_period_repeat_collapse() {
+        assert_eq!(push_ellipsis("・・", '/'), "⋯");
+        assert_eq!(push_ellipsis("、、", ','), "⋯");
+        // 英字直後の `.` は `．` になる経路（alpha_width=fullwidth 既定）
+        assert_eq!(push_ellipsis("ａ．．", '.'), "ａ⋯");
+        // 半角設定なら `...` のまま積まれてから畳まれる
+        let config = crate::EngineConfig {
+            alpha_width: crate::AlphaWidth::Halfwidth,
+            symbol_width: crate::SymbolWidth::Halfwidth,
+            ..ellipsis_config()
+        };
+        let mut e = RakunEngine::new(config);
+        e.push_fullwidth_alpha('A');
+        for _ in 0..3 {
+            e.push_char('.');
+        }
+        assert_eq!(e.hiragana_text(), "A⋯");
+    }
+
+    #[test]
+    fn ellipsis_then_period_is_japanese_maru() {
+        // `⋯` は英字・記号扱いにならないので直後の `.` は `。`
+        assert_eq!(push_ellipsis("⋯", '.'), "⋯。");
+    }
+
+    #[test]
+    fn ellipsis_backspace_removes_whole_symbol() {
+        let mut e = RakunEngine::new(ellipsis_config());
+        for c in "sou...".chars() {
+            e.push_char(c);
+        }
+        assert_eq!(e.hiragana_text(), "そう⋯");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "そう");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "そ");
+    }
+
+    #[test]
+    fn ellipsis_survives_romaji_log_restore() {
+        let mut e = RakunEngine::new(ellipsis_config());
+        for c in "a...".chars() {
+            e.push_char(c);
+        }
+        assert_eq!(e.hiragana_text(), "あ⋯");
+        assert_eq!(e.hiragana_from_romaji_log(), "あ⋯");
+    }
+
+    #[test]
+    fn force_preedit_tail_is_not_collapsed_by_unrelated_key() {
+        // force_preedit で置かれた `。。。` は、読みを伸ばさない打鍵では畳まない
+        let mut e = RakunEngine::new(ellipsis_config());
+        e.force_preedit("。。。".to_string());
+        e.push_char('k'); // pending に留まる
+        assert_eq!(e.hiragana_text(), "。。。");
     }
 
     #[test]

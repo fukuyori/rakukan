@@ -218,6 +218,10 @@ pub struct InputConfig {
     /// 数字候補の表示順。指定した種別だけを候補に出す。
     #[serde(default = "default_digit_candidates_order")]
     pub digit_candidates_order: Vec<DigitCandidateKind>,
+    /// 記号の連打を三点リーダー `⋯` へ畳む（`。。。` / `・・・` / `、、、`）。
+    /// 既定 `false`（従来どおり打った記号がそのまま残る）。
+    #[serde(default)]
+    pub symbol_repeat_ellipsis: bool,
     /// 確定時に学習するか (デフォルト `true`)。
     /// Phase 1: 従来どおり user_dict.toml に追記される (肥大化注意)。
     /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
@@ -239,6 +243,7 @@ impl Default for InputConfig {
             symbol_width: SymbolWidth::default(),
             digit_separator_auto: default_digit_separator_auto(),
             digit_candidates_order: default_digit_candidates_order(),
+            symbol_repeat_ellipsis: false,
             auto_learn: default_auto_learn(),
         }
     }
@@ -579,6 +584,8 @@ symbol_width = "fullwidth"
 digit_separator_auto = true
 # 数字だけの reading に対して提示する候補種別と順序
 digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
+# 記号の連打を三点リーダー ⋯ へ畳む (。。。 / ・・・ / 、、、 / ．．． / ...)
+symbol_repeat_ellipsis = false
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true

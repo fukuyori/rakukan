@@ -533,13 +533,17 @@ impl super::TextServiceFactory_Impl {
         }
 
         if sess.is_live_conv() {
-            let (reading, preview) = sess
+            let (mut next_reading, mut display) = sess
                 .live_conv_parts()
                 .map(|(r, p)| (r.to_string(), p.to_string()))
                 .unwrap_or_default();
+            // engine が末尾を畳む（`。。。` → `⋯`）ことがあるので、記号をそのまま
+            // 足さず engine の読みの差分を表示側にも当てる。畳みが off なら
+            // 差分は「記号 1 文字を足す」と同じになる。
             engine.push_raw(symbol);
-            let display = format!("{preview}{symbol}");
-            let next_reading = format!("{reading}{symbol}");
+            let (removed, added) = text_util::tail_delta(&reading_before, &engine.hiragana_text());
+            text_util::apply_tail_delta(&mut next_reading, removed, &added);
+            text_util::apply_tail_delta(&mut display, removed, &added);
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
@@ -548,12 +552,13 @@ impl super::TextServiceFactory_Impl {
         }
 
         if sess.is_block_selecting() {
-            let full_text = sess.block_selecting_full_text().unwrap_or_default();
-            let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
-            engine.force_preedit(full_reading.clone());
+            let mut display = sess.block_selecting_full_text().unwrap_or_default();
+            let mut next_reading = sess.block_selecting_full_reading().unwrap_or_default();
+            engine.force_preedit(next_reading.clone());
             engine.push_raw(symbol);
-            let display = format!("{full_text}{symbol}");
-            let next_reading = format!("{full_reading}{symbol}");
+            let (removed, added) = text_util::tail_delta(&next_reading, &engine.hiragana_text());
+            text_util::apply_tail_delta(&mut next_reading, removed, &added);
+            text_util::apply_tail_delta(&mut display, removed, &added);
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
@@ -576,8 +581,17 @@ impl super::TextServiceFactory_Impl {
             if remainder_reading.is_empty() {
                 remainder_reading = remainder.clone();
             }
-            let display = format!("{prefix}{text}{symbol}{remainder}");
-            let next_reading = format!("{prefix_reading}{reading}{symbol}{remainder_reading}");
+            // 記号は engine に積んで畳み込み（`。。。` → `⋯`）を通し、その差分を
+            // 表示側にも当てる。remainder は畳み込みの対象外なので後から足す。
+            let mut head_display = format!("{prefix}{text}");
+            let mut head_reading = format!("{prefix_reading}{reading}");
+            engine.force_preedit(head_reading.clone());
+            engine.push_raw(symbol);
+            let (removed, added) = text_util::tail_delta(&head_reading, &engine.hiragana_text());
+            text_util::apply_tail_delta(&mut head_reading, removed, &added);
+            text_util::apply_tail_delta(&mut head_display, removed, &added);
+            let display = format!("{head_display}{remainder}");
+            let next_reading = format!("{head_reading}{remainder_reading}");
             engine.force_preedit(next_reading.clone());
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
@@ -587,9 +601,10 @@ impl super::TextServiceFactory_Impl {
         }
 
         if sess.is_waiting() {
-            let text = sess.preedit_text().unwrap_or("").to_string();
+            let mut display = sess.preedit_text().unwrap_or("").to_string();
             engine.push_raw(symbol);
-            let display = format!("{text}{symbol}");
+            let (removed, added) = text_util::tail_delta(&reading_before, &engine.hiragana_text());
+            text_util::apply_tail_delta(&mut display, removed, &added);
             sess.set_preedit(display.clone());
             drop(sess);
             drop(guard);
