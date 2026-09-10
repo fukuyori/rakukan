@@ -66,6 +66,13 @@ enum State {
         key: String,
         converter: KanaKanjiConverter,
         candidates: Vec<String>,
+        /// 推論がエラー / パニックで落ちたか。
+        ///
+        /// 候補が空になる理由は「LLM が何も出さなかった」と「推論そのものが
+        /// 失敗した」の 2 つあり、`candidates.is_empty()` だけでは区別できない。
+        /// GPU デバイス消失（ドライバ更新・スリープ復帰・TDR）は後者としてしか
+        /// 観測できないので、呼び出し元が復帰を判断するための唯一の手掛かりになる。
+        failed: bool,
     },
 }
 
@@ -143,7 +150,7 @@ fn worker_loop(cache: Arc<Cache>) {
         let converter = req.converter;
 
         let t = std::time::Instant::now();
-        let (converter, candidates) =
+        let (converter, candidates, failed) =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::digits::convert_with_digit_protection(
                     &converter,
@@ -162,15 +169,15 @@ fn worker_loop(cache: Arc<Cache>) {
                         cands.len(),
                         key
                     );
-                    (converter, cands)
+                    (converter, cands, false)
                 }
                 Ok(Err(e)) => {
                     tracing::warn!("conv-worker error: {e}");
-                    (converter, vec![])
+                    (converter, vec![], true)
                 }
                 Err(_) => {
                     tracing::error!("conv-worker PANIC");
-                    (converter, vec![])
+                    (converter, vec![], true)
                 }
             };
 
@@ -184,6 +191,7 @@ fn worker_loop(cache: Arc<Cache>) {
                 key,
                 converter,
                 candidates,
+                failed,
             };
         }
         // Done 遷移を wait_done_timeout に通知
@@ -293,6 +301,7 @@ pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
         key: k,
         converter,
         candidates,
+        failed,
     } = std::mem::replace(&mut inner.state, State::Idle)
     else {
         unreachable!()
@@ -323,6 +332,7 @@ pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
             key: k,
             converter,
             candidates,
+            failed,
         };
         return None;
     }
@@ -430,11 +440,16 @@ pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
 ///
 /// `blocking lock` を使用。`try_lock()` だとワーカーが Done を書いている瞬間に
 /// "locked" を返してしまい状態を見落とすため。
+///
+/// 推論が失敗した Done は `"done"` ではなく `"error"` を返す。呼び出し元から見た
+/// 「候補が空」は正常な結果でも起こりうるが、`"error"` は推論が落ちたときにしか
+/// 出ないため、GPU デバイス消失からの復帰判断に使える。
 pub fn status() -> &'static str {
     match CACHE.inner.lock() {
         Ok(s) => match &s.state {
             State::Idle => "idle",
             State::Running { .. } => "running",
+            State::Done { failed: true, .. } => "error",
             State::Done { .. } => "done",
         },
         Err(_) => "idle", // poisoned — フォールバック
