@@ -190,6 +190,44 @@ fn immediate_dict_candidates(
     }
 }
 
+/// Selecting 中の候補ウィンドウと composition を更新する。
+///
+/// `advance` が真なら選択を 1 つ進める。通常の Space 押下（進める）と、
+/// LLM を待つのをやめて候補表を入れ替えた直後（先頭を選んだまま見せる）の
+/// 両方から呼ぶ。呼び出し前にエンジンガードとセッションガードを手放しておくこと。
+fn show_selection(
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    advance: bool,
+) -> Result<bool> {
+    let mut sess = session_get()?;
+    if advance {
+        sess.next_with_page_wrap();
+    }
+    let page_cands = sess.page_candidates().to_vec();
+    let page_sel = sess.page_selected();
+    let page_info = sess.page_info();
+    let cand_text = sess
+        .current_candidate()
+        .or_else(|| sess.original_preedit())
+        .unwrap_or("")
+        .to_string();
+    let prefix = sess.selecting_prefix_clone();
+    let remainder = sess.selecting_remainder_clone();
+    drop(sess);
+    candidate_window::update_selection(page_sel, &page_info);
+    candidate_window::show(
+        &page_cands,
+        page_sel,
+        &page_info,
+        caret_rect_get().left,
+        caret_rect_get().bottom,
+    );
+    update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
+    Ok(true)
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
         &self,
@@ -411,7 +449,7 @@ impl super::TextServiceFactory_Impl {
 
         // すでに選択モード中 → 1候補ずつ進む
         {
-            let mut sess = session_get()?;
+            let sess = session_get()?;
             if sess.is_selecting() {
                 // llm_pending=true の場合はLLM完了を確認して候補を更新
                 let llm_pending = matches!(
@@ -449,6 +487,10 @@ impl super::TextServiceFactory_Impl {
 
                     let bg_done = engine.bg_status() == "done";
                     tracing::debug!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
+                    if bg_done {
+                        // 推論が通った = デバイスは生きている
+                        crate::engine::state::bg_failure_reset();
+                    }
                     const DICT_LIMIT: usize = 40;
 
                     if bg_done {
@@ -647,7 +689,7 @@ impl super::TextServiceFactory_Impl {
                                 }
                             }
                         }
-                    } else {
+                    } else if engine.bg_status() == "running" {
                         // まだ変換中 → 現在の候補ウィンドウをそのまま維持
                         if let Ok(sess2) = session_get() {
                             let page_cands = sess2.page_candidates().to_vec();
@@ -666,33 +708,60 @@ impl super::TextServiceFactory_Impl {
                             );
                             return Ok(true);
                         }
+                    } else {
+                        // BG 変換が走っていない（idle / error）のに llm_pending が
+                        // 立ったまま。待っても候補は永久に来ないので、ここで
+                        // llm_pending を降ろして辞書候補での候補送りに切り替える。
+                        //
+                        // これを入れないと Space が無反応のまま固まる。ウィンドウには
+                        // 「⏳ 変換中...」が出続けるので、ユーザーからは「待てば直る」
+                        // ようにしか見えず、実際には何も走っていない。
+                        // 推論が失敗して即 idle に戻る壊れ方（GPU デバイス消失）で必ず踏む。
+                        let bg_now = engine.bg_status();
+                        tracing::warn!(
+                            "on_convert[llm_pending]: bg={} with llm_pending set — giving up on LLM, \
+                             falling back to dict candidates",
+                            bg_now
+                        );
+                        if bg_now == "error" {
+                            engine.bg_reclaim();
+                            crate::engine::state::bg_failure_watchdog();
+                        }
+                        // LLM 待ちの間に出していたのが読みそのものだけ（候補 1 件）の
+                        // 場合は、候補送りする先が無く生かなのまま詰む。辞書候補が
+                        // 引けるなら差し替えて、その先頭を選んだ状態で見せる。
+                        let dict_fallback = immediate_dict_candidates(engine, &preedit, DICT_LIMIT);
+                        drop(guard);
+                        let mut replaced = false;
+                        if let Ok(mut sess2) = session_get() {
+                            let only_placeholder = matches!(
+                                *sess2,
+                                SessionState::Selecting { ref candidates, .. }
+                                    if candidates.len() <= 1
+                            );
+                            if only_placeholder && let Some(candidates) = dict_fallback {
+                                sess2.replace_selecting_candidates(
+                                    candidates,
+                                    CandidateViewSource::Dict,
+                                );
+                                replaced = true;
+                            }
+                            if let SessionState::Selecting {
+                                ref mut llm_pending,
+                                ..
+                            } = *sess2
+                            {
+                                *llm_pending = false;
+                            }
+                        }
+                        return show_selection(ctx, tid, sink, !replaced);
                     }
                     return Ok(true);
                 }
 
-                sess.next_with_page_wrap();
-                let page_cands = sess.page_candidates().to_vec();
-                let page_sel = sess.page_selected();
-                let page_info = sess.page_info();
-                let cand_text = sess
-                    .current_candidate()
-                    .or_else(|| sess.original_preedit())
-                    .unwrap_or("")
-                    .to_string();
-                let prefix = sess.selecting_prefix_clone();
-                let remainder = sess.selecting_remainder_clone();
                 drop(sess);
                 drop(guard);
-                candidate_window::update_selection(page_sel, &page_info);
-                candidate_window::show(
-                    &page_cands,
-                    page_sel,
-                    &page_info,
-                    caret_rect_get().left,
-                    caret_rect_get().bottom,
-                );
-                update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
-                return Ok(true);
+                return show_selection(ctx, tid, sink, true);
             }
         }
 

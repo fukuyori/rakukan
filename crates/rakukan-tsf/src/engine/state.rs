@@ -460,6 +460,103 @@ pub fn bg_timeout_watchdog(is_stuck: bool) {
     }
 }
 
+// ─── 推論失敗のウォッチドッグ（GPU デバイス消失からの復帰） ────────────────────
+//
+// `bg_timeout_watchdog` は「詰まったまま帰ってこない」ケースしか見ていない。
+// GPU デバイスが消えると推論は詰まらず**即座に失敗して idle に戻る**ので、
+// 20 秒の停滞は永久に発生せず、そちらのウォッチドッグは一度も発火しない。
+//
+// デバイスが消える経路（いずれも IME を起動したまま起こる）:
+//   - GPU ドライバの更新（インストーラがディスプレイドライバを入れ替える）
+//   - スリープ / 休止からの復帰
+//   - TDR（ドライバのタイムアウト検出と回復）
+//
+// エンジンホストは生きていて、掴んでいる Vulkan デバイスだけが無効になるため、
+// プロセスを立て直す以外に復帰手段がない。ホストを再起動すれば新しいデバイスを
+// 作り直すので、規定回数連続で失敗したら自動で再起動する。
+
+/// 連続失敗が何回でエンジンを再起動するか。
+///
+/// 1 回で撃たないのは、単発の失敗（一時的なメモリ不足・生成タイムアウト）で
+/// 再起動して変換中のセッションを壊さないため。デバイスが消えている場合は
+/// 打鍵のたびに必ず失敗するので、2 回の猶予でも体感の遅れにはならない。
+const BG_FAILURE_RELOAD_THRESHOLD: u32 = 3;
+
+/// 自動再起動の最短間隔。
+///
+/// TSF DLL はアプリごとに別プロセスで動き、共有シングルトンのエンジンホストを
+/// 各プロセスが独立に監視している。間隔を置かないと、1 回のデバイス消失で
+/// 全プロセスが順番にホストを撃ち落とす reload storm になる
+/// （`engine_reload` の条件付き再起動と同じ問題）。
+const BG_FAILURE_RELOAD_COOLDOWN_SECS: u64 = 60;
+
+struct BgFailureState {
+    consecutive: u32,
+    last_reload: Option<std::time::Instant>,
+}
+
+static BG_FAILURE: Mutex<BgFailureState> = Mutex::new(BgFailureState {
+    consecutive: 0,
+    last_reload: None,
+});
+
+/// 推論が成功したことを記録し、連続失敗カウントを解除する。
+pub fn bg_failure_reset() {
+    let Ok(mut guard) = BG_FAILURE.try_lock() else {
+        return;
+    };
+    if guard.consecutive != 0 {
+        tracing::debug!(
+            "bg_failure_watchdog: reset after {} failures",
+            guard.consecutive
+        );
+        guard.consecutive = 0;
+    }
+}
+
+/// 連続失敗回数と前回の自動再起動からの経過から、いま再起動すべきかを決める。
+///
+/// 時計とグローバル状態から切り離してあるのは、閾値とクールダウンの判定だけを
+/// テストできるようにするため。
+fn should_reload_after_failures(
+    consecutive: u32,
+    since_last_reload: Option<std::time::Duration>,
+) -> bool {
+    if consecutive < BG_FAILURE_RELOAD_THRESHOLD {
+        return false;
+    }
+    match since_last_reload {
+        Some(elapsed) => elapsed.as_secs() >= BG_FAILURE_RELOAD_COOLDOWN_SECS,
+        None => true,
+    }
+}
+
+/// 推論失敗（`bg_status() == "error"`）を記録する。
+///
+/// 連続 `BG_FAILURE_RELOAD_THRESHOLD` 回でエンジンホストを再起動する。
+/// 再起動を起動したときだけ `true` を返す（呼び出し元のログ用）。
+pub fn bg_failure_watchdog() -> bool {
+    let Ok(mut guard) = BG_FAILURE.try_lock() else {
+        return false;
+    };
+    guard.consecutive += 1;
+    let n = guard.consecutive;
+    tracing::warn!("bg_failure_watchdog: inference failed {n} time(s) in a row");
+    if !should_reload_after_failures(n, guard.last_reload.map(|t| t.elapsed())) {
+        return false;
+    }
+    tracing::warn!(
+        "bg_failure_watchdog: {n} consecutive inference failures, auto engine_reload \
+         (GPU device likely lost — driver update / resume / TDR)"
+    );
+    guard.consecutive = 0;
+    guard.last_reload = Some(std::time::Instant::now());
+    drop(guard);
+    // デバイス復帰目的なので config が同じでも必ず再起動する
+    engine_reload_force();
+    true
+}
+
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
 ///
 /// **条件付き**: ホストが既に同じ config で動いている場合は再起動しない
@@ -2415,6 +2512,36 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bg_failure_reload_needs_consecutive_failures() {
+        // 単発の失敗で再起動すると、一時的な失敗のたびに変換中のセッションを壊す。
+        assert!(!should_reload_after_failures(1, None));
+        assert!(!should_reload_after_failures(
+            BG_FAILURE_RELOAD_THRESHOLD - 1,
+            None
+        ));
+        assert!(should_reload_after_failures(
+            BG_FAILURE_RELOAD_THRESHOLD,
+            None
+        ));
+    }
+
+    #[test]
+    fn bg_failure_reload_respects_cooldown() {
+        // TSF DLL はアプリごとに別プロセスで動くので、クールダウンが無いと
+        // 1 回のデバイス消失で全プロセスが順にホストを撃ち落とす。
+        let within = std::time::Duration::from_secs(BG_FAILURE_RELOAD_COOLDOWN_SECS - 1);
+        let elapsed = std::time::Duration::from_secs(BG_FAILURE_RELOAD_COOLDOWN_SECS);
+        assert!(!should_reload_after_failures(
+            BG_FAILURE_RELOAD_THRESHOLD,
+            Some(within)
+        ));
+        assert!(should_reload_after_failures(
+            BG_FAILURE_RELOAD_THRESHOLD,
+            Some(elapsed)
+        ));
+    }
 
     fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {
         ConversionBlock {
