@@ -514,47 +514,76 @@ pub fn bg_failure_reset() {
     }
 }
 
-/// 連続失敗回数と前回の自動再起動からの経過から、いま再起動すべきかを決める。
+/// 推論失敗を記録した結果、いま何が起きているか。
+///
+/// ユーザーに出す文言を決めるために使う。デバイスが消えたことも、エンジンを
+/// 入れ直せば直ることも、ユーザーには推測しようがない。黙って直すだけだと
+/// 「直らなかったとき」に打つ手が無くなるので、段階を区別して伝える。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgFailureAction {
+    /// 閾値に達していない。単発の失敗かもしれないので様子を見る。
+    Counting,
+    /// エンジンホストの再起動を起動した。
+    Reloading,
+    /// 再起動したのにまた失敗している。エンジンの入れ直しでは直らない。
+    ReloadDidNotHelp,
+}
+
+/// 連続失敗回数と前回の自動再起動からの経過から、いま何をすべきかを決める。
 ///
 /// 時計とグローバル状態から切り離してあるのは、閾値とクールダウンの判定だけを
 /// テストできるようにするため。
-fn should_reload_after_failures(
+fn classify_failure(
     consecutive: u32,
     since_last_reload: Option<std::time::Duration>,
-) -> bool {
+) -> BgFailureAction {
     if consecutive < BG_FAILURE_RELOAD_THRESHOLD {
-        return false;
+        return BgFailureAction::Counting;
     }
     match since_last_reload {
-        Some(elapsed) => elapsed.as_secs() >= BG_FAILURE_RELOAD_COOLDOWN_SECS,
-        None => true,
+        // 直前に再起動したばかりなのに、また閾値まで失敗した
+        // = プロセスを立て直しても状況が変わっていない。
+        Some(elapsed) if elapsed.as_secs() < BG_FAILURE_RELOAD_COOLDOWN_SECS => {
+            BgFailureAction::ReloadDidNotHelp
+        }
+        _ => BgFailureAction::Reloading,
     }
 }
 
 /// 推論失敗（`bg_status() == "error"`）を記録する。
 ///
 /// 連続 `BG_FAILURE_RELOAD_THRESHOLD` 回でエンジンホストを再起動する。
-/// 再起動を起動したときだけ `true` を返す（呼び出し元のログ用）。
-pub fn bg_failure_watchdog() -> bool {
+/// 戻り値は呼び出し元がユーザーへの文言を決めるために使う。
+pub fn bg_failure_watchdog() -> BgFailureAction {
     let Ok(mut guard) = BG_FAILURE.try_lock() else {
-        return false;
+        // 他スレッドが数えている最中。二重計上を避けて様子見に倒す。
+        return BgFailureAction::Counting;
     };
     guard.consecutive += 1;
     let n = guard.consecutive;
     tracing::warn!("bg_failure_watchdog: inference failed {n} time(s) in a row");
-    if !should_reload_after_failures(n, guard.last_reload.map(|t| t.elapsed())) {
-        return false;
+    let action = classify_failure(n, guard.last_reload.map(|t| t.elapsed()));
+    match action {
+        BgFailureAction::Counting => {}
+        BgFailureAction::ReloadDidNotHelp => {
+            tracing::error!(
+                "bg_failure_watchdog: still failing after an auto engine_reload — \
+                 the GPU device is not coming back by restarting the host"
+            );
+        }
+        BgFailureAction::Reloading => {
+            tracing::warn!(
+                "bg_failure_watchdog: {n} consecutive inference failures, auto engine_reload \
+                 (GPU device likely lost — driver update / resume / TDR)"
+            );
+            guard.consecutive = 0;
+            guard.last_reload = Some(std::time::Instant::now());
+            drop(guard);
+            // デバイス復帰目的なので config が同じでも必ず再起動する
+            engine_reload_force();
+        }
     }
-    tracing::warn!(
-        "bg_failure_watchdog: {n} consecutive inference failures, auto engine_reload \
-         (GPU device likely lost — driver update / resume / TDR)"
-    );
-    guard.consecutive = 0;
-    guard.last_reload = Some(std::time::Instant::now());
-    drop(guard);
-    // デバイス復帰目的なので config が同じでも必ず再起動する
-    engine_reload_force();
-    true
+    action
 }
 
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
@@ -2516,31 +2545,37 @@ mod tests {
     #[test]
     fn bg_failure_reload_needs_consecutive_failures() {
         // 単発の失敗で再起動すると、一時的な失敗のたびに変換中のセッションを壊す。
-        assert!(!should_reload_after_failures(1, None));
-        assert!(!should_reload_after_failures(
-            BG_FAILURE_RELOAD_THRESHOLD - 1,
-            None
-        ));
-        assert!(should_reload_after_failures(
-            BG_FAILURE_RELOAD_THRESHOLD,
-            None
-        ));
+        assert_eq!(classify_failure(1, None), BgFailureAction::Counting);
+        assert_eq!(
+            classify_failure(BG_FAILURE_RELOAD_THRESHOLD - 1, None),
+            BgFailureAction::Counting
+        );
+        assert_eq!(
+            classify_failure(BG_FAILURE_RELOAD_THRESHOLD, None),
+            BgFailureAction::Reloading
+        );
+    }
+
+    #[test]
+    fn bg_failure_repeats_after_reload_are_reported_as_unrecoverable() {
+        // 再起動した直後にまた閾値まで失敗する = ホストを立て直しても直っていない。
+        // ここを Reloading と区別しないと、撃ち続けるだけでユーザーには何も伝わらない。
+        let within = std::time::Duration::from_secs(BG_FAILURE_RELOAD_COOLDOWN_SECS - 1);
+        assert_eq!(
+            classify_failure(BG_FAILURE_RELOAD_THRESHOLD, Some(within)),
+            BgFailureAction::ReloadDidNotHelp
+        );
     }
 
     #[test]
     fn bg_failure_reload_respects_cooldown() {
         // TSF DLL はアプリごとに別プロセスで動くので、クールダウンが無いと
         // 1 回のデバイス消失で全プロセスが順にホストを撃ち落とす。
-        let within = std::time::Duration::from_secs(BG_FAILURE_RELOAD_COOLDOWN_SECS - 1);
         let elapsed = std::time::Duration::from_secs(BG_FAILURE_RELOAD_COOLDOWN_SECS);
-        assert!(!should_reload_after_failures(
-            BG_FAILURE_RELOAD_THRESHOLD,
-            Some(within)
-        ));
-        assert!(should_reload_after_failures(
-            BG_FAILURE_RELOAD_THRESHOLD,
-            Some(elapsed)
-        ));
+        assert_eq!(
+            classify_failure(BG_FAILURE_RELOAD_THRESHOLD, Some(elapsed)),
+            BgFailureAction::Reloading
+        );
     }
 
     fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {

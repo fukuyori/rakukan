@@ -195,11 +195,15 @@ fn immediate_dict_candidates(
 /// `advance` が真なら選択を 1 つ進める。通常の Space 押下（進める）と、
 /// LLM を待つのをやめて候補表を入れ替えた直後（先頭を選んだまま見せる）の
 /// 両方から呼ぶ。呼び出し前にエンジンガードとセッションガードを手放しておくこと。
+///
+/// `status` はウィンドウ下部に出す一行。LLM を諦めた経路では、なぜ候補が
+/// 変わったのかをここで伝える（`None` なら通常表示）。
 fn show_selection(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
     advance: bool,
+    status: Option<&str>,
 ) -> Result<bool> {
     let mut sess = session_get()?;
     if advance {
@@ -217,12 +221,13 @@ fn show_selection(
     let remainder = sess.selecting_remainder_clone();
     drop(sess);
     candidate_window::update_selection(page_sel, &page_info);
-    candidate_window::show(
+    candidate_window::show_with_status(
         &page_cands,
         page_sel,
         &page_info,
         caret_rect_get().left,
         caret_rect_get().bottom,
+        status,
     );
     update_composition_candidate_parts(ctx, tid, sink, prefix, cand_text, remainder)?;
     Ok(true)
@@ -723,10 +728,13 @@ impl super::TextServiceFactory_Impl {
                              falling back to dict candidates",
                             bg_now
                         );
-                        if bg_now == "error" {
+                        let failure_status = if bg_now == "error" {
                             engine.bg_reclaim();
-                            crate::engine::state::bg_failure_watchdog();
-                        }
+                            let action = crate::engine::state::bg_failure_watchdog();
+                            Some(candidate_window::bg_failure_status_text(action))
+                        } else {
+                            None
+                        };
                         // LLM 待ちの間に出していたのが読みそのものだけ（候補 1 件）の
                         // 場合は、候補送りする先が無く生かなのまま詰む。辞書候補が
                         // 引けるなら差し替えて、その先頭を選んだ状態で見せる。
@@ -754,14 +762,14 @@ impl super::TextServiceFactory_Impl {
                                 *llm_pending = false;
                             }
                         }
-                        return show_selection(ctx, tid, sink, !replaced);
+                        return show_selection(ctx, tid, sink, !replaced, failure_status);
                     }
                     return Ok(true);
                 }
 
                 drop(sess);
                 drop(guard);
-                return show_selection(ctx, tid, sink, true);
+                return show_selection(ctx, tid, sink, true, None);
             }
         }
 

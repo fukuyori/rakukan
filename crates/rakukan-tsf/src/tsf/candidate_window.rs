@@ -1141,6 +1141,21 @@ fn clear_llm_pending() {
     }
 }
 
+/// 推論が失敗したときに候補ウィンドウへ出す文言。
+///
+/// GPU デバイスが消えたことも、エンジンを入れ直せば直ることも、ユーザーには
+/// 推測しようがない。特に「ドライバを入れ替えた後は入れ直しが要る」は、
+/// 黙って復帰させている限り一生気付けない。自力で直せた場合はその旨を、
+/// 直せなかった場合は次に何を試せばよいかを出す。
+pub fn bg_failure_status_text(action: crate::engine::state::BgFailureAction) -> &'static str {
+    use crate::engine::state::BgFailureAction;
+    match action {
+        BgFailureAction::Counting => "⚠ 変換エンジンが応答していません（辞書候補のみ）",
+        BgFailureAction::Reloading => "⚠ 変換エンジンを再起動中…（GPU ドライバ更新後に必要）",
+        BgFailureAction::ReloadDidNotHelp => "⚠ GPU が使えません。Windows の再起動をお試しください",
+    }
+}
+
 /// 推論が失敗した（`bg_status() == "error"`）ときの後始末。
 ///
 /// 失敗した結果をキャッシュから回収して idle に戻し、連続失敗を数え、
@@ -1154,12 +1169,12 @@ fn bg_failure_fallback(site: &str) {
     {
         engine.bg_reclaim();
     }
-    crate::engine::state::bg_failure_watchdog();
+    let action = crate::engine::state::bg_failure_watchdog();
     clear_llm_pending();
     stop_waiting_timer();
 
     // 「⏳ 変換中...」のままだと、待てば直ると誤解させる。
-    // 実際には LLM 候補は来ないので、辞書候補だけであることを出す。
+    // 実際には LLM 候補は来ないので、いま何が起きているかを出す。
     let shown = match crate::engine::state::session_get() {
         Ok(sess) => {
             let cands = sess.page_candidates().to_vec();
@@ -1179,7 +1194,7 @@ fn bg_failure_fallback(site: &str) {
             &info,
             pos.left,
             pos.bottom,
-            Some("⚠ LLM 変換に失敗（辞書候補のみ）"),
+            Some(bg_failure_status_text(action)),
         );
     }
 }
@@ -1388,7 +1403,7 @@ pub fn on_waiting_timer() {
         {
             engine.bg_reclaim();
         }
-        crate::engine::state::bg_failure_watchdog();
+        let _ = crate::engine::state::bg_failure_watchdog();
         stop_waiting_timer();
         return;
     }
