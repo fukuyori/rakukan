@@ -775,8 +775,9 @@ pub fn to_half_katakana(s: &str) -> String {
 /// これらは LLM に渡さない delimiter として扱う。
 #[inline]
 pub fn is_kuten(c: char) -> bool {
-    // 日本語区読点（FF01-FF5E 外）
-    if matches!(c, '、' | '。') {
+    // 日本語区読点（FF01-FF5E 外）。リーダー類は engine が `。。。` 等を
+    // 畳んで作る記号で、句点と同じく変換対象から外す。
+    if matches!(c, '、' | '。' | '⋯' | '…' | '‥') {
         return true;
     }
     let n = c as u32;
@@ -862,6 +863,27 @@ pub(crate) fn split_symbol_affixes(s: &str) -> Option<(String, String, String)> 
     }
 
     Some((prefix.to_string(), target.to_string(), suffix.to_string()))
+}
+
+/// engine の読みが `before` → `after` へ変わったときの末尾差分。
+///
+/// 戻り値 `(removed, added)`: `before` の末尾から `removed` 文字を消して
+/// `added` を足すと `after` になる。`on_punctuate` は記号を engine に積んだ
+/// あと session 側の表示文字列を自前で組み立てるので、engine が末尾を
+/// 畳んだ（`。。。` → `⋯`）ときに同じ操作を表示側にも当てるために使う。
+pub(crate) fn tail_delta(before: &str, after: &str) -> (usize, String) {
+    let b: Vec<char> = before.chars().collect();
+    let a: Vec<char> = after.chars().collect();
+    let common = b.iter().zip(a.iter()).take_while(|(x, y)| x == y).count();
+    (b.len() - common, a[common..].iter().collect())
+}
+
+/// [`tail_delta`] の結果を別の文字列の末尾に当てる。
+pub(crate) fn apply_tail_delta(s: &mut String, removed: usize, added: &str) {
+    for _ in 0..removed {
+        s.pop();
+    }
+    s.push_str(added);
 }
 
 /// 文字列が区読点を含むかどうか。
@@ -1046,6 +1068,30 @@ mod tests {
     fn romaji_log_latin_convert_japanese_symbols() {
         assert_eq!(romaji_to_fullwidth_latin("、。・-"), "，．／－");
         assert_eq!(romaji_to_halfwidth_latin("、。・-"), ",./-");
+    }
+
+    // ─── tail_delta ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn tail_delta_plain_append() {
+        assert_eq!(tail_delta("そう。。", "そう。。。"), (0, "。".to_string()));
+    }
+
+    #[test]
+    fn tail_delta_collapse() {
+        assert_eq!(tail_delta("そう。。", "そう⋯"), (2, "⋯".to_string()));
+        let mut preview = "騒。。".to_string();
+        apply_tail_delta(&mut preview, 2, "⋯");
+        assert_eq!(preview, "騒⋯");
+    }
+
+    #[test]
+    fn ellipsis_is_kuten() {
+        assert!(is_kuten('⋯'));
+        assert_eq!(
+            split_symbol_affixes("そうか⋯"),
+            Some(("".to_string(), "そうか".to_string(), "⋯".to_string()))
+        );
     }
 
     // ─── split_by_punctuation ─────────────────────────────────────────────────

@@ -228,6 +228,28 @@ impl RomajiConverter {
         }
     }
 
+    /// 出力末尾を `pattern` と一致する範囲だけ削り、`insert` に置き換える。
+    ///
+    /// 記号の連打を 1 文字へ畳む（`。。。` → `⋯`）とき、engine 側の
+    /// `hiragana_buf` と歩調を合わせるために使う。`push_raw` 経由で来た
+    /// 記号は output に載っていないので、末尾から一致する分だけ削る。
+    /// 1 文字も一致しなければ何もしない（その場合 backspace は `Empty` 経由で
+    /// hiragana_buf だけを削るので整合する）。
+    pub fn replace_output_tail(&mut self, pattern: &str, insert: &str) {
+        let mut removed = 0;
+        for expected in pattern.chars().rev() {
+            if self.output.ends_with(expected) {
+                self.output.pop();
+                removed += 1;
+            } else {
+                break;
+            }
+        }
+        if removed > 0 {
+            self.output.push_str(insert);
+        }
+    }
+
     /// Get the current output
     pub fn output(&self) -> &str {
         &self.output
