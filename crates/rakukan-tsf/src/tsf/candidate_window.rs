@@ -1397,14 +1397,55 @@ pub fn on_waiting_timer() {
     if bg_status == "error" {
         // 推論が落ちた。待ち続けても完了しないのでタイマーを止め、
         // 連続失敗ならエンジンを再起動して次の変換に備える。
-        tracing::warn!("on_waiting_timer: inference failed, stopping wait");
-        if let Ok(mut g) = engine_get()
-            && let Some(engine) = g.as_mut()
-        {
-            engine.bg_reclaim();
+        tracing::warn!("on_waiting_timer: inference failed — falling back to dict candidates");
+        let dict = match engine_get() {
+            Ok(mut g) => g.as_mut().map(|engine| {
+                engine.bg_reclaim();
+                engine.merge_candidates_for_reading(&wait_preedit, Vec::new(), DICT_LIMIT)
+            }),
+            Err(_) => None,
         }
-        let _ = crate::engine::state::bg_failure_watchdog();
+        .unwrap_or_default();
+        let action = crate::engine::state::bg_failure_watchdog();
         stop_waiting_timer();
+
+        // Waiting のまま抜けると「⏳ 変換中...」が残り、タイマーも止まっているので
+        // 表示を更新する経路が無くなる。辞書候補で Selecting に移し、
+        // いま何が起きているかを出す。
+        let cands = if dict.is_empty() {
+            vec![wait_preedit.clone()]
+        } else {
+            dict
+        };
+        let (page_cands, page_info_str) = {
+            let mut sess = match session_get() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            sess.activate_selecting_with_affixes(
+                cands,
+                wait_preedit.clone(),
+                pos_x,
+                pos_y,
+                false,
+                String::new(),
+                String::new(),
+                remainder,
+                remainder_reading,
+            );
+            (
+                sess.page_candidates().to_vec(),
+                sess.page_info().to_string(),
+            )
+        };
+        show_with_status(
+            &page_cands,
+            0,
+            &page_info_str,
+            pos_x,
+            pos_y,
+            Some(bg_failure_status_text(action)),
+        );
         return;
     }
 

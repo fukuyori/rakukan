@@ -484,10 +484,14 @@ const BG_FAILURE_RELOAD_THRESHOLD: u32 = 3;
 
 /// 自動再起動の最短間隔。
 ///
-/// TSF DLL はアプリごとに別プロセスで動き、共有シングルトンのエンジンホストを
-/// 各プロセスが独立に監視している。間隔を置かないと、1 回のデバイス消失で
-/// 全プロセスが順番にホストを撃ち落とす reload storm になる
-/// （`engine_reload` の条件付き再起動と同じ問題）。
+/// 再起動しても直らない状態（デバイスが戻ってこない）で、打鍵のたびに
+/// ホストを撃ち直すのを防ぐ。この間に再び閾値まで失敗したら
+/// `ReloadDidNotHelp` として再起動を止め、ユーザーに次の手を伝える。
+///
+/// 状態は TSF DLL のプロセスごと（アプリごと）に持つので、アプリをまたいだ
+/// 抑止にはならない。失敗を数えるのは打鍵中のアプリだけなので、1 回の
+/// デバイス消失で全アプリが順番にホストを落とすことは起きないが、直らない
+/// 状態でアプリを切り替えて打つと、アプリごとに 1 回ずつ再起動が走る。
 const BG_FAILURE_RELOAD_COOLDOWN_SECS: u64 = 60;
 
 struct BgFailureState {
@@ -501,6 +505,10 @@ static BG_FAILURE: Mutex<BgFailureState> = Mutex::new(BgFailureState {
 });
 
 /// 推論が成功したことを記録し、連続失敗カウントを解除する。
+///
+/// 前回の自動再起動の記録も消す。成功した = その再起動は効いたので、
+/// この後の失敗は別のデバイス消失として扱い、再び再起動の対象にする
+/// （残しておくと 60 秒以内の次の失敗を `ReloadDidNotHelp` と誤判定する）。
 pub fn bg_failure_reset() {
     let Ok(mut guard) = BG_FAILURE.try_lock() else {
         return;
@@ -512,6 +520,7 @@ pub fn bg_failure_reset() {
         );
         guard.consecutive = 0;
     }
+    guard.last_reload = None;
 }
 
 /// 推論失敗を記録した結果、いま何が起きているか。
