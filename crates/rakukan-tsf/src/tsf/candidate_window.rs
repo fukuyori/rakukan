@@ -1318,7 +1318,7 @@ pub fn on_waiting_timer() {
     const DICT_LIMIT: usize = 40;
     let _llm_limit = crate::engine::state::get_num_candidates();
 
-    let result = (|| -> Option<(Vec<String>, String)> {
+    let result = (|| -> Option<(Vec<String>, String, String)> {
         let mut guard = engine_get().ok()?;
         let engine = guard.as_mut()?;
 
@@ -1371,10 +1371,10 @@ pub fn on_waiting_timer() {
             .first()
             .cloned()
             .unwrap_or_else(|| wait_preedit.clone());
-        Some((merged, first))
+        Some((merged, first, matched_key))
     })();
 
-    let (merged, _first) = match result {
+    let (merged, _first, matched_key) = match result {
         Some(v) => v,
         None => {
             tracing::warn!("on_waiting_timer: bg_take_candidates returned None or empty");
@@ -1383,6 +1383,10 @@ pub fn on_waiting_timer() {
     };
 
     // セッションを Selecting に遷移。範囲指定変換経由で remainder があれば引き継ぐ。
+    // 読みは候補が取れたキー（hiragana_text）。wait_preedit に未確定ローマ字が付いて
+    // いれば接尾辞として remainder の前に置く（Step 10-5）。
+    let pending_suffix = crate::engine::state::pending_suffix_display(&wait_preedit, &matched_key);
+    let remainder = format!("{pending_suffix}{remainder}");
     let page_info_str;
     let page_cands;
     {
@@ -1392,7 +1396,7 @@ pub fn on_waiting_timer() {
         };
         sess.activate_selecting_with_affixes(
             merged,
-            wait_preedit.clone(),
+            matched_key,
             pos_x,
             pos_y,
             false,

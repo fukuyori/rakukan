@@ -332,7 +332,7 @@ engine 側は既に reading（`hiragana_text()`）と接尾辞（`pending_romaji
 | 10-2 | 追い越し防止 | §3.3、pending 中の数字、`on_punctuate` LiveConv 分岐、TSF / engine の区切り判定の二重実装 | `k` + `.` = 「k。」、`n` + `.` = 「ん。」、`k` + `1` が `digit_width` に従う | 実装済み（2026-09-12。engine 202 / tsf 99 件通過、clippy・fmt クリーン。実機未確認、未コミット） |
 | 10-3 | Backspace 再生（pending あり） | §3.1、`force_preedit` 後の据え置き、`closes_run`、TSF テスト追加 | `kt` / `nt` / `tt` → BS → `a` が「か」「な」「た」 | 実装済み（2026-09-12。engine 218 / tsf 99 件通過、clippy・fmt クリーン。実機未確認、未コミット） |
 | 10-4 | Backspace（pending なし）の log 書き換え | §3.2、2 段方式の具体化、F9 の回復、回帰テスト | `kya` → BS → F9 = `ki`、`sha` → BS → F9 = `shi`、`tta` → BS → F9 = `tt` | 実装済み（2026-09-12。engine 231 / tsf 99 件通過、clippy・fmt クリーン。実機未確認、未コミット） |
-| 10-5 | Space 変換の未変換接尾辞 | §4.5 | 「たt」の `t` が候補と確定に残り、学習キーに入らない | 未着手 |
+| 10-5 | Space 変換の未変換接尾辞 | §4.5 | 「たt」の `t` が候補と確定に残り、学習キーに入らない | 実装済み（2026-09-12。tsf 102 件通過、clippy・fmt・check クリーン。実機未確認、未コミット） |
 
 10-0 と 10-1〜10-4 は engine 内で閉じ、ABI 変更は不要な見込み。10-2 で `edit_ops.rs`（`on_punctuate`）、10-5 で `on_convert.rs` に及ぶ。
 
@@ -412,6 +412,18 @@ engine 側は既に reading（`hiragana_text()`）と接尾辞（`pending_romaji
 - F9 の綴りが打鍵と変わる例: `sha` → BS → F9 = `shi`（旧版は復元不能で「し」のまま）、`nta` → BS → F9 = `nt`
 - テスト: `log_rewrite_tests` 12 件、`rules.rs` の逆引き表 1 件。性質テスト 2（`output` 連結 == `hiragana_buf`）の Backspace を「常に」に広げた。性質テスト 1（`typed` + pending == 打鍵列）は書き換え後に打鍵原本と一致しなくなるので、pending があるときの Backspace に限ったまま
 - 実機での確認項目: `kya` → BS → F9、`sha` → BS → F9、`tta` → BS → F9、`wi` → BS → F9 → BS → `i`、`tta` → BS → `k` → BS、長い読みを Backspace で全部消す
+
+### 9.5 10-5 の実装メモ（2026-09-12）
+
+- TSF のみ。engine は変更なし
+- **現状の挙動（コード上の読み）**: Space 時の `original_preedit` に `preedit_display()`（「たt」）を渡していたため、候補は reading「た」で引かれるのに Selecting の読みは「たt」になり、(1) 候補表示で `t` が消える、(2) Enter の確定文字列からも `t` が消える、(3) 学習キーが「たt」になる、(4) Waiting からの復帰（dispatch の waiting-poll）で `bg_take_candidates("たt")` がキー不一致になる、という 4 つの問題があった
+- 変更: `on_convert` の Space 経路で `conv_reading = hiragana_text()` と `pending_suffix = pending_suffix_display(preedit, reading)` を求め、Selecting の `original_preedit` を reading、`remainder` を接尾辞（`remainder_reading` は空）として起動する。既存の描画（`update_composition_candidate_parts(prefix, 候補, remainder)`）、候補送り、Enter（`confirmed + remainder`）、Esc（`prefix + original + remainder`）がそのまま接尾辞を扱う。学習は `original_preedit` = reading で行われる
+- 接尾辞の幅: `text_util::pending_suffix_for_display(preedit, reading, fullwidth)`（純関数、テスト 3 件）と `state::pending_suffix_display`（`[input] alpha_width` を読む）。reading が空、または preedit が reading で始まらないときは接尾辞なし
+- 起動箇所の変更: `on_convert` の Space 経路 5 か所（`activate_selecting_snapshot_*` に `suffix` 引数を追加、フォールバック候補 `vec![preedit]` は `vec![reading]` に）、`dispatch.rs` の waiting-poll（hiragana_text でのキー再試行を追加し、取れたキーを読みにする）、`candidate_window.rs` の `on_waiting_timer`（取れたキーを読みにし、接尾辞を remainder の前に置く）
+- `on_backspace` の Selecting 分岐は `prefix + original + remainder` を表示するよう on_cancel と揃えた（従来は original だけで、接尾辞が消えていた）
+- `SessionState::activate_selecting`（affix 無し版）は使われなくなったので削除し、テスト 2 件を `activate_selecting_with_affixes` に変更
+- 末尾 `n` は従来どおり `flush_pending_n` で「ん」にしてから変換する（§5-2）
+- 実機での確認項目: 「た」+ `t` → Space（候補の後ろに `ｔ` が付く）、Enter（「田ｔ」が確定し、学習は「た」→「田」）、Esc（「たｔ」に戻る）、Backspace、辞書候補が無い読みで Waiting → 候補到着、`alpha_width = halfwidth` での接尾辞
 
 ## 10. 関連 PR との関係（2026-09-10）
 

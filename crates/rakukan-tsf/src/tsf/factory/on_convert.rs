@@ -37,6 +37,8 @@ struct SelectingSnapshot {
     suffix_len: usize,
 }
 
+/// `suffix` は未確定ローマ字の表示（Step 10-5）。候補の後ろに `remainder` として置き、
+/// 確定文字列に含める。`remainder_reading` は空にして再変換の対象にはしない。
 fn activate_selecting_snapshot_with_source(
     candidates: Vec<String>,
     original_preedit: String,
@@ -44,6 +46,7 @@ fn activate_selecting_snapshot_with_source(
     y: i32,
     llm_pending: bool,
     source: CandidateViewSource,
+    suffix: String,
 ) -> Result<SelectingSnapshot> {
     activate_selecting_snapshot_with_candidate_view(
         candidates,
@@ -53,9 +56,11 @@ fn activate_selecting_snapshot_with_source(
         llm_pending,
         source,
         None,
+        suffix,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn activate_selecting_snapshot_with_candidate_view(
     mut candidates: Vec<String>,
     original_preedit: String,
@@ -64,13 +69,24 @@ fn activate_selecting_snapshot_with_candidate_view(
     llm_pending: bool,
     source: CandidateViewSource,
     current_candidate_view: Option<CandidateView>,
+    suffix: String,
 ) -> Result<SelectingSnapshot> {
     if candidates.is_empty() {
         candidates.push(original_preedit.clone());
     }
 
     let mut sess = session_get()?;
-    sess.activate_selecting(candidates, original_preedit, x, y, llm_pending);
+    sess.activate_selecting_with_affixes(
+        candidates,
+        original_preedit,
+        x,
+        y,
+        llm_pending,
+        String::new(),
+        String::new(),
+        suffix,
+        String::new(),
+    );
     sess.rebuild_selecting_candidate_views(source);
     if let Some(view) = current_candidate_view {
         sess.replace_current_candidate_view(view);
@@ -408,6 +424,11 @@ impl super::TextServiceFactory_Impl {
         }
 
         let preedit = engine.preedit_display();
+        // Step 10-5: 辞書・LLM は reading（`hiragana_text()`）で引き、末尾の未確定ローマ字
+        // （「たt」の `t`）は接尾辞として候補の後ろに残す。確定文字列には含め、学習キー
+        // （Selecting の original_preedit）には含めない。
+        let conv_reading = engine.hiragana_text().to_string();
+        let pending_suffix = crate::engine::state::pending_suffix_display(&preedit, &conv_reading);
 
         // すでに選択モード中 → 1候補ずつ進む
         {
@@ -888,11 +909,12 @@ impl super::TextServiceFactory_Impl {
                 phase3_candidate_source = "dict_model_not_ready";
                 let snapshot = activate_selecting_snapshot_with_source(
                     candidates.clone(),
-                    preedit.clone(),
+                    conv_reading.clone(),
                     caret.left,
                     caret.bottom,
                     false,
                     CandidateViewSource::Dict,
+                    pending_suffix.clone(),
                 )?;
                 drop(guard);
                 candidate_window::stop_waiting_timer();
@@ -934,16 +956,24 @@ impl super::TextServiceFactory_Impl {
                     snapshot.corresponding_reading_len,
                     snapshot.suffix_len,
                 );
-                update_composition(ctx, tid, sink, snapshot.first)?;
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    snapshot.first,
+                    pending_suffix.clone(),
+                )?;
                 return Ok(true);
             }
             let snapshot = activate_selecting_snapshot_with_source(
-                vec![preedit.clone()],
-                preedit.clone(),
+                vec![conv_reading.clone()],
+                conv_reading.clone(),
                 caret.left,
                 caret.bottom,
                 false,
                 CandidateViewSource::Preedit,
+                pending_suffix.clone(),
             )?;
             drop(guard);
             candidate_window::stop_waiting_timer();
@@ -985,7 +1015,14 @@ impl super::TextServiceFactory_Impl {
                 snapshot.corresponding_reading_len,
                 snapshot.suffix_len,
             );
-            update_composition(ctx, tid, sink, snapshot.first)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                snapshot.first,
+                pending_suffix.clone(),
+            )?;
             return Ok(true);
         }
         let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
@@ -1010,11 +1047,12 @@ impl super::TextServiceFactory_Impl {
                 phase3_candidate_source = "dict_before_bg_wait";
                 let snapshot = activate_selecting_snapshot_with_source(
                     candidates.clone(),
-                    preedit.clone(),
+                    conv_reading.clone(),
                     caret.left,
                     caret.bottom,
                     true,
                     CandidateViewSource::Dict,
+                    pending_suffix.clone(),
                 )?;
                 drop(guard);
                 candidate_window::show_with_status(
@@ -1053,14 +1091,21 @@ impl super::TextServiceFactory_Impl {
                     snapshot.corresponding_reading_len,
                     snapshot.suffix_len,
                 );
-                update_composition(ctx, tid, sink, snapshot.first)?;
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    snapshot.first,
+                    pending_suffix.clone(),
+                )?;
                 return Ok(true);
             }
             let pending_from_live_preview = space_live_candidate.is_some();
             let pending_first = space_live_candidate
                 .as_ref()
                 .map(|candidate| candidate.text.clone())
-                .unwrap_or_else(|| preedit.clone());
+                .unwrap_or_else(|| conv_reading.clone());
             let pending_view_source = if pending_from_live_preview {
                 CandidateViewSource::LivePreview
             } else {
@@ -1074,12 +1119,13 @@ impl super::TextServiceFactory_Impl {
             let pending_candidates = vec![pending_first.clone()];
             let snapshot = activate_selecting_snapshot_with_candidate_view(
                 pending_candidates,
-                preedit.clone(),
+                conv_reading.clone(),
                 caret.left,
                 caret.bottom,
                 true,
                 pending_view_source,
                 space_live_candidate,
+                pending_suffix.clone(),
             )?;
             drop(guard);
             candidate_window::show_with_status(
@@ -1117,7 +1163,14 @@ impl super::TextServiceFactory_Impl {
                 snapshot.corresponding_reading_len,
                 snapshot.suffix_len,
             );
-            update_composition(ctx, tid, sink, snapshot.first)?;
+            update_composition_candidate_parts(
+                ctx,
+                tid,
+                sink,
+                String::new(),
+                snapshot.first,
+                pending_suffix.clone(),
+            )?;
             return Ok(true);
         } else if bg_running {
             phase3_path = "prev_bg_running_wait";
@@ -1346,7 +1399,7 @@ impl super::TextServiceFactory_Impl {
                             false,
                         )
                     } else {
-                        (vec![preedit.clone()], false)
+                        (vec![conv_reading.clone()], false)
                     }
                 } else {
                     (merged, false)
@@ -1367,13 +1420,13 @@ impl super::TextServiceFactory_Impl {
                         &mut convert_last,
                     );
                     if dict_cands.is_empty() {
-                        (vec![preedit.clone()], false)
+                        (vec![conv_reading.clone()], false)
                     } else {
                         (dict_cands, false)
                     }
                 } else {
                     phase3_candidate_source = "preedit_model_not_ready";
-                    (vec![preedit.clone()], false)
+                    (vec![conv_reading.clone()], false)
                 }
             }
         };
@@ -1396,11 +1449,12 @@ impl super::TextServiceFactory_Impl {
         };
         let snapshot = activate_selecting_snapshot_with_source(
             candidates.clone(),
-            preedit.clone(),
+            conv_reading.clone(),
             caret.left,
             caret.bottom,
             llm_pending,
             candidate_view_source,
+            pending_suffix.clone(),
         )?;
         diag::event(DiagEvent::Convert {
             preedit: preedit.clone(),
@@ -1442,7 +1496,14 @@ impl super::TextServiceFactory_Impl {
             snapshot.corresponding_reading_len,
             snapshot.suffix_len,
         );
-        update_composition(ctx, tid, sink, snapshot.first)?;
+        update_composition_candidate_parts(
+            ctx,
+            tid,
+            sink,
+            String::new(),
+            snapshot.first,
+            pending_suffix.clone(),
+        )?;
         convert_mark("update_composition", convert_start, &mut convert_last);
         tracing::info!(
             "convert_timing result=shown path={} bg_take={} candidate_source={} retry={} sync_fallback={} candidates={} llm_pending={} total_us={}",
@@ -1759,12 +1820,16 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
             if sess.is_selecting() {
+                // on_cancel と同じく prefix / remainder（Step 10-5 の接尾辞を含む）ごと戻す
                 let original = sess.original_preedit().unwrap_or("").to_string();
-                sess.set_preedit(original.clone());
+                let prefix = sess.selecting_prefix_clone();
+                let remainder = sess.selecting_remainder_clone();
+                let full = format!("{prefix}{original}{remainder}");
+                sess.set_preedit(full.clone());
                 drop(sess);
                 candidate_window::hide();
                 drop(guard);
-                update_composition(ctx, tid, sink, original)?;
+                update_composition(ctx, tid, sink, full)?;
                 return Ok(true);
             }
             if sess.is_waiting() {

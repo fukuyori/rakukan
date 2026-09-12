@@ -776,6 +776,16 @@ pub fn is_auto_learn_enabled() -> bool {
     super::config::current_config().input.auto_learn
 }
 
+/// Space 変換で候補の後ろに残す未確定ローマ字の表示文字列（Step 10-5）。
+/// `[input] alpha_width` に従って全角 / 半角にする。
+pub fn pending_suffix_display(preedit: &str, reading: &str) -> String {
+    let fullwidth = matches!(
+        super::config::current_config().input.alpha_width,
+        super::config::AlphaWidth::Fullwidth
+    );
+    super::text_util::pending_suffix_for_display(preedit, reading, fullwidth)
+}
+
 /// `CandidateView.source` を元に、その候補が学習対象かを判定する。
 ///
 /// azooKey の `Candidate.isLearningTarget` に対応する。劣化経路や入力等価候補は
@@ -1711,27 +1721,6 @@ impl SessionState {
         SESSION_SELECTING.store(false, std::sync::atomic::Ordering::Release);
     }
 
-    pub fn activate_selecting(
-        &mut self,
-        candidates: Vec<String>,
-        original_preedit: String,
-        pos_x: i32,
-        pos_y: i32,
-        llm_pending: bool,
-    ) {
-        self.activate_selecting_with_affixes(
-            candidates,
-            original_preedit,
-            pos_x,
-            pos_y,
-            llm_pending,
-            String::new(),
-            String::new(),
-            String::new(),
-            String::new(),
-        );
-    }
-
     #[allow(clippy::too_many_arguments)]
     pub fn activate_selecting_with_affixes(
         &mut self,
@@ -2591,12 +2580,16 @@ mod tests {
         let mut state = SessionState::Preedit {
             text: String::new(),
         };
-        state.activate_selecting(
+        state.activate_selecting_with_affixes(
             vec!["候補1".into(), "候補2".into(), "候補3".into()],
             "こうほ".into(),
             0,
             0,
             true,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
         );
         state.next_with_page_wrap();
 
@@ -2614,12 +2607,16 @@ mod tests {
         let mut state = SessionState::Preedit {
             text: String::new(),
         };
-        state.activate_selecting(
+        state.activate_selecting_with_affixes(
             vec!["候補1".into(), "候補2".into(), "候補3".into()],
             "こうほ".into(),
             0,
             0,
             true,
+            String::new(),
+            String::new(),
+            String::new(),
+            String::new(),
         );
         state.next_with_page_wrap();
         state.next_with_page_wrap();

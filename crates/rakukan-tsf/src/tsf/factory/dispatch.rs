@@ -310,20 +310,37 @@ impl super::TextServiceFactory_Impl {
                         "waiting-poll: calling bg_take_candidates({:?})",
                         wait_preedit
                     );
-                    match engine.bg_take_candidates(&wait_preedit) {
-                        Some(llm_cands) => {
+                    // bg のキーは hiragana_buf。wait_preedit は preedit_display()（未確定
+                    // ローマ字を含む。例「たt」）なので、不一致なら hiragana_text() で再試行し、
+                    // 取れたキーを読みにする（Step 10-5。candidate_window の on_waiting_timer と同じ）。
+                    let hira_key = engine.hiragana_text().to_string();
+                    let taken = match engine.bg_take_candidates(&wait_preedit) {
+                        Some(c) => Some((wait_preedit.clone(), c)),
+                        None if hira_key != wait_preedit => {
+                            tracing::debug!(
+                                "waiting-poll: key mismatch, retry hira={:?}",
+                                hira_key
+                            );
+                            engine
+                                .bg_take_candidates(&hira_key)
+                                .map(|c| (hira_key.clone(), c))
+                        }
+                        None => None,
+                    };
+                    match taken {
+                        Some((matched_key, llm_cands)) => {
                             tracing::debug!("waiting-poll: got {} LLM cands", llm_cands.len());
                             bg_timeout_watchdog(false); // 回復 → ウォッチドッグリセット
                             // LLM候補とマージ。llm_cands が空でも辞書候補がある場合はそちらを使う。
                             let merged = if llm_cands.is_empty() {
                                 engine.merge_candidates_for_reading(
-                                    &wait_preedit,
+                                    &matched_key,
                                     vec![],
                                     DICT_LIMIT_WAIT,
                                 )
                             } else {
                                 engine.merge_candidates_for_reading(
-                                    &wait_preedit,
+                                    &matched_key,
                                     llm_cands,
                                     DICT_LIMIT_WAIT,
                                 )
@@ -332,12 +349,21 @@ impl super::TextServiceFactory_Impl {
                             // preedit 1件だけでも候補ウィンドウを出す（辞書/LLMどちらかにヒットした）
                             if !merged.is_empty() {
                                 let first = merged.first().cloned().unwrap_or_default();
-                                sess.activate_selecting(
+                                // 未確定ローマ字は接尾辞として候補の後ろに残す（Step 10-5）
+                                let suffix = crate::engine::state::pending_suffix_display(
+                                    &wait_preedit,
+                                    &matched_key,
+                                );
+                                sess.activate_selecting_with_affixes(
                                     merged,
-                                    wait_preedit.clone(),
+                                    matched_key.clone(),
                                     pos_x,
                                     pos_y,
                                     false,
+                                    String::new(),
+                                    String::new(),
+                                    suffix.clone(),
+                                    String::new(),
                                 );
                                 let page_cands = sess.page_candidates().to_vec();
                                 let page_info = sess.page_info();
@@ -352,7 +378,14 @@ impl super::TextServiceFactory_Impl {
                                     pos_y,
                                     None,
                                 );
-                                update_composition(ctx, tid, sink, first)?;
+                                update_composition_candidate_parts(
+                                    ctx,
+                                    tid,
+                                    sink,
+                                    String::new(),
+                                    first,
+                                    suffix,
+                                )?;
                                 return Ok(true);
                             }
                         }

@@ -94,6 +94,23 @@ pub(crate) fn fullwidth_symbol_to_hankaku(c: char) -> char {
     }
 }
 
+/// Space 変換時に候補の後ろへ残す未確定ローマ字の表示文字列（Step 10-5）。
+///
+/// `preedit`（`preedit_display()` = 読み + 未確定ローマ字）から `reading`
+/// （`hiragana_text()`）を除いた残りを、`fullwidth` なら全角英字にして返す。
+/// 読みが空、または preedit が読みで始まらないときは接尾辞なし（空）。
+pub(crate) fn pending_suffix_for_display(preedit: &str, reading: &str, fullwidth: bool) -> String {
+    if reading.is_empty() {
+        return String::new();
+    }
+    let suffix = suffix_after_prefix_or_empty(preedit, reading, "pending suffix");
+    if fullwidth {
+        ascii_to_fullwidth(suffix)
+    } else {
+        suffix.to_string()
+    }
+}
+
 /// `full = prefix + suffix` を前提に suffix 部分を返す。
 ///
 /// ライブ変換の preedit は `reading + pending_romaji` 構成なので `strip_prefix`
@@ -1225,5 +1242,35 @@ mod tests {
                 ("おおさか".to_string(), None),
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod pending_suffix_tests {
+    use super::pending_suffix_for_display;
+
+    #[test]
+    fn suffix_follows_alpha_width() {
+        assert_eq!(pending_suffix_for_display("たt", "た", true), "ｔ");
+        assert_eq!(pending_suffix_for_display("たt", "た", false), "t");
+        assert_eq!(
+            pending_suffix_for_display("やまのたky", "やまのた", true),
+            "ｋｙ"
+        );
+    }
+
+    #[test]
+    fn no_suffix_when_reading_covers_preedit() {
+        assert_eq!(pending_suffix_for_display("た", "た", true), "");
+        assert_eq!(
+            pending_suffix_for_display("かれは、", "かれは、", false),
+            ""
+        );
+    }
+
+    #[test]
+    fn no_suffix_when_reading_is_empty_or_mismatched() {
+        assert_eq!(pending_suffix_for_display("k", "", true), "");
+        assert_eq!(pending_suffix_for_display("abc", "xyz", true), "");
     }
 }
