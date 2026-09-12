@@ -14,7 +14,7 @@
     <ApplicationIcon>..\..\crates\rakukan-tsf\rakukan.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <Version>0.11.5</Version>
+    <Version>0.11.6</Version>
     <!-- Program.Main で単一インスタンス制御を行うため、XAML 生成の Main を無効化 -->
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
