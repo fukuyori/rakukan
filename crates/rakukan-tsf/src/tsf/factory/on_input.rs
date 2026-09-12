@@ -31,7 +31,7 @@ use super::{
 /// フォールバックする。以前の「表示が読みの 60% 未満なら fallback」という長さ比は、
 /// 「だいとうりょうからこく」→「大統領から酷」のような正常な漢字圧縮で誤発動していた
 /// （8月ログ 160 回/月）ため撤去した。
-fn live_continuation_display(
+pub(super) fn live_continuation_display(
     preview_for: &str,
     preview: &str,
     reading: &str,

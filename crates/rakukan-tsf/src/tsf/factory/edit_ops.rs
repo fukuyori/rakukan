@@ -537,13 +537,27 @@ impl super::TextServiceFactory_Impl {
                 .live_conv_parts()
                 .map(|(r, p)| (r.to_string(), p.to_string()))
                 .unwrap_or_default();
+            let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
             engine.push_raw(symbol);
-            let display = format!("{preview}{symbol}");
-            let next_reading = format!("{reading}{symbol}");
-            sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
+            // engine は未確定ローマ字を閉じてから記号を足す（Step 10-2）ので、読みは
+            // `reading + symbol` ではなく engine から取り直す（`on_input_raw` と同じ）。
+            let new_reading = engine.hiragana_text().to_string();
+            let (display, display_shown) = super::on_input::live_continuation_display(
+                &preview_for,
+                &preview,
+                &reading,
+                &new_reading,
+                "",
+            );
+            let next_preview_for = if display == new_reading {
+                new_reading.clone()
+            } else {
+                preview_for
+            };
+            sess.set_live_conv(new_reading, display, next_preview_for);
             drop(sess);
             drop(guard);
-            update_composition(ctx, tid, sink, display)?;
+            update_composition(ctx, tid, sink, display_shown)?;
             return Ok(true);
         }
 

@@ -194,7 +194,7 @@ pub extern "C" fn engine_push_raw(handle: *mut c_void, codepoint: u32) {
     }
 }
 
-/// Shift+アルファベット用: hiragana_buf に全角大文字、romaji_input_log に ASCII 大文字を記録する。
+/// Shift+アルファベット用: hiragana_buf に全角大文字、input_log に ASCII 大文字を記録する。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_push_fullwidth_alpha(handle: *mut c_void, codepoint: u32) {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
@@ -261,7 +261,7 @@ pub extern "C" fn engine_romaji_log_str(handle: *mut c_void) -> *mut c_char {
     unsafe { to_cstr(engine.romaji_log_str()) }
 }
 
-/// romaji_input_log からひらがなを復元する（F6/F7/F8 でかなに戻す用）
+/// input_log から F9/F10 前の表示を復元する（F6/F7/F8 でかなに戻す用）
 /// 戻り値は `engine_free_string` で解放すること。
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_hiragana_from_romaji_log(handle: *mut c_void) -> *mut c_char {

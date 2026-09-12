@@ -308,6 +308,106 @@ fn numeric_separator_after_digit(prev: Option<char>, c: char) -> Option<char> {
     }
 }
 
+/// 変換器に 1 文字流し、このステップで確定した (打鍵, 出力) を返す。
+/// `push_char` 経路 5 と Backspace 再生（`replay_romaji_run`）で共用する。
+/// `output` / `buffer` の差分で判定するので、PassThrough の連鎖で複数文字が
+/// 確定するケースも 1 エントリにまとまる。
+fn romaji_step(
+    conv: &mut RomajiConverter,
+    pending: &mut String,
+    c: char,
+) -> Option<(String, String)> {
+    pending.push(c);
+    let prev_output_len = conv.output().len();
+    let _ = conv.push(c);
+    let added = conv.output()[prev_output_len..].to_string();
+    let new_buffer_len = conv.buffer().len();
+    debug_assert!(new_buffer_len <= pending.len());
+    let consumed_len = pending.len() - new_buffer_len;
+    (consumed_len > 0).then(|| (pending.drain(..consumed_len).collect(), added))
+}
+
+/// ローマ字区間の打鍵列を先頭から新しい変換器に流し、
+/// (エントリ列, 未確定ローマ字, 変換器) を返す（Step 10-3 の Backspace 再生用）。
+fn replay_romaji_run(typed: &str) -> (Vec<InputEntry>, String, RomajiConverter) {
+    let mut conv = RomajiConverter::new();
+    let mut entries = Vec::new();
+    let mut pending = String::new();
+    for c in typed.chars() {
+        if let Some((entry_typed, output)) = romaji_step(&mut conv, &mut pending, c) {
+            entries.push(InputEntry {
+                typed: entry_typed,
+                output,
+                kind: InputKind::Romaji,
+                closes_run: false,
+            });
+        }
+    }
+    (entries, pending, conv)
+}
+
+/// Step 10-4 の 1 段目: `run_typed` の接頭辞を再生して、出力が `target` に一致する
+/// エントリ列を探す。未確定が残らない一致（`kata` → `ka`）を優先し、無ければ未確定を
+/// 末尾エントリの打鍵に含めた形（`tta` → `tt` = 「っ」）を返す。いずれも最長を採る。
+fn replay_prefix_for(run_typed: &str, target: &str) -> Option<Vec<InputEntry>> {
+    let mut with_pending: Option<Vec<InputEntry>> = None;
+    let cuts: Vec<usize> = run_typed
+        .char_indices()
+        .map(|(i, _)| i)
+        .skip(1)
+        .chain(std::iter::once(run_typed.len()))
+        .collect();
+    for &cut in cuts.iter().rev() {
+        let (mut entries, pending, _) = replay_romaji_run(&run_typed[..cut]);
+        let output: String = entries.iter().map(|e| e.output.as_str()).collect();
+        if output != target {
+            continue;
+        }
+        if pending.is_empty() {
+            return Some(entries);
+        }
+        if with_pending.is_none()
+            && let Some(last) = entries.last_mut()
+        {
+            last.typed.push_str(&pending);
+            with_pending = Some(entries);
+        }
+    }
+    with_pending
+}
+
+/// Step 10-4 の 2 段目: 残るかな `remaining` を出す綴りを逆引きする。
+/// 母音字 1 文字（`a` `i` `u` `e` `o`）が候補にあればそれ（`wi` → 「う」は `u`）。
+/// それ以外は元の綴り `original` と共有する接頭辞が最長のもの（`sha` → 「し」は `shi`）、
+/// 同点なら短いもの、さらに同点なら辞書順。
+fn reverse_spelling(remaining: &str, original: &str) -> Option<String> {
+    let candidates = romaji::spellings_for(remaining);
+    if let Some(vowel) = candidates
+        .iter()
+        .find(|c| matches!(c.as_str(), "a" | "i" | "u" | "e" | "o"))
+    {
+        return Some(vowel.clone());
+    }
+    fn common_prefix_len(a: &str, b: &str) -> usize {
+        a.chars().zip(b.chars()).take_while(|(x, y)| x == y).count()
+    }
+    candidates
+        .iter()
+        .max_by(|x, y| {
+            common_prefix_len(x, original)
+                .cmp(&common_prefix_len(y, original))
+                .then(y.len().cmp(&x.len()))
+                .then(y.cmp(x))
+        })
+        .cloned()
+}
+
+/// `push_char` で trie（ローマ字ルール）に委ねる文字か。
+/// 英字と `,./[]\-`（、。・「」￥ー等のルールがある記号）。
+fn is_trie_input_char(c: char) -> bool {
+    c.is_ascii_alphabetic() || matches!(c, ',' | '.' | '/' | '[' | ']' | '\\' | '-')
+}
+
 fn is_alpha_char(c: char) -> bool {
     c.is_ascii_alphabetic() || ('Ａ'..='Ｚ').contains(&c) || ('ａ'..='ｚ').contains(&c)
 }
@@ -355,16 +455,55 @@ fn alpha_symbol_separator_auto(
     }
 }
 
+/// 入力ログのエントリ種別（どの経路で入力されたか）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InputKind {
+    /// `push_char` 経路 5。trie で変換する通常ローマ字
+    Romaji,
+    /// `push_char` 経路 3。数字（`digit_width` で幅が決まる）
+    Digit,
+    /// `push_char` 経路 4。ASCII 記号（`symbol_width` で幅が決まる）
+    Symbol,
+    /// `push_char` 経路 1・2。自動置換された区切り（数値区切り・欧文句読点）
+    Separator,
+    /// `push_raw`。かなルール登録文字などの直接入力
+    Raw,
+    /// `push_fullwidth_alpha`。Shift+英字（`typed` は ASCII 大文字）
+    ShiftAlpha,
+}
+
+/// 入力ログの 1 エントリ。
+///
+/// 不変条件（Backspace / force_preedit を除く経路で成立）:
+/// - `typed` の連結 + `pending_romaji_buf` == ユーザーが打った文字列
+/// - `output` の連結 == `hiragana_buf`
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InputEntry {
+    /// ユーザーが打った文字そのまま（"kya" / "1" / "A" / "。"）
+    typed: String,
+    /// このエントリが `hiragana_buf` に足した文字列（"きゃ" / "１" / "Ａ" / "。"）
+    output: String,
+    kind: InputKind,
+    /// このエントリでローマ字区間が閉じた（`flush_pending_n`）。
+    /// Backspace 再生（Step 10-3）で区間の境界として使う。
+    closes_run: bool,
+}
+
 pub struct RakunEngine {
     romaji: RomajiConverter,
     kanji: Option<KanaKanjiConverter>,
     config: EngineConfig,
     hiragana_buf: String,
     pending_romaji_buf: String,
-    /// ローマ字入力ログ。`RomajiConverter::Converted` 単位で1エントリとして積む。
-    /// 末尾エントリは pending_romaji_buf に対応する未確定分（確定時に上書き）。
-    /// F9/F10 でかな→ローマ字復元に使用する。
-    romaji_input_log: Vec<String>,
+    /// 入力ログ。`hiragana_buf` に文字が足されるたびに 1 エントリ積む
+    /// （ローマ字は `RomajiConverter::Converted` 単位）。
+    /// 未確定分（`pending_romaji_buf`）はログに入らない。
+    /// F6〜F10 の文字種変換で元の表示・ローマ字を復元するのに使う。
+    input_log: Vec<InputEntry>,
+    /// `force_preedit` で `hiragana_buf` を差し替えた時点の `input_log.len()`。
+    /// これより前のエントリは `hiragana_buf` と対応しないので、Backspace 再生の対象外。
+    /// log をクリアしたら 0 に戻す。
+    log_detached_at: usize,
     committed: String,
     dict_store: Option<DictStore>,
 }
@@ -377,7 +516,8 @@ impl RakunEngine {
             config,
             hiragana_buf: String::new(),
             pending_romaji_buf: String::new(),
-            romaji_input_log: Vec::new(),
+            input_log: Vec::new(),
+            log_detached_at: 0,
             committed: String::new(),
             dict_store: None,
         }
@@ -432,14 +572,68 @@ impl RakunEngine {
         &self.hiragana_buf
     }
 
+    fn log_push(&mut self, typed: impl Into<String>, output: impl Into<String>, kind: InputKind) {
+        self.input_log.push(InputEntry {
+            typed: typed.into(),
+            output: output.into(),
+            kind,
+            closes_run: false,
+        });
+    }
+
+    fn log_pop(&mut self) {
+        self.input_log.pop();
+        self.log_detached_at = self.log_detached_at.min(self.input_log.len());
+    }
+
+    fn log_clear(&mut self) {
+        self.input_log.clear();
+        self.log_detached_at = 0;
+    }
+
+    /// 未確定ローマ字を閉じる（Step 10-2）。
+    ///
+    /// ローマ字以外の入力（記号・Shift+英字・数字）が来たとき、先に pending を確定側へ
+    /// 移してから追記することで、表示順と打鍵順が一致する（`k` + `。` = 「k。」）。
+    /// 閉じ方は `flush_pending_n`（`n` だけなら「ん」）→ `RomajiConverter::flush`
+    /// （残りは trie 一致か素通し）の順。閉じたエントリには `closes_run` を立てる。
+    fn close_pending(&mut self) {
+        if self.pending_romaji_buf.is_empty() {
+            return;
+        }
+        if self.flush_pending_n() {
+            return;
+        }
+        let typed = std::mem::take(&mut self.pending_romaji_buf);
+        let output = self.romaji.flush();
+        self.hiragana_buf.push_str(&output);
+        debug!("engine::close_pending: {:?} → {:?}", typed, output);
+        self.input_log.push(InputEntry {
+            typed,
+            output,
+            kind: InputKind::Romaji,
+            closes_run: true,
+        });
+        self.romaji = RomajiConverter::new();
+    }
+
     pub fn push_char(&mut self, c: char) -> PreeditState {
+        // 数字と trie 外の ASCII 記号は pending を閉じてから経路 3・4 で扱う。
+        // `,./[]\-` と英字は trie に委ねる（pending と結合しうるため）。
+        if !self.pending_romaji_buf.is_empty() && !is_trie_input_char(c) {
+            let n = c as u32;
+            if c.is_ascii_digit() || ((0x21..=0x7E).contains(&n) && !c.is_ascii_alphabetic()) {
+                self.close_pending();
+            }
+        }
+
         if self.config.digit_separator_auto
             && self.pending_romaji_buf.is_empty()
             && let Some(separator) =
                 numeric_separator_after_digit(self.hiragana_buf.chars().last(), c)
         {
             self.hiragana_buf.push(separator);
-            self.romaji_input_log.push(c.to_string());
+            self.log_push(c, separator, InputKind::Separator);
             debug!("engine::push: numeric separator {:?} → {:?}", c, separator);
             return self.current_preedit();
         }
@@ -455,7 +649,7 @@ impl RakunEngine {
             )
         {
             self.hiragana_buf.push(separator);
-            self.romaji_input_log.push(c.to_string());
+            self.log_push(c, separator, InputKind::Separator);
             debug!(
                 "engine::push: alpha/symbol separator {:?} → {:?}",
                 c, separator
@@ -470,7 +664,7 @@ impl RakunEngine {
                 DigitWidth::Halfwidth => c,
             };
             self.hiragana_buf.push(out);
-            self.romaji_input_log.push(c.to_string());
+            self.log_push(c, out, InputKind::Digit);
             debug!("engine::push: digit {:?} → {:?}", c, out);
             return self.current_preedit();
         }
@@ -489,7 +683,7 @@ impl RakunEngine {
                     SymbolWidth::Halfwidth => c,
                 };
                 self.hiragana_buf.push(out);
-                self.romaji_input_log.push(c.to_string());
+                self.log_push(c, out, InputKind::Symbol);
                 debug!("engine::push: symbol {:?} → {:?}", c, out);
                 return self.current_preedit();
             }
@@ -500,19 +694,11 @@ impl RakunEngine {
         // ConversionEvent variant ではなく romaji.output / romaji.buffer の差分から
         // 「確定したひらがな」と「未確定として残っているローマ字」を判定する。
         // （PassThrough の連鎖で複数文字が確定するケースを正しく扱うため）
-        self.pending_romaji_buf.push(c);
-        let prev_output_len = self.romaji.output().len();
-        let _ = self.romaji.push(c);
-
-        let added = self.romaji.output()[prev_output_len..].to_string();
-        let new_buffer_len = self.romaji.buffer().len();
-        debug_assert!(new_buffer_len <= self.pending_romaji_buf.len());
-        let consumed_len = self.pending_romaji_buf.len() - new_buffer_len;
-        if consumed_len > 0 {
-            let entry: String = self.pending_romaji_buf.drain(..consumed_len).collect();
+        if let Some((entry, added)) = romaji_step(&mut self.romaji, &mut self.pending_romaji_buf, c)
+        {
             self.hiragana_buf.push_str(&added);
             debug!("engine::push: romaji {:?} → {:?}", entry, added);
-            self.romaji_input_log.push(entry);
+            self.log_push(entry, added, InputKind::Romaji);
         }
         self.current_preedit()
     }
@@ -522,7 +708,12 @@ impl RakunEngine {
         if self.pending_romaji_buf == "n" {
             self.hiragana_buf.push('ん');
             let entry = std::mem::take(&mut self.pending_romaji_buf);
-            self.romaji_input_log.push(entry);
+            self.input_log.push(InputEntry {
+                typed: entry,
+                output: "ん".to_string(),
+                kind: InputKind::Romaji,
+                closes_run: true,
+            });
             self.romaji = RomajiConverter::new();
             true
         } else {
@@ -531,61 +722,195 @@ impl RakunEngine {
     }
 
     /// プリエディット文字列を強制置換する（F6〜F10 の文字種変換用）
-    /// romaji_input_log は保持する（F9/F10 サイクル中に再度ローマ字に戻せるよう）
+    /// input_log は保持する（F9/F10 サイクル中に再度ローマ字に戻せるよう）
     pub fn force_preedit(&mut self, text: String) {
         self.hiragana_buf = text;
         self.pending_romaji_buf.clear();
         self.romaji = RomajiConverter::new();
+        self.log_detached_at = self.input_log.len();
     }
 
     /// ローマ字変換を経由せず hiragana_buf に直接1文字追加する。
     /// テンキー記号など、かなルールに登録されている文字をそのまま入力する場合に使用する。
     pub fn push_raw(&mut self, c: char) {
+        self.close_pending();
         self.hiragana_buf.push(c);
-        self.romaji_input_log.push(c.to_string());
+        self.log_push(c, c, InputKind::Raw);
     }
 
     /// Shift+アルファベット用: alpha_width 設定に従って全角 or 半角の大文字を hiragana_buf に追加。
-    /// `romaji_input_log` には ASCII 大文字を記録する。
+    /// `input_log` の `typed` には ASCII 大文字を記録する。
     ///
-    /// F9/F10 のサイクル変換は romaji_input_log の ASCII 文字を元に動作するため、
-    /// log には元の ASCII 文字（'A'–'Z'）を保持する必要がある。
+    /// F9/F10 のサイクル変換は input_log の ASCII 文字を元に動作するため、
+    /// `typed` には元の ASCII 文字（'A'–'Z'）を保持する必要がある。
     /// `c` には ASCII 大文字（'A'–'Z'）を渡すこと。
     pub fn push_fullwidth_alpha(&mut self, c: char) {
         debug_assert!(c.is_ascii_uppercase());
+        self.close_pending();
         let out = match self.config.alpha_width {
             AlphaWidth::Fullwidth => char::from_u32(c as u32 - 0x41 + 0xFF21).unwrap_or(c),
             AlphaWidth::Halfwidth => c,
         };
         self.hiragana_buf.push(out);
-        self.romaji_input_log.push(c.to_string());
+        self.log_push(c, out, InputKind::ShiftAlpha);
     }
 
     pub fn backspace(&mut self) -> bool {
-        use romaji::BackspaceResult;
-        match self.romaji.backspace() {
-            BackspaceResult::RemovedBuffer(_) => {
-                self.pending_romaji_buf.pop();
-                // pending_romaji_buf はまだ未確定 → romaji_input_log には記録されていない
-                // log 操作は不要
-                true
+        if !self.pending_romaji_buf.is_empty() {
+            if self.replay_backspace() {
+                return true;
             }
-            BackspaceResult::RemovedOutput(_) => {
-                self.hiragana_buf.pop();
-                // 確定済みのひらがな1文字分 → log エントリを1つ pop
-                self.romaji_input_log.pop();
-                true
-            }
-            BackspaceResult::Empty => {
-                if self.hiragana_buf.is_empty() {
-                    false
-                } else {
-                    self.hiragana_buf.pop();
-                    self.romaji_input_log.pop();
-                    true
-                }
-            }
+            // 再生できない（log と表示がずれている）ときは未確定 1 文字を消すだけ
+            self.pending_romaji_buf.pop();
+            let _ = self.romaji.backspace();
+            return true;
         }
+        self.pop_display_char()
+    }
+
+    /// pending が空のときの Backspace（Step 10-4）。
+    ///
+    /// 表示の末尾 1 文字を消し、log を「残った表示を再生できる打鍵列」に書き換える。
+    /// 書き換えは §4.3 の 2 段（`replay_prefix_for` → `reverse_spelling`）。どちらも
+    /// 効かなければ末尾エントリの打鍵から 1 文字削る。書き換えた区間の末尾エントリは
+    /// `closes_run` で閉じ、以後の Backspace 再生（10-3）で流し直さない。
+    ///
+    /// detach 後（`force_preedit` の後）や log と表示が対応しないときは、現行どおり
+    /// 表示 1 文字とエントリ 1 つを消す。
+    fn pop_display_char(&mut self) -> bool {
+        let Some(removed) = self.hiragana_buf.pop() else {
+            return false;
+        };
+        // 区間は閉じるので変換器の履歴は要らない
+        self.romaji = RomajiConverter::new();
+
+        let len = self.input_log.len();
+        let detached = len <= self.log_detached_at;
+        let Some(last) = self.input_log.last() else {
+            return true;
+        };
+        if detached || !last.output.ends_with(removed) {
+            self.log_pop();
+            return true;
+        }
+        let start = if last.kind != InputKind::Romaji {
+            len
+        } else if last.closes_run {
+            len - 1
+        } else {
+            self.romaji_run_start()
+        };
+        if start == len {
+            // 1 文字出力の非ローマ字エントリ
+            self.log_pop();
+            return true;
+        }
+
+        let run = &self.input_log[start..];
+        let run_typed: String = run.iter().map(|e| e.typed.as_str()).collect();
+        let mut target: String = run.iter().map(|e| e.output.as_str()).collect();
+        target.pop();
+        let last_typed = last.typed.clone();
+        let mut last_remaining = last.output.clone();
+        last_remaining.pop();
+
+        if target.is_empty() {
+            self.input_log.truncate(start);
+            return true;
+        }
+        if let Some(mut entries) = replay_prefix_for(&run_typed, &target) {
+            self.input_log.truncate(start);
+            if let Some(e) = entries.last_mut() {
+                e.closes_run = true;
+            }
+            debug!(
+                "engine::backspace: rewrote run {:?} → {:?}",
+                run_typed,
+                entries.iter().map(|e| e.typed.as_str()).collect::<String>()
+            );
+            self.input_log.extend(entries);
+            return true;
+        }
+        if last_remaining.is_empty() {
+            // 末尾エントリを丸ごと消し、残る区間の末尾を閉じる
+            self.log_pop();
+            if let Some(e) = self.input_log.last_mut() {
+                e.closes_run = true;
+            }
+            return true;
+        }
+        let typed = reverse_spelling(&last_remaining, &last_typed).unwrap_or_else(|| {
+            let mut t = last_typed.clone();
+            t.pop();
+            t
+        });
+        debug!(
+            "engine::backspace: rewrote entry {:?} → {:?} ({:?})",
+            last_typed, typed, last_remaining
+        );
+        let e = self.input_log.last_mut().expect("checked above");
+        e.typed = typed;
+        e.output = last_remaining;
+        e.closes_run = true;
+        true
+    }
+
+    /// 末尾のローマ字区間の開始 index。
+    /// 区間は、最後の非ローマ字エントリ・区間終端（`closes_run`）・detach 境界のいずれかの
+    /// 直後から始まる。
+    fn romaji_run_start(&self) -> usize {
+        let floor = self.log_detached_at.min(self.input_log.len());
+        let mut start = self.input_log.len();
+        while start > floor {
+            let e = &self.input_log[start - 1];
+            if e.kind != InputKind::Romaji || e.closes_run {
+                break;
+            }
+            start -= 1;
+        }
+        start
+    }
+
+    /// pending があるときの Backspace（Step 10-3）。
+    ///
+    /// 末尾のローマ字区間と pending を合わせた打鍵列から末尾 1 打鍵を消し、区間を
+    /// 新しい変換器で再生して `input_log` / `hiragana_buf` / `pending_romaji_buf` /
+    /// 変換器を同じ打鍵列を表す状態にする。素通しで確定側に固定されていた `k`（`kt`）や
+    /// 次の子音で確定した「ん」「っ」（`nt` / `tt`）が打鍵どおりの未確定に戻る。
+    ///
+    /// 区間の出力が `hiragana_buf` の末尾と一致しない（log と表示がずれている）ときは
+    /// 何もせず false を返し、呼び出し側が現行の単純 pop に落とす。
+    fn replay_backspace(&mut self) -> bool {
+        let start = self.romaji_run_start();
+        let run_output: String = self.input_log[start..]
+            .iter()
+            .map(|e| e.output.as_str())
+            .collect();
+        if !self.hiragana_buf.ends_with(&run_output) {
+            return false;
+        }
+        let mut typed: String = self.input_log[start..]
+            .iter()
+            .map(|e| e.typed.as_str())
+            .collect();
+        typed.push_str(&self.pending_romaji_buf);
+        typed.pop();
+
+        self.input_log.truncate(start);
+        let keep = self.hiragana_buf.len() - run_output.len();
+        self.hiragana_buf.truncate(keep);
+        let (entries, pending, conv) = replay_romaji_run(&typed);
+        for e in &entries {
+            self.hiragana_buf.push_str(&e.output);
+        }
+        self.input_log.extend(entries);
+        debug!(
+            "engine::backspace: replayed {:?} → hira {:?} pending {:?}",
+            typed, self.hiragana_buf, pending
+        );
+        self.pending_romaji_buf = pending;
+        self.romaji = conv;
+        true
     }
 
     pub fn convert(&self, num_candidates: usize) -> Result<Vec<String>, EngineError> {
@@ -620,7 +945,7 @@ impl RakunEngine {
             // 確定自体は成立させ、context にだけ入れない。
             info!("engine::commit: hiragana-only text excluded from context");
             self.hiragana_buf.clear();
-            self.romaji_input_log.clear();
+            self.log_clear();
             self.romaji = RomajiConverter::new();
             return;
         }
@@ -644,7 +969,7 @@ impl RakunEngine {
             }
         }
         self.hiragana_buf.clear();
-        self.romaji_input_log.clear();
+        self.log_clear();
         self.romaji = RomajiConverter::new();
     }
 
@@ -666,30 +991,19 @@ impl RakunEngine {
         self.hiragana_buf.is_empty() && self.pending_romaji_buf.is_empty()
     }
 
-    /// ローマ字入力ログを結合した文字列を返す（F9/F10 のローマ字復元用）
+    /// 入力ログの打鍵文字を結合した文字列を返す（F9/F10 のローマ字復元用）
     pub fn romaji_log_str(&self) -> String {
-        self.romaji_input_log.concat()
+        self.input_log.iter().map(|e| e.typed.as_str()).collect()
     }
 
-    /// romaji_input_log からひらがなを復元する（F6/F7/F8 でかなに戻す用）
+    /// input_log から F9/F10 を押す前の表示を復元する（F6/F7/F8 でかなに戻す用）。
     /// F9/F10 で force_preedit した後でも log は保持されているため復元可能。
+    ///
+    /// 各エントリが入力時に `hiragana_buf` へ足した文字列（`output`）を連結する。
+    /// 変換器に流し直さないので、Shift+英字・数字・区切り記号・`flush_pending_n` の
+    /// 「ん」が入力時の幅と文字のまま戻る。
     pub fn hiragana_from_romaji_log(&self) -> String {
-        let romaji = self.romaji_input_log.concat();
-        if romaji.is_empty() {
-            return String::new();
-        }
-        let mut conv = RomajiConverter::new();
-        let mut result = String::new();
-        for c in romaji.chars() {
-            match conv.push(c) {
-                crate::romaji::ConversionEvent::Converted(h) => result.push_str(&h),
-                crate::romaji::ConversionEvent::PassThrough(ch) => result.push(ch),
-                crate::romaji::ConversionEvent::Buffered => {}
-            }
-        }
-        // pending を flush
-        result.push_str(&conv.flush());
-        result
+        self.input_log.iter().map(|e| e.output.as_str()).collect()
     }
     pub fn get_config(&self) -> &EngineConfig {
         &self.config
@@ -945,7 +1259,7 @@ impl RakunEngine {
         self.hiragana_buf.clear();
         self.romaji = RomajiConverter::new();
         self.pending_romaji_buf.clear();
-        self.romaji_input_log.clear();
+        self.log_clear();
     }
 
     pub fn reset_all(&mut self) {
@@ -953,7 +1267,7 @@ impl RakunEngine {
         self.committed.clear();
         self.romaji = RomajiConverter::new();
         self.pending_romaji_buf.clear();
-        self.romaji_input_log.clear();
+        self.log_clear();
     }
 
     pub fn available_models() -> Vec<ModelInfo> {
@@ -1480,5 +1794,750 @@ mod passthrough_sync_tests {
         let log = e.romaji_log_str();
         let pending = e.current_preedit().pending_romaji.clone();
         assert_eq!(format!("{}{}", log, pending), "qwrty");
+    }
+}
+
+#[cfg(test)]
+mod input_log_tests {
+    //! Step 10-1: 入力ログの種別化と復元。
+    //!
+    //! 不変条件 1: `romaji_log_str() + pending == 打鍵列`
+    //! 不変条件 2: `hiragana_from_romaji_log() == hiragana_text()`（Backspace / force_preedit を除く経路）
+    use super::{AlphaWidth, DigitWidth, EngineConfig, RakunEngine};
+
+    /// 依存を増やさないための決定的な擬似乱数（LCG）
+    struct Lcg(u64);
+
+    impl Lcg {
+        fn next(&mut self) -> u64 {
+            self.0 = self
+                .0
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            self.0 >> 33
+        }
+
+        fn pick<'a, T>(&mut self, xs: &'a [T]) -> &'a T {
+            &xs[(self.next() as usize) % xs.len()]
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum Op {
+        /// キーボード英数字・記号（`push_char`）
+        Char(char),
+        /// TSF が全角化して渡す記号（`push_raw`）
+        Raw(char),
+        /// Shift+英字（`push_fullwidth_alpha`）
+        Shift(char),
+        /// Space / Enter 直前の末尾 n 確定
+        FlushN,
+        /// Backspace（pending があるときだけ打鍵列から 1 文字消す。空なら何もしない）
+        BackspacePending,
+    }
+
+    fn apply(e: &mut RakunEngine, op: Op, typed: &mut String) {
+        apply_opts(e, op, typed, false);
+    }
+
+    /// `full_backspace` が true なら pending が空でも Backspace を押す
+    /// （打鍵列は追跡しない。不変条件 2 の検査用）。
+    fn apply_opts(e: &mut RakunEngine, op: Op, typed: &mut String, full_backspace: bool) {
+        match op {
+            Op::Char(c) => {
+                e.push_char(c);
+                typed.push(c);
+            }
+            Op::Raw(c) => {
+                e.push_raw(c);
+                typed.push(c);
+            }
+            Op::Shift(c) => {
+                e.push_fullwidth_alpha(c);
+                typed.push(c);
+            }
+            Op::FlushN => {
+                e.flush_pending_n();
+            }
+            Op::BackspacePending => {
+                if !e.current_preedit().pending_romaji.is_empty() {
+                    assert!(e.backspace());
+                    typed.pop();
+                } else if full_backspace {
+                    let _ = e.backspace();
+                }
+            }
+        }
+    }
+
+    fn random_op(rng: &mut Lcg) -> Op {
+        const CHARS: &[char] = &[
+            'a', 'i', 'u', 'e', 'o', 'k', 's', 't', 'n', 'h', 'm', 'y', 'r', 'w', 'g', 'z', 'j',
+            'd', 'b', 'p', 'c', 'x', 'l', 'q', 'v', 'f', '0', '1', '9', ',', '.', '-', '\'', '!',
+            '?', '@',
+        ];
+        const RAWS: &[char] = &['、', '。', '・', 'ー', '！', ',', '.', '-'];
+        const SHIFTS: &[char] = &['A', 'B', 'N', 'Z'];
+        match rng.next() % 12 {
+            0 => Op::Raw(*rng.pick(RAWS)),
+            1 => Op::Shift(*rng.pick(SHIFTS)),
+            2 => Op::FlushN,
+            3 | 4 => Op::BackspacePending,
+            _ => Op::Char(*rng.pick(CHARS)),
+        }
+    }
+
+    fn configs() -> Vec<EngineConfig> {
+        vec![
+            EngineConfig::default(),
+            EngineConfig {
+                digit_width: DigitWidth::Fullwidth,
+                alpha_width: AlphaWidth::Halfwidth,
+                digit_separator_auto: false,
+                ..Default::default()
+            },
+            EngineConfig {
+                digit_width: DigitWidth::Halfwidth,
+                alpha_width: AlphaWidth::Fullwidth,
+                digit_separator_auto: true,
+                ..Default::default()
+            },
+        ]
+    }
+
+    #[test]
+    fn property_typed_concat_plus_pending_equals_keystrokes() {
+        for (ci, config) in configs().into_iter().enumerate() {
+            let mut rng = Lcg(0x5EED_0000 + ci as u64);
+            for case in 0..200 {
+                let mut e = RakunEngine::new(config.clone());
+                let mut typed = String::new();
+                let len = 1 + (rng.next() % 12) as usize;
+                for _ in 0..len {
+                    apply(&mut e, random_op(&mut rng), &mut typed);
+                    let pending = e.current_preedit().pending_romaji.clone();
+                    assert_eq!(
+                        format!("{}{}", e.romaji_log_str(), pending),
+                        typed,
+                        "config {ci} case {case}: log + pending != typed"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn property_output_concat_equals_hiragana_buf() {
+        for (ci, config) in configs().into_iter().enumerate() {
+            let mut rng = Lcg(0x0B5E_0000 + ci as u64);
+            for case in 0..200 {
+                let mut e = RakunEngine::new(config.clone());
+                let mut typed = String::new();
+                let len = 1 + (rng.next() % 12) as usize;
+                for _ in 0..len {
+                    apply_opts(&mut e, random_op(&mut rng), &mut typed, true);
+                    assert_eq!(
+                        e.hiragana_from_romaji_log(),
+                        e.hiragana_text(),
+                        "config {ci} case {case}: typed={typed:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    fn type_all(e: &mut RakunEngine, s: &str) {
+        for c in s.chars() {
+            e.push_char(c);
+        }
+    }
+
+    #[test]
+    fn shift_alpha_restores_with_alpha_width_fullwidth() {
+        let mut e = RakunEngine::new(EngineConfig {
+            alpha_width: AlphaWidth::Fullwidth,
+            ..Default::default()
+        });
+        type_all(&mut e, "ru-mu");
+        e.push_fullwidth_alpha('A');
+        type_all(&mut e, "situ");
+        assert_eq!(e.hiragana_text(), "るーむＡしつ");
+        assert_eq!(e.romaji_log_str(), "ru-muAsitu");
+        assert_eq!(e.hiragana_from_romaji_log(), "るーむＡしつ");
+    }
+
+    #[test]
+    fn shift_alpha_restores_with_alpha_width_halfwidth() {
+        let mut e = RakunEngine::new(EngineConfig {
+            alpha_width: AlphaWidth::Halfwidth,
+            ..Default::default()
+        });
+        type_all(&mut e, "ka");
+        e.push_fullwidth_alpha('B');
+        type_all(&mut e, "i");
+        assert_eq!(e.hiragana_text(), "かBい");
+        assert_eq!(e.hiragana_from_romaji_log(), "かBい");
+    }
+
+    #[test]
+    fn digit_separator_restores_as_recorded() {
+        let mut e = RakunEngine::new(EngineConfig {
+            digit_width: DigitWidth::Fullwidth,
+            digit_separator_auto: true,
+            ..Default::default()
+        });
+        type_all(&mut e, "1,000.0");
+        assert_eq!(e.hiragana_text(), "１,０００.０");
+        assert_eq!(e.hiragana_from_romaji_log(), "１,０００.０");
+    }
+
+    #[test]
+    fn raw_kuten_after_digit_restores_as_recorded() {
+        // TSF の on_punctuate は digit_separator_auto が無効なら「、」「。」を push_raw で渡す
+        let mut e = RakunEngine::new(EngineConfig {
+            digit_width: DigitWidth::Fullwidth,
+            digit_separator_auto: false,
+            ..Default::default()
+        });
+        e.push_char('1');
+        e.push_raw('、');
+        type_all(&mut e, "000");
+        e.push_raw('。');
+        e.push_char('0');
+        assert_eq!(e.hiragana_text(), "１、０００。０");
+        assert_eq!(e.hiragana_from_romaji_log(), "１、０００。０");
+    }
+
+    #[test]
+    fn flushed_n_restores_as_nn() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kon");
+        assert!(e.flush_pending_n());
+        assert_eq!(e.hiragana_text(), "こん");
+        assert_eq!(e.romaji_log_str(), "kon");
+        assert_eq!(e.hiragana_from_romaji_log(), "こん");
+    }
+
+    #[test]
+    fn kuten_via_raw_restores_unchanged() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kareha");
+        e.push_raw('、');
+        type_all(&mut e, "otokoda");
+        e.push_raw('。');
+        assert_eq!(e.hiragana_text(), "かれは、おとこだ。");
+        assert_eq!(e.hiragana_from_romaji_log(), "かれは、おとこだ。");
+    }
+
+    #[test]
+    fn restore_is_empty_when_nothing_typed() {
+        let e = RakunEngine::new(EngineConfig::default());
+        assert_eq!(e.hiragana_from_romaji_log(), "");
+        assert_eq!(e.romaji_log_str(), "");
+    }
+}
+
+#[cfg(test)]
+mod close_pending_tests {
+    //! Step 10-2: 未確定ローマ字を追い越す入力の防止。
+    //!
+    //! `push_raw` / `push_fullwidth_alpha` / 数字・記号の `push_char` は、先に pending を
+    //! 閉じてから追記する（`flush_pending_n` → `flush` → 追記）。
+    use super::{AlphaWidth, DigitWidth, EngineConfig, RakunEngine};
+
+    fn engine() -> RakunEngine {
+        RakunEngine::new(EngineConfig {
+            alpha_width: AlphaWidth::Fullwidth,
+            digit_width: DigitWidth::Fullwidth,
+            ..Default::default()
+        })
+    }
+
+    fn type_all(e: &mut RakunEngine, s: &str) {
+        for c in s.chars() {
+            e.push_char(c);
+        }
+    }
+
+    #[test]
+    fn raw_symbol_after_consonant_keeps_order() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_raw('。');
+        assert_eq!(e.current_preedit().display(), "k。");
+        assert_eq!(e.hiragana_text(), "k。");
+        assert!(e.current_preedit().pending_romaji.is_empty());
+        assert_eq!(e.romaji_log_str(), "k。");
+    }
+
+    #[test]
+    fn raw_symbol_after_j_keeps_order() {
+        let mut e = engine();
+        e.push_char('j');
+        e.push_raw('。');
+        assert_eq!(e.current_preedit().display(), "j。");
+    }
+
+    #[test]
+    fn raw_symbol_after_two_consonants_keeps_order() {
+        let mut e = engine();
+        type_all(&mut e, "ky");
+        e.push_raw('。');
+        assert_eq!(e.current_preedit().display(), "ky。");
+    }
+
+    #[test]
+    fn raw_symbol_after_n_makes_nn() {
+        let mut e = engine();
+        e.push_char('n');
+        e.push_raw('。');
+        assert_eq!(e.current_preedit().display(), "ん。");
+        assert_eq!(e.romaji_log_str(), "n。");
+        assert_eq!(e.hiragana_from_romaji_log(), "ん。");
+    }
+
+    #[test]
+    fn raw_symbol_after_z_has_no_leader_exception() {
+        // §5-5 は未決。例外を入れない前提で「z、」に固定する
+        let mut e = engine();
+        e.push_char('z');
+        e.push_raw('、');
+        assert_eq!(e.current_preedit().display(), "z、");
+    }
+
+    #[test]
+    fn shift_alpha_after_consonant_keeps_order() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_fullwidth_alpha('A');
+        assert_eq!(e.current_preedit().display(), "kＡ");
+        assert_eq!(e.romaji_log_str(), "kA");
+    }
+
+    #[test]
+    fn shift_alpha_after_n_makes_nn() {
+        let mut e = engine();
+        e.push_char('n');
+        e.push_fullwidth_alpha('A');
+        assert_eq!(e.current_preedit().display(), "んＡ");
+    }
+
+    #[test]
+    fn digit_after_consonant_follows_digit_width() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_char('1');
+        assert_eq!(e.current_preedit().display(), "k１");
+        assert_eq!(e.romaji_log_str(), "k1");
+    }
+
+    #[test]
+    fn digit_after_n_follows_digit_width() {
+        let mut e = engine();
+        e.push_char('n');
+        e.push_char('1');
+        assert_eq!(e.current_preedit().display(), "ん１");
+    }
+
+    #[test]
+    fn ascii_symbol_after_consonant_follows_symbol_width() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_char('@');
+        assert_eq!(e.current_preedit().display(), "k＠");
+    }
+
+    #[test]
+    fn trie_symbol_after_consonant_still_goes_through_trie() {
+        // `,./[]\-` は trie に委ねたまま（`z,` 系の例外を将来入れられるよう）
+        let mut e = engine();
+        e.push_char('k');
+        e.push_char('-');
+        assert_eq!(e.current_preedit().display(), "kー");
+    }
+
+    #[test]
+    fn closed_consonant_stays_confirmed_after_backspace() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_raw('。');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "k");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "kあ");
+    }
+
+    #[test]
+    fn vowel_after_symbol_does_not_merge_with_earlier_consonant() {
+        let mut e = engine();
+        e.push_char('k');
+        e.push_raw('。');
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "k。あ");
+    }
+
+    #[test]
+    fn closing_keeps_both_invariants() {
+        let mut e = engine();
+        type_all(&mut e, "tat");
+        e.push_raw('。');
+        e.push_char('n');
+        e.push_fullwidth_alpha('B');
+        e.push_char('k');
+        e.push_char('9');
+        let pending = e.current_preedit().pending_romaji.clone();
+        assert_eq!(format!("{}{}", e.romaji_log_str(), pending), "tat。nBk9");
+        assert_eq!(e.hiragana_from_romaji_log(), e.hiragana_text());
+        assert_eq!(e.hiragana_text(), "たt。んＢk９");
+    }
+
+    #[test]
+    fn empty_pending_is_unchanged() {
+        let mut e = engine();
+        type_all(&mut e, "ka");
+        e.push_raw('。');
+        assert_eq!(e.current_preedit().display(), "か。");
+        e.push_fullwidth_alpha('A');
+        assert_eq!(e.current_preedit().display(), "か。Ａ");
+        e.push_char('1');
+        assert_eq!(e.current_preedit().display(), "か。Ａ１");
+    }
+}
+
+#[cfg(test)]
+mod backspace_replay_tests {
+    //! Step 10-3: pending があるときの Backspace は、末尾のローマ字区間を打鍵列から再生する。
+    use super::{EngineConfig, RakunEngine};
+
+    fn type_all(e: &mut RakunEngine, s: &str) {
+        for c in s.chars() {
+            e.push_char(c);
+        }
+    }
+
+    fn typed_then_bs(s: &str) -> RakunEngine {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, s);
+        assert!(e.backspace());
+        e
+    }
+
+    #[test]
+    fn kt_bs_leaves_k_pending() {
+        let e = typed_then_bs("kt");
+        assert_eq!(e.hiragana_text(), "");
+        assert_eq!(e.current_preedit().pending_romaji, "k");
+        assert_eq!(e.current_preedit().display(), "k");
+        assert_eq!(e.romaji_log_str(), "");
+    }
+
+    #[test]
+    fn kt_bs_a_is_ka() {
+        let mut e = typed_then_bs("kt");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "か");
+        assert_eq!(e.romaji_log_str(), "ka");
+    }
+
+    #[test]
+    fn nt_bs_a_is_na() {
+        let mut e = typed_then_bs("nt");
+        assert_eq!(e.current_preedit().display(), "n");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "な");
+    }
+
+    #[test]
+    fn tt_bs_a_is_ta() {
+        let mut e = typed_then_bs("tt");
+        assert_eq!(e.current_preedit().display(), "t");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "た");
+    }
+
+    #[test]
+    fn kk_bs_a_is_ka() {
+        let mut e = typed_then_bs("kk");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "か");
+    }
+
+    #[test]
+    fn kyt_bs_a_is_kya() {
+        let mut e = typed_then_bs("kyt");
+        assert_eq!(e.current_preedit().display(), "ky");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "きゃ");
+    }
+
+    #[test]
+    fn sht_bs_i_is_shi() {
+        let mut e = typed_then_bs("sht");
+        e.push_char('i');
+        assert_eq!(e.current_preedit().display(), "し");
+        assert_eq!(e.romaji_log_str(), "shi");
+    }
+
+    #[test]
+    fn kanakq_bs_keeps_display_and_makes_k_pending() {
+        let mut e = typed_then_bs("kanakq");
+        assert_eq!(e.current_preedit().display(), "かなk");
+        assert_eq!(e.hiragana_text(), "かな");
+        assert_eq!(e.current_preedit().pending_romaji, "k");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "かなか");
+    }
+
+    #[test]
+    fn replay_stops_at_flushed_n() {
+        // Space → Waiting → Esc で Preedit に戻った後の入力を想定
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kon");
+        assert!(e.flush_pending_n());
+        e.push_char('k');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "こん");
+        assert!(e.current_preedit().pending_romaji.is_empty());
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "こんあ");
+    }
+
+    #[test]
+    fn replay_stops_at_raw_entry() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        e.push_char('k');
+        e.push_raw('。');
+        e.push_char('k');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "k。");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "k。あ");
+    }
+
+    #[test]
+    fn replay_stops_at_digit_entry() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "ka1kt");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "か1k");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "か1か");
+    }
+
+    #[test]
+    fn after_force_preedit_backspace_is_simple_pop() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "ka");
+        e.force_preedit("カ".to_string());
+        e.push_char('k');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "カ");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "カあ");
+        // 境界より前は単純 pop
+        assert!(e.backspace());
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "");
+        assert!(!e.backspace());
+    }
+
+    #[test]
+    fn replay_after_force_preedit_covers_only_new_input() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "ka");
+        e.force_preedit("カ".to_string());
+        type_all(&mut e, "kt");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "カk");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "カか");
+    }
+
+    #[test]
+    fn multiple_backspaces_walk_back_through_typed() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kanakt");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "かなk");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "かな");
+        assert!(e.current_preedit().pending_romaji.is_empty());
+        // pending が空になったら現行の 1 文字削除
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "か");
+    }
+
+    #[test]
+    fn empty_pending_backspace_is_unchanged() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kya");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "き");
+    }
+
+    #[test]
+    fn invariants_hold_after_pending_backspace() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "watasit");
+        assert!(e.backspace());
+        let pending = e.current_preedit().pending_romaji.clone();
+        assert_eq!(format!("{}{}", e.romaji_log_str(), pending), "watasi");
+        assert_eq!(e.hiragana_from_romaji_log(), e.hiragana_text());
+        assert_eq!(e.hiragana_text(), "わたし");
+    }
+}
+
+#[cfg(test)]
+mod log_rewrite_tests {
+    //! Step 10-4: pending が空のときの Backspace は表示 1 文字を消し、log を残る表示に
+    //! 合う打鍵列に書き換える（§4.3 の 2 段: 接頭辞の再生 → 逆引き。母音は母音字 1 文字）。
+    use super::{EngineConfig, RakunEngine};
+
+    fn type_all(e: &mut RakunEngine, s: &str) {
+        for c in s.chars() {
+            e.push_char(c);
+        }
+    }
+
+    /// 打鍵 → Backspace 1 回。(表示, F9 用の打鍵列) を返す
+    fn bs(s: &str) -> (String, String) {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, s);
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_from_romaji_log(), e.hiragana_text());
+        (e.current_preedit().display(), e.romaji_log_str())
+    }
+
+    #[test]
+    fn youon_falls_back_to_reverse_lookup() {
+        assert_eq!(bs("kya"), ("き".into(), "ki".into()));
+        assert_eq!(bs("gyo"), ("ぎ".into(), "gi".into()));
+        assert_eq!(bs("nyu"), ("に".into(), "ni".into()));
+    }
+
+    #[test]
+    fn reverse_lookup_prefers_shared_prefix() {
+        assert_eq!(bs("sha"), ("し".into(), "shi".into()));
+        assert_eq!(bs("sya"), ("し".into(), "si".into()));
+        assert_eq!(bs("cha"), ("ち".into(), "chi".into()));
+        assert_eq!(bs("tya"), ("ち".into(), "ti".into()));
+        assert_eq!(bs("ja"), ("じ".into(), "ji".into()));
+        assert_eq!(bs("zya"), ("じ".into(), "zi".into()));
+        assert_eq!(bs("fa"), ("ふ".into(), "fu".into()));
+        assert_eq!(bs("hwa"), ("ふ".into(), "hu".into()));
+        assert_eq!(bs("tsa"), ("つ".into(), "tsu".into()));
+    }
+
+    #[test]
+    fn reverse_lookup_uses_bare_vowel_for_vowel_kana() {
+        assert_eq!(bs("wi"), ("う".into(), "u".into()));
+        assert_eq!(bs("who"), ("う".into(), "u".into()));
+        assert_eq!(bs("ye"), ("い".into(), "i".into()));
+    }
+
+    #[test]
+    fn prefix_replay_keeps_typed_spelling() {
+        // 促音: 逆引きだと xtu になるが、打鍵の接頭辞 tt で「っ」が出る
+        assert_eq!(bs("tta"), ("っ".into(), "tt".into()));
+        // 撥音: nna は 1 エントリ（んあ）。nn で「ん」
+        assert_eq!(bs("nna"), ("ん".into(), "nn".into()));
+        // n + 子音の「ん」も打鍵の接頭辞
+        assert_eq!(bs("nta"), ("ん".into(), "nt".into()));
+        // 複合エントリ（んにゃ）から 1 文字消す
+        assert_eq!(bs("nnnya"), ("んに".into(), "nnni".into()));
+    }
+
+    #[test]
+    fn exact_prefix_is_preferred_over_prefix_with_pending() {
+        // kata → BS: kat（か + 未確定 t）ではなく ka
+        assert_eq!(bs("kata"), ("か".into(), "ka".into()));
+        assert_eq!(bs("kana"), ("か".into(), "ka".into()));
+    }
+
+    #[test]
+    fn single_char_entries_are_popped_as_before() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "ka");
+        e.push_raw('。');
+        e.push_fullwidth_alpha('A');
+        e.push_char('1');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "か。Ａ");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "か。");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "か");
+        assert_eq!(e.romaji_log_str(), "ka");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "");
+        assert!(!e.backspace());
+    }
+
+    #[test]
+    fn rewritten_entry_is_closed_so_replay_does_not_reopen_it() {
+        // 10-3 で入った崩れ: った → BS → っ → k → BS が t になっていた
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "tta");
+        assert!(e.backspace());
+        e.push_char('k');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "っ");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "っあ");
+    }
+
+    #[test]
+    fn popped_run_tail_is_closed_too() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "nta");
+        assert!(e.backspace());
+        e.push_char('k');
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "ん");
+    }
+
+    #[test]
+    fn replay_after_rewrite_starts_after_closed_entry() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kya");
+        assert!(e.backspace());
+        type_all(&mut e, "kt");
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "きk");
+        e.push_char('a');
+        assert_eq!(e.current_preedit().display(), "きか");
+        assert_eq!(e.romaji_log_str(), "kika");
+    }
+
+    #[test]
+    fn rewrite_restores_through_f6_path() {
+        // F9 → F6 相当: hiragana_from_romaji_log が書き換え後の表示を返す
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kyakya");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "きゃき");
+        assert_eq!(e.hiragana_from_romaji_log(), "きゃき");
+        assert_eq!(e.romaji_log_str(), "kyaki");
+    }
+
+    #[test]
+    fn detached_backspace_is_simple_pop() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kya");
+        e.force_preedit("キャ".to_string());
+        assert!(e.backspace());
+        assert_eq!(e.current_preedit().display(), "キ");
+        // detach 後は log と表示が対応しないので、現行どおり 1 エントリ消す
+        assert_eq!(e.romaji_log_str(), "");
+    }
+
+    #[test]
+    fn consecutive_backspaces_keep_invariant_two() {
+        let mut e = RakunEngine::new(EngineConfig::default());
+        type_all(&mut e, "kyounohanashashin");
+        while e.backspace() {
+            assert_eq!(e.hiragana_from_romaji_log(), e.hiragana_text());
+        }
+        assert_eq!(e.current_preedit().display(), "");
     }
 }

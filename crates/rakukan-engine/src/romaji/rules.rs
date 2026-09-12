@@ -1,4 +1,6 @@
 use super::trie::TrieNode;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 
 /// Build the conversion rules trie
 pub fn build_rules() -> TrieNode {
@@ -370,9 +372,49 @@ pub fn build_rules() -> TrieNode {
     trie
 }
 
+/// かな → 綴りの逆引き表。全規則を trie から集めて構築する（初回のみ）。
+fn reverse_table() -> &'static HashMap<String, Vec<String>> {
+    static TABLE: OnceLock<HashMap<String, Vec<String>>> = OnceLock::new();
+    TABLE.get_or_init(|| {
+        fn collect(node: &TrieNode, prefix: &mut String, out: &mut Vec<(String, String)>) {
+            if let Some(output) = &node.output {
+                out.push((prefix.clone(), output.clone()));
+            }
+            for (c, child) in &node.children {
+                prefix.push(*c);
+                collect(child, prefix, out);
+                prefix.pop();
+            }
+        }
+        let mut pairs = Vec::new();
+        collect(&build_rules(), &mut String::new(), &mut pairs);
+        let mut map: HashMap<String, Vec<String>> = HashMap::new();
+        for (romaji, kana) in pairs {
+            map.entry(kana).or_default().push(romaji);
+        }
+        for spellings in map.values_mut() {
+            spellings.sort();
+        }
+        map
+    })
+}
+
+/// `kana` を出力する綴りをすべて返す（辞書順）。規則が無ければ空。
+pub fn spellings_for(kana: &str) -> &'static [String] {
+    reverse_table().get(kana).map(Vec::as_slice).unwrap_or(&[])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spellings_for_returns_all_rules_sorted() {
+        assert_eq!(spellings_for("し"), ["ci", "shi", "si"]);
+        assert_eq!(spellings_for("っ"), ["ltsu", "ltu", "xtsu", "xtu"]);
+        assert_eq!(spellings_for("う"), ["u", "whu", "wu"]);
+        assert!(spellings_for("漢").is_empty());
+    }
 
     #[test]
     fn test_basic_vowels() {
