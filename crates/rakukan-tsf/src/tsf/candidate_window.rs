@@ -1124,6 +1124,68 @@ pub fn stop_waiting_timer() {
     }
 }
 
+/// 推論が失敗した（`bg_status() == "error"`）ときに候補ウィンドウの status 行へ出す文言。
+///
+/// 「⏳ 変換中...」のままだと待てば直ると誤解させる。LLM 候補は来ないので、
+/// 辞書候補だけで操作を続けられる状態であることを伝える。
+pub const BG_ERROR_STATUS: &str = "⚠ 変換エンジンが応答していません（辞書候補のみ）";
+
+/// Selecting 中の `llm_pending` を降ろす。
+///
+/// LLM の結果を待つのをやめる全経路で必要になる。立てたまま抜けると
+/// `on_convert` が「まだ変換中」と判断して Space を無視し続けるため、
+/// 候補送りも確定もできない状態でウィンドウが固まる（PR #41 の取り込み）。
+fn clear_llm_pending() {
+    use crate::engine::state::{SessionState, session_get};
+    if let Ok(mut sess) = session_get()
+        && let SessionState::Selecting {
+            ref mut llm_pending,
+            ..
+        } = *sess
+    {
+        *llm_pending = false;
+    }
+}
+
+/// Selecting 中に推論が失敗したときの後始末。
+///
+/// 失敗した結果をキャッシュから回収して idle に戻し、`llm_pending` を降ろし、
+/// 表示中の辞書候補で操作を続けられる状態にする。復帰（ホストの再起動）は
+/// ここでは行わない（設計は別 Issue）。
+fn bg_error_fallback_selecting(site: &str) {
+    use crate::engine::state::{engine_get, session_get};
+    tracing::warn!("{site}: inference failed — falling back to dict candidates");
+    if let Ok(mut g) = engine_get()
+        && let Some(engine) = g.as_mut()
+    {
+        engine.bg_reclaim();
+    }
+    clear_llm_pending();
+    stop_waiting_timer();
+
+    let shown = match session_get() {
+        Ok(sess) => Some((
+            sess.page_candidates().to_vec(),
+            sess.page_selected(),
+            sess.page_info(),
+        )),
+        Err(_) => None,
+    };
+    if let Some((cands, selected, info)) = shown
+        && !cands.is_empty()
+    {
+        let pos = crate::engine::state::caret_rect_get();
+        show_with_status(
+            &cands,
+            selected,
+            &info,
+            pos.left,
+            pos.bottom,
+            Some(BG_ERROR_STATUS),
+        );
+    }
+}
+
 /// WM_TIMER コールバック（TSFスレッド上で呼ばれる）。
 /// bg_status == "done" になったら候補を取り出して表示する。
 pub fn on_waiting_timer() {
@@ -1157,11 +1219,17 @@ pub fn on_waiting_timer() {
     };
 
     if let Some((preedit_key, pos_x, pos_y)) = selecting_info {
-        let bg_done = match engine_get() {
-            Ok(g) => g.as_ref().map(|e| e.bg_status() == "done").unwrap_or(false),
-            Err(_) => false,
+        let bg_status = match engine_get() {
+            Ok(g) => g.as_ref().map(|e| e.bg_status()).unwrap_or("idle"),
+            Err(_) => "idle",
         };
-        if !bg_done {
+        if bg_status == "error" {
+            // 推論が落ちた。候補は永久に来ないので、待機表示のまま固まらせず
+            // 辞書候補で確定できる状態に戻す。
+            bg_error_fallback_selecting("on_waiting_timer(selecting)");
+            return;
+        }
+        if bg_status != "done" {
             return;
         }
 
@@ -1200,6 +1268,9 @@ pub fn on_waiting_timer() {
             tracing::warn!(
                 "on_waiting_timer(selecting): bg_take_candidates returned None or empty"
             );
+            // llm_pending を降ろさずに抜けると、以降 Space が候補送りに
+            // 進めなくなる（on_convert が「変換中」と見なして待ち続ける）。
+            clear_llm_pending();
             stop_waiting_timer();
             return;
         };
@@ -1301,14 +1372,78 @@ pub fn on_waiting_timer() {
     };
 
     // engine の bg_status を確認
-    let bg_done = {
+    let bg_status = {
         match engine_get() {
-            Ok(g) => g.as_ref().map(|e| e.bg_status() == "done").unwrap_or(false),
-            Err(_) => false,
+            Ok(g) => g.as_ref().map(|e| e.bg_status()).unwrap_or("idle"),
+            Err(_) => "idle",
         }
     };
 
-    if !bg_done {
+    if bg_status == "error" {
+        // 推論が落ちた。待ち続けても完了しないのでタイマーを止め、辞書候補で
+        // Selecting に移す。Waiting のまま抜けると「⏳ 変換中...」が残り、
+        // タイマーも止まっているので表示を更新する経路が無くなる。
+        tracing::warn!("on_waiting_timer: inference failed — falling back to dict candidates");
+        const DICT_LIMIT_ERR: usize = 40;
+        let (reading, dict) = match engine_get() {
+            Ok(mut g) => g.as_mut().map(|engine| {
+                engine.bg_reclaim();
+                // 読みは hiragana_text（wait_preedit は未確定ローマ字を含みうる。Step 10-5）
+                let hira = engine.hiragana_text().to_string();
+                let reading = if !hira.is_empty() && wait_preedit.starts_with(&hira) {
+                    hira
+                } else {
+                    wait_preedit.clone()
+                };
+                let dict =
+                    engine.merge_candidates_for_reading(&reading, Vec::new(), DICT_LIMIT_ERR);
+                (reading, dict)
+            }),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| (wait_preedit.clone(), Vec::new()));
+        stop_waiting_timer();
+
+        let cands = if dict.is_empty() {
+            vec![reading.clone()]
+        } else {
+            dict
+        };
+        let pending_suffix = crate::engine::state::pending_suffix_display(&wait_preedit, &reading);
+        let remainder = format!("{pending_suffix}{remainder}");
+        let (page_cands, page_info_str) = {
+            let mut sess = match session_get() {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            sess.activate_selecting_with_affixes(
+                cands,
+                reading,
+                pos_x,
+                pos_y,
+                false,
+                String::new(),
+                String::new(),
+                remainder,
+                remainder_reading,
+            );
+            (
+                sess.page_candidates().to_vec(),
+                sess.page_info().to_string(),
+            )
+        };
+        show_with_status(
+            &page_cands,
+            0,
+            &page_info_str,
+            pos_x,
+            pos_y,
+            Some(BG_ERROR_STATUS),
+        );
+        return;
+    }
+
+    if bg_status != "done" {
         return; // まだ実行中 → 次の WM_TIMER を待つ
     }
 
