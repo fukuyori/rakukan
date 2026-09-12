@@ -978,11 +978,6 @@ impl super::TextServiceFactory_Impl {
             kanji_ready,
             engine.bg_status()
         );
-        if kanji_ready && engine.bg_status() == "idle" {
-            tracing::debug!("on_convert: model ready → bg_start");
-            engine.bg_start(llm_limit);
-            convert_mark("bg_start", convert_start, &mut convert_last);
-        }
         if !kanji_ready {
             let err = engine.last_error();
             tracing::warn!("on_convert: kanji not ready, engine status={:?}", err);
@@ -993,6 +988,14 @@ impl super::TextServiceFactory_Impl {
                     kanji_ready
                 );
             }
+        }
+        // ready 判定（読み込み完了の注入を含む）の後で bg_start する。注入で ready に
+        // 変わった直後に起動しないと、llm_pending のまま bg=idle で「⏳ 変換中...」が
+        // 残る（host 再起動直後の Space、2026-09-12 実機で確認）。
+        if kanji_ready && engine.bg_status() == "idle" {
+            tracing::debug!("on_convert: model ready → bg_start");
+            engine.bg_start(llm_limit);
+            convert_mark("bg_start", convert_start, &mut convert_last);
         }
 
         let bg_status = engine.bg_status();
