@@ -206,6 +206,31 @@ fn immediate_dict_candidates(
     }
 }
 
+/// Selecting から読みに戻すとき（Backspace / Esc）の表示を決め、必要なら engine に書き戻す。
+///
+/// Space 前の engine 状態（読み + 未確定ローマ字）がそのまま残っていれば engine の表示
+/// （例「たt」）を使い、`force_preedit` しない。未確定ローマ字が生きたまま戻るので、
+/// 続けて母音を打てば結合する（Step 10-5）。範囲指定変換や区読点分割で engine が
+/// `force_preedit(target)` により縮んでいる場合は、従来どおり `prefix + 読み + remainder`
+/// を engine に書き戻す。
+fn restore_reading_from_selecting(
+    engine: &mut crate::engine::state::DynEngine,
+    prefix: &str,
+    original: &str,
+    remainder: &str,
+) -> String {
+    let current = engine.preedit_display();
+    let intact = prefix.is_empty()
+        && engine.hiragana_text() == original
+        && crate::engine::state::pending_suffix_display(&current, original) == remainder;
+    if intact {
+        return current;
+    }
+    let full = format!("{prefix}{original}{remainder}");
+    engine.force_preedit(full.clone());
+    full
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_convert(
         &self,
@@ -1820,16 +1845,17 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
             if sess.is_selecting() {
-                // on_cancel と同じく prefix / remainder（Step 10-5 の接尾辞を含む）ごと戻す
+                // 変換をやめて読みに戻す（on_cancel と同じ復元規則）
                 let original = sess.original_preedit().unwrap_or("").to_string();
                 let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.selecting_remainder_clone();
-                let full = format!("{prefix}{original}{remainder}");
-                sess.set_preedit(full.clone());
+                let restored =
+                    restore_reading_from_selecting(engine, &prefix, &original, &remainder);
+                sess.set_preedit(restored.clone());
                 drop(sess);
                 candidate_window::hide();
                 drop(guard);
-                update_composition(ctx, tid, sink, full)?;
+                update_composition(ctx, tid, sink, restored)?;
                 return Ok(true);
             }
             if sess.is_waiting() {
@@ -1926,22 +1952,21 @@ impl super::TextServiceFactory_Impl {
                 let original = sess.original_preedit().unwrap_or("").to_string();
                 let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.selecting_remainder_clone();
-                let full = format!("{prefix}{original}{remainder}");
+                engine.bg_reclaim();
+                let restored =
+                    restore_reading_from_selecting(engine, &prefix, &original, &remainder);
                 tracing::debug!(
-                    "on_cancel[Selecting]: prefix={:?} original={:?} remainder={:?} → full={:?}",
+                    "on_cancel[Selecting]: prefix={:?} original={:?} remainder={:?} → {:?}",
                     prefix,
                     original,
                     remainder,
-                    full
+                    restored
                 );
-                sess.set_preedit(full.clone());
+                sess.set_preedit(restored.clone());
                 drop(sess);
                 candidate_window::hide();
-                engine.bg_reclaim();
-                // engine の hiragana_buf を full に復元（force_preedit(target) で縮んでいるため）
-                engine.force_preedit(full.clone());
                 drop(guard);
-                update_composition(ctx, tid, sink, full)?;
+                update_composition(ctx, tid, sink, restored)?;
                 return Ok(true);
             }
             if sess.is_waiting() {

@@ -585,13 +585,22 @@ impl super::TextServiceFactory_Impl {
                 .to_string();
             let reading = sess.original_preedit().unwrap_or("").to_string();
             let remainder = sess.selecting_remainder_clone();
-            // remainder_reading が空でも remainder（リテラル記号接尾辞）は読みに含める
-            let mut remainder_reading = sess.selecting_remainder_reading_clone();
-            if remainder_reading.is_empty() {
-                remainder_reading = remainder.clone();
-            }
-            let display = format!("{prefix}{text}{symbol}{remainder}");
-            let next_reading = format!("{prefix_reading}{reading}{symbol}{remainder_reading}");
+            let remainder_reading = sess.selecting_remainder_reading_clone();
+            // remainder_reading が空なら remainder はリテラル（Step 10-5 の未確定ローマ字接尾辞
+            // 「ｔ」や、区読点分割で残した記号）。打鍵順どおり記号はその後ろに置き、読みにも
+            // そのまま含める。remainder_reading があれば再変換対象の残り読み（範囲指定変換）
+            // なので、記号は確定部分の直後に置く。
+            let (display, next_reading) = if remainder_reading.is_empty() {
+                (
+                    format!("{prefix}{text}{remainder}{symbol}"),
+                    format!("{prefix_reading}{reading}{remainder}{symbol}"),
+                )
+            } else {
+                (
+                    format!("{prefix}{text}{symbol}{remainder}"),
+                    format!("{prefix_reading}{reading}{symbol}{remainder_reading}"),
+                )
+            };
             engine.force_preedit(next_reading.clone());
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
