@@ -42,7 +42,10 @@ use crate::{DigitCandidateKind, default_digit_candidates_order};
 
 /// ワーカーへの変換リクエスト（single-slot 上書き式キュー）
 struct Request {
+    /// TSF 側の打鍵そのままの読みと照合するキャッシュキー。
     hiragana: String,
+    /// 先頭ラテン語ランの復元後、変換器へ実際に渡す読み。
+    conv_reading: String,
     committed: String,
     converter: KanaKanjiConverter,
     n: usize,
@@ -142,6 +145,7 @@ fn worker_loop(cache: Arc<Cache>) {
         };
 
         let key = req.hiragana.clone();
+        let conv_reading = req.conv_reading.clone();
         let committed = req.committed.clone();
         let n = req.n;
         let digit_candidates_order = req.digit_candidates_order.clone();
@@ -154,7 +158,7 @@ fn worker_loop(cache: Arc<Cache>) {
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::digits::convert_with_digit_protection(
                     &converter,
-                    &key,
+                    &conv_reading,
                     &committed,
                     n,
                     &digit_candidates_order,
@@ -209,8 +213,11 @@ fn worker_loop(cache: Arc<Cache>) {
 /// # 戻り値
 /// - `None`       = ワーカーに渡した（converter の所有権はキャッシュへ）
 /// - `Some(conv)` = 渡せなかった（同一キー実行中 or lock 取得失敗）
+// 引数を構造体にまとめても Request と二重になるだけなので、この形を保つ。
+#[allow(clippy::too_many_arguments)]
 pub fn start(
     hiragana: String,
+    conv_reading: String,
     committed: String,
     converter: KanaKanjiConverter,
     n: usize,
@@ -242,6 +249,7 @@ pub fn start(
 
     inner.pending = Some(Request {
         hiragana,
+        conv_reading,
         committed,
         converter,
         n,
