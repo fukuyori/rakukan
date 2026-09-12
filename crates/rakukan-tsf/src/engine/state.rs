@@ -801,31 +801,76 @@ pub fn is_candidate_learning_target(source: CandidateViewSource) -> bool {
     }
 }
 
+/// 確定時に学習するか、するならどの経路か（Step 12-3）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LearnAction {
+    /// 学習しない
+    Skip,
+    /// `engine.learn()`（辞書ガードあり）
+    Learn,
+    /// `engine.learn_force()`（辞書ガードなし。LLM 候補と、読みそのものの明示選択）
+    LearnForce,
+}
+
 /// 学習判定の中央ヘルパ。`auto_learn` 設定 / `text == reading` / `source` 判定を一括し、
 /// 観測ログ `learning_decision` を出す。`engine.learn()` を呼ぶ前に必ずこれを通す。
 ///
-/// `source = None` の場合（LiveConv 経路など `CandidateView` がない経路）は source 判定を
-/// skip し、従来通り auto_learn + text != reading だけで判断する。
-pub fn should_learn_and_log(
+/// - `source = None`（LiveConv 経路など `CandidateView` がない経路）は source 判定を
+///   skip し、auto_learn + text != reading だけで判断する。
+/// - `text == reading`（読みそのものを確定）は原則学習しないが、候補ウィンドウから
+///   読みそのものを**明示的に選んだ**場合（`explicit_pick`）は学習する（#37 の 5、E-2）。
+///   「すごい」「ください」のようにひらがなのまま使いたい語の意思を反映するため。
+///   読みは辞書に表記として無いことが多いので `LearnForce` で記録する。Enter でそのまま
+///   確定した場合や先頭候補が読みだった場合は明示選択ではないので学習しない。
+pub fn learn_action(
     reading: &str,
     text: &str,
     source: Option<CandidateViewSource>,
-) -> bool {
-    if !is_auto_learn_enabled() {
-        return false;
-    }
-    if text == reading {
-        return false;
-    }
-    let learnable = source.map(is_candidate_learning_target).unwrap_or(true);
+    explicit_pick: bool,
+) -> LearnAction {
+    let action = learn_action_with(
+        is_auto_learn_enabled(),
+        reading,
+        text,
+        source,
+        explicit_pick,
+    );
     tracing::info!(
-        "learning_decision learn={} source={} reading_len={} text={:?}",
-        learnable,
+        "learning_decision action={:?} source={} reading_len={} text={:?} explicit_pick={} reading_pick={}",
+        action,
         source.map(|s| s.as_str()).unwrap_or("none"),
         reading.chars().count(),
-        text
+        text,
+        explicit_pick,
+        text == reading
     );
-    learnable
+    action
+}
+
+/// `learn_action` の純粋部分（設定値を引数で受ける。テスト用）。
+fn learn_action_with(
+    auto_learn: bool,
+    reading: &str,
+    text: &str,
+    source: Option<CandidateViewSource>,
+    explicit_pick: bool,
+) -> LearnAction {
+    if !auto_learn {
+        return LearnAction::Skip;
+    }
+    if text == reading {
+        return if explicit_pick {
+            LearnAction::LearnForce
+        } else {
+            LearnAction::Skip
+        };
+    }
+    match source {
+        Some(CandidateViewSource::Bg) => LearnAction::LearnForce,
+        Some(s) if is_candidate_learning_target(s) => LearnAction::Learn,
+        Some(_) => LearnAction::Skip,
+        None => LearnAction::Learn,
+    }
 }
 
 pub fn is_digit_separator_auto_enabled() -> bool {
@@ -1875,6 +1920,15 @@ impl SessionState {
         }
     }
 
+    /// Selecting 中の選択位置（全候補中の index）。Selecting でなければ 0。
+    /// 0 より大きければ、利用者が候補送りで先頭以外を選んだ（明示選択）ことを表す。
+    pub fn selecting_selected_index(&self) -> usize {
+        match self {
+            SessionState::Selecting { selected, .. } => *selected,
+            _ => 0,
+        }
+    }
+
     pub fn selecting_prefix_clone(&self) -> String {
         if let SessionState::Selecting { prefix, .. } = self {
             prefix.clone()
@@ -2505,6 +2559,77 @@ mod tests {
         assert!(!ends_with_pending_romaji("hello"));
         // 数字・記号で終わる読み
         assert!(!ends_with_pending_romaji("2024"));
+    }
+
+    #[test]
+    fn learn_action_learns_reading_only_when_explicitly_picked() {
+        use super::{LearnAction, learn_action_with};
+        // Enter でそのまま確定（先頭候補が読み）→ 学習しない
+        assert_eq!(
+            learn_action_with(
+                true,
+                "すごい",
+                "すごい",
+                Some(CandidateViewSource::Dict),
+                false
+            ),
+            LearnAction::Skip
+        );
+        // 候補送りで読みそのものを選んで確定 → 辞書ガードなしで学習
+        assert_eq!(
+            learn_action_with(
+                true,
+                "すごい",
+                "すごい",
+                Some(CandidateViewSource::Dict),
+                true
+            ),
+            LearnAction::LearnForce
+        );
+        // auto_learn が無効なら何もしない
+        assert_eq!(
+            learn_action_with(
+                false,
+                "すごい",
+                "すごい",
+                Some(CandidateViewSource::Dict),
+                true
+            ),
+            LearnAction::Skip
+        );
+    }
+
+    #[test]
+    fn learn_action_keeps_source_rules_for_converted_text() {
+        use super::{LearnAction, learn_action_with};
+        assert_eq!(
+            learn_action_with(true, "すごい", "凄い", Some(CandidateViewSource::Bg), false),
+            LearnAction::LearnForce
+        );
+        assert_eq!(
+            learn_action_with(
+                true,
+                "すごい",
+                "凄い",
+                Some(CandidateViewSource::Dict),
+                false
+            ),
+            LearnAction::Learn
+        );
+        assert_eq!(
+            learn_action_with(
+                true,
+                "すごい",
+                "凄い",
+                Some(CandidateViewSource::Fallback),
+                true
+            ),
+            LearnAction::Skip
+        );
+        assert_eq!(
+            learn_action_with(true, "すごい", "凄い", None, false),
+            LearnAction::Learn
+        );
     }
 
     #[test]

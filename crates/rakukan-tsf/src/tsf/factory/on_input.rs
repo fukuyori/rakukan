@@ -247,6 +247,7 @@ impl super::TextServiceFactory_Impl {
                 let punct = sess.take_punct_pending();
                 let remainder = sess.take_selecting_remainder();
                 let candidate_source = sess.current_candidate_view().map(|v| v.source);
+                let explicit_pick = sess.selecting_selected_index() > 0;
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
@@ -257,19 +258,19 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if crate::engine::state::should_learn_and_log(
+                match crate::engine::state::learn_action(
                     &reading,
                     &selected_text,
                     candidate_source,
+                    explicit_pick,
                 ) {
-                    if matches!(
-                        candidate_source,
-                        Some(crate::engine::state::CandidateViewSource::Bg)
-                    ) {
-                        engine.learn_force(&reading, &selected_text);
-                    } else {
-                        engine.learn(&reading, &selected_text);
+                    crate::engine::state::LearnAction::LearnForce => {
+                        engine.learn_force(&reading, &selected_text)
                     }
+                    crate::engine::state::LearnAction::Learn => {
+                        engine.learn(&reading, &selected_text)
+                    }
+                    crate::engine::state::LearnAction::Skip => {}
                 }
                 engine.commit(&full_text);
                 engine.reset_preedit();
@@ -432,6 +433,7 @@ impl super::TextServiceFactory_Impl {
                 let punct = sess.take_punct_pending();
                 let remainder = sess.take_selecting_remainder();
                 let candidate_source = sess.current_candidate_view().map(|v| v.source);
+                let explicit_pick = sess.selecting_selected_index() > 0;
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
@@ -442,19 +444,19 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                if crate::engine::state::should_learn_and_log(
+                match crate::engine::state::learn_action(
                     &reading,
                     &selected_text,
                     candidate_source,
+                    explicit_pick,
                 ) {
-                    if matches!(
-                        candidate_source,
-                        Some(crate::engine::state::CandidateViewSource::Bg)
-                    ) {
-                        engine.learn_force(&reading, &selected_text);
-                    } else {
-                        engine.learn(&reading, &selected_text);
+                    crate::engine::state::LearnAction::LearnForce => {
+                        engine.learn_force(&reading, &selected_text)
                     }
+                    crate::engine::state::LearnAction::Learn => {
+                        engine.learn(&reading, &selected_text)
+                    }
+                    crate::engine::state::LearnAction::Skip => {}
                 }
                 engine.commit(&full_text);
                 engine.reset_preedit();

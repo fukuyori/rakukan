@@ -1756,6 +1756,7 @@ impl super::TextServiceFactory_Impl {
                 let remainder = sess.take_selecting_remainder();
                 let remainder_reading = sess.selecting_remainder_reading_clone();
                 let candidate_source = sess.current_candidate_view().map(|v| v.source);
+                let explicit_pick = sess.selecting_selected_index() > 0;
                 sess.set_idle();
                 drop(sess);
                 let commit_text = if let Some(p) = punct {
@@ -1763,15 +1764,17 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     text.clone()
                 };
-                if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
-                    if matches!(
-                        candidate_source,
-                        Some(crate::engine::state::CandidateViewSource::Bg)
-                    ) {
-                        engine.learn_force(&reading, &text);
-                    } else {
-                        engine.learn(&reading, &text);
+                match crate::engine::state::learn_action(
+                    &reading,
+                    &text,
+                    candidate_source,
+                    explicit_pick,
+                ) {
+                    crate::engine::state::LearnAction::LearnForce => {
+                        engine.learn_force(&reading, &text)
                     }
+                    crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
+                    crate::engine::state::LearnAction::Skip => {}
                 }
                 candidate_window::hide();
                 candidate_window::stop_live_timer();

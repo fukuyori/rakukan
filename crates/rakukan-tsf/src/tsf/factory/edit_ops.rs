@@ -343,15 +343,11 @@ impl super::TextServiceFactory_Impl {
         } else {
             text.clone()
         };
-        if crate::engine::state::should_learn_and_log(&reading, &text, candidate_source) {
-            if matches!(
-                candidate_source,
-                Some(crate::engine::state::CandidateViewSource::Bg)
-            ) {
-                engine.learn_force(&reading, &text);
-            } else {
-                engine.learn(&reading, &text);
-            }
+        // 番号キーで選んだ候補は、それが読みそのものでも明示選択として扱う
+        match crate::engine::state::learn_action(&reading, &text, candidate_source, true) {
+            crate::engine::state::LearnAction::LearnForce => engine.learn_force(&reading, &text),
+            crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
+            crate::engine::state::LearnAction::Skip => {}
         }
         candidate_window::hide();
         let confirmed = format!("{prefix}{commit_text}");
