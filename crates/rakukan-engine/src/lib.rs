@@ -403,6 +403,57 @@ fn reverse_spelling(remaining: &str, original: &str) -> Option<String> {
         .cloned()
 }
 
+/// 候補リストを優先順位どおりに 1 本へマージする（Step 12-1）。
+///
+/// 順序は 学習履歴 → ユーザー辞書 → システム辞書 → LLM。重複は先に積んだ側を残す。
+/// システム辞書は `limit` まで埋めず、LLM 候補（`merged` にまだ無いもの）の分だけ
+/// 枠を残す。従来は辞書候補が 40 件ある読みで LLM 候補が 1 件も入らなかった
+/// （Issue #42 の問題点 4）。LLM の枠を残しても辞書候補が少なければ LLM が
+/// その分を使うので、合計は `limit` を超えない。
+fn merge_candidate_lists(
+    learn: &[String],
+    user: &[String],
+    dict: &[String],
+    llm: Vec<String>,
+    limit: usize,
+) -> Vec<String> {
+    let mut merged: Vec<String> = Vec::new();
+    let push_unique = |merged: &mut Vec<String>, c: &str, cap: usize| {
+        if merged.len() < cap && !merged.iter().any(|m| m == c) {
+            merged.push(c.to_string());
+        }
+    };
+
+    // 1. 学習履歴（スコア順。最近・頻繁に選んだものが先頭）
+    for c in learn {
+        push_unique(&mut merged, c, limit);
+    }
+    // 2. ユーザー辞書
+    for c in user {
+        push_unique(&mut merged, c, limit);
+    }
+    // 3. システム辞書。LLM の未登場候補ぶんは枠を残す
+    let mut llm_unique: Vec<String> = Vec::new();
+    for c in llm {
+        if !merged.contains(&c) && !llm_unique.contains(&c) {
+            llm_unique.push(c);
+        }
+    }
+    let dict_cap = limit.saturating_sub(llm_unique.len()).max(merged.len());
+    for c in dict {
+        push_unique(&mut merged, c, dict_cap);
+    }
+    // 4. LLM 候補（文脈考慮。辞書と重複するものは辞書側の位置に残る）
+    for c in &llm_unique {
+        push_unique(&mut merged, c, limit);
+    }
+    // 5. LLM 候補が辞書と重複して枠が余ったら、辞書の残りで埋め戻す
+    for c in dict {
+        push_unique(&mut merged, c, limit);
+    }
+    merged
+}
+
 /// `push_char` で trie（ローマ字ルール）に委ねる文字か。
 /// 英字と `,./[]\-`（、。・「」￥ー等のルールがある記号）。
 fn is_trie_input_char(c: char) -> bool {
@@ -1082,8 +1133,9 @@ impl RakunEngine {
         llm_candidates: Vec<String>,
         limit: usize,
     ) -> Vec<String> {
-        // 優先順位: ユーザー辞書 → 学習済み辞書候補（スコア順） → 残り辞書候補 → LLM
-        // 学習スコアで上位に来た辞書候補を先に表示し、LLM は空きスロットを埋める。
+        // 優先順位（Step 12-1、Issue #13 / #37）: 学習履歴 → ユーザー辞書 → システム辞書 → LLM
+        // 学習履歴を先頭に置くので、ユーザー辞書の表記を別の候補で上書きできる。
+        // LLM は末尾だが、辞書候補が上限まで埋めても LLM の枠は確保する（#42 の 4）。
         let user_cands: Vec<String> = self
             .dict_store
             .as_ref()
@@ -1116,50 +1168,13 @@ impl RakunEngine {
             llm_candidates
         );
 
-        let mut merged: Vec<String> = Vec::new();
-
-        // 1. ユーザー辞書候補（最優先）
-        for c in &user_cands {
-            if merged.len() >= limit {
-                break;
-            }
-            if !merged.contains(c) {
-                merged.push(c.clone());
-            }
-        }
-
-        // 2. 学習履歴: スコア順（最近・頻繁に選んだもの優先）で前に出す。
-        //    DictStore::learn 側で「ひらがな・CJK漢字を含む surface は辞書ガード必須」と
-        //    制御しているため、ここでの二重チェックは不要。辞書外の surface（記号・カタカナ等）
-        //    も学習対象になったので、dict_cands チェックは外す。
-        for c in &learn_cands {
-            if merged.len() >= limit {
-                break;
-            }
-            if !merged.contains(c) {
-                merged.push(c.clone());
-            }
-        }
-
-        // 3. 残りの辞書候補（学習で上昇済みのものは既に merged に含まれる）
-        for c in &dict_cands {
-            if merged.len() >= limit {
-                break;
-            }
-            if !merged.contains(c) {
-                merged.push(c.clone());
-            }
-        }
-
-        // 4. LLM候補（残りスロット、文脈考慮）
-        for c in llm_candidates {
-            if merged.len() >= limit {
-                break;
-            }
-            if !merged.contains(&c) {
-                merged.push(c);
-            }
-        }
+        let mut merged = merge_candidate_lists(
+            &learn_cands,
+            &user_cands,
+            &dict_cands,
+            llm_candidates,
+            limit,
+        );
 
         // 候補不足時は元の読みを末尾に追加（変換せず確定する退避路）
         let desired_visible = self.config.num_candidates.min(limit);
@@ -1722,6 +1737,93 @@ mod candidate_merge_tests {
         let merged = engine.merge_candidates(llm_candidates, 40);
 
         assert_eq!(merged.iter().filter(|c| c.as_str() == "てすと").count(), 1);
+    }
+
+    #[test]
+    fn learned_surface_outranks_user_dict_entry() {
+        // Issue #13: ユーザー辞書「杜野」を登録した読みで「森の」を選んで確定すると、
+        // 次回は学習した「森の」が先頭になる（旧順序では永久に「杜野」が先頭だった）。
+        let dir = tempfile::tempdir().unwrap();
+        let user_path = dir.path().join("user_dict.toml");
+        fs::write(
+            &user_path,
+            r#"
+[[entries]]
+reading = "もりの"
+surfaces = ["杜野"]
+"#,
+        )
+        .unwrap();
+        let store = DictStore::load(Some(&user_path), None, None).unwrap();
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.set_dict_store(store);
+
+        // 登録直後（学習なし）はユーザー辞書が先頭
+        let before = engine.merge_candidates_for_reading("もりの", vec!["森の".into()], 40);
+        assert_eq!(before.first().map(String::as_str), Some("杜野"));
+
+        engine.learn_force("もりの", "森の");
+        let after = engine.merge_candidates_for_reading("もりの", vec!["森の".into()], 40);
+        assert_eq!(after.first().map(String::as_str), Some("森の"));
+        assert_eq!(after.get(1).map(String::as_str), Some("杜野"));
+    }
+
+    #[test]
+    fn merge_lists_orders_learn_user_dict_llm() {
+        let merged = super::merge_candidate_lists(
+            &["学".into()],
+            &["ユ".into()],
+            &["辞1".into(), "辞2".into()],
+            vec!["L1".into()],
+            40,
+        );
+        assert_eq!(merged, ["学", "ユ", "辞1", "辞2", "L1"]);
+    }
+
+    #[test]
+    fn merge_lists_keeps_slots_for_llm_when_dict_fills_limit() {
+        // Issue #42 の 4: 辞書候補が上限まであっても LLM 候補が落ちない
+        let dict: Vec<String> = (1..=40).map(|n| format!("辞{n}")).collect();
+        let merged =
+            super::merge_candidate_lists(&[], &[], &dict, vec!["L1".into(), "L2".into()], 40);
+        assert_eq!(merged.len(), 40);
+        assert_eq!(&merged[38..], ["L1", "L2"]);
+        assert!(!merged.iter().any(|c| c == "辞39"));
+    }
+
+    #[test]
+    fn merge_lists_llm_duplicate_of_dict_stays_at_dict_position() {
+        let dict: Vec<String> = (1..=40).map(|n| format!("辞{n}")).collect();
+        let merged =
+            super::merge_candidate_lists(&[], &[], &dict, vec!["辞3".into(), "L1".into()], 40);
+        assert_eq!(merged.len(), 40);
+        assert_eq!(merged[2], "辞3");
+        assert_eq!(merged.iter().filter(|c| c.as_str() == "辞3").count(), 1);
+        // LLM の重複ぶんは辞書の残りで埋め戻す（L1 の後ろに 辞39）
+        assert_eq!(&merged[38..], ["L1", "辞39"]);
+    }
+
+    #[test]
+    fn merge_lists_llm_fills_remaining_when_dict_is_short() {
+        let merged = super::merge_candidate_lists(
+            &[],
+            &[],
+            &["辞1".into()],
+            vec!["L1".into(), "L2".into(), "L1".into()],
+            3,
+        );
+        assert_eq!(merged, ["辞1", "L1", "L2"]);
+    }
+
+    #[test]
+    fn merge_lists_learn_and_user_never_exceed_limit() {
+        let learn: Vec<String> = (1..=5).map(|n| format!("学{n}")).collect();
+        let user: Vec<String> = (1..=5).map(|n| format!("ユ{n}")).collect();
+        let merged = super::merge_candidate_lists(&learn, &user, &[], vec!["L1".into()], 4);
+        assert_eq!(merged, ["学1", "学2", "学3", "学4"]);
     }
 
     #[test]
