@@ -225,12 +225,12 @@ fn u16_le(buf: &[u8], off: usize) -> u16 {
 // ─── テスト ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::io::Write;
 
-    /// テスト用のミニ rakukan.dict をメモリ上で作る
-    fn build_test_dict(entries: &[(&str, &str, u16)]) -> Vec<u8> {
+    /// テスト用のミニ rakukan.dict をメモリ上で作る（store のテストからも使う）
+    pub(crate) fn build_test_dict(entries: &[(&str, &str, u16)]) -> Vec<u8> {
         // entries: [(reading, surface, cost)]
         use std::collections::BTreeMap;
 

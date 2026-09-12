@@ -108,6 +108,7 @@ Source: "dist\settings-ui\*"; DestDir: "{app}\settings-ui"; Flags: ignoreversion
 
 ; ----- 辞書 -----
 Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
+Source: "dist\rakukan.dict.build.json"; DestDir: "{app}\dict"; Flags: ignoreversion skipifsourcedoesntexist
 
 ; ----- デフォルト設定ファイル (既存は上書きしない) -----
 ; config.toml は %APPDATA%\rakukan\ に配置する（rakukan が読む場所）

@@ -11,6 +11,7 @@ name = "rakukan-dict-builder"
 path = "src/main.rs"
 
 [dependencies]
+rakukan-dict = { path = "../rakukan-dict" }
 anyhow  = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

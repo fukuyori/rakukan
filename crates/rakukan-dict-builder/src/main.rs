@@ -42,10 +42,11 @@
 
 use std::collections::HashMap;
 use std::io::{BufWriter, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use rakukan_dict::cost_band;
 
 // ─── CLI ──────────────────────────────────────────────────────────────────────
 
@@ -78,10 +79,6 @@ struct Args {
     /// Max cost threshold (default: no limit)
     #[arg(long, default_value = "65535")]
     max_cost: u16,
-
-    /// Cost for emoji entries (default: 6000 — 一般語より下、symbol より下で候補末尾寄り)
-    #[arg(long, default_value = "6000")]
-    emoji_cost: u16,
 }
 
 // ─── TSV パーサー ─────────────────────────────────────────────────────────────
@@ -121,6 +118,7 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut skipped = 0usize;
     let mut skipped_unrenderable = 0usize;
+    let mut clamped = 0usize;
 
     for (lineno, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -170,6 +168,15 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
             continue;
         }
 
+        // 通常語は記号帯・絵文字帯と重ならないよう上限未満に丸める（Step 12-2）。
+        // mozc の実測最大は 18,318 なので通常は到達しない。
+        let cost = if cost >= cost_band::NORMAL_MAX {
+            clamped += 1;
+            cost_band::NORMAL_MAX - 1
+        } else {
+            cost
+        };
+
         // 読みが空・表記が空のエントリを除外
         if reading.is_empty() || surface.is_empty() {
             skipped += 1;
@@ -189,6 +196,15 @@ fn parse_tsv(path: &PathBuf, max_cost: u16) -> Result<Vec<Entry>> {
         });
     }
 
+    if clamped > 0 {
+        tracing::warn!(
+            "{}: {} エントリの cost が {} 以上だったため {} に丸めた",
+            path.display(),
+            clamped,
+            cost_band::NORMAL_MAX,
+            cost_band::NORMAL_MAX - 1
+        );
+    }
     tracing::info!(
         "{}: {} エントリ読み込み、{} スキップ (うち描画不可仮名 {})",
         path.display(),
@@ -212,7 +228,8 @@ struct ReadingGroup {
 ///
 /// フォーマット: POS TAB CHAR TAB Readings(space-sep) TAB description ...
 /// Readings フィールドのうちひらがなのみのトークンを読みとして採用する。
-/// cost は固定値（symbol は優先度を高めにする）。
+/// cost は記号帯 `SYMBOL_BASE + 行番号`（Step 12-2）。通常語の後ろに並び、
+/// symbol.tsv の行順（mozc の優先順）をそのまま保つ。
 fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("symbol TSV read failed: {}", path.display()))?;
@@ -220,6 +237,7 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
     let mut entries = Vec::new();
     let mut skipped = 0usize;
     let mut skipped_unrenderable = 0usize;
+    let mut row: u16 = 0;
 
     for line in text.lines() {
         let line = line.trim();
@@ -266,8 +284,16 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
             continue;
         }
 
-        // symbol エントリは cost=3000 固定（mozc 通常エントリの平均的な値）
-        let cost: u16 = 3000;
+        let Some(cost) = cost_band::SYMBOL_BASE
+            .checked_add(row)
+            .filter(|c| *c < cost_band::EMOJI_BASE)
+        else {
+            anyhow::bail!(
+                "symbol.tsv の行数が記号帯（{} 行）を超えた",
+                cost_band::EMOJI_BASE - cost_band::SYMBOL_BASE
+            );
+        };
+        row += 1;
 
         for reading in hira_readings {
             entries.push(Entry {
@@ -300,16 +326,18 @@ fn parse_symbol_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
 /// 7. emoji version (例: "E0.6")
 ///
 /// 読み (カラム 3) のうち「ひらがな + 長音符」のみで構成されるトークンを reading として採用。
-/// surface は カラム 2 をそのまま使う。
+/// surface は カラム 2 をそのまま使う。cost は絵文字帯 `EMOJI_BASE + 行番号`（Step 12-2）で、
+/// 記号のさらに後ろに行順で並ぶ。
 /// 変体仮名は `has_unrenderable_kana` で surface 単位で除外するが、emoji は U+1F000 以上
 /// もしくは BMP 内の Misc Technical 系で、そもそもフィルタ範囲と重ならない。
-fn parse_emoji_tsv(path: &PathBuf, cost: u16) -> Result<Vec<Entry>> {
+fn parse_emoji_tsv(path: &PathBuf) -> Result<Vec<Entry>> {
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("emoji TSV read failed: {}", path.display()))?;
 
     let mut entries = Vec::new();
     let mut skipped = 0usize;
     let mut skipped_no_reading = 0usize;
+    let mut row: u16 = 0;
 
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
@@ -354,6 +382,14 @@ fn parse_emoji_tsv(path: &PathBuf, cost: u16) -> Result<Vec<Entry>> {
             continue;
         }
 
+        let Some(cost) = cost_band::EMOJI_BASE.checked_add(row) else {
+            anyhow::bail!(
+                "emoji_data.tsv の行数が絵文字帯（{} 行）を超えた",
+                u16::MAX - cost_band::EMOJI_BASE
+            );
+        };
+        row += 1;
+
         for reading in hira_readings {
             entries.push(Entry {
                 reading: reading.to_string(),
@@ -387,8 +423,15 @@ fn build_groups(entries: Vec<Entry>, max_per_reading: usize) -> Vec<ReadingGroup
             tokens.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
             // 重複表記除去（コスト最小を残す）
             tokens.dedup_by(|a, b| a.0 == b.0);
-            // 上限カット
-            tokens.truncate(max_per_reading);
+            // 上限カットは通常語だけに適用する。記号・絵文字は列挙が目的なので切らない
+            // （cost 昇順なので通常語は先頭に固まっている）
+            let n_normal = tokens
+                .iter()
+                .take_while(|t| t.1 < cost_band::NORMAL_MAX)
+                .count();
+            if n_normal > max_per_reading {
+                tokens.drain(max_per_reading..n_normal);
+            }
             ReadingGroup { reading, tokens }
         })
         .collect();
@@ -511,6 +554,28 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
+/// 辞書の隣に `<output>.build.json` を書く。`install.ps1` が `dict_schema` を期待値と
+/// 比較し、cost 帯の版が古い辞書を再生成する（Step 12-2）。
+fn write_build_info(output: &Path) -> Result<()> {
+    let path = build_info_path(output);
+    let json = format!(
+        "{{\n  \"dict_schema\": {},\n  \"format_version\": {},\n  \"builder_version\": \"{}\"\n}}\n",
+        cost_band::DICT_SCHEMA,
+        VERSION,
+        env!("CARGO_PKG_VERSION")
+    );
+    std::fs::write(&path, json)
+        .with_context(|| format!("build info 書き込み失敗: {}", path.display()))?;
+    tracing::info!("出力: {}", path.display());
+    Ok(())
+}
+
+fn build_info_path(output: &Path) -> PathBuf {
+    let mut p = output.as_os_str().to_owned();
+    p.push(".build.json");
+    PathBuf::from(p)
+}
+
 // ─── main ─────────────────────────────────────────────────────────────────────
 
 fn main() -> Result<()> {
@@ -535,7 +600,7 @@ fn main() -> Result<()> {
 
     // emoji_data.tsv を読み込んでマージ
     for path in &args.emojis {
-        let entries = parse_emoji_tsv(path, args.emoji_cost)
+        let entries = parse_emoji_tsv(path)
             .with_context(|| format!("emoji TSV パース失敗: {}", path.display()))?;
         all_entries.extend(entries);
     }
@@ -548,6 +613,7 @@ fn main() -> Result<()> {
 
     // バイナリ書き出し
     write_dict(&groups, &args.output)?;
+    write_build_info(&args.output)?;
 
     println!("完了: {} 読み → {}", groups.len(), args.output.display());
     Ok(())
@@ -616,7 +682,7 @@ mod tests {
         .join("\n");
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &content).unwrap();
-        let entries = parse_emoji_tsv(&tmp.path().to_path_buf(), 6000).unwrap();
+        let entries = parse_emoji_tsv(&tmp.path().to_path_buf()).unwrap();
 
         // ⏩ → 3 readings (はやおくり, ばいそく, ぼたん)
         // 1️⃣ → 1 reading (いち)
@@ -628,8 +694,10 @@ mod tests {
             assert!(!has_unrenderable_kana(&e.surface));
         }
 
-        // cost は引数値
-        assert!(entries.iter().all(|e| e.cost == 6000));
+        // cost は絵文字帯 + 行番号（⏩ の 3 読みは同じ行、1️⃣ は次の行）
+        assert!(entries.iter().all(|e| e.cost >= cost_band::EMOJI_BASE));
+        assert_eq!(entries[0].cost, cost_band::EMOJI_BASE);
+        assert_eq!(entries[3].cost, cost_band::EMOJI_BASE + 1);
 
         // ⏩ が hiragana 読みで引けること
         let hayaokuri: Vec<&Entry> = entries
@@ -665,6 +733,97 @@ mod tests {
         std::fs::write(tmp.path(), &content2).unwrap();
         let entries2 = parse_tsv(&tmp.path().to_path_buf(), 65535).unwrap();
         assert_eq!(entries2.len(), 2);
+    }
+
+    #[test]
+    fn test_symbol_rows_keep_order_in_symbol_band() {
+        // symbol.tsv: POS TAB CHAR TAB Readings TAB description。行順が cost に写る
+        let content = [
+            "POS\tCHAR\tREADINGS\tDESC",
+            "記号\t→\tみぎ やじるし\t右矢印",
+            "記号\t⇒\tみぎ\t",
+            "記号\t←\tひだり やじるし\t左矢印",
+        ]
+        .join("\n");
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &content).unwrap();
+        let entries = parse_symbol_tsv(&tmp.path().to_path_buf()).unwrap();
+        let migi: Vec<(&str, u16)> = entries
+            .iter()
+            .filter(|e| e.reading == "みぎ")
+            .map(|e| (e.surface.as_str(), e.cost))
+            .collect();
+        assert_eq!(
+            migi,
+            [
+                ("→", cost_band::SYMBOL_BASE),
+                ("⇒", cost_band::SYMBOL_BASE + 1)
+            ]
+        );
+        let yajirushi: Vec<&str> = entries
+            .iter()
+            .filter(|e| e.reading == "やじるし")
+            .map(|e| e.surface.as_str())
+            .collect();
+        assert_eq!(yajirushi, ["→", "←"]);
+        assert!(
+            entries
+                .iter()
+                .all(|e| cost_band::classify(e.cost) == cost_band::Class::Symbol)
+        );
+    }
+
+    #[test]
+    fn test_normal_cost_is_clamped_below_symbol_band() {
+        let content = make_tsv(&[
+            "にほん\t1849\t1849\t3394\t日本",
+            "にほん\t1849\t1849\t25000\t二本",
+        ]);
+        let tmp = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(tmp.path(), &content).unwrap();
+        let entries = parse_tsv(&tmp.path().to_path_buf(), 65535).unwrap();
+        assert_eq!(entries[1].cost, cost_band::NORMAL_MAX - 1);
+        assert!(
+            entries
+                .iter()
+                .all(|e| cost_band::classify(e.cost) == cost_band::Class::Normal)
+        );
+    }
+
+    #[test]
+    fn test_group_truncates_only_normal_words() {
+        let mut entries: Vec<Entry> = (0..5)
+            .map(|i| Entry {
+                reading: "みぎ".into(),
+                surface: format!("語{i}"),
+                cost: 1000 + i as u16,
+            })
+            .collect();
+        for i in 0..4u16 {
+            entries.push(Entry {
+                reading: "みぎ".into(),
+                surface: format!("記{i}"),
+                cost: cost_band::SYMBOL_BASE + i,
+            });
+        }
+        entries.push(Entry {
+            reading: "みぎ".into(),
+            surface: "絵".into(),
+            cost: cost_band::EMOJI_BASE,
+        });
+        let groups = build_groups(entries, 3);
+        let surfaces: Vec<&str> = groups[0].tokens.iter().map(|t| t.0.as_str()).collect();
+        // 通常語は 3 件に切られ、記号 4 件と絵文字 1 件は残る（行順のまま）
+        assert_eq!(
+            surfaces,
+            ["語0", "語1", "語2", "記0", "記1", "記2", "記3", "絵"]
+        );
+    }
+
+    #[test]
+    fn test_build_info_path_appends_suffix() {
+        let p = build_info_path(Path::new("C:/x/rakukan.dict"));
+        assert!(p.to_string_lossy().ends_with("rakukan.dict.build.json"));
     }
 
     #[test]

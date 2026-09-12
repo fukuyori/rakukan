@@ -30,6 +30,16 @@
 - DLL / EXE の VERSIONINFO リソース（`winres` / `.rc`）は 2026-09-01 時点で**使っていない**。追加した場合はここに加える。
 - `engine_abi_version()` / `EXPECTED_ENGINE_ABI_VERSION`（ABI 番号）はバージョン番号とは独立。FFI シグネチャを変えたときだけ **2 か所同時に**上げる（`crates/rakukan-engine/src/ffi.rs` と `crates/rakukan-engine-abi/src/lib.rs`）。
 
+## 4.1 辞書の cost 帯（dict_schema）を変えたとき
+
+`rakukan.dict` の cost 帯（`crates/rakukan-dict/src/lib.rs` の `cost_band`）の意味を変えたら、次を同時に行う。バージョン番号とは独立。
+
+| 箇所 | 内容 |
+|---|---|
+| `cost_band::DICT_SCHEMA` | 1 上げる |
+| `scripts/install.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
+| ビルドマシンの辞書 | パッケージ作成前に `RAKUKAN_FORCE_DICT=1` を付けて `cargo make install` を実行し、`%LOCALAPPDATA%\rakukan\dict\rakukan.dict` と `rakukan.dict.build.json` を作り直す（`build-installer.ps1` はこの 2 つを同梱する） |
+
 ## 5. 変更しないもの
 
 - `crates/rakukan-engine-abi/src/lib.rs` の `build_id_tests` にある `"0.10.4"` / `"0.10.5"` はテスト用の固定値であり、実バージョンに追随させない。

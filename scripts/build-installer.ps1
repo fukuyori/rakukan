@@ -159,6 +159,13 @@ $dict = Join-Path $env:LOCALAPPDATA "rakukan\dict\rakukan.dict"
 if (Test-Path $dict) {
     Copy-Item $dict "$distDir\rakukan.dict" -Force
     Write-Host "  -> rakukan.dict"
+    # cost 帯の版（install.ps1 が再生成の要否に使う）。無ければ古い辞書なので警告
+    if (Test-Path "$dict.build.json") {
+        Copy-Item "$dict.build.json" "$distDir\rakukan.dict.build.json" -Force
+        Write-Host "  -> rakukan.dict.build.json"
+    } else {
+        Write-Warning "rakukan.dict.build.json が見つかりません。辞書が古い可能性があります（RAKUKAN_FORCE_DICT=1 で install を実行して再生成してください）"
+    }
 } else {
     Write-Warning "rakukan.dict が見つかりません ($dict)"
 }

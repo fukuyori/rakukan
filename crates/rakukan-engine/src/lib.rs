@@ -454,6 +454,54 @@ fn merge_candidate_lists(
     merged
 }
 
+/// 記号を差し込む位置: 通常候補の上位この件数の後ろ（mozc の SymbolRewriter と同じ 3）
+const SYMBOL_INSERT_AFTER: usize = 3;
+/// 前方に差し込む記号の最大数（mozc と同じ 15）。残りは末尾
+const SYMBOL_PROMOTE: usize = 15;
+
+/// 記号・絵文字を通常候補の列に差し込む（Step 12-2、Issue #42）。
+///
+/// mozc の SymbolRewriter に倣い、通常候補の上位 `SYMBOL_INSERT_AFTER` 件の後ろに
+/// 記号を最大 `SYMBOL_PROMOTE` 個入れ、残りの記号は末尾、絵文字はさらにその後ろに
+/// 置く。「みぎ」なら 右 → みぎ → ミギ → 記号 15 個 → 残りの記号 → 絵文字。
+/// 通常候補と重複する記号・絵文字は入れない。戻りの件数は `limit` を超えてよい
+/// （候補ウィンドウはページ送りを持つ）。
+fn place_symbol_candidates(
+    base: Vec<String>,
+    symbols: Vec<String>,
+    emoji: Vec<String>,
+) -> Vec<String> {
+    if symbols.is_empty() && emoji.is_empty() {
+        return base;
+    }
+    let mut seen: Vec<String> = base.clone();
+    let mut unique = |items: Vec<String>| -> Vec<String> {
+        let mut out = Vec::new();
+        for c in items {
+            if !seen.contains(&c) {
+                seen.push(c.clone());
+                out.push(c);
+            }
+        }
+        out
+    };
+    let mut symbols = unique(symbols);
+    let emoji = unique(emoji);
+    let rest = if symbols.len() > SYMBOL_PROMOTE {
+        symbols.split_off(SYMBOL_PROMOTE)
+    } else {
+        Vec::new()
+    };
+    let at = SYMBOL_INSERT_AFTER.min(base.len());
+    let mut out = Vec::with_capacity(base.len() + symbols.len() + rest.len() + emoji.len());
+    out.extend_from_slice(&base[..at]);
+    out.extend(symbols);
+    out.extend_from_slice(&base[at..]);
+    out.extend(rest);
+    out.extend(emoji);
+    out
+}
+
 /// `push_char` で trie（ローマ字ルール）に委ねる文字か。
 /// 英字と `,./[]\-`（、。・「」￥ー等のルールがある記号）。
 fn is_trie_input_char(c: char) -> bool {
@@ -1154,6 +1202,18 @@ impl RakunEngine {
             .map(|d| d.lookup_dict(hiragana, limit))
             .unwrap_or_default();
 
+        // 記号・絵文字は通常候補と別に引き、マージ後に位置を決める（Step 12-2、#42）
+        let symbol_cands: Vec<String> = self
+            .dict_store
+            .as_ref()
+            .map(|d| d.lookup_symbols(hiragana))
+            .unwrap_or_default();
+        let emoji_cands: Vec<String> = self
+            .dict_store
+            .as_ref()
+            .map(|d| d.lookup_emoji(hiragana))
+            .unwrap_or_default();
+
         debug!(
             "engine::merge: reading={:?} dict_store={} user_cands={:?} learn_cands={:?} dict_cands={:?} llm_cands={:?}",
             hiragana,
@@ -1168,13 +1228,14 @@ impl RakunEngine {
             llm_candidates
         );
 
-        let mut merged = merge_candidate_lists(
+        let merged = merge_candidate_lists(
             &learn_cands,
             &user_cands,
             &dict_cands,
             llm_candidates,
             limit,
         );
+        let mut merged = place_symbol_candidates(merged, symbol_cands, emoji_cands);
 
         // 候補不足時は元の読みを末尾に追加（変換せず確定する退避路）
         let desired_visible = self.config.num_candidates.min(limit);
@@ -1824,6 +1885,54 @@ surfaces = ["杜野"]
         let user: Vec<String> = (1..=5).map(|n| format!("ユ{n}")).collect();
         let merged = super::merge_candidate_lists(&learn, &user, &[], vec!["L1".into()], 4);
         assert_eq!(merged, ["学1", "学2", "学3", "学4"]);
+    }
+
+    fn syms(prefix: &str, n: usize) -> Vec<String> {
+        (0..n).map(|i| format!("{prefix}{i}")).collect()
+    }
+
+    #[test]
+    fn symbols_are_inserted_after_top_three_and_rest_go_last() {
+        let base: Vec<String> = ["右", "みぎ", "ミギ", "語3", "語4"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let out = super::place_symbol_candidates(base, syms("記", 20), syms("絵", 2));
+        let expect: Vec<String> = ["右", "みぎ", "ミギ"]
+            .iter()
+            .map(|s| s.to_string())
+            .chain(syms("記", 15))
+            .chain(["語3".to_string(), "語4".to_string()])
+            .chain((15..20).map(|i| format!("記{i}")))
+            .chain(syms("絵", 2))
+            .collect();
+        assert_eq!(out, expect);
+    }
+
+    #[test]
+    fn symbols_follow_short_base_and_dedup_against_it() {
+        let base: Vec<String> = vec!["→".into(), "右".into()];
+        let out = super::place_symbol_candidates(
+            base,
+            vec!["→".into(), "⇒".into(), "⇒".into()],
+            vec!["👉".into(), "右".into()],
+        );
+        assert_eq!(out, ["→", "右", "⇒", "👉"]);
+    }
+
+    #[test]
+    fn symbols_only_reading_lists_symbols_in_order() {
+        let out = super::place_symbol_candidates(vec![], syms("記", 17), vec![]);
+        assert_eq!(out, syms("記", 17));
+    }
+
+    #[test]
+    fn no_symbols_returns_base_unchanged() {
+        let base: Vec<String> = vec!["右".into()];
+        assert_eq!(
+            super::place_symbol_candidates(base.clone(), vec![], vec![]),
+            base
+        );
     }
 
     #[test]

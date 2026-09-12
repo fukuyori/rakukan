@@ -14,6 +14,7 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
+use crate::cost_band;
 use crate::mozc_dict::MozcDict;
 use crate::user_dict::UserDict;
 
@@ -520,27 +521,41 @@ impl DictStore {
         user.get(reading).cloned().unwrap_or_default()
     }
 
-    /// ひらがな読みから mozc 候補を返す（ユーザー辞書を除く）
+    /// ひらがな読みから mozc の通常語候補を返す（ユーザー辞書・記号・絵文字を除く。
+    /// cost 昇順、最大 `limit` 件）
     pub fn lookup_dict(&self, reading: &str, limit: usize) -> Vec<String> {
-        let mozc_loaded = self.inner.mozc.is_some();
-        let result: Vec<String> = self
-            .inner
-            .mozc
-            .as_ref()
-            .map(|d| {
-                d.lookup(reading, limit)
-                    .into_iter()
-                    .map(|(s, _)| s)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let result = self.lookup_class(reading, cost_band::Class::Normal, limit);
         debug!(
             "dict::store: lookup reading={:?} mozc={} n={}",
             reading,
-            mozc_loaded,
+            self.inner.mozc.is_some(),
             result.len()
         );
         result
+    }
+
+    /// ひらがな読みから記号候補（`symbol.tsv` 由来、mozc の行順）を全件返す（Step 12-2）
+    pub fn lookup_symbols(&self, reading: &str) -> Vec<String> {
+        self.lookup_class(reading, cost_band::Class::Symbol, usize::MAX)
+    }
+
+    /// ひらがな読みから絵文字候補（`emoji_data.tsv` 由来、行順）を全件返す（Step 12-2）
+    pub fn lookup_emoji(&self, reading: &str) -> Vec<String> {
+        self.lookup_class(reading, cost_band::Class::Emoji, usize::MAX)
+    }
+
+    /// cost 帯で分類した mozc 候補を返す。旧辞書（記号 3000 / 絵文字 6000 固定）は
+    /// すべて `Normal` に入るので、再生成するまで従来どおりの並びになる。
+    fn lookup_class(&self, reading: &str, class: cost_band::Class, limit: usize) -> Vec<String> {
+        let Some(mozc) = self.inner.mozc.as_ref() else {
+            return vec![];
+        };
+        mozc.lookup(reading, u16::MAX as usize)
+            .into_iter()
+            .filter(|(_, cost)| cost_band::classify(*cost) == class)
+            .map(|(s, _)| s)
+            .take(limit)
+            .collect()
     }
 
     /// ひらがな読みから候補リストを引く（優先順位: user > mozc）
@@ -786,6 +801,41 @@ mod tests {
                 learn_history_path: None,
             }),
         }
+    }
+
+    fn store_with_dict(entries: &[(&str, &str, u16)]) -> (DictStore, tempfile::NamedTempFile) {
+        use std::io::Write;
+        let data = crate::mozc_dict::tests::build_test_dict(entries);
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(&data).unwrap();
+        f.flush().unwrap();
+        let store = DictStore::load(None, Some(f.path()), None).unwrap();
+        (store, f)
+    }
+
+    #[test]
+    fn test_lookup_dict_separates_symbol_and_emoji_bands() {
+        use crate::cost_band::{EMOJI_BASE, SYMBOL_BASE};
+        let (store, _f) = store_with_dict(&[
+            ("みぎ", "→", SYMBOL_BASE),
+            ("みぎ", "⇒", SYMBOL_BASE + 1),
+            ("みぎ", "右", 3624),
+            ("みぎ", "みぎ", 6481),
+            ("みぎ", "👉", EMOJI_BASE),
+        ]);
+        assert_eq!(store.lookup_dict("みぎ", 40), ["右", "みぎ"]);
+        assert_eq!(store.lookup_dict("みぎ", 1), ["右"]);
+        assert_eq!(store.lookup_symbols("みぎ"), ["→", "⇒"]);
+        assert_eq!(store.lookup_emoji("みぎ"), ["👉"]);
+        assert!(store.lookup_symbols("ない").is_empty());
+    }
+
+    #[test]
+    fn test_legacy_fixed_cost_symbols_stay_in_normal_list() {
+        // 旧辞書（記号 3000 固定）は再生成まで従来どおり通常語として並ぶ
+        let (store, _f) = store_with_dict(&[("みぎ", "→", 3000), ("みぎ", "右", 3624)]);
+        assert_eq!(store.lookup_dict("みぎ", 40), ["→", "右"]);
+        assert!(store.lookup_symbols("みぎ").is_empty());
     }
 
     #[test]

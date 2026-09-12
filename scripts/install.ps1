@@ -380,9 +380,27 @@ $mozcTsvFiles = @(
 )
 $mozcBaseUrl = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/dictionary_oss"
 
-if ((Test-Path -LiteralPath $mozcDictOut) -and (-not $forceDict)) {
+# cost 帯の版（rakukan-dict の cost_band::DICT_SCHEMA と同じ値にする）。
+# 辞書の隣の rakukan.dict.build.json にビルダーが書く。無い・古い辞書は再生成する。
+$dictSchemaExpected = 2
+$dictBuildInfo = "$mozcDictOut.build.json"
+$dictUpToDate = $false
+if (Test-Path -LiteralPath $mozcDictOut) {
+    if (Test-Path -LiteralPath $dictBuildInfo) {
+        try {
+            $info = Get-Content -LiteralPath $dictBuildInfo -Raw | ConvertFrom-Json
+            if ([int]$info.dict_schema -ge $dictSchemaExpected) { $dictUpToDate = $true }
+        } catch {
+            Write-Host ("  [WARNING] " + $dictBuildInfo + " could not be read; rebuilding rakukan.dict")
+        }
+    } else {
+        Write-Host "  -> rakukan.dict has no build info (built before dict_schema 2); rebuilding."
+    }
+}
+
+if ($dictUpToDate -and (-not $forceDict)) {
     $sizeMB = [math]::Round((Get-Item $mozcDictOut).Length / 1048576, 1)
-    Write-Host ("  -> rakukan.dict already built (" + $sizeMB + " MB), skipping.")
+    Write-Host ("  -> rakukan.dict already built (" + $sizeMB + " MB, dict_schema " + $info.dict_schema + "), skipping.")
     Write-Host "     (To rebuild, set RAKUKAN_FORCE_DICT=1 and re-run)"
 } elseif (-not (Test-Path -LiteralPath $dictBuilderExe)) {
     Write-Host "  [WARNING] rakukan-dict-builder.exe not found, skipping mozc dict."
