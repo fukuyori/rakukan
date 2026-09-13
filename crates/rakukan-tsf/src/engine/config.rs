@@ -223,6 +223,18 @@ pub struct InputConfig {
     /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
     #[serde(default = "default_auto_learn")]
     pub auto_learn: bool,
+    /// アプリごとの「文字入力欄が開いたときの IME オン/オフ」。キーは exe 名
+    /// （大文字小文字は区別しない）。Photoshop の文字ツールのように、入力の
+    /// たびに新しい文書（DocumentManager）を作るアプリで、その文書に初めて
+    /// フォーカスが来たときのモードを決める。抜けて本体の文書へ戻ると、
+    /// そちらが覚えているモードに戻る。既定は空（この判定を行わない）。
+    ///
+    /// ```toml
+    /// [input.text_field_mode]
+    /// "Photoshop.exe" = "on"
+    /// ```
+    #[serde(default)]
+    pub text_field_mode: std::collections::HashMap<String, DefaultImeMode>,
 }
 
 fn default_auto_learn() -> bool {
@@ -240,6 +252,7 @@ impl Default for InputConfig {
             digit_separator_auto: default_digit_separator_auto(),
             digit_candidates_order: default_digit_candidates_order(),
             auto_learn: default_auto_learn(),
+            text_field_mode: std::collections::HashMap::new(),
         }
     }
 }
@@ -597,6 +610,12 @@ digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "dai
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true
+# アプリごとの「文字入力欄が開いたときの IME オン/オフ」(exe 名 -> "on" / "off")。
+# Photoshop の文字ツールのように入力用の文書が新しく作られるアプリで、
+# その文書に入ったら指定モード、抜けたら本体が覚えているモードに戻す。
+# 既定は空 (この判定を行わない)。
+# [input.text_field_mode]
+# "Photoshop.exe" = "on"
 
 [live_conversion]
 enabled = false
@@ -661,6 +680,51 @@ force_inference_failure = true
         )
         .expect("parse");
         assert!(cfg.diagnostics.force_inference_failure);
+    }
+
+    #[test]
+    fn text_field_mode_is_empty_by_default() {
+        let cfg = AppConfig::default();
+        assert!(cfg.input.text_field_mode.is_empty());
+    }
+
+    #[test]
+    fn text_field_mode_parses_exe_keyed_table() {
+        use super::DefaultImeMode;
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[input.text_field_mode]
+"Photoshop.exe" = "on"
+"notepad.exe" = "off"
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(matches!(
+            cfg.input.text_field_mode.get("Photoshop.exe"),
+            Some(DefaultImeMode::On)
+        ));
+        assert!(matches!(
+            cfg.input.text_field_mode.get("notepad.exe"),
+            Some(DefaultImeMode::Off)
+        ));
+    }
+
+    #[test]
+    fn text_field_mode_accepts_legacy_mode_names() {
+        use super::DefaultImeMode;
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[input.text_field_mode]
+"Photoshop.exe" = "hiragana"
+"#,
+        )
+        .expect("config should parse");
+
+        assert!(matches!(
+            cfg.input.text_field_mode.get("Photoshop.exe"),
+            Some(DefaultImeMode::On)
+        ));
     }
 
     #[test]

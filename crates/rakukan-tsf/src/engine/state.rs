@@ -2263,6 +2263,61 @@ struct ModeStore {
     dm_modes: HashMap<usize, ImeMode>,   // DM ptr → mode
     hwnd_modes: HashMap<usize, ImeMode>, // HWND → mode（DM 再作成時フォールバック）
     dm_to_hwnd: HashMap<usize, usize>,   // DM ptr → HWND（保存時の HWND 特定用）
+    /// このプロセスで最初にフォーカスを得た DM（アプリ本体の文書とみなす）。
+    /// `input.text_field_mode` の対象アプリでは、これ以外の新しい DM を
+    /// 「文字入力欄」として扱う（Photoshop の文字ツールは編集開始で DM を作り、
+    /// 終了で破棄する）。
+    base_dm: usize,
+    /// `input.text_field_mode` で「文字入力欄」と判定した DM。Photoshop は同じ
+    /// 文字レイヤーを編集し直すとき DM を使い回すので、一度 IME を切った
+    /// モードを覚えたままにせず、フォーカスが来るたびに設定のモードで始める。
+    text_field_dms: std::collections::HashSet<usize>,
+}
+
+/// このプロセスの exe 名（小文字）。`input.text_field_mode` のキー照合用。
+fn current_exe_name_lower() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+            .unwrap_or_default()
+    })
+}
+
+/// `input.text_field_mode` にこのプロセスの exe が載っていれば、そのモード。
+fn app_text_field_mode(cfg: &super::config::AppConfig) -> Option<ImeMode> {
+    use super::config::DefaultImeMode;
+    if cfg.input.text_field_mode.is_empty() {
+        return None;
+    }
+    let exe = current_exe_name_lower();
+    cfg.input
+        .text_field_mode
+        .iter()
+        .find(|(k, _)| k.to_lowercase() == exe)
+        .map(|(_, m)| match m {
+            DefaultImeMode::On => ImeMode::On,
+            DefaultImeMode::Off => ImeMode::Off,
+        })
+}
+
+/// 「文字入力欄が開いた」判定（純粋関数）。基準 DM 以外の**初見の** DM、または
+/// 一度そう判定した DM だけが対象。設定が無ければ常に `None`（従来の経路へ）。
+fn text_field_mode_for(
+    next_dm: usize,
+    base_dm: usize,
+    known: bool,
+    flagged: bool,
+    configured: Option<ImeMode>,
+) -> Option<ImeMode> {
+    if next_dm == base_dm {
+        return None;
+    }
+    if known && !flagged {
+        return None;
+    }
+    configured
 }
 
 static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
@@ -2270,6 +2325,8 @@ static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
         dm_modes: HashMap::new(),
         hwnd_modes: HashMap::new(),
         dm_to_hwnd: HashMap::new(),
+        base_dm: 0,
+        text_field_dms: std::collections::HashSet::new(),
     })
 });
 
@@ -2325,6 +2382,29 @@ pub fn doc_mode_on_focus_change(
     // DM→HWND マッピングを更新（フォーカスが来るたびに記録）
     if next_hwnd != 0 {
         store.dm_to_hwnd.insert(next_dm_ptr, next_hwnd);
+    }
+
+    // 最初に見た DM をアプリ本体の文書とみなす
+    if store.base_dm == 0 {
+        store.base_dm = next_dm_ptr;
+    }
+    // 対象アプリの「文字入力欄」（基準 DM 以外の初見の DM）は設定のモードで始める。
+    // HWND 経由の復元より先に判定する（文字入力欄は本体と同じ HWND を持つことが
+    // 多く、そちらを引くと本体が覚えているモードが復元されてしまう）。
+    if let Some(m) = text_field_mode_for(
+        next_dm_ptr,
+        store.base_dm,
+        store.dm_modes.contains_key(&next_dm_ptr),
+        store.text_field_dms.contains(&next_dm_ptr),
+        app_text_field_mode(&cfg),
+    ) {
+        tracing::info!(
+            "doc_mode: text field dm={next_dm_ptr:#x} (base={:#x}) → {m:?} (input.text_field_mode)",
+            store.base_dm
+        );
+        store.dm_modes.insert(next_dm_ptr, m);
+        store.text_field_dms.insert(next_dm_ptr);
+        return Some(m);
     }
 
     // 初回フォーカス時のデフォルトモードを決定
@@ -2418,6 +2498,7 @@ pub fn doc_mode_remove(dm_ptr: usize) {
             );
         }
         store.dm_modes.remove(&dm_ptr);
+        store.text_field_dms.remove(&dm_ptr);
         store.dm_to_hwnd.remove(&dm_ptr);
         tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
     }
@@ -2471,6 +2552,28 @@ fn is_terminal_hwnd(hwnd_val: usize) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn text_field_mode_only_for_new_non_base_dm() {
+        let on = Some(ImeMode::On);
+        // 基準 DM（アプリ本体の文書）には効かない
+        assert_eq!(text_field_mode_for(0x10, 0x10, false, false, on), None);
+        // 初見の別 DM → 設定のモード
+        assert_eq!(
+            text_field_mode_for(0x20, 0x10, false, false, on),
+            Some(ImeMode::On)
+        );
+        // 既知で未判定の DM は、覚えているモードの復元に任せる
+        assert_eq!(text_field_mode_for(0x20, 0x10, true, false, on), None);
+        // 一度「文字入力欄」と判定した DM は、既知でも毎回設定のモードで始める
+        assert_eq!(
+            text_field_mode_for(0x20, 0x10, true, true, on),
+            Some(ImeMode::On)
+        );
+        // 設定が空（既定）なら、どの DM でも従来の経路へ落ちる
+        assert_eq!(text_field_mode_for(0x20, 0x10, false, false, None), None);
+        assert_eq!(text_field_mode_for(0x20, 0x10, true, true, None), None);
+    }
 
     fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {
         ConversionBlock {
