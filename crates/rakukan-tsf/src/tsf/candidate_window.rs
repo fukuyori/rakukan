@@ -7,7 +7,7 @@
 //! HWND/CandData は `thread_local!` で管理し、Send/Sync を回避する。
 //!
 //! # ウィンドウ仕様
-//! - `WS_POPUP | WS_BORDER`、`WS_EX_TOPMOST | WS_EX_NOACTIVATE`
+//! - `WS_POPUP | WS_BORDER`、`WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW`
 //! - GDI で番号付きリスト描画（選択行はハイライト）
 //! - キャレット位置の直下に表示
 //!
@@ -41,7 +41,7 @@ use windows::{
                 CreateWindowExW, DefWindowProcW, DestroyWindow, HMENU, HWND_TOPMOST, KillTimer,
                 PostMessageW, RegisterClassW, SW_HIDE, SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SetTimer,
                 SetWindowPos, ShowWindow, WM_APP, WM_ERASEBKGND, WM_PAINT, WM_TIMER, WNDCLASSW,
-                WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOPMOST, WS_POPUP,
+                WS_BORDER, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
             },
         },
     },
@@ -729,7 +729,7 @@ pub fn show_with_status(
             ensure_class_registered();
             let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
             match CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                 PCWSTR(CLASS_NAME_UTF16.as_ptr()),
                 PCWSTR::null(),
                 WS_POPUP | WS_BORDER,
@@ -873,7 +873,7 @@ fn ensure_hwnd() -> HWND {
         ensure_class_registered();
         let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
         match CreateWindowExW(
-            WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+            WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
             PCWSTR(CLASS_NAME_UTF16.as_ptr()),
             PCWSTR::null(),
             WS_POPUP | WS_BORDER,
@@ -1601,7 +1601,7 @@ pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid
                 ensure_class_registered();
                 let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
                 match CreateWindowExW(
-                    WS_EX_TOPMOST | WS_EX_NOACTIVATE,
+                    WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
                     PCWSTR(CLASS_NAME_UTF16.as_ptr()),
                     PCWSTR::null(),
                     WS_POPUP | WS_BORDER,
