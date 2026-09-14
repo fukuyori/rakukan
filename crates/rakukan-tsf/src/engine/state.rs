@@ -2488,20 +2488,39 @@ pub fn doc_mode_remember_current(mode: ImeMode) {
 /// 新しい DM が作られたときに hwnd_modes から復元できる。
 pub fn doc_mode_remove(dm_ptr: usize) {
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
-        if let (Some(&mode), Some(&hwnd)) =
-            (store.dm_modes.get(&dm_ptr), store.dm_to_hwnd.get(&dm_ptr))
-            && hwnd != 0
-        {
-            store.hwnd_modes.insert(hwnd, mode);
-            tracing::debug!(
-                "doc_mode: retained mode={mode:?} for hwnd={hwnd:#x} before removing dm={dm_ptr:#x}"
-            );
-        }
-        store.dm_modes.remove(&dm_ptr);
-        store.text_field_dms.remove(&dm_ptr);
-        store.dm_to_hwnd.remove(&dm_ptr);
-        tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
+        apply_dm_removal(&mut store, dm_ptr);
     }
+}
+
+/// [doc_mode_remove] の本体。store を引数に取ってテストできるようにしてある。
+fn apply_dm_removal(store: &mut ModeStore, dm_ptr: usize) {
+    // 「文字入力欄」と判定した DM のモードは HWND へ退避しない。文字入力欄は本体と
+    // 同じ HWND を共有するため、退避すると本体側の記憶（多くは IME オフ）を
+    // 文字入力欄のモードで上書きしてしまう。文字入力欄はフォーカスのたびに設定の
+    // モードで始まるので、退避しても使い道がない。
+    if !store.text_field_dms.contains(&dm_ptr)
+        && let (Some(&mode), Some(&hwnd)) =
+            (store.dm_modes.get(&dm_ptr), store.dm_to_hwnd.get(&dm_ptr))
+        && hwnd != 0
+    {
+        store.hwnd_modes.insert(hwnd, mode);
+        tracing::debug!(
+            "doc_mode: retained mode={mode:?} for hwnd={hwnd:#x} before removing dm={dm_ptr:#x}"
+        );
+    }
+    store.dm_modes.remove(&dm_ptr);
+    store.text_field_dms.remove(&dm_ptr);
+    store.dm_to_hwnd.remove(&dm_ptr);
+    // 基準 DM が破棄されたら空にする。次にフォーカスを得た DM が新しい基準になる。
+    // 文字編集を開いたまま TIP が activate すると、Activate 時の `GetFocus()` が
+    // 文字入力欄の DM を返すため、それが基準として記録され本体との判定が入れ替わる。
+    // その DM は編集終了で破棄されるので、ここで空にすれば次にフォーカスが来る
+    // 本体の DM が基準に戻る。
+    if store.base_dm == dm_ptr {
+        store.base_dm = 0;
+        tracing::debug!("doc_mode: base_dm cleared (dm={dm_ptr:#x} destroyed)");
+    }
+    tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
 }
 
 /// DocumentManager 破棄時 (`OnUninitDocumentMgr`) の後片付けを集約する (M1 T3-B)。
@@ -2573,6 +2592,65 @@ mod tests {
         // 設定が空（既定）なら、どの DM でも従来の経路へ落ちる
         assert_eq!(text_field_mode_for(0x20, 0x10, false, false, None), None);
         assert_eq!(text_field_mode_for(0x20, 0x10, true, true, None), None);
+    }
+
+    fn empty_store() -> ModeStore {
+        ModeStore {
+            dm_modes: HashMap::new(),
+            hwnd_modes: HashMap::new(),
+            dm_to_hwnd: HashMap::new(),
+            base_dm: 0,
+            text_field_dms: std::collections::HashSet::new(),
+        }
+    }
+
+    #[test]
+    fn removing_text_field_dm_keeps_the_hwnd_memory_of_the_app() {
+        let mut store = empty_store();
+        // 本体（base）と文字入力欄が同じ HWND を共有している状態
+        store.base_dm = 0x10;
+        store.dm_modes.insert(0x10, ImeMode::Off);
+        store.dm_to_hwnd.insert(0x10, 0x100);
+        store.hwnd_modes.insert(0x100, ImeMode::Off);
+        store.dm_modes.insert(0x20, ImeMode::On);
+        store.dm_to_hwnd.insert(0x20, 0x100);
+        store.text_field_dms.insert(0x20);
+
+        apply_dm_removal(&mut store, 0x20);
+
+        // 文字入力欄のモードが本体側の HWND 記憶を塗り替えない
+        assert_eq!(store.hwnd_modes.get(&0x100), Some(&ImeMode::Off));
+        assert!(!store.dm_modes.contains_key(&0x20));
+        assert!(!store.text_field_dms.contains(&0x20));
+        assert!(!store.dm_to_hwnd.contains_key(&0x20));
+        assert_eq!(store.base_dm, 0x10);
+    }
+
+    #[test]
+    fn removing_a_normal_dm_still_retains_its_mode_to_the_hwnd() {
+        let mut store = empty_store();
+        store.base_dm = 0x10;
+        store.dm_modes.insert(0x20, ImeMode::On);
+        store.dm_to_hwnd.insert(0x20, 0x100);
+
+        apply_dm_removal(&mut store, 0x20);
+
+        // 文字入力欄でない DM は従来どおり HWND へ退避される
+        assert_eq!(store.hwnd_modes.get(&0x100), Some(&ImeMode::On));
+    }
+
+    #[test]
+    fn removing_the_base_dm_clears_the_base() {
+        let mut store = empty_store();
+        store.base_dm = 0x10;
+        store.dm_modes.insert(0x10, ImeMode::Off);
+        store.dm_to_hwnd.insert(0x10, 0x100);
+
+        apply_dm_removal(&mut store, 0x10);
+
+        // 次にフォーカスを得た DM が新しい基準になる
+        assert_eq!(store.base_dm, 0);
+        assert_eq!(store.hwnd_modes.get(&0x100), Some(&ImeMode::Off));
     }
 
     fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {
