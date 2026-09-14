@@ -1174,6 +1174,16 @@ pub fn stop_waiting_timer() {
 /// 辞書候補だけで操作を続けられる状態であることを伝える。
 pub const BG_ERROR_STATUS: &str = "⚠ 変換エンジンが応答していません（辞書候補のみ）";
 
+/// モデル読み込みを待っている間の文言（Step 13-1、Issue #39）。
+///
+/// 辞書候補が引けた場合でも必ず出す。候補が出ていると「変換できた」ように
+/// 見えるが、実際には LLM 候補が来ていない。黙っていると、10 秒後に
+/// [`MODEL_WAIT_SLOW_STATUS`] が突然出る理由も分からない。
+pub const MODEL_LOADING_STATUS: &str = "⏳ モデル読み込み中...";
+
+/// モデル読み込みの待機を打ち切ったときの文言（Step 13-1）。
+pub const MODEL_WAIT_SLOW_STATUS: &str = "⏳ モデル読み込みに時間がかかっています";
+
 /// ホストが復帰を試している間の文言（Issue #43）。
 ///
 /// GPU ドライバの更新後は、ホストを作り直さないと推論が通らない。黙って
@@ -1404,7 +1414,7 @@ fn tick_model_wait() -> bool {
                 &info,
                 pos_x,
                 pos_y,
-                Some("⏳ モデル読み込みに時間がかかっています"),
+                Some(MODEL_WAIT_SLOW_STATUS),
             );
         }
         return true;

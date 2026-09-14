@@ -1047,12 +1047,16 @@ impl super::TextServiceFactory_Impl {
                 )?;
                 drop(guard);
                 candidate_window::stop_waiting_timer();
-                candidate_window::show(
+                // 辞書候補が出ていても「LLM 候補を待っている」ことは伝える。
+                // 黙っていると変換できたように見え、10 秒後の打ち切りの文言だけが
+                // 唐突に出ることになる（Step 13-1、実機で指摘された）。
+                candidate_window::show_with_status(
                     &snapshot.page_candidates,
                     snapshot.page_selected,
                     &snapshot.page_info,
                     caret.left,
                     caret.bottom,
+                    Some(candidate_window::MODEL_LOADING_STATUS),
                 );
                 // モデルが読み込まれたら変換をやり直す（Step 13-1、#39）。
                 // 候補ウィンドウを出した後に呼ぶ（タイマーは HWND が要る）。
@@ -1115,7 +1119,7 @@ impl super::TextServiceFactory_Impl {
                 &snapshot.page_info,
                 caret.left,
                 caret.bottom,
-                Some("⏳ モデル読み込み中..."),
+                Some(candidate_window::MODEL_LOADING_STATUS),
             );
             // モデルが読み込まれたら変換をやり直す（Step 13-1、#39）。
             candidate_window::start_model_wait(conv_reading.clone(), caret.left, caret.bottom);

@@ -102,6 +102,16 @@ impl HealthTracker {
     }
 
     pub fn health(&self) -> Health {
+        // 自己終了から戻った直後は、推論が 1 回成功するまで「復帰中」を返す。
+        //
+        // 健全性はホストのプロセスごとに持つので、自己終了した瞬間の
+        // `Recovering` はそのプロセスと一緒に消える。新しいホストは `Ok` から
+        // 始まるため、これが無いと再起動直後の文言が「応答していません」になり、
+        // 「再起動中（GPU ドライバ更新後に必要）」が利用者に届かない。
+        // 推論が成功すれば `Action::Recovered` で `prior_attempts` が 0 に戻る。
+        if self.health == Health::Ok && self.prior_attempts > 0 {
+            return Health::Recovering;
+        }
         self.health
     }
 
@@ -262,6 +272,31 @@ mod tests {
         t.observe("running");
         assert_eq!(t.observe("error"), Action::MarkUnrecoverable);
         assert_eq!(t.health(), Health::Unrecoverable);
+    }
+
+    #[test]
+    fn restarted_host_reports_recovering_until_inference_succeeds() {
+        // マーカーから「1 回自己終了して戻ってきた」と分かる状態で起動
+        let mut t = HealthTracker::new(1);
+        assert_eq!(
+            t.health(),
+            Health::Recovering,
+            "再起動直後は復帰中として見せる"
+        );
+        // まだ失敗が続いている間も復帰中のまま
+        t.observe("running");
+        t.observe("error");
+        assert_eq!(t.health(), Health::Recovering);
+        // 推論が成功したら通常へ戻る
+        t.observe("running");
+        assert_eq!(t.observe("done"), Action::Recovered);
+        assert_eq!(t.health(), Health::Ok);
+    }
+
+    #[test]
+    fn fresh_host_reports_ok() {
+        let t = HealthTracker::new(0);
+        assert_eq!(t.health(), Health::Ok);
     }
 
     #[test]

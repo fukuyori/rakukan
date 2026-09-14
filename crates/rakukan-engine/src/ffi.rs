@@ -294,10 +294,21 @@ pub extern "C" fn engine_bg_start(handle: *mut c_void, n_cands: u32) -> bool {
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_bg_status(handle: *mut c_void) -> *const c_char {
     let _engine = unsafe { &*(handle as *const RakunEngine) };
-    match crate::conv_cache::status() {
-        "running" => c"running".as_ptr(),
-        "done" => c"done".as_ptr(),
-        _ => c"idle".as_ptr(),
+    bg_status_cstr(crate::conv_cache::status()).as_ptr()
+}
+
+/// `conv_cache::status()` の戻り値を ABI 用の C 文字列へ対応づける。
+///
+/// 対応を足し忘れた状態は `"idle"` に潰れ、呼び出し側からは「何も起きていない」
+/// ようにしか見えなくなる。`"error"`（推論失敗）がこれで消えており、TSF の
+/// 辞書候補フォールバックも host 側の復帰判断も動いていなかった。
+/// 取りこぼしを防ぐため、[`crate::conv_cache::STATUS_VALUES`] を回すテストを置く。
+fn bg_status_cstr(status: &str) -> &'static CStr {
+    match status {
+        "running" => c"running",
+        "done" => c"done",
+        "error" => c"error",
+        _ => c"idle",
     }
 }
 
@@ -764,5 +775,26 @@ mod build_info_tests {
         assert_eq!(back.pkg_version, info.pkg_version);
         assert_eq!(back.abi_version, info.abi_version);
         assert_eq!(back.git_sha, info.git_sha);
+    }
+
+    /// `conv_cache::status()` が返す値はすべて、そのままの文字列で ABI を渡ること。
+    ///
+    /// ここが崩れると、その状態は `"idle"` に見えて呼び出し側が何も判断できない。
+    /// `"error"`（推論失敗）の対応漏れで、TSF の辞書候補フォールバックも host 側の
+    /// 復帰判断も動いていなかった。状態を増やすときは `STATUS_VALUES` に足す。
+    #[test]
+    fn bg_status_maps_every_conv_cache_state() {
+        for value in crate::conv_cache::STATUS_VALUES {
+            assert_eq!(
+                bg_status_cstr(value).to_str().expect("utf-8"),
+                *value,
+                "conv_cache の状態 {value:?} が ABI で別の値に潰れている"
+            );
+        }
+    }
+
+    #[test]
+    fn bg_status_unknown_state_falls_back_to_idle() {
+        assert_eq!(bg_status_cstr("なにか新しい状態").to_str().unwrap(), "idle");
     }
 }

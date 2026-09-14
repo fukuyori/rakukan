@@ -452,6 +452,14 @@ pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
 /// 推論が失敗した Done は `"done"` ではなく `"error"` を返す。呼び出し元から見た
 /// 「候補が空」は正常な結果でも起こりうるが、`"error"` は推論が落ちたときにしか
 /// 出ないため、GPU デバイス消失からの復帰判断に使える。
+/// [`status`] が返しうる値の全集合。
+///
+/// ABI（`engine_bg_status`）はこの文字列を C 文字列へ変換して外へ渡す。変換表に
+/// 分岐を足し忘れると、その状態は `"idle"` に潰れて呼び出し側から見えなくなる。
+/// 実際に `"error"` の追加漏れで、推論失敗が TSF にも host にも伝わっていなかった。
+/// 状態を増やすときはこの配列に足すこと（ffi 側のテストがここを参照して落ちる）。
+pub const STATUS_VALUES: &[&str] = &["idle", "running", "done", "error"];
+
 pub fn status() -> &'static str {
     match CACHE.inner.lock() {
         Ok(s) => match &s.state {
