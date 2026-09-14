@@ -30,6 +30,40 @@ const HOST_FAILURE_WINDOW_MS: u64 = 15_000;
 const HOST_FAILURE_COOLDOWN_MS: u64 = 30_000;
 const CONNECT_WHILE_BLOCKED_MS: u64 = 500;
 
+/// spawn するホストへ渡すエンジン DLL のログレベル（`RAKUKAN_LOG`）。
+///
+/// DLL 内の tracing は cdylib ごとに独立した subscriber を持ち、その filter は
+/// `RAKUKAN_LOG`（既定 info）だけで決まる。`config.toml` の `log_level` を
+/// 上げても DLL のログは info のままで、辞書・候補まわりの DEBUG が取れない。
+/// TSF が config を読んだ時点でここへ入れ、ホスト起動時に子プロセスへ渡す。
+static HOST_LOG_LEVEL: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+/// spawn するホストに渡すエンジン DLL のログレベルを設定する。
+///
+/// 呼び出し側（TSF）は config の読み込み・再読み込みのたびに呼ぶ。既に起動して
+/// いるホストには影響しない（次回 spawn 時から反映される）。
+pub fn set_host_log_level(level: Option<String>) {
+    if let Ok(mut g) = HOST_LOG_LEVEL.lock() {
+        *g = level;
+    }
+}
+
+fn host_log_level() -> Option<String> {
+    HOST_LOG_LEVEL.lock().ok().and_then(|g| g.clone())
+}
+
+/// spawn するホストへ設定する `RAKUKAN_LOG` の値を決める。
+///
+/// 既にこのプロセスの環境に `RAKUKAN_LOG` がある場合は何も設定しない。
+/// 子はそれを継承するので、調査のために手で設定した値を config の値で
+/// 上書きしてしまわないようにする。
+fn spawn_log_env(env_already_set: bool, configured: Option<String>) -> Option<String> {
+    if env_already_set {
+        return None;
+    }
+    configured.filter(|level| !level.trim().is_empty())
+}
+
 static HOST_FAILURE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
 static HOST_SPAWN_GUARD: LazyLock<Mutex<HostSpawnGuard>> =
     LazyLock::new(|| Mutex::new(HostSpawnGuard::default()));
@@ -665,9 +699,16 @@ fn spawn_detached(exe: &PathBuf) -> Result<()> {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
-    std::process::Command::new(exe)
-        .creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS)
-        .spawn()
+    let mut cmd = std::process::Command::new(exe);
+    cmd.creation_flags(CREATE_NO_WINDOW | DETACHED_PROCESS);
+    // エンジン DLL のログレベルを config に追随させる。手動で `RAKUKAN_LOG` を
+    // 設定して起動した場合（調査時など）を壊さないよう、既に環境にあるときは
+    // 触らない。
+    if let Some(level) = spawn_log_env(std::env::var_os("RAKUKAN_LOG").is_some(), host_log_level())
+    {
+        cmd.env("RAKUKAN_LOG", level);
+    }
+    cmd.spawn()
         .with_context(|| format!("spawn {}", exe.display()))?;
     Ok(())
 }
@@ -683,6 +724,24 @@ fn spawn_detached(_exe: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spawn_log_env_respects_existing_environment() {
+        // 手で RAKUKAN_LOG を設定して起動した調査用ホストを壊さない
+        assert_eq!(spawn_log_env(true, Some("debug".into())), None);
+        assert_eq!(spawn_log_env(true, None), None);
+    }
+
+    #[test]
+    fn spawn_log_env_uses_configured_level() {
+        assert_eq!(
+            spawn_log_env(false, Some("debug".into())),
+            Some("debug".to_string())
+        );
+        assert_eq!(spawn_log_env(false, None), None);
+        // 空文字は EnvFilter を壊すので渡さない
+        assert_eq!(spawn_log_env(false, Some("  ".into())), None);
+    }
 
     #[test]
     fn host_spawn_guard_blocks_after_repeated_failures() {

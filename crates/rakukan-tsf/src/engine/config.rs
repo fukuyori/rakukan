@@ -382,6 +382,10 @@ impl ConfigManager {
 /// CONFIG_MANAGER の Mutex を取ると描画のたびにロック競合が起きる。
 /// 設定を読み込んだタイミングでアトミックへ写しておき、描画側はロックなしで読む。
 fn publish_atomics(cfg: &AppConfig) {
+    // エンジン DLL のログレベルは `RAKUKAN_LOG` だけで決まり、config.toml の
+    // log_level が効かない。次に spawn するホストへ渡せるよう、config を読んだ
+    // 時点で RPC クライアントに預ける（起動済みのホストには影響しない）。
+    rakukan_engine_rpc::set_host_log_level(Some(cfg.general.log_level.clone()));
     CANDIDATE_FONT_HEIGHT.store(
         cfg.appearance
             .candidate_font_height

@@ -16,6 +16,6 @@ pub mod pipe;
 pub mod protocol;
 pub mod server;
 
-pub use client::RpcEngine;
+pub use client::{RpcEngine, set_host_log_level};
 pub use protocol::{InputCharKind, PIPE_BASE_NAME, Request, Response};
 pub use rakukan_engine_abi::{Candidate, CandidateSource, Segment, Segments};
