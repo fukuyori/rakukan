@@ -1139,6 +1139,38 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 1. 13-1 の待ち上限と、上限に達したときの表示文言。
 2. 13-3（#43）を Step 13 に含めるか、別ステップに分けるか。
 
+### ホスト入れ替わりで辞書が注入されない不具合（2026-09-14）
+
+「`はんは` の候補が 2 件しか出ない」という報告の調査から、候補数とは別の不具合が見つかったため、その場で修正した（計画外）。
+
+#### 報告そのものの結論: LLM のビーム多様性
+
+`はんは` の beam 19 本は、重複排除・長さ・degenerate・echo・`filter_by_confidence`（margin 3.0）のすべてを通過していた（最良 `班は` = −0.276、最下位 −1.77 で閾値 −3.28 に届かない）。同じ読みでも `llm_cands` は文脈により 19 件 / 4 件 / 1 件と変動する。**フィルタと候補マージは正常**で、候補が少ないのは LLM 側の性質による。
+
+辞書も助けにならない。`rakukan.dict` のインデックスを二分探索して確認したところ、`はんは` は**見出しが無く**（`はん` は 43 件、`みぎ` は 48 件）、エンジンのログでも `dict::store: lookup reading="はんは" mozc=true n=0` となる。読み全体で完全一致検索するため、助詞を含む読みからは辞書の `はん` に到達できない。ここは #16 / #32 の領域で、今回は対象外とした。
+
+#### 見つかった不具合: ホストが入れ替わると辞書が注入されない
+
+辞書とモデルは DLL の BG スレッドでロードされ、`engine_poll_dict_ready` が呼ばれたときだけエンジンへ注入される（BG スレッドはエンジンを直接触れないため）。TSF 側の `poll_dict_ready_cached` は `DICT_READY_LATCH`（プロセス単位の static）が立つと即 return し、このラッチを戻すのは `engine_reload` だけだった。しかも `engine_reload` は「config 同一ならホストを維持」する分岐で `reset_ready_latches()` を呼ばずに `return` していた。RPC クライアントはホストが消えると黙って新ホストへ再接続 + Create する（`client.rs`）。
+
+結果、**`engine_reload` を経ないホストの入れ替わり（クラッシュ・外部終了・再 spawn）では、そのアプリの TSF は新ホストへ辞書を注入せず `dict_store=None` のまま動き続ける**。辞書・ユーザー辞書・学習履歴がすべて出ず、確定時の学習も `learn: dict_store not initialized` で捨てられる。モデル側は `on_convert` にラッチを迂回する復旧路があり（`a2b85d6`）、辞書側にだけ無かったため、変換はできるのに辞書だけ効かない状態になる。
+
+実測（0.11.6）: 辞書は `dict::store: ready` までロードされているのに、3 秒後の変換が `engine::merge: dict_store=None dict_cands=[]` になり、`learn_force: dict_store not initialized` が出た。DLL ログには 2026-09-12 にも同じ WARN が 4 件あり、以前から起きていた。
+
+#### 修正（0.11.6 の後、未リリース）
+
+- `6ccb9e0`: `dispatch_engine`（エンジン要求の唯一の funnel、engine mutex 下）の冒頭で host 側が必ず注入を試みる。TSF のラッチ・reload 経路・ホストが入れ替わった理由に依存しなくなる。注入済みなら `is_*_ready()` の判定だけで終わり RPC も増えない。あわせて `engine_reload` の skip 経路でも `reset_ready_latches()` を呼び、辞書未注入のまま `Learn` / `LearnForce` が来たら host ログへ WARN（`dict_status` 付き）。
+- `481e5bf`: エンジン DLL のログレベルを `config.toml` の `log_level` に追随させる。DLL の filter は `RAKUKAN_LOG`（既定 info）だけで決まり、config を上げても `engine::merge` や `conv candidate confidence` が取れず、今回の調査で障害になった。TSF が config を読んだ時点で rpc クライアントへ預け、ホスト spawn 時に子の環境変数として渡す。既に `RAKUKAN_LOG` があるときは触らない（手動設定を壊さない）。判定は純関数 `spawn_log_env` に切り出してテスト 2 件。
+
+テスト 424 件すべて成功、`cargo clippy -D warnings` / `cargo fmt --check` クリーン。
+
+#### 実機確認（2026-09-14、0.11.6 + 上記 2 コミット）
+
+- **ホスト入れ替わり**: `engine_reload` を経ずに host を外部から終了 → 変換。TSF ログに `dict ready:` も `engine_reload` も出ない（= ラッチは立ったまま・TSF は一度も poll していない）状態で、`engine::merge: dict_store=Some` を確認。修正前は同条件で `dict_store=None` が続いていた。
+- **reload の skip 経路**: reload イベント → `engine_reload: host already running with same config, skipping restart` の後に `dict ready: 17518 ms since reload reset` / `model ready: 18892 ms` が出た（`since reload reset` はラッチリセット時のみ出る）。
+- **ログレベル**: `log_level = "info"` にして再読込 → 新ホストの DLL ログは DEBUG 0 行 / INFO 16 行。`RAKUKAN_LOG` の継承ではなく config 由来と確定。確認後 `debug` に戻した。
+- `Learn` / `LearnForce` の WARN は未確認。挙動を変えない 4 行で、条件が成立することは同日の DLL 側 WARN で観測済みのため、辞書の退避コストと釣り合わないと判断した。
+
 #### 今後の対応ステップ（2026-09-09 再構成）
 
 Step 9 と Step 11 は完了、Step 10 以降が残っている。順序は変えず、各ステップに Issue を対応づけた。判断待ちの項目は時期未定。
@@ -1153,5 +1185,5 @@ Step 9 と Step 11 は完了、Step 10 以降が残っている。順序は変�
 | 判断待ち | リーダー記号の入力方式 | #35 | 方式（Space 変換の候補 / `z` 系キー列）と文字の割り当てが未決。PR #31 は保留 |
 | 判断待ち | 新しい入力欄の IME 状態（H） | #36 | 受けるか、判定基準の説明を先に求めるか、見送るか |
 | 判断待ち | 候補・予測の品質（D） | #40、#45 | 1・3 は main で再現せず、7 は #45 に切り出して PR 待ち、2 は Step 12 後に縮小版の PR を受ける（依頼済み）、4 は見送り |
-| 判断待ち | かな run の辞書参照（Step 9 残件） | #16 | `DictLookup` API（#32 側）の転用可能性を含めて設計が必要 |
+| 判断待ち | かな run の辞書参照（Step 9 残件） | #16 | `DictLookup` API（#32 側）の転用可能性を含めて設計が必要。2026-09-14 に具体例を確認: `はんは` は辞書に見出しが無く（`はん` は 43 件）、助詞を含む読みからは辞書に到達できない |
 | 判断待ち | 文節変換 | #32 | `docs/Segment_Edit_Plan.md`。統合ブランチ側の自動分割案（#18 の A）との方式比較が未着手 |
