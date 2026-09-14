@@ -306,8 +306,40 @@ fn load_engine_into(
     }
 }
 
+/// 辞書が未注入のまま学習要求が来たら host ログへ WARN を出す。
+///
+/// DLL 側も `learn: dict_store not initialized` を出すが、そちらは
+/// `rakukan-engine-dll.log` にしか残らず、既定のログレベルでは他の DEBUG 行と
+/// 混ざらないため見落としやすい。辞書のロード自体が失敗している場合は
+/// `dict_status` に理由が入るので添える。
+fn warn_if_dict_missing(eng: &mut DynEngine, req_name: &str, reading: &str) {
+    if eng.is_dict_ready() {
+        return;
+    }
+    tracing::warn!(
+        "rpc: {} discarded (dict not injected): reading={:?} dict_status={:?}",
+        req_name,
+        reading,
+        eng.dict_status()
+    );
+}
+
 fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
     use Request::*;
+
+    // 辞書・モデルはバックグラウンドでロードされ、poll でエンジンへ注入される
+    // （DLL の BG スレッドはエンジンを直接触れない）。この poll を TSF 側の
+    // ラッチ任せにすると、ホストが入れ替わったとき（クラッシュ・外部終了・
+    // 再 spawn）にラッチが立ったままで二度と poll されず、`dict_store=None`
+    // のまま固定される。要求を処理する前に host 側で必ず注入を試みる。
+    // 注入済みなら `is_*_ready()` の判定だけで終わるので RPC も往復しない。
+    if !eng.is_dict_ready() {
+        eng.poll_dict_ready();
+    }
+    if !eng.is_kanji_ready() {
+        eng.poll_model_ready();
+    }
+
     match req {
         Hello { .. }
         | Create { .. }
@@ -423,10 +455,12 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         AvailableModelsJson => Response::String(eng.available_models_json()),
 
         Learn { reading, surface } => {
+            warn_if_dict_missing(eng, "Learn", &reading);
             eng.learn(&reading, &surface);
             Response::Unit
         }
         LearnForce { reading, surface } => {
+            warn_if_dict_missing(eng, "LearnForce", &reading);
             eng.learn_force(&reading, &surface);
             Response::Unit
         }

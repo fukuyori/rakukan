@@ -517,14 +517,20 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
         match guard.0.as_mut() {
             Some(eng) => {
                 if !force {
-                    // まずホスト側と config を比較。同一なら再起動せず終了
-                    // （ハンドル・ready ラッチとも現状維持）。
+                    // まずホスト側と config を比較。同一なら再起動しない
+                    // （ハンドルは現状維持）。
                     match eng.shutdown_if_config_differs(Some(cfg.clone())) {
                         Ok(false) => {
                             tracing::info!(
                                 "engine_reload: host already running with same config, skipping restart ({:?})",
                                 t_start.elapsed()
                             );
+                            // ホストは維持するがラッチは落とす。ホストが我々の
+                            // 知らないうちに入れ替わっていると（クラッシュ・外部
+                            // 終了・再 spawn）、ラッチが立ったままでは辞書・モデル
+                            // の注入を二度と poll しない。次の poll で実態を確認
+                            // させる。余分な RPC は ready になるまでの数回だけ。
+                            reset_ready_latches();
                             return;
                         }
                         Ok(true) => {
