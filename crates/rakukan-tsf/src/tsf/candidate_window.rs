@@ -1079,6 +1079,37 @@ fn process_focus_change(fc: FocusChange) {
 
 // ─── LLM待機タイマー ──────────────────────────────────────────────────────────
 
+/// モデル読み込みを待つ上限（Step 13-1、Issue #39）。
+///
+/// ホスト起動からモデル ready までは実測 0.2〜0.3 秒（OS キャッシュが効いた状態）。
+/// コールドスタートを見込んでも 10 秒あれば足りる。超えたら待機を打ち切り、
+/// 文言を切り替えて辞書候補のまま操作できる状態にする。
+const MODEL_WAIT_LIMIT_MS: u64 = 10_000;
+
+/// Waiting（「⏳ 変換中...」）で待ち続ける上限（Step 13-1）。
+///
+/// 待機タイマーは periodic なので、変換が永遠に完了しないと 80ms ごとの
+/// ポーリングが止まらない。上限を超えたら推論失敗時と同じ経路で辞書候補へ
+/// 落とし、タイマーを止める。
+const WAITING_LIMIT_MS: u64 = 10_000;
+
+/// モデル読み込み完了を待って変換をやり直すための記録（Step 13-1）。
+struct ModelWait {
+    /// 待ち始めた時点の読み。`bg_start` のキー（engine 内部の hiragana_buf）と
+    /// 一致しなくなっていたら、別の入力に移ったとみなして破棄する。
+    reading: String,
+    started: std::time::Instant,
+    pos_x: i32,
+    pos_y: i32,
+}
+
+thread_local! {
+    /// モデル読み込み待ち（Step 13-1）。`None` = 待っていない。
+    static TL_MODEL_WAIT: RefCell<Option<ModelWait>> = const { RefCell::new(None) };
+    /// Waiting に入った時刻（Step 13-1 の上限判定用）。`None` = Waiting ではない。
+    static TL_WAITING_SINCE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+}
+
 const WAITING_TIMER_ID: usize = 0x1234;
 const WAITING_POLL_MS: u32 = 80; // 80ms ごとにポーリング
 
@@ -1109,12 +1140,25 @@ pub fn start_waiting_timer() {
         unsafe {
             SetTimer(hwnd, WAITING_TIMER_ID, WAITING_POLL_MS, None);
         }
+        // 待ち始めた時刻は最初の 1 回だけ記録する。tick の中で張り直しても
+        // 上限が延びないようにするため（Step 13-1）。
+        TL_WAITING_SINCE.with(|c| {
+            if c.get().is_none() {
+                c.set(Some(std::time::Instant::now()));
+            }
+        });
         tracing::debug!("waiting timer started");
     }
 }
 
 /// Waiting状態を抜けた時に呼ぶ。タイマーを停止する。
 pub fn stop_waiting_timer() {
+    TL_WAITING_SINCE.with(|c| c.set(None));
+    // モデル待ちは待機タイマーが動いている間だけ意味を持つ。確定・Esc など
+    // タイマーを止める経路で一緒に捨てる（Step 13-1）。
+    TL_MODEL_WAIT.with(|c| {
+        let _ = c.borrow_mut().take();
+    });
     let hwnd = get_hwnd();
     if is_valid(hwnd) {
         unsafe {
@@ -1129,6 +1173,41 @@ pub fn stop_waiting_timer() {
 /// 「⏳ 変換中...」のままだと待てば直ると誤解させる。LLM 候補は来ないので、
 /// 辞書候補だけで操作を続けられる状態であることを伝える。
 pub const BG_ERROR_STATUS: &str = "⚠ 変換エンジンが応答していません（辞書候補のみ）";
+
+/// ホストが復帰を試している間の文言（Issue #43）。
+///
+/// GPU ドライバの更新後は、ホストを作り直さないと推論が通らない。黙って
+/// 復帰させると利用者からは「たまに変換できない」としか見えないので、
+/// 原因と一時的であることを伝える。
+pub const BG_RECOVERING_STATUS: &str = "⚠ 変換エンジンを再起動中…（GPU ドライバ更新後に必要）";
+
+/// 復帰できなかったときの文言（Issue #43）。利用者の次の一手を示す。
+pub const BG_UNRECOVERABLE_STATUS: &str = "⚠ GPU が使えません。Windows の再起動をお試しください";
+
+/// ホストの健全性から status 行の文言を決める（Issue #43）。
+fn status_for_health(health: &str) -> &'static str {
+    match health {
+        "recovering" => BG_RECOVERING_STATUS,
+        "unrecoverable" => BG_UNRECOVERABLE_STATUS,
+        _ => BG_ERROR_STATUS,
+    }
+}
+
+/// 推論が失敗したときの文言。エンジンのハンドルを持っている経路から呼ぶ。
+pub fn bg_error_status_for(engine: &crate::engine::state::DynEngine) -> &'static str {
+    status_for_health(&engine.engine_health())
+}
+
+/// 推論が失敗したときの文言。エンジンのロックを持っていない経路から呼ぶ。
+pub fn bg_error_status_now() -> &'static str {
+    match crate::engine::state::engine_get() {
+        Ok(g) => match g.as_ref() {
+            Some(e) => status_for_health(&e.engine_health()),
+            None => BG_ERROR_STATUS,
+        },
+        Err(_) => BG_ERROR_STATUS,
+    }
+}
 
 /// Selecting 中の `llm_pending` を降ろす。
 ///
@@ -1181,16 +1260,168 @@ fn bg_error_fallback_selecting(site: &str) {
             &info,
             pos.left,
             pos.bottom,
-            Some(BG_ERROR_STATUS),
+            Some(bg_error_status_now()),
         );
     }
 }
 
 /// WM_TIMER コールバック（TSFスレッド上で呼ばれる）。
 /// bg_status == "done" になったら候補を取り出して表示する。
+/// モデル読み込み完了を待って変換をやり直す（Step 13-1、Issue #39）。
+///
+/// `on_convert` の `model_not_ready` 経路から呼ぶ。候補表（辞書候補か読み）は
+/// すでに表示されている前提で、セッションは `Selecting { llm_pending: false }`
+/// のまま。したがって待っている間も候補送りは通常どおり効く。
+///
+/// 待機タイマーの tick で `is_kanji_ready()` を確認し、ready になった時点で
+/// 1 回だけ `bg_start` する。上限（`MODEL_WAIT_LIMIT_MS`）を超えたら打ち切る。
+pub fn start_model_wait(reading: String, pos_x: i32, pos_y: i32) {
+    TL_MODEL_WAIT.with(|c| {
+        *c.borrow_mut() = Some(ModelWait {
+            reading,
+            started: std::time::Instant::now(),
+            pos_x,
+            pos_y,
+        });
+    });
+    start_waiting_timer();
+    tracing::info!("model_wait: started (limit {MODEL_WAIT_LIMIT_MS} ms)");
+}
+
+/// モデル待ちを解除する。確定・Esc など Selecting を抜ける経路から呼ぶ。
+pub fn clear_model_wait() {
+    TL_MODEL_WAIT.with(|c| {
+        if c.borrow_mut().take().is_some() {
+            tracing::debug!("model_wait: cleared");
+        }
+    });
+}
+
+/// モデル待ちの 1 tick。戻り値 `true` = この tick はモデル待ちとして処理した
+/// （呼び出し側は以降の分岐へ進まない）。
+fn tick_model_wait() -> bool {
+    use crate::engine::state::{SessionState, engine_get, session_get};
+
+    let Some((reading, elapsed_ms, pos_x, pos_y)) = TL_MODEL_WAIT.with(|c| {
+        c.borrow().as_ref().map(|w| {
+            (
+                w.reading.clone(),
+                w.started.elapsed().as_millis() as u64,
+                w.pos_x,
+                w.pos_y,
+            )
+        })
+    }) else {
+        return false;
+    };
+
+    // Selecting を抜けていたら（確定・Esc など）待つ意味がない
+    let still_selecting = session_get()
+        .map(|s| matches!(&*s, SessionState::Selecting { .. }))
+        .unwrap_or(false);
+    if !still_selecting {
+        clear_model_wait();
+        stop_waiting_timer();
+        return true;
+    }
+
+    let ready = {
+        match engine_get() {
+            Ok(mut g) => match g.as_mut() {
+                Some(e) => {
+                    let _ = crate::engine::state::poll_model_ready_cached(e);
+                    e.is_kanji_ready()
+                }
+                None => false,
+            },
+            Err(_) => false,
+        }
+    };
+
+    if ready {
+        // ready になった → 同じ読みのままなら変換を開始し直す。以降は
+        // llm_pending の分岐（このタイマーの先頭）が完了を拾う。
+        let started = {
+            match engine_get() {
+                Ok(mut g) => match g.as_mut() {
+                    Some(e) => {
+                        let hira = e.hiragana_text().to_string();
+                        if hira != reading {
+                            tracing::info!(
+                                "model_wait: reading changed ({reading:?} → {hira:?}), giving up"
+                            );
+                            false
+                        } else if e.bg_status() != "idle" {
+                            tracing::debug!("model_wait: bg busy ({}), waiting", e.bg_status());
+                            return true;
+                        } else {
+                            let limit = crate::engine::state::get_num_candidates();
+                            let ok = e.bg_start(limit);
+                            tracing::info!(
+                                "model_wait: model ready after {elapsed_ms} ms → bg_start={ok}"
+                            );
+                            ok
+                        }
+                    }
+                    None => false,
+                },
+                Err(_) => false,
+            }
+        };
+        clear_model_wait();
+        if started {
+            if let Ok(mut sess) = session_get()
+                && let SessionState::Selecting {
+                    ref mut llm_pending,
+                    ..
+                } = *sess
+            {
+                *llm_pending = true;
+            }
+        } else {
+            stop_waiting_timer();
+        }
+        return true;
+    }
+
+    if elapsed_ms >= MODEL_WAIT_LIMIT_MS {
+        tracing::warn!("model_wait: model not ready after {elapsed_ms} ms, giving up");
+        clear_model_wait();
+        stop_waiting_timer();
+        // 待機を打ち切ったことが分かる文言に差し替える。候補表はそのままなので
+        // 辞書候補での確定は続けられる。
+        let view = session_get().ok().map(|s| {
+            (
+                s.page_candidates().to_vec(),
+                s.page_selected(),
+                s.page_info().to_string(),
+            )
+        });
+        if let Some((cands, selected, info)) = view {
+            show_with_status(
+                &cands,
+                selected,
+                &info,
+                pos_x,
+                pos_y,
+                Some("⏳ モデル読み込みに時間がかかっています"),
+            );
+        }
+        return true;
+    }
+
+    true
+}
+
 pub fn on_waiting_timer() {
     use crate::engine::state::engine_get;
     use crate::engine::state::{CandidateViewSource, SessionState, session_get};
+
+    // モデル読み込み待ち（Step 13-1）。llm_pending は false なので下の分岐では
+    // 拾えず、Waiting でもないため先頭で処理する。
+    if tick_model_wait() {
+        return;
+    }
 
     // Selecting { llm_pending=true } は、Space 1回目で候補表を即表示した後の
     // 後追い更新状態。Waiting と同じタイマーで BG 完了を拾い、候補表だけ更新する。
@@ -1379,11 +1610,27 @@ pub fn on_waiting_timer() {
         }
     };
 
-    if bg_status == "error" {
-        // 推論が落ちた。待ち続けても完了しないのでタイマーを止め、辞書候補で
-        // Selecting に移す。Waiting のまま抜けると「⏳ 変換中...」が残り、
-        // タイマーも止まっているので表示を更新する経路が無くなる。
-        tracing::warn!("on_waiting_timer: inference failed — falling back to dict candidates");
+    // 待ち過ぎの打ち切り（Step 13-1）。待機タイマーは periodic なので、変換が
+    // 完了しないままだと 80ms ごとのポーリングが止まらない。上限を超えたら
+    // 推論失敗と同じ経路で辞書候補へ落とす。
+    let waited_too_long = TL_WAITING_SINCE.with(|c| {
+        c.get()
+            .map(|t| t.elapsed().as_millis() as u64 >= WAITING_LIMIT_MS)
+            .unwrap_or(false)
+    });
+
+    if bg_status == "error" || waited_too_long {
+        // 推論が落ちた（または待ち過ぎた）。待ち続けても完了しないのでタイマーを
+        // 止め、辞書候補で Selecting に移す。Waiting のまま抜けると
+        // 「⏳ 変換中...」が残り、タイマーも止まっているので表示を更新する経路が
+        // 無くなる。
+        if waited_too_long {
+            tracing::warn!(
+                "on_waiting_timer: no candidates after {WAITING_LIMIT_MS} ms (bg={bg_status}) — falling back to dict candidates"
+            );
+        } else {
+            tracing::warn!("on_waiting_timer: inference failed — falling back to dict candidates");
+        }
         const DICT_LIMIT_ERR: usize = 40;
         let (reading, dict) = match engine_get() {
             Ok(mut g) => g.as_mut().map(|engine| {
@@ -1438,7 +1685,7 @@ pub fn on_waiting_timer() {
             &page_info_str,
             pos_x,
             pos_y,
-            Some(BG_ERROR_STATUS),
+            Some(bg_error_status_now()),
         );
         return;
     }
@@ -2220,8 +2467,20 @@ pub fn on_live_timer() {
 #[cfg(test)]
 mod tests {
     use super::{
-        FONT_HEIGHT_BASE, FONT_HEIGHT_MIN, Layout, fit_font_height, guard_preview_shrink, scaled_to,
+        BG_ERROR_STATUS, BG_RECOVERING_STATUS, BG_UNRECOVERABLE_STATUS, FONT_HEIGHT_BASE,
+        FONT_HEIGHT_MIN, Layout, fit_font_height, guard_preview_shrink, scaled_to,
+        status_for_health,
     };
+
+    #[test]
+    fn status_text_follows_engine_health() {
+        assert_eq!(status_for_health("recovering"), BG_RECOVERING_STATUS);
+        assert_eq!(status_for_health("unrecoverable"), BG_UNRECOVERABLE_STATUS);
+        assert_eq!(status_for_health("ok"), BG_ERROR_STATUS);
+        // 未知の値・取得失敗（空文字）は従来の文言に落とす
+        assert_eq!(status_for_health(""), BG_ERROR_STATUS);
+        assert_eq!(status_for_health("something-new"), BG_ERROR_STATUS);
+    }
 
     /// 設定なし（＝既定の 17px）では、これまでの寸法と 1px も変わらないこと。
     #[test]

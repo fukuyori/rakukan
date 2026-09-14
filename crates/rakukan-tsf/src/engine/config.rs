@@ -332,6 +332,13 @@ pub struct DiagnosticsConfig {
     pub dump_active_config: bool,
     #[serde(default = "default_warn_on_unknown_key")]
     pub warn_on_unknown_key: bool,
+    /// 推論を必ず失敗させる（既定 false）。
+    ///
+    /// GPU デバイス消失（ドライバ更新・スリープ復帰・TDR）で推論が即時失敗する
+    /// 壊れ方は意図的に再現できないため、復帰の段階（Issue #43）を実機で確認する
+    /// ための診断用スイッチ。変換は辞書候補だけになる。
+    #[serde(default)]
+    pub force_inference_failure: bool,
 }
 
 impl Default for DiagnosticsConfig {
@@ -339,6 +346,7 @@ impl Default for DiagnosticsConfig {
         Self {
             dump_active_config: false,
             warn_on_unknown_key: true,
+            force_inference_failure: false,
         }
     }
 }
@@ -583,6 +591,9 @@ symbol_width = "fullwidth"
 digit_separator_auto = true
 # 数字だけの reading に対して提示する候補種別と順序
 digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
+# 診断用: 推論を必ず失敗させる (デフォルト: false)。
+# GPU デバイス消失からの復帰 (Issue #43) の確認用。変換は辞書候補だけになる。
+# [diagnostics] force_inference_failure = true
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true
@@ -628,6 +639,29 @@ warn_on_unknown_key = true
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+
+    #[test]
+    fn force_inference_failure_defaults_to_false() {
+        assert!(!AppConfig::default().diagnostics.force_inference_failure);
+        let cfg: AppConfig = toml::from_str(
+            "[diagnostics]
+warn_on_unknown_key = true
+",
+        )
+        .expect("config should parse");
+        assert!(!cfg.diagnostics.force_inference_failure);
+    }
+
+    #[test]
+    fn force_inference_failure_can_be_enabled() {
+        let cfg: AppConfig = toml::from_str(
+            "[diagnostics]
+force_inference_failure = true
+",
+        )
+        .expect("parse");
+        assert!(cfg.diagnostics.force_inference_failure);
+    }
 
     #[test]
     fn effective_num_candidates_reads_new_conversion_key() {

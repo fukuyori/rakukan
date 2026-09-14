@@ -29,6 +29,13 @@ pub struct ConversionConfig {
     /// 適切な閾値は実地のスコア分布に依存するため既定 `None`（無効）。有効化する場合は
     /// まず `confidence_margin` のデバッグログで実際の平均 log-prob を観測してから設定する。
     pub min_top_confidence: Option<f32>,
+    /// 診断用: 推論を必ず失敗させる（既定 false）。
+    ///
+    /// GPU デバイス消失（ドライバ更新・スリープ復帰・TDR）で推論が即時失敗する
+    /// 壊れ方は意図的に再現できない。復帰の段階（Issue #43）を実機で確認できる
+    /// ようにするための設定で、`config.toml` の
+    /// `[diagnostics] force_inference_failure` から渡る。
+    pub force_inference_failure: bool,
 }
 
 impl Default for ConversionConfig {
@@ -38,6 +45,7 @@ impl Default for ConversionConfig {
             beam_size: 30,
             confidence_margin: Some(3.0),
             min_top_confidence: None,
+            force_inference_failure: false,
         }
     }
 }
@@ -440,6 +448,13 @@ impl KanaKanjiConverter {
         context: &str,
         num_candidates: usize,
     ) -> Result<Vec<String>> {
+        // 診断用の強制失敗（Issue #43）。GPU デバイス消失時と同じ「即座に失敗して
+        // idle に戻る」経路を再現し、ホスト側の復帰段階を確認できるようにする。
+        if self.config.force_inference_failure {
+            return Err(KanjiError::Inference(
+                "forced inference failure (diagnostics.force_inference_failure)".into(),
+            ));
+        }
         let max_new_tokens = generation_budget(reading, self.config.max_new_tokens);
 
         // context 汚染対策: 読みのエコー源（長いかな run）を含む文を context から除去。

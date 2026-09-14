@@ -12,6 +12,7 @@
 //! 保持するので並列実行はされない（DynEngine でも同じ前提）。
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -62,6 +63,55 @@ fn spawn_log_env(env_already_set: bool, configured: Option<String>) -> Option<St
         return None;
     }
     configured.filter(|level| !level.trim().is_empty())
+}
+
+/// 1 回の RPC がこの時間を超えたら WARN を出す（Step 13-2）。
+const RPC_SLOW_WARN_MS: u64 = 500;
+
+/// 呼び出し側が意図して待つ要求。閾値を超えても WARN を出さない。
+const RPC_EXPECTED_SLOW: &[&str] = &[
+    "Create",
+    "Reload",
+    "ConvertSync",
+    "BgWaitMs",
+    "Shutdown",
+    "ShutdownIfConfigDiffers",
+];
+
+/// この要求で WARN を出す閾値（ms）。`None` = 出さない。
+fn rpc_slow_threshold_ms(label: &str) -> Option<u64> {
+    if RPC_EXPECTED_SLOW.contains(&label) {
+        None
+    } else {
+        Some(RPC_SLOW_WARN_MS)
+    }
+}
+
+/// 直近の区間（例: Convert 1 回）の RPC 呼び出し回数と合計時間（μs）。
+///
+/// 呼び出し側が `rpc_stats_reset()` してから `rpc_stats_snapshot()` で読む。
+/// TSF プロセス全体で 1 組しか持たないので、複数スレッドが同時に区間を測ると
+/// 混ざる。キー処理は 1 スレッドで、診断用途に足りる粒度として割り切る。
+static RPC_CALLS: AtomicU32 = AtomicU32::new(0);
+static RPC_MICROS: AtomicU64 = AtomicU64::new(0);
+
+/// 区間の計測を開始する（カウンタを 0 に戻す）。
+pub fn rpc_stats_reset() {
+    RPC_CALLS.store(0, Ordering::Relaxed);
+    RPC_MICROS.store(0, Ordering::Relaxed);
+}
+
+/// 区間の (呼び出し回数, 合計 μs) を読む。
+pub fn rpc_stats_snapshot() -> (u32, u64) {
+    (
+        RPC_CALLS.load(Ordering::Relaxed),
+        RPC_MICROS.load(Ordering::Relaxed),
+    )
+}
+
+fn rpc_stats_record(elapsed_us: u64) {
+    RPC_CALLS.fetch_add(1, Ordering::Relaxed);
+    RPC_MICROS.fetch_add(elapsed_us, Ordering::Relaxed);
 }
 
 static HOST_FAILURE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
@@ -489,13 +539,38 @@ impl RpcEngine {
     pub fn last_error(&self) -> String {
         self.call_string(Request::LastError).unwrap_or_default()
     }
+    /// ホストの健全性（Issue #43）。`ok` / `recovering` / `unrecoverable`。
+    ///
+    /// 取れなかった場合は `ok` 扱いにする。文言を決めるためだけの問い合わせなので、
+    /// ここで失敗しても従来どおりの表示にフォールバックすればよい。
+    pub fn engine_health(&self) -> String {
+        self.call_string(Request::EngineHealth)
+            .unwrap_or_else(|_| crate::health::Health::Ok.as_str().to_string())
+    }
+
     pub fn dict_status(&self) -> String {
         self.call_string(Request::DictStatus).unwrap_or_default()
     }
 }
 
 impl Connection {
+    /// 1 回の RPC。所要時間を計測して区間カウンタへ足し、閾値を超えたら WARN を
+    /// 出す（Step 13-2）。再接続のリトライも含めた実時間を測る。
     fn call_with_retry(&mut self, req: Request) -> Result<Response> {
+        let label = crate::server::request_label(&req);
+        let started = Instant::now();
+        let result = self.call_with_retry_inner(req);
+        let elapsed_us = started.elapsed().as_micros() as u64;
+        rpc_stats_record(elapsed_us);
+        if let Some(threshold) = rpc_slow_threshold_ms(label)
+            && elapsed_us / 1000 >= threshold
+        {
+            tracing::warn!("rpc SLOW {label} elapsed_us={elapsed_us}");
+        }
+        result
+    }
+
+    fn call_with_retry_inner(&mut self, req: Request) -> Result<Response> {
         for attempt in 0..2 {
             if self.stream.is_none()
                 && let Err(e) = self.ensure_connected()
@@ -724,6 +799,30 @@ fn spawn_detached(_exe: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rpc_slow_threshold_skips_expected_slow_requests() {
+        // 呼び出し側が意図して待つ要求は WARN の対象外
+        assert_eq!(rpc_slow_threshold_ms("ConvertSync"), None);
+        assert_eq!(rpc_slow_threshold_ms("BgWaitMs"), None);
+        assert_eq!(rpc_slow_threshold_ms("Create"), None);
+        // それ以外は閾値つき
+        assert_eq!(rpc_slow_threshold_ms("PushChar"), Some(RPC_SLOW_WARN_MS));
+        assert_eq!(
+            rpc_slow_threshold_ms("MergeCandidatesForReading"),
+            Some(RPC_SLOW_WARN_MS)
+        );
+    }
+
+    #[test]
+    fn rpc_stats_accumulate_and_reset() {
+        rpc_stats_reset();
+        rpc_stats_record(1_200);
+        rpc_stats_record(800);
+        assert_eq!(rpc_stats_snapshot(), (2, 2_000));
+        rpc_stats_reset();
+        assert_eq!(rpc_stats_snapshot(), (0, 0));
+    }
 
     #[test]
     fn spawn_log_env_respects_existing_environment() {

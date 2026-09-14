@@ -13,6 +13,7 @@
 //! セッション間の hiragana_buf 等の汚染は TSF 側が既に `ResetAll` を
 //! フォーカス変化で呼ぶ前提でカバーする。
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -20,6 +21,7 @@ use anyhow::{Context, Result};
 use rakukan_engine_abi::DynEngine;
 
 use crate::codec::{read_frame, write_frame};
+use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
 
@@ -35,14 +37,60 @@ pub struct HostShared {
     /// ロックが塞がっていても即応答できる必要がある（`Shutdown` が engine
     /// ロックなしで動くのと同じ理由）。ロックは比較・更新の瞬間だけ保持する。
     pub config_json: Mutex<Option<String>>,
+    /// 推論の即時失敗を数え、復帰の段階を進める（Issue #43）。
+    ///
+    /// `state` とは別ロックにする: 変換中（engine ロック保持中）でも
+    /// `EngineHealth` に即応答できる必要がある。
+    health: Mutex<HealthTracker>,
+    /// 復帰のためにホストを終了する要求。応答を書いた後に見る。
+    exit_after_response: AtomicBool,
 }
 
 impl HostShared {
     pub fn new() -> Self {
+        // 直近に自己終了しているかをマーカーから読む（Issue #43）。
+        let prior = health::prior_attempts(health::load_marker(), health::now_ms());
+        if prior > 0 {
+            tracing::warn!("recovery marker found: prior self-exit attempts={prior}");
+        }
         Self {
             state: Mutex::new(SharedEngineState { engine: None }),
             config_json: Mutex::new(None),
+            health: Mutex::new(HealthTracker::new(prior)),
+            exit_after_response: AtomicBool::new(false),
         }
+    }
+
+    /// `bg_status()` を 1 件観測し、ホストが取るべき動作を返す（Issue #43）。
+    fn health_observe(&self, status: &str) -> Action {
+        match self.health.lock() {
+            Ok(mut g) => g.observe(status),
+            Err(p) => p.into_inner().observe(status),
+        }
+    }
+
+    /// 現在の健全性。`EngineHealth` の応答に使う。
+    fn health_now(&self) -> Health {
+        match self.health.lock() {
+            Ok(g) => g.health(),
+            Err(p) => p.into_inner().health(),
+        }
+    }
+
+    /// 次に自己終了するときマーカーへ書く試行回数。
+    fn next_attempt(&self) -> u32 {
+        match self.health.lock() {
+            Ok(g) => g.next_attempt(),
+            Err(p) => p.into_inner().next_attempt(),
+        }
+    }
+
+    fn request_exit(&self) {
+        self.exit_after_response.store(true, Ordering::Release);
+    }
+
+    fn take_exit_request(&self) -> bool {
+        self.exit_after_response.swap(false, Ordering::AcqRel)
     }
 
     /// config_json の現在値を短時間ロックで複製する。poisoned は回復する。
@@ -128,6 +176,17 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
             tracing::debug!("rpc session: write_frame failed, closing: {e}");
             return Ok(());
         }
+        // 復帰のための自己終了（Issue #43）。応答を返し切ってから落ちる。
+        if engine.take_exit_request() {
+            let attempt = engine.next_attempt();
+            health::write_marker(RecoveryMarker {
+                exited_at_ms: health::now_ms(),
+                attempt,
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            tracing::warn!("rpc: exiting host for recovery (attempt={attempt})");
+            std::process::exit(0);
+        }
         if is_shutdown {
             // OS にパイプ経由の response を配送させるため短時間待ってから exit。
             // flush は write_frame 内で完了しているが、pipe buffer から相手の read
@@ -140,7 +199,7 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
 }
 
 /// ログ用のリクエスト名（payload は含めない）。
-fn request_label(req: &Request) -> &'static str {
+pub(crate) fn request_label(req: &Request) -> &'static str {
     use Request::*;
     match req {
         Hello { .. } => "Hello",
@@ -200,6 +259,7 @@ fn request_label(req: &Request) -> &'static str {
         MergeCandidatesForReading { .. } => "MergeCandidatesForReading",
         LastError => "LastError",
         DictStatus => "DictStatus",
+        EngineHealth => "EngineHealth",
         InputChar { .. } => "InputChar",
         ShutdownIfConfigDiffers { .. } => "ShutdownIfConfigDiffers",
     }
@@ -240,6 +300,8 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
         }
         Request::Bye => Response::Unit,
         Request::Shutdown => Response::Unit,
+        // 変換中（engine ロック保持中）でも即答する必要があるので engine を取らない。
+        Request::EngineHealth => Response::String(engine.health_now().as_str().to_string()),
         Request::ShutdownIfConfigDiffers { config_json } => {
             // 変換中でも応答できるよう engine ロックは取らない（Shutdown と同じ扱い）。
             // config だけを短時間ロックで比較する。
@@ -263,7 +325,9 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             let Some(eng) = g.engine.as_mut() else {
                 return Response::Error("engine not created".into());
             };
-            dispatch_engine(eng, other)
+            let resp = dispatch_engine(eng, other);
+            apply_health_action(engine, eng);
+            resp
         }
     }
 }
@@ -324,6 +388,34 @@ fn warn_if_dict_missing(eng: &mut DynEngine, req_name: &str, reading: &str) {
     );
 }
 
+/// 推論の即時失敗を観測して復帰の段階を進める（Issue #43）。
+///
+/// 判断はホストが持つ。TSF は `EngineHealth` で状態を聞いて文言を決めるだけで、
+/// 再起動の判断は持たない（複数の TSF プロセスが共有ホストを撃つのを避ける）。
+fn apply_health_action(shared: &SharedEngine, eng: &mut DynEngine) {
+    let status = eng.bg_status();
+    match shared.health_observe(status) {
+        Action::None => {}
+        Action::ExitHost => {
+            tracing::warn!(
+                "engine health: inference failed {} times in a row — exiting host so a fresh one is spawned",
+                health::FAILURE_THRESHOLD
+            );
+            shared.request_exit();
+        }
+        Action::MarkUnrecoverable => {
+            tracing::error!(
+                "engine health: still failing after {} restarts — giving up (unrecoverable)",
+                health::UNRECOVERABLE_ATTEMPTS
+            );
+        }
+        Action::Recovered => {
+            tracing::info!("engine health: inference succeeded — recovery state cleared");
+            health::clear_marker();
+        }
+    }
+}
+
 fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
     use Request::*;
 
@@ -346,6 +438,7 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         | Reload { .. }
         | Bye
         | Shutdown
+        | EngineHealth
         | ShutdownIfConfigDiffers { .. } => Response::Unit, // handled upstream
 
         PushChar(c) => {

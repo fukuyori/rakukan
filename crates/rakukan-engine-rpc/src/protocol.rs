@@ -17,7 +17,7 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v4: `MergeCandidatesForReading` を追加
 /// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
-pub const PROTOCOL_VERSION: u32 = 4;
+pub const PROTOCOL_VERSION: u32 = 5;
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,6 +143,9 @@ pub enum Request {
     // ─── 診断 ─────────────────────────────────────────────
     LastError,
     DictStatus,
+    /// ホストの健全性（Issue #43）。`ok` / `recovering` / `unrecoverable` を返す。
+    /// 復帰の判断はホストが持ち、TSF は文言を決めるためだけに問い合わせる。
+    EngineHealth,
 
     // ─── ライフサイクル ────────────────────────────────────
     /// クライアント側が切断を宣言する。ホストは該当セッションを破棄する。

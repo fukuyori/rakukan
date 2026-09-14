@@ -252,6 +252,9 @@ pub struct EngineConfig {
     /// 詳細は `kanji::ConversionConfig::min_top_confidence` を参照。
     #[serde(default)]
     pub min_top_confidence: Option<f32>,
+    /// 診断用: 推論を必ず失敗させる（既定 false）。Issue #43 の復帰段階の確認用。
+    #[serde(default)]
+    pub force_inference_failure: bool,
 }
 
 fn default_confidence_margin() -> Option<f32> {
@@ -275,6 +278,7 @@ impl Default for EngineConfig {
             convert_beam_size: 30,
             confidence_margin: default_confidence_margin(),
             min_top_confidence: None,
+            force_inference_failure: false,
         }
     }
 }
@@ -646,6 +650,7 @@ impl RakunEngine {
             beam_size: config.convert_beam_size,
             confidence_margin: config.confidence_margin,
             min_top_confidence: config.min_top_confidence,
+            force_inference_failure: config.force_inference_failure,
             ..Default::default()
         };
         let mut converter = KanaKanjiConverter::with_config(backend, conv_cfg)

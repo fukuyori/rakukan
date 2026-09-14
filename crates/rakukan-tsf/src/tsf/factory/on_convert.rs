@@ -18,6 +18,35 @@ use super::{
     update_caret_rect, update_composition, update_composition_candidate_parts,
 };
 
+/// Convert 1 回ぶんの RPC 回数と合計時間を、どの経路で抜けても 1 行残す
+/// （Step 13-2、Issue #39）。
+///
+/// `on_convert` は分岐ごとに `return` するので、`convert_timing result=` の各行に
+/// 足すと付け忘れが出る。生成時にカウンタを 0 に戻し、Drop で記録する。
+/// TSF 側の Drop なので I/O 制約（engine DLL の cdylib）には当たらない。
+struct ConvertRpcProbe {
+    started: Instant,
+}
+
+impl ConvertRpcProbe {
+    fn start() -> Self {
+        rakukan_engine_rpc::rpc_stats_reset();
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for ConvertRpcProbe {
+    fn drop(&mut self) {
+        let (calls, rpc_us) = rakukan_engine_rpc::rpc_stats_snapshot();
+        tracing::info!(
+            "convert_rpc calls={calls} rpc_us={rpc_us} total_us={}",
+            self.started.elapsed().as_micros()
+        );
+    }
+}
+
 #[inline]
 fn convert_mark(stage: &'static str, start: Instant, last: &mut Instant) {
     let now = Instant::now();
@@ -289,6 +318,8 @@ impl super::TextServiceFactory_Impl {
         };
         crate::engine::state::maybe_log_gpu_memory(engine);
         let _t = diag::span("Convert");
+        // Convert 1 回の RPC 回数・合計時間を Drop で記録する（Step 13-2）
+        let _rpc_probe = ConvertRpcProbe::start();
         update_caret_rect(ctx.clone(), tid);
         engine.flush_pending_n();
         let preedit_empty = engine.preedit_is_empty();
@@ -770,7 +801,7 @@ impl super::TextServiceFactory_Impl {
                         );
                         let failure_status = if bg_now == "error" {
                             engine.bg_reclaim();
-                            Some(candidate_window::BG_ERROR_STATUS)
+                            Some(candidate_window::bg_error_status_for(engine))
                         } else {
                             None
                         };
@@ -1023,6 +1054,9 @@ impl super::TextServiceFactory_Impl {
                     caret.left,
                     caret.bottom,
                 );
+                // モデルが読み込まれたら変換をやり直す（Step 13-1、#39）。
+                // 候補ウィンドウを出した後に呼ぶ（タイマーは HWND が要る）。
+                candidate_window::start_model_wait(conv_reading.clone(), caret.left, caret.bottom);
                 convert_mark(
                     "selecting_dict_model_not_ready_show",
                     convert_start,
@@ -1083,6 +1117,8 @@ impl super::TextServiceFactory_Impl {
                 caret.bottom,
                 Some("⏳ モデル読み込み中..."),
             );
+            // モデルが読み込まれたら変換をやり直す（Step 13-1、#39）。
+            candidate_window::start_model_wait(conv_reading.clone(), caret.left, caret.bottom);
             convert_mark(
                 "selecting_model_not_ready_show",
                 convert_start,
