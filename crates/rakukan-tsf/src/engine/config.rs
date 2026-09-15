@@ -251,6 +251,10 @@ fn default_ime_off_apps() -> Vec<String> {
         "conhost.exe".to_string(),
         "WindowsTerminal.exe".to_string(),
         "mintty.exe".to_string(),
+        // 実機で一致を確認した名前（2026-09-15）。旧来のクラス名判定では
+        // 拾えなかったターミナル。
+        "wezterm-gui.exe".to_string(),
+        "ghostty.exe".to_string(),
     ]
 }
 
@@ -629,7 +633,7 @@ auto_learn = true
 # ターミナルのように常に英数で打ち始めたいアプリを挙げる。
 # 操作中に IME を変えればその状態が続き、インアクティブになると捨てられる。
 # 空配列を書けば何も適用しない。
-ime_off_apps = ["conhost.exe", "WindowsTerminal.exe", "mintty.exe"]
+ime_off_apps = ["conhost.exe", "WindowsTerminal.exe", "mintty.exe", "wezterm-gui.exe", "ghostty.exe"]
 # アクティブになり、アプリ本体とは別の入力先に入ったとき IME をオンにするアプリ (exe 名)。
 # Photoshop の文字ツールのように、入力のたびに別の入力先が作られるアプリで使う。
 # アクティブ化後 1 回だけ適用し、その後は操作した状態が続く。
@@ -686,7 +690,13 @@ mod tests {
         let cfg = AppConfig::default();
         assert_eq!(
             cfg.input.ime_off_apps,
-            vec!["conhost.exe", "WindowsTerminal.exe", "mintty.exe"]
+            vec![
+                "conhost.exe",
+                "WindowsTerminal.exe",
+                "mintty.exe",
+                "wezterm-gui.exe",
+                "ghostty.exe"
+            ]
         );
         assert!(cfg.input.ime_on_apps.is_empty());
 
@@ -696,7 +706,7 @@ default_mode = \"off\"
 ",
         )
         .expect("parse");
-        assert_eq!(parsed.input.ime_off_apps.len(), 3);
+        assert_eq!(parsed.input.ime_off_apps.len(), 5);
     }
 
     #[test]
