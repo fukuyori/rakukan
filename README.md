@@ -146,7 +146,8 @@ cargo make quick-install
 `[input]` セクションでは起動時の IME 状態を指定できます。
 
 - `default_mode = "off"`（既定）は直接入力で開始、`"on"` はかな漢字変換で開始。旧値 `"alphanumeric"` / `"hiragana"` も同じ意味で受け付けます
-- `remember_last_kana_mode = true`（既定）はアプリ（ウィンドウ）ごとに前回の IME オン/オフを記憶して復元します。ターミナル系アプリは設定に関わらず IME オフで開始します
+- `remember_last_kana_mode = true`（既定）はアプリ（ウィンドウ）ごとに前回の IME オン/オフを記憶して復元します
+- `ime_off_apps`（既定 `["conhost.exe", "WindowsTerminal.exe", "mintty.exe"]`）に挙げた exe は、アクティブになるたび IME オフで始まります。操作中に IME を変えればその状態が続き、インアクティブになると捨てられます。`ime_on_apps` は逆に、アプリ本体とは別の入力先（Photoshop の文字ツールなど）に入ったとき IME をオンにします
 
 > v0.4.4 より、Zoom / Dropbox 等の他アプリが異常終了する問題は別プロセス化で解消済みです。`n_gpu_layers` を下げる回避策は不要になりました。
 

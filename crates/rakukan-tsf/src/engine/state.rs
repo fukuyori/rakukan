@@ -2327,16 +2327,46 @@ pub fn doc_mode_on_focus_change(
         store.dm_to_hwnd.insert(next_dm_ptr, next_hwnd);
     }
 
-    // 初回フォーカス時のデフォルトモードを決定
-    // ターミナルは config に関わらず常に IME オフ
-    let resolve_default = |hwnd: usize| -> ImeMode {
-        if is_terminal_hwnd(hwnd) {
-            tracing::debug!("doc_mode: terminal detected (hwnd={hwnd:#x}), default=Off");
-            ImeMode::Off
+    // アプリごとの IME 初期状態（Issue #51）。
+    //
+    // 対象アプリでは記憶による復元を通さない。アクティブ化のとき（off）または
+    // 本体とは別の入力先に入ったとき（on）に 1 回だけ適用し、その後は操作した
+    // 状態を維持する。インアクティブで状態は捨てられる。
+    let session_mode = {
+        let on_listed = exe_listed(&cfg.input.ime_on_apps);
+        let off_listed = exe_listed(&cfg.input.ime_off_apps);
+        if on_listed || off_listed {
+            TL_IME_APP_SESSION.with(|c| {
+                let mut sess = c.borrow_mut();
+                if sess.base_dm == 0 {
+                    // アクティブ化後に最初にフォーカスされた入力先 = アプリ本体
+                    sess.base_dm = next_dm_ptr;
+                    tracing::debug!("ime_app_session: base dm={next_dm_ptr:#x}");
+                }
+                if on_listed && should_apply_ime_on(next_dm_ptr, sess.base_dm, sess.applied) {
+                    sess.applied = true;
+                    tracing::info!(
+                        "ime_app_session: text input dm={next_dm_ptr:#x} (base={:#x}) → On (ime_on_apps)",
+                        sess.base_dm
+                    );
+                    Some(ImeMode::On)
+                } else {
+                    // 対象アプリでは記憶を復元しない（今の状態を維持する）
+                    None
+                }
+            })
         } else {
-            tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
-            config_default
+            None
         }
+    };
+    if exe_listed(&cfg.input.ime_on_apps) || exe_listed(&cfg.input.ime_off_apps) {
+        return session_mode;
+    }
+
+    // 初回フォーカス時のデフォルトモードを決定
+    let resolve_default = |_hwnd: usize| -> ImeMode {
+        tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
+        config_default
     };
 
     let mode = if remember {
@@ -2435,42 +2465,120 @@ pub fn dispose_dm_resources(dm_ptr: usize) {
     invalidate_composition_for_dm(dm_ptr);
 }
 
-/// HWND がターミナル系ウィンドウかどうかを判定する。
+// ─── アプリごとの IME 初期状態（Issue #51） ──────────────────────────────────
+
+/// このプロセスの exe 名（小文字）。`ime_off_apps` / `ime_on_apps` の照合用。
 ///
-/// 判定対象:
-/// - Windows Terminal: `CASCADIA_HOSTING_WINDOW_CLASS`
-/// - 旧来の ConHost:   `ConsoleWindowClass`
-/// - VSCode 統合ターミナル等は親が上記クラスを持つ場合あり（簡易判定のみ）
-fn is_terminal_hwnd(hwnd_val: usize) -> bool {
-    if hwnd_val == 0 {
+/// TSF DLL はアプリのプロセス内で動くので、これが「今のアプリ」になる。
+fn current_exe_name_lower() -> &'static str {
+    static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::current_exe()
+            .ok()
+            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_lowercase()))
+            .unwrap_or_default()
+    })
+}
+
+/// exe 名のリストに自分が含まれるか（大文字小文字は区別しない）。
+fn exe_listed(list: &[String]) -> bool {
+    if list.is_empty() {
         return false;
     }
+    let exe = current_exe_name_lower();
+    list.iter().any(|e| e.to_lowercase() == exe)
+}
 
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::GetClassNameW;
+/// アプリがアクティブな間だけ持つ状態（Issue #51）。
+///
+/// インアクティブになったら捨てるので、次のアクティブ化では設定値から始まる。
+#[derive(Default)]
+struct ImeAppSession {
+    /// アクティブ化後、最初にフォーカスを得た入力先。「アプリ本体」とみなす。
+    base_dm: usize,
+    /// 設定値を適用済み（以後は操作した状態を維持する）。
+    applied: bool,
+}
 
-    let hwnd = HWND(hwnd_val as *mut _);
-    let mut buf = [0u16; 256];
-    let len = unsafe { GetClassNameW(hwnd, &mut buf) } as usize;
-    if len == 0 {
+thread_local! {
+    static TL_IME_APP_SESSION: std::cell::RefCell<ImeAppSession> =
+        std::cell::RefCell::new(ImeAppSession::default());
+}
+
+/// `ime_on_apps` の適用判定（純関数）。
+///
+/// 戻り値 `true` = この入力先でオンにする。アクティブ化後 1 回だけで、
+/// 「アプリ本体」とみなした入力先では適用しない。
+fn should_apply_ime_on(next_dm: usize, base_dm: usize, applied: bool) -> bool {
+    if applied || next_dm == 0 {
         return false;
     }
+    base_dm != 0 && next_dm != base_dm
+}
 
-    let class_name = String::from_utf16_lossy(&buf[..len]);
-    tracing::trace!("doc_mode: hwnd={hwnd_val:#x} class={class_name:?}");
+/// アプリがアクティブになったときに呼ぶ。戻り値 = 今すぐ適用すべきモード。
+///
+/// `ime_off_apps` のアプリは即オフにする。`ime_on_apps` のアプリはここでは
+/// 何もせず、本体とは別の入力先に入った時点で [`doc_mode_on_focus_change`] が
+/// オンにする。
+pub fn ime_app_session_activate() -> Option<ImeMode> {
+    let cfg = super::config::current_config();
+    TL_IME_APP_SESSION.with(|c| {
+        let mut sess = c.borrow_mut();
+        *sess = ImeAppSession::default();
+        if exe_listed(&cfg.input.ime_off_apps) {
+            sess.applied = true;
+            tracing::info!(
+                "ime_app_session: {} is in ime_off_apps → Off",
+                current_exe_name_lower()
+            );
+            Some(ImeMode::Off)
+        } else {
+            None
+        }
+    })
+}
 
-    matches!(
-        class_name.as_str(),
-        "CASCADIA_HOSTING_WINDOW_CLASS"  // Windows Terminal
-        | "ConsoleWindowClass"           // conhost.exe
-        | "VirtualConsoleClass"          // mintty 等
-        | "mintty"
-    )
+/// アプリがインアクティブになったときに呼ぶ。セッションの状態を捨てる。
+pub fn ime_app_session_deactivate() {
+    TL_IME_APP_SESSION.with(|c| {
+        let mut sess = c.borrow_mut();
+        if sess.base_dm != 0 || sess.applied {
+            tracing::debug!("ime_app_session: cleared");
+        }
+        *sess = ImeAppSession::default();
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `ime_on_apps` の適用は「アプリ本体以外の入力先に初めて入ったとき 1 回だけ」
+    /// （Issue #51）。2 回目以降は操作した状態を維持するので適用しない。
+    #[test]
+    fn ime_on_applies_once_for_a_non_base_input() {
+        // アプリ本体（アクティブ化後に最初に見た入力先）では適用しない
+        assert!(!should_apply_ime_on(0x10, 0x10, false));
+        // 本体以外の入力先 → 適用
+        assert!(should_apply_ime_on(0x20, 0x10, false));
+        // 適用済みなら以後は適用しない（操作した状態を維持する）
+        assert!(!should_apply_ime_on(0x20, 0x10, true));
+        assert!(!should_apply_ime_on(0x30, 0x10, true));
+        // 本体が未確定（アクティブ化直後）のうちは適用しない
+        assert!(!should_apply_ime_on(0x20, 0, false));
+        // 入力先が無い（フォーカス喪失）
+        assert!(!should_apply_ime_on(0, 0x10, false));
+    }
+
+    #[test]
+    fn exe_list_matching_ignores_case_and_empty() {
+        assert!(!exe_listed(&[]));
+        // 自分の exe 名が含まれていれば大文字小文字を問わず一致する
+        let me = current_exe_name_lower().to_string();
+        assert!(exe_listed(&[me.to_uppercase()]));
+        assert!(!exe_listed(&["no-such-app.exe".to_string()]));
+    }
 
     fn conv_block(reading: &str, candidate: &str, punct: Option<char>) -> ConversionBlock {
         ConversionBlock {

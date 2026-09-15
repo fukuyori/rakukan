@@ -319,7 +319,8 @@ OnSetFocus(prev_dm, next_dm)
   │    └─ next_ptr の復元:
   │         ├─ store に存在: 前回モードを返す
   │         └─ 初回: config.input.default_mode を返す
-  │              ※ ターミナル（CASCADIA_HOSTING_WINDOW_CLASS 等）は常に Off
+  │              ※ ime_off_apps / ime_on_apps（exe 名）の対象アプリは記憶を通さず
+  │                アクティブ化ごとに設定値から始める（Issue #51）
   │
   └─ ime_sync::apply(new_mode)  ← 内部状態と KEYBOARD_OPENCLOSE を同時に揃える
 ```

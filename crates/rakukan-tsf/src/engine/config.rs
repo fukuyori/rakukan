@@ -223,6 +223,35 @@ pub struct InputConfig {
     /// Phase 2 以降: 独立した learn_history に記録され user_dict.toml には書かない。
     #[serde(default = "default_auto_learn")]
     pub auto_learn: bool,
+    /// アクティブになったとき IME をオフで始めるアプリ（exe 名。大文字小文字は区別しない）。
+    ///
+    /// ターミナルのように常に英数で打ち始めたいアプリを挙げる。既定は旧来の
+    /// コンソール・Windows Terminal・mintty。空配列を書けば何も適用しない。
+    /// 操作中に IME を変えればその状態が続き、インアクティブになると捨てられる
+    /// （次にアクティブになったらまたオフで始まる）。
+    #[serde(default = "default_ime_off_apps")]
+    pub ime_off_apps: Vec<String>,
+    /// アクティブになり、アプリ本体とは別の入力先に入ったとき IME をオンにする
+    /// アプリ（exe 名。大文字小文字は区別しない）。
+    ///
+    /// Photoshop の文字ツールのように、入力のたびに別の入力先が作られるアプリで
+    /// 使う。アクティブ化後 1 回だけ適用し、その後は操作した状態が続く。
+    #[serde(default)]
+    pub ime_on_apps: Vec<String>,
+}
+
+/// `ime_off_apps` の既定値。
+///
+/// 0.11.7 まではウィンドウクラス名（`CASCADIA_HOSTING_WINDOW_CLASS` 等）を
+/// コードに直書きして判定していた（Issue #51）。config を唯一の情報源にする
+/// ため exe 名へ移したが、キーが無い既存の設定でも従来どおりオフになるよう
+/// 既定値として持つ。
+fn default_ime_off_apps() -> Vec<String> {
+    vec![
+        "conhost.exe".to_string(),
+        "WindowsTerminal.exe".to_string(),
+        "mintty.exe".to_string(),
+    ]
 }
 
 fn default_auto_learn() -> bool {
@@ -240,6 +269,8 @@ impl Default for InputConfig {
             digit_separator_auto: default_digit_separator_auto(),
             digit_candidates_order: default_digit_candidates_order(),
             auto_learn: default_auto_learn(),
+            ime_off_apps: default_ime_off_apps(),
+            ime_on_apps: Vec::new(),
         }
     }
 }
@@ -591,12 +622,18 @@ symbol_width = "fullwidth"
 digit_separator_auto = true
 # 数字だけの reading に対して提示する候補種別と順序
 digit_candidates_order = ["arabic", "fullwidth", "positional", "per_digit", "daiji"]
-# 診断用: 推論を必ず失敗させる (デフォルト: false)。
-# GPU デバイス消失からの復帰 (Issue #43) の確認用。変換は辞書候補だけになる。
-# [diagnostics] force_inference_failure = true
 # 確定時に学習するか (デフォルト: true)。
 # false にすると学習を完全に抑止する。
 auto_learn = true
+# アクティブになったとき IME をオフで始めるアプリ (exe 名)。
+# ターミナルのように常に英数で打ち始めたいアプリを挙げる。
+# 操作中に IME を変えればその状態が続き、インアクティブになると捨てられる。
+# 空配列を書けば何も適用しない。
+ime_off_apps = ["conhost.exe", "WindowsTerminal.exe", "mintty.exe"]
+# アクティブになり、アプリ本体とは別の入力先に入ったとき IME をオンにするアプリ (exe 名)。
+# Photoshop の文字ツールのように、入力のたびに別の入力先が作られるアプリで使う。
+# アクティブ化後 1 回だけ適用し、その後は操作した状態が続く。
+ime_on_apps = []
 
 [live_conversion]
 enabled = false
@@ -630,6 +667,9 @@ candidate_font_height = 17
 [diagnostics]
 dump_active_config = false
 warn_on_unknown_key = true
+# 診断用: 推論を必ず失敗させる (デフォルト: false)。
+# GPU デバイス消失からの復帰 (Issue #43) の確認用。変換は辞書候補だけになる。
+# force_inference_failure = true
 
 # 旧形式との互換用:
 # num_candidates = 6
@@ -639,6 +679,48 @@ warn_on_unknown_key = true
 #[cfg(test)]
 mod tests {
     use super::AppConfig;
+
+    #[test]
+    fn ime_off_apps_has_terminal_defaults() {
+        // キーが無い設定でも、従来のターミナル判定と同じ結果になること
+        let cfg = AppConfig::default();
+        assert_eq!(
+            cfg.input.ime_off_apps,
+            vec!["conhost.exe", "WindowsTerminal.exe", "mintty.exe"]
+        );
+        assert!(cfg.input.ime_on_apps.is_empty());
+
+        let parsed: AppConfig = toml::from_str(
+            "[input]
+default_mode = \"off\"
+",
+        )
+        .expect("parse");
+        assert_eq!(parsed.input.ime_off_apps.len(), 3);
+    }
+
+    #[test]
+    fn ime_apps_can_be_set_and_emptied() {
+        let cfg: AppConfig = toml::from_str(
+            r#"
+[input]
+ime_off_apps = ["wezterm.exe"]
+ime_on_apps = ["Photoshop.exe"]
+"#,
+        )
+        .expect("parse");
+        assert_eq!(cfg.input.ime_off_apps, vec!["wezterm.exe"]);
+        assert_eq!(cfg.input.ime_on_apps, vec!["Photoshop.exe"]);
+
+        // 空配列を書けば既定値を打ち消せる
+        let none: AppConfig = toml::from_str(
+            "[input]
+ime_off_apps = []
+",
+        )
+        .expect("parse");
+        assert!(none.input.ime_off_apps.is_empty());
+    }
 
     #[test]
     fn force_inference_failure_defaults_to_false() {
