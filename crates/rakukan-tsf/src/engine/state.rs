@@ -2345,8 +2345,9 @@ pub fn doc_mode_on_focus_change(
                 }
                 if on_listed && should_apply_ime_on(next_dm_ptr, sess.base_dm, sess.applied) {
                     sess.applied = true;
-                    tracing::info!(
-                        "ime_app_session: text input dm={next_dm_ptr:#x} (base={:#x}) → On (ime_on_apps)",
+                    tracing::debug!(
+                        "ime_app_session: {} text input dm={next_dm_ptr:#x} (base={:#x}) → On (ime_on_apps)",
+                        current_exe_name_lower(),
                         sess.base_dm
                     );
                     Some(ImeMode::On)
@@ -2528,7 +2529,7 @@ pub fn ime_app_session_activate() -> Option<ImeMode> {
         *sess = ImeAppSession::default();
         if exe_listed(&cfg.input.ime_off_apps) {
             sess.applied = true;
-            tracing::info!(
+            tracing::debug!(
                 "ime_app_session: {} is in ime_off_apps → Off",
                 current_exe_name_lower()
             );
