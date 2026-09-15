@@ -3,19 +3,6 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
-## [0.11.8] - 2026-09-15
-
-### Added
-
-- **アプリごとに「文字入力欄が開いたら IME をオンにする」設定を追加**（[Issue #36](https://github.com/fukuyori/rakukan/issues/36) / [PR #47](https://github.com/fukuyori/rakukan/pull/47)、nick20002005）: Photoshop の文字ツールのように、入力のたびに新しい文書（DocumentManager）を作るアプリで、その入力欄に初めて入ったときのモードを決められる。既定は空（この判定を行わない）。
-
-  ```toml
-  [input.text_field_mode]
-  "Photoshop.exe" = "on"
-  ```
-
-  **編集を終えてキャンバスへ戻ったときに元のモードへ戻すことはできない**（Photoshop が文字編集の終了を IME に通知せず、フォーカスも文書も戻らないため）。抜けるときは明示的に切り替える運用になる。アプリが本体の文書を作り直す場合や、IME を切り替えた時点で文字編集を開いていた場合も判定が効かない。
-
 ## [0.11.7] - 2026-09-14
 
 ### Fixed
