@@ -1280,6 +1280,19 @@ impl ITfCompartmentEventSink_Impl for TextServiceFactory_Impl {
 impl ITfThreadFocusSink_Impl for TextServiceFactory_Impl {
     fn OnSetThreadFocus(&self) -> windows::core::Result<()> {
         tracing::debug!("OnSetThreadFocus");
+        // アプリがアクティブになった。ime_off_apps のアプリは今すぐオフにする
+        // （Issue #51）。ime_on_apps は入力先に入った時点で state 側が適用する。
+        if let Some(mode) = crate::engine::state::ime_app_session_activate() {
+            let tid = self
+                .inner
+                .try_borrow()
+                .ok()
+                .map(|inner| inner.client_id)
+                .unwrap_or_default();
+            if let Err(e) = self.switch_ime(None, tid, mode) {
+                tracing::warn!("OnSetThreadFocus: switch_ime failed: {e}");
+            }
+        }
         Ok(())
     }
 
@@ -1288,6 +1301,8 @@ impl ITfThreadFocusSink_Impl for TextServiceFactory_Impl {
         candidate_window::hide();
         candidate_window::stop_live_timer();
         candidate_window::stop_waiting_timer();
+        // アプリがインアクティブになった。状態は引き継がない（Issue #51）。
+        crate::engine::state::ime_app_session_deactivate();
         Ok(())
     }
 }
