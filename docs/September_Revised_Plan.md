@@ -1242,7 +1242,8 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 | 13-3 連続 3 回失敗 → ホスト自己終了 → マーカー継承 | 確認（`attempt=1` → `attempt=2`） |
 | 13-3 文言 3 種（ok / recovering / unrecoverable） | 確認 |
 | 13-1 「ready になったら自動でやり直す」 | **未確認**。モデル読み込みが 157ms で終わるため人為再現できない。コールドスタート時に確認する |
-| 13-2 `rpc SLOW` / `edit_session: SLOW grant` | **未確認**。閾値超過時のみ出る（0 件 = 遅延が起きていない） |
+| 13-2 `edit_session: SLOW grant` | **未確認**。閾値超過時のみ出る（0 件 = 遅延が起きていない） |
+| 13-2 `rpc SLOW` | **未確認・記録されない状態**。当初「閾値超過時のみ出る（0 件 = 遅延が起きていない）」としたが誤り。TSF のログ filter が `rakukan_tsf=<level>` だけで、`rakukan_engine_rpc` のログは `rakukan.log` に出ない（2026-09-17 確認、該当 target の行は 6 世代で 0 件）。#54 の修正後に確認する |
 
 #### 検証手段についての知見
 

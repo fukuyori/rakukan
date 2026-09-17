@@ -210,13 +210,14 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
 
 ### 主要設計書
 
-- [DESIGN.md](docs/DESIGN.md) — v0.4.4 時点の全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
-- [handoff.md](docs/handoff.md) — v0.9.3 引き継ぎ資料 + 残タスクリスト
+- [DESIGN.md](docs/DESIGN.md) — 全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
+- [handoff.md](docs/handoff.md) — 引き継ぎ資料（現在の状態・開いている Issue・未確認の項目・既知の問題）
 
 ### 独立した技術課題
 
 - [ ] `rakukan-engine-host.exe` の idle 自死（長時間アイドル時のメモリ解放）
-- [ ] ホストプロセスのヘルスチェックとクラッシュカウント
+- [x] 推論失敗が続いたときのホストの自己終了と自動復帰（0.11.7、[Issue #43](https://github.com/fukuyori/rakukan/issues/43)）
+- [ ] ホストが異常終了を繰り返したときの検知と抑止（接続直後の失敗が続いたときに再起動を一時停止する仕組みはあるが、起動に成功した後の異常終了は数えていない）
 - [ ] Preedit / LiveConv / Selecting の display_attr 拡張
 
 ### 過去の設計書・計画書

@@ -1,7 +1,7 @@
 # Rakukan 詳細設計書
 
-バージョン: v0.7.1  
-最終更新: 2026-04-24
+対象: main（0.11.7 以降）。節ごとに変更に合わせて更新しており、全節を一度に照合した版ではない  
+最終更新: 2026-09-17（6.1 節を protocol v5 と現行のホスト再起動経路に合わせた）
 
 ---
 
@@ -499,7 +499,9 @@ RpcEngine (client)                          serve() (server)
 
 ### プロトコル
 
-現在の `PROTOCOL_VERSION` は **4**。
+現在の `PROTOCOL_VERSION` は **5**（v0.11.7 で `EngineHealth` を追加）。
+`Hello` で一致しないと接続できないため、上げたリリースではサインアウト／サインインで
+古いホストを終わらせる必要がある。
 
 `rakukan-engine-rpc/src/protocol.rs` の `Request` enum は DynEngine の全メソッドを
 1 対 1 でマップしている。代表的なバリアント:
@@ -513,9 +515,14 @@ RpcEngine (client)                          serve() (server)
 | `BgStart / BgWaitMs / BgTakeCandidates / ...` | BG 変換 |
 | `MergeCandidatesForReading` | 候補マージ。TSF 側が reading を明示する（旧 `MergeCandidates` は `_ReservedMergeCandidates` としてスロットのみ残し、host は Error を返す） |
 | `ConvertSync / SegmentSurface / ...` | 同期変換 |
+| `Shutdown` | ホストに自己終了を依頼する（応答後に `process::exit(0)`） |
+| `ShutdownIfConfigDiffers { config_json }` | ホストの config と異なるときだけ自己終了する（`Bool(true)` = 終了する） |
+| `EngineHealth` | ホストの健全性 `ok` / `recovering` / `unrecoverable` を返す（Issue #43）。エンジンのロックを取らずに即答する |
 | `Bye` | クライアント切断宣言 |
 
-`Response` は `Unit / Bool / U32 / I32 / String / Strings / Segments / SegmentBlocks / Error` のいずれか。
+`Response` は `Hello / Unit / Bool / U32 / I32 / String / Strings / SegmentsModel / Error / InputCharResult` のいずれか
+（`_ReservedSegments` / `_ReservedSegmentBlocks` は ABI v7 で廃止したスロット）。
+enum の discriminant は宣言順なので、`Request` / `Response` の variant は**末尾にだけ追加する**。
 ホスト側で panic したり DynEngine が未生成のまま他リクエストが来た場合は
 `Response::Error(String)` を返し、クライアント側は空値を返すかそのまま無視する。
 
@@ -534,21 +541,55 @@ hiragana_buf 等のセッション状態は TSF 側がフォーカス変化で `
 3. `ensure_connected()` がパイプ接続を試行 → 失敗したら `CreateProcessW`
    （`DETACHED_PROCESS | CREATE_NO_WINDOW`）で `rakukan-engine-host.exe` を起動
 4. 最大 5 秒までリトライ接続、成功したら `Hello` → `Create` を送信
+   （`Create` はホストの config と同じなら no-op、異なればエンジンを作り直す）
 5. ホストがクラッシュして別 PID で再起動した場合、`call_with_retry` が
    パイプエラーを検知して 1 回だけ再接続し、**保存済み `config_json` で `Create` を再送**
-6. 現状ホストは常駐（idle 自死しない）
+6. 接続直後の `Hello` / `Create` の失敗が 15 秒に 3 回続くと、その TSF プロセスからの
+   spawn を 30 秒止める（`HostSpawnGuard`）。起動に成功すると回数は 0 に戻るため、
+   起動後の異常終了の繰り返しは数えていない
+7. 辞書・モデルの注入はホストの `dispatch_engine` 冒頭で毎回試みる（v0.11.7）。
+   TSF 側のラッチや、ホストが入れ替わった理由に依存しない
+8. 現状ホストは常駐（idle 自死しない）
+
+### 推論失敗からの復帰（v0.11.7、Issue #43）
+
+GPU ドライバ更新・スリープ復帰・TDR でホストの GPU デバイスだけが無効になると、推論は
+詰まらず即座に失敗し続ける。判断と抑止はホスト 1 プロセスに置く（TSF はアプリごとに別
+プロセスなので、TSF 側で判断すると各アプリが共有ホストを順に再起動してしまう）。
+
+- `dispatch_engine` の応答後に `bg_status()` を観測し、**状態が変わったときだけ**数える
+  （`crates/rakukan-engine-rpc/src/health.rs` の `HealthTracker`）
+- 連続 3 回失敗 → `%LOCALAPPDATA%\rakukan\engine-recovery.txt` に
+  `<exited_at_ms> <attempt>` を書いてホストが自己終了し、次の呼び出しでクライアントが spawn し直す
+- マーカーが 5 分以内で `attempt >= 2` の状態からまた 3 回失敗 → `unrecoverable`（ホストは
+  生き続け、辞書候補のみで動作）
+- 推論が 1 回成功したら失敗の回数とマーカーを捨てる
+- TSF は `EngineHealth` を問い合わせて status 行の文言を決めるだけ
+- 検証用に `[diagnostics] force_inference_failure` で推論を必ず失敗させられる
+- プロセス内でモデルだけ作り直す方式は、現在の ABI では converter を差し替えられないため採っていない
 
 ### config.toml の即時反映
 
-IME モード切替時の `engine_reload()` は以下のように動作する:
+`engine_reload()`（IME モード切替時の config 変更検出、または設定アプリ保存時の名前付きイベント
+`Local\rakukan.engine.reload` から呼ばれる）は、エンジンをホスト内で作り直さず**ホストプロセスごと
+再起動する**（v0.7.1 M1.6 T-HOST1。DLL を drop すると BG スレッドが参照中の DLL が unmap されて
+AV を誘発するため）。
 
-1. TSF 側が `build_engine_config_json()` で最新の設定 JSON を作る
-2. 既存 `RpcEngine` ハンドルに対して `reload(config_json)` を呼ぶ（**ハンドルは捨てない**）
-3. `RpcEngine::reload` は `Request::Reload { config_json }` をパイプに送信
-4. ホスト側は現 `DynEngine` を drop → `DynEngine::load_auto(install, new_config)` で再生成
-5. 辞書・モデルの bg ロードも連動して再起動
-6. クライアント側は内部の `config_json` も新しい値で上書き（次回再接続でも新 config が使われる）
-7. RPC reload 自体が失敗したときはハンドルを捨てて通常の再接続パスに落とす（ホスト死亡時の復旧）
+1. バックグラウンドスレッドで `config.toml` を読み直し、`build_engine_config_json()` で設定 JSON を作る
+2. `ShutdownIfConfigDiffers { config_json }` を送る
+   - `Bool(false)`（同じ config）: ホストを維持し、ready ラッチだけ落として終わる
+   - `Bool(true)`（異なる）: ホストは応答後に自己終了する
+   - エラー（比較できない）: 無条件の `Shutdown` にフォールバック
+3. ラッチを落とし、100ms 待ってから TSF 側のハンドルを捨てる（終了途中のパイプへ再接続する race を避ける）
+4. 次の呼び出しで `connect_or_spawn` が新しいホストを spawn し、新しい config で `Create` する
+
+`engine_reload_force()`（言語バーメニューの「エンジン再起動」と BG ウォッチドッグ）は比較せずに `Shutdown` を送る。
+
+TSF DLL はアプリごとに別プロセスで動くため、同じ config で複数プロセスが reload しても
+ホストの再起動は 1 回で済む（2 回目以降は `Bool(false)`）。ただし reload イベントは
+auto-reset なので、1 回の Set で届くのは 1 プロセスだけである。
+
+`Request::Reload`（ホスト内でエンジンを drop → 再生成）はプロトコルに残っているが、TSF からは使っていない。
 
 ---
 
