@@ -30,6 +30,22 @@ use windows::{
 const CLASS_E_CLASSNOTAVAILABLE: windows::core::HRESULT =
     windows::core::HRESULT(0x80040111u32 as i32);
 
+/// TSF DLL の tracing で記録する target。
+///
+/// `EnvFilter` は指定した target 以外を捨てるため、同じ DLL に静的リンクされている
+/// RPC クライアント（`rakukan_engine_rpc`）もここに並べないと、`rpc SLOW` や
+/// `spawn_host failed` が `rakukan.log` に記録されない（Issue #54）。
+const LOG_TARGETS: &[&str] = &["rakukan_tsf", "rakukan_engine_rpc"];
+
+/// `RAKUKAN_LOG` が無いときの filter 指定（`rakukan_tsf=debug,rakukan_engine_rpc=debug` の形）。
+fn default_log_filter_spec(level: &str) -> String {
+    LOG_TARGETS
+        .iter()
+        .map(|target| format!("{target}={level}"))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
 const LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 const LOG_ROTATE_GENERATIONS: usize = 5;
 
@@ -101,9 +117,10 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 .unwrap_or_else(|| "debug".to_string())
         };
 
-        let make_filter = |scope: &str| {
+        // `RAKUKAN_LOG` を明示した場合はそちらを優先する。
+        let make_filter = || {
             tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG").unwrap_or_else(|_| {
-                tracing_subscriber::EnvFilter::new(format!("{}={}", scope, config_log_level))
+                tracing_subscriber::EnvFilter::new(default_log_filter_spec(&config_log_level))
             })
         };
 
@@ -116,14 +133,14 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
             {
                 let _ = tracing_subscriber::fmt()
                     .compact()
-                    .with_env_filter(make_filter("rakukan_tsf"))
+                    .with_env_filter(make_filter())
                     .with_ansi(false)
                     .with_writer(std::sync::Mutex::new(f))
                     .try_init();
             }
         } else {
             let _ = tracing_subscriber::fmt()
-                .with_env_filter(make_filter("rakukan"))
+                .with_env_filter(make_filter())
                 .try_init();
         }
         tracing::info!(
@@ -258,4 +275,66 @@ pub unsafe extern "system" fn DllUnregisterServer() -> windows::core::HRESULT {
     };
     CoUninitialize();
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    struct CountTargets {
+        tsf: Arc<AtomicUsize>,
+        rpc: Arc<AtomicUsize>,
+        other: Arc<AtomicUsize>,
+    }
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CountTargets {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let counter = match event.metadata().target() {
+                "rakukan_tsf" => &self.tsf,
+                "rakukan_engine_rpc" => &self.rpc,
+                _ => &self.other,
+            };
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    #[test]
+    fn default_log_filter_spec_lists_tsf_and_rpc_client() {
+        assert_eq!(
+            default_log_filter_spec("debug"),
+            "rakukan_tsf=debug,rakukan_engine_rpc=debug"
+        );
+    }
+
+    #[test]
+    fn default_log_filter_records_rpc_client_events() {
+        let tsf = Arc::new(AtomicUsize::new(0));
+        let rpc = Arc::new(AtomicUsize::new(0));
+        let other = Arc::new(AtomicUsize::new(0));
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_subscriber::EnvFilter::new(default_log_filter_spec(
+                "info",
+            )))
+            .with(CountTargets {
+                tsf: tsf.clone(),
+                rpc: rpc.clone(),
+                other: other.clone(),
+            });
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "rakukan_tsf", "tsf warn");
+            tracing::warn!(target: "rakukan_engine_rpc", "rpc SLOW");
+            // 指定レベル未満は記録しない
+            tracing::debug!(target: "rakukan_engine_rpc", "rpc read failed");
+            // 列挙していない target は記録しない
+            tracing::warn!(target: "rakukan_engine", "engine warn");
+        });
+
+        assert_eq!(tsf.load(Ordering::Relaxed), 1);
+        assert_eq!(rpc.load(Ordering::Relaxed), 1);
+        assert_eq!(other.load(Ordering::Relaxed), 0);
+    }
 }
