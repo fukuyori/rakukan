@@ -32,6 +32,7 @@ pub use romaji::{BackspaceResult, ConversionEvent, RomajiConverter};
 pub mod backend;
 pub mod conv_cache;
 pub mod dict;
+mod digit_license;
 pub mod digits;
 pub mod ffi;
 pub mod segments;
@@ -1060,6 +1061,9 @@ impl RakunEngine {
             &self.config.digit_candidates_order,
             matches!(self.config.alpha_width, AlphaWidth::Fullwidth),
             matches!(self.config.symbol_width, SymbolWidth::Fullwidth),
+            self.dict_store
+                .as_ref()
+                .map(|d| d as &dyn digits::SurfaceSource),
         )
         .map_err(|e| EngineError::ConversionFailed(e.to_string()))
     }
@@ -1178,6 +1182,15 @@ impl RakunEngine {
 
     pub fn dict_store_ref(&self) -> Option<&DictStore> {
         self.dict_store.as_ref()
+    }
+
+    /// 変換ワーカーへの要求に入れる辞書（数字保存の検証で、大字の除外の根拠に使う）。
+    ///
+    /// 要求を作る時点（`bg_start`）の辞書を捕捉する。辞書の注入前に始まった変換は
+    /// 辞書なし（現行と同じ判定）になり、注入後の要求から照合が効く。
+    /// `DictStore` は `Arc` の複製なので、要求 1 件あたりのコストは参照カウントだけ。
+    fn dict_for_bg_request(&self) -> Option<DictStore> {
+        self.dict_store.clone()
     }
 
     pub fn merge_candidates_for_reading(
@@ -1303,6 +1316,7 @@ impl RakunEngine {
                 self.config.digit_candidates_order.clone(),
                 matches!(self.config.alpha_width, AlphaWidth::Fullwidth),
                 matches!(self.config.symbol_width, SymbolWidth::Fullwidth),
+                self.dict_for_bg_request(),
             ) {
                 Some(returned) => {
                     self.kanji = Some(returned);
@@ -2784,5 +2798,86 @@ mod log_rewrite_tests {
             assert_eq!(e.hiragana_from_romaji_log(), e.hiragana_text());
         }
         assert_eq!(e.current_preedit().display(), "");
+    }
+}
+
+#[cfg(test)]
+mod digit_license_dict_tests {
+    //! 変換ワーカーへの辞書の受け渡し（#53）
+    use super::{EngineConfig, RakunEngine, conv_cache, digits};
+    use rakukan_dict::DictStore;
+    use std::time::Duration;
+
+    #[test]
+    fn bg_request_captures_dict_at_request_time() {
+        let mut engine = RakunEngine::new(EngineConfig::default());
+        // 注入前の要求は辞書なし（現行と同じ判定）
+        assert!(engine.dict_for_bg_request().is_none());
+        engine.set_dict_store(DictStore::load(None, None, None).unwrap());
+        // 注入後の要求から辞書が入る
+        assert!(engine.dict_for_bg_request().is_some());
+    }
+
+    const READING: &str = "2まいめをさんこう";
+
+    fn installed_dict() -> DictStore {
+        let base = std::env::var("LOCALAPPDATA").expect("LOCALAPPDATA");
+        let path = std::path::Path::new(&base).join("rakukan/dict/rakukan.dict");
+        DictStore::load(None, Some(&path), None).expect("load installed dictionary")
+    }
+
+    fn engine_with_model() -> RakunEngine {
+        let mut engine = RakunEngine::new(EngineConfig {
+            num_candidates: 9,
+            ..Default::default()
+        });
+        engine.init_kanji().expect("load model");
+        engine
+    }
+
+    /// 変換ワーカーで `READING` を変換し、完了まで待つ（取り出しはしない）
+    fn start_and_wait(engine: &mut RakunEngine) {
+        engine.force_preedit(READING.to_string());
+        assert!(engine.bg_start(9), "bg_start");
+        assert!(
+            conv_cache::wait_done_timeout(Duration::from_secs(120)),
+            "worker did not finish"
+        );
+    }
+
+    /// 実モデルと同じ run の候補に対し、辞書なしの判定で落ちる候補の数
+    fn rejected_without_dict(cands: &[String]) -> usize {
+        cands
+            .iter()
+            .filter(|c| c.as_str() != READING && !digits::verify_digits_preserved(READING, c))
+            .count()
+    }
+
+    #[test]
+    #[ignore = "実モデルとインストール済み辞書が必要（--test-threads=1 で実行）"]
+    fn worker_applies_dictionary_injected_before_request() {
+        let mut engine = engine_with_model();
+        engine.set_dict_store(installed_dict());
+        start_and_wait(&mut engine);
+        let cands = engine.bg_take_candidates(READING).expect("take");
+        println!("after injection: {cands:?}");
+        // 辞書なしの判定では落ちる候補（`参考` の `参` を数えない候補）が、ワーカーで通っている
+        assert!(rejected_without_dict(&cands) > 0, "{cands:?}");
+        assert!(cands.iter().any(|c| c == "2枚目を参考"), "{cands:?}");
+    }
+
+    #[test]
+    #[ignore = "実モデルとインストール済み辞書が必要（--test-threads=1 で実行）"]
+    fn done_result_before_injection_keeps_judgement_without_dict() {
+        let mut engine = engine_with_model();
+        start_and_wait(&mut engine);
+        // 変換が Done になった後で辞書を注入する
+        engine.set_dict_store(installed_dict());
+        let (conv, cands) = conv_cache::take_ready(READING).expect("take");
+        engine.set_kanji_converter(conv);
+        println!("done before injection: {cands:?}");
+        // 注入前に完了した結果は、辞書なしの判定のまま返る（再変換まで）
+        assert_eq!(rejected_without_dict(&cands), 0, "{cands:?}");
+        assert!(!cands.iter().any(|c| c == "2枚目を参考"), "{cands:?}");
     }
 }
