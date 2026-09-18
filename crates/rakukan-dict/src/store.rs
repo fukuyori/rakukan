@@ -534,6 +534,15 @@ impl DictStore {
         result
     }
 
+    /// ひらがな読みから mozc の通常語の表記を全件返す（ログを出さない）。
+    ///
+    /// 数字保存の検証（大字の除外の根拠）で、かな run の読みの部分文字列を
+    /// 1 回の変換で数百回引くための引き方。`lookup_dict` は呼ぶたびに debug
+    /// ログを出し、件数の上限もあるので使わない。ユーザー辞書・学習履歴は含めない。
+    pub fn lookup_system_normal(&self, reading: &str) -> Vec<String> {
+        self.lookup_class(reading, cost_band::Class::Normal, usize::MAX)
+    }
+
     /// ひらがな読みから記号候補（`symbol.tsv` 由来、mozc の行順）を全件返す（Step 12-2）
     pub fn lookup_symbols(&self, reading: &str) -> Vec<String> {
         self.lookup_class(reading, cost_band::Class::Symbol, usize::MAX)
@@ -828,6 +837,20 @@ mod tests {
         assert_eq!(store.lookup_symbols("みぎ"), ["→", "⇒"]);
         assert_eq!(store.lookup_emoji("みぎ"), ["👉"]);
         assert!(store.lookup_symbols("ない").is_empty());
+    }
+
+    #[test]
+    fn test_lookup_system_normal_returns_all_normal_surfaces() {
+        use crate::cost_band::{EMOJI_BASE, SYMBOL_BASE};
+        let surfaces: Vec<String> = (0..60).map(|i| format!("右{i}")).collect();
+        let mut entries = vec![("みぎ", "→", SYMBOL_BASE), ("みぎ", "👉", EMOJI_BASE)];
+        for (i, s) in surfaces.iter().enumerate() {
+            entries.push(("みぎ", s.as_str(), 3000 + i as u16));
+        }
+        let (store, _f) = store_with_dict(&entries);
+        // 記号・絵文字の帯は含めず、通常語は上限なしで全件
+        assert_eq!(store.lookup_system_normal("みぎ"), surfaces);
+        assert!(store.lookup_system_normal("ない").is_empty());
     }
 
     #[test]
