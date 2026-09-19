@@ -874,12 +874,19 @@ cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名な�
 
 | ファイル（`%LOCALAPPDATA%\rakukan\`） | 出所 | 主な内容 |
 |------|------|------|
-| `rakukan.log` | TSF DLL（アプリごとのプロセス） | キー処理、変換経路、`dict not ready after 30s: dict_status=...`（辞書が ready にならない場合） |
+| `rakukan-tsf-<PID>-<起動識別子>.log` | TSF DLL（アプリごとのプロセス） | キー処理、変換経路、`dict not ready after 30s: dict_status=...`（辞書が ready にならない場合） |
 | `rakukan-engine-host.log` | `rakukan-engine-host.exe` | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延 |
 | `rakukan-engine-dll.log` | engine DLL 内の tracing（cdylib は host と subscriber を共有しない） | `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
 
+TSF ログは書き込み時に 16 MiB を基準として退避し、5 世代を保持する。
+本体を `.log.tmp` に移してから世代を送る。途中で削除・移動に失敗した場合は
+`.tmp` と次の操作を `RotatingLog` に保持し、成功済みの操作を繰り返さずに再開する。
+失敗後は、開き直した本体がさらに 1 MiB 増えるまで再試行を控えるため、
+共有違反などが続く間はサイズ上限を超えることがある。
+進行状態を持たない既存の `.tmp` は上書き・削除せず、新たな退避を中止する。
+
 ```powershell
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 30 -Wait
+.\scripts\merge-logs.ps1 -OutFile merged.log; Get-Content merged.log -Tail 30
 Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-host.log" -Tail 30
 Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 ```

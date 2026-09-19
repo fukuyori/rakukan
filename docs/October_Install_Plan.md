@@ -67,7 +67,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | `%ProgramFiles%\rakukan` | `rakukan_tsf.dll`、`rakukan_engine_{cpu,vulkan,cuda}.dll`、`rakukan-engine-host.exe`、`rakukan-tray.exe`、`settings-ui\`、`dict\rakukan.dict`、`register-tip.ps1` / `unregister-tip.ps1`、NOTICE 類 |
 | `%ProgramData%\rakukan\models` | GGUF モデル（engine-host がダウンロード・読込。全ユーザー書込可） |
 | `%APPDATA%\rakukan` | `config.toml`、`keymap.toml`、`user_dict.toml`、`learn_history.bin` |
-| `%LOCALAPPDATA%\rakukan` | `rakukan.log`、`rakukan-engine-host.log`、`rakukan-engine-dll.log` |
+| `%LOCALAPPDATA%\rakukan` | `rakukan-tsf-<PID>-<起動識別子>.log`、`rakukan-engine-host.log`、`rakukan-engine-dll.log` |
 
 ## 4. 変更内容
 

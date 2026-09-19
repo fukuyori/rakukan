@@ -124,7 +124,7 @@ cargo make quick-install
 設定: `%APPDATA%\rakukan\config.toml`  
 ログ:
 
-- TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
+- TSF 側: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（アプリごとのプロセス単位。統合は `scripts/merge-logs.ps1`）
 - エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）
 - エンジン DLL 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log`（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告はこちらに出る）
 
@@ -203,7 +203,7 @@ rakukan の入力状態は **IME オン**（かな漢字変換）と **IME オ�
 - 生成ログ確認:
 
 ```powershell
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 40
+.\scripts\merge-logs.ps1 | Select-Object -Last 40
 ```
 
 ## 課題リスト

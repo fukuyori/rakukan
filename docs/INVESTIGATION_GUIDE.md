@@ -17,7 +17,7 @@
 
 1. **症状の再現条件を最優先で絞り込む**: 発生する操作シーケンス・タイミング・環境（アプリ、入力速度、モード）を書き起こしてから着手する。憶測で修正しない
 2. **WinDbg `!analyze -v` の `Failure.Bucket` を最初に見る**: call stack が一見不完全でも bucket 名だけで方向が決まることが多い（例: `<module>!Unloaded` → unload race）
-3. **tracing ログを time-correlate する**: `rakukan.log` と `rakukan-engine-host.log` の両方を時刻で並べて race の順序を組み立てる
+3. **tracing ログを time-correlate する**: TSF のログ（`rakukan-tsf-*.log`。アプリごとのプロセス単位で分かれるので `scripts/merge-logs.ps1` で統合する）と `rakukan-engine-host.log` を時刻で並べて race の順序を組み立てる
 4. **仮説は 1 つずつ検証する**: 同時に複数の変更を入れると root cause が分からない。再現性が低い bug ほど「1 変更 → 実機テスト」で確かめる
 5. **`0xc0000005` は unload race を最初に疑う**（0.6.6 の教訓）。TSF DLL / engine DLL / Windows API の順で当たる
 
@@ -106,15 +106,20 @@ level = "debug"
 
 ログ出力先:
 
-- TSF 側: `%LOCALAPPDATA%\rakukan\rakukan.log`
+- TSF 側: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（統合は `scripts/merge-logs.ps1`）
 - Host 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
+
+TSF の `.log.tmp` はローテーション途中のログを保持している場合がある。
+削除せず、本体・退避世代と一緒に調査する（`scripts/merge-logs.ps1` の対象に含まれる）。
+ファイルの共有違反などが解消すると、同じプロセス内では失敗した操作から退避を再開する。
+再試行は本体がさらに 1 MiB 増えた後の書き込み時に行われ、即時ではない。
 
 ### 3.2 ログの tail（再現中）
 
 別窓で tail して再現:
 
 ```powershell
-Get-Content -Wait -Path "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 0
+.\scripts\merge-logs.ps1 -OutFile merged.log   # 統合してから読む
 ```
 
 再現後は tail を止めてファイル全体を確認。
@@ -136,10 +141,11 @@ Get-Content -Wait -Path "$env:LOCALAPPDATA\rakukan\rakukan.log" -Tail 0
 ### 3.4 時系列組み立て
 
 1. 症状発生時刻を特定（ユーザ記憶 / アプリ挙動）
-2. `rakukan.log` を該当時刻 ±5 秒で抽出:
+2. 統合したログを該当時刻 ±5 秒で抽出:
 
    ```powershell
-   Select-String -Path "$env:LOCALAPPDATA\rakukan\rakukan.log" `
+   .\scripts\merge-logs.ps1 -OutFile merged.log
+   Select-String -Path merged.log `
      -Pattern "2026-04-24 12:3[45]:"
    ```
 
@@ -174,13 +180,13 @@ sudo cargo make install
 #### モード保持 / race 系
 
 1. 再現手順を 3 回連続で実施（タイミング依存のため）
-2. `rakukan.log` を確認し §3.3 のログパターンで経路を特定
+2. 統合したログを確認し §3.3 のログパターンで経路を特定
 3. 想定通りの discard / retained / saved ログが出ているか
 4. 出ていない経路があれば、そこが race の穴
 
 #### 文字消失 / 尻切れ系
 
-1. `rakukan.log` で `reading={:?}` と `preview={:?}` の対応を追う
+1. 統合したログで `reading={:?}` と `preview={:?}` の対応を追う
 2. `Phase1A: discarded` / `Phase1B: discarded` / `preview discarded` のいずれが出ているか
 3. どれも出ていないのに消える → 別経路の race、新規調査が要
 
@@ -194,7 +200,7 @@ sudo cargo make install
 
 - どのアプリで発生するか（Explorer / Chrome / VSCode / etc.）
 - OS ビルド番号（`winver`）
-- rakukan のバージョン（`%LOCALAPPDATA%\rakukan\rakukan.log` 先頭行）
+- rakukan のバージョン（TSF ログの `rakukan TSF DLL loaded build=...` 行）
 - 再現率（毎回 / たまに / 1 回だけ）
 
 ### crash 系
