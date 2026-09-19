@@ -13,7 +13,7 @@
 //!  Idle（pending=Some）
 //!       │ ワーカーが pending を取り出す
 //!       ▼
-//!  Running { key }
+//!  Running { key, run_id, started }
 //!       │ 変換完了
 //!       ▼
 //!  Done { key, conv, candidates }
@@ -32,8 +32,25 @@
 //! `State::Idle && pending=Some` という中間状態になる。
 //! `wait_done_timeout()` はこの状態でも Condvar で待機し、
 //! ワーカーが `Running` → `Done` になったら `true` を返す。
+//!
+//! # 実行番号と詰まりの監視（Issue #57）
+//! ワーカーが `pending` を取り出して `Running` に入るたびに実行番号を 1 つ進め、
+//! 入った時刻を `Running` に持たせる。ホストの監視スレッドは [`run_state`] で
+//! 「どの実行が、どれだけ `Running` のままか」を読み、閾値を超えたら
+//! [`confirm_stalled`] で同じ実行がまだ `Running` のままかを確かめる。
+//!
+//! 起点がこの DLL の中（ワーカーが `Running` に入った時刻）にあるので、
+//! どのアプリ（TSF プロセス）から見ても同じで、完了すれば `Running` でなくなる
+//! だけなので解除の呼び出しは要らない。
+//!
+//! どちらも `CACHE.inner` を短時間持つだけで、推論が詰まっている間もロックを
+//! 待たない（ワーカーは推論中に `CACHE.inner` を持たない）。
+//!
+//! 検出できないもの: `Idle && pending=Some` のまま拾われない詰まり（ワーカー
+//! スレッド自体が止まった場合）は `Running` の開始時刻が無いので拾えない。
 
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use crate::kanji::KanaKanjiConverter;
 use crate::{DictStore, DigitCandidateKind, default_digit_candidates_order};
@@ -65,7 +82,13 @@ enum State {
     /// 変換中でも結果待ちでもない
     Idle,
     /// ワーカーが変換処理を実行中
-    Running { key: String },
+    Running {
+        key: String,
+        /// 実行番号（Issue #57）。`Running` に入るたびに 1 つ進む
+        run_id: u64,
+        /// `Running` に入った時刻
+        started: Instant,
+    },
     /// 変換完了。`take_ready()` または `reclaim()` で回収するまで保持
     Done {
         key: String,
@@ -87,6 +110,8 @@ struct Inner {
     /// Running 中に新リクエストが来た場合も上書きし、
     /// ワーカーは変換完了時に pending があれば warm-up 済み converter を再利用する。
     pending: Option<Request>,
+    /// 直前に `Running` に入った実行の番号（まだ無ければ 0）
+    last_run_id: u64,
 }
 
 impl Inner {
@@ -94,6 +119,27 @@ impl Inner {
     /// 存在するか。`Idle && pending=None` のときだけ false。
     fn holds_converter(&self) -> bool {
         self.pending.is_some() || !matches!(self.state, State::Idle)
+    }
+
+    fn run_state(&self, now: Instant) -> RunState {
+        match &self.state {
+            State::Running {
+                run_id, started, ..
+            } => RunState::Running {
+                run_id: *run_id,
+                elapsed: now.saturating_duration_since(*started),
+            },
+            _ => RunState::NotRunning {
+                last_run_id: self.last_run_id,
+            },
+        }
+    }
+
+    fn is_stalled(&self, run_id: u64, threshold: Duration, now: Instant) -> bool {
+        matches!(
+            self.run_state(now),
+            RunState::Running { run_id: r, elapsed } if r == run_id && elapsed >= threshold
+        )
     }
 }
 
@@ -113,6 +159,7 @@ static CACHE: LazyLock<Arc<Cache>> = LazyLock::new(|| {
         inner: Mutex::new(Inner {
             state: State::Idle,
             pending: None,
+            last_run_id: 0,
         }),
         cond: Condvar::new(),
     });
@@ -133,8 +180,11 @@ fn worker_loop(cache: Arc<Cache>) {
             let mut inner = cache.inner.lock().unwrap();
             loop {
                 if let Some(req) = inner.pending.take() {
+                    inner.last_run_id = inner.last_run_id.wrapping_add(1);
                     inner.state = State::Running {
                         key: req.hiragana.clone(),
+                        run_id: inner.last_run_id,
+                        started: Instant::now(),
                     };
                     // Idle → Running の遷移を wait_done_timeout（pending 待機中）に通知。
                     // この notify がないと bg_start 直後に wait_done_timeout を呼んだ側が
@@ -156,7 +206,7 @@ fn worker_loop(cache: Arc<Cache>) {
         let dict = req.dict;
         let converter = req.converter;
 
-        let t = std::time::Instant::now();
+        let t = Instant::now();
         let (converter, candidates, failed) =
             match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 crate::digits::convert_with_digit_protection(
@@ -247,7 +297,7 @@ pub fn start(
         tracing::trace!("conv-cache: skip same key {:?}", hiragana);
         return Some(converter);
     }
-    if let State::Running { key } = &inner.state
+    if let State::Running { key, .. } = &inner.state
         && key == &hiragana
     {
         return Some(converter);
@@ -467,6 +517,40 @@ pub fn wait_done_timeout(timeout: std::time::Duration) -> bool {
 /// 状態を増やすときはこの配列に足すこと（ffi 側のテストがここを参照して落ちる）。
 pub const STATUS_VALUES: &[&str] = &["idle", "running", "done", "error"];
 
+/// 実行中の変換の識別（Issue #57）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunState {
+    /// 状態を読めない（ロックの poison）。完了にも詰まりにも数えない
+    Unknown,
+    /// `Running` ではない。`last_run_id` は直前に `Running` に入った実行の番号
+    NotRunning { last_run_id: u64 },
+    /// 実行番号 `run_id` が、`Running` に入ってから `elapsed` 経っている
+    Running { run_id: u64, elapsed: Duration },
+}
+
+/// 現在の実行の状態を読む（Issue #57）。
+///
+/// [`status`] と違い、poison を `"idle"` に潰さず [`RunState::Unknown`] を返す。
+pub fn run_state() -> RunState {
+    match CACHE.inner.lock() {
+        Ok(inner) => inner.run_state(Instant::now()),
+        Err(_) => RunState::Unknown,
+    }
+}
+
+/// 実行番号 `run_id` が、まだ `Running` のまま `threshold` 以上経っているかを
+/// 1 回のロックの中で確かめる（Issue #57）。
+///
+/// ワーカーが `Done` を書くにも次の実行に入るにも同じロックが要るので、`Some(true)`
+/// は「この瞬間に、同じ実行が閾値以上 `Running` だった」ことを確定させる。
+/// 状態を読めないときは `None`。
+pub fn confirm_stalled(run_id: u64, threshold: Duration) -> Option<bool> {
+    match CACHE.inner.lock() {
+        Ok(inner) => Some(inner.is_stalled(run_id, threshold, Instant::now())),
+        Err(_) => None,
+    }
+}
+
 pub fn status() -> &'static str {
     match CACHE.inner.lock() {
         Ok(s) => match &s.state {
@@ -490,16 +574,71 @@ mod tests {
         let idle = Inner {
             state: State::Idle,
             pending: None,
+            last_run_id: 0,
         };
         assert!(!idle.holds_converter());
 
         let running = Inner {
             state: State::Running {
                 key: "きょう".into(),
+                run_id: 1,
+                started: Instant::now(),
             },
             pending: None,
+            last_run_id: 1,
         };
         assert!(running.holds_converter());
+    }
+
+    fn running(run_id: u64, started: Instant) -> Inner {
+        Inner {
+            state: State::Running {
+                key: "きょう".into(),
+                run_id,
+                started,
+            },
+            pending: None,
+            last_run_id: run_id,
+        }
+    }
+
+    #[test]
+    fn run_state_reports_run_id_and_elapsed() {
+        let t0 = Instant::now();
+        let inner = running(7, t0);
+        assert_eq!(
+            inner.run_state(t0 + Duration::from_secs(12)),
+            RunState::Running {
+                run_id: 7,
+                elapsed: Duration::from_secs(12)
+            }
+        );
+        let idle = Inner {
+            state: State::Idle,
+            pending: None,
+            last_run_id: 7,
+        };
+        assert_eq!(idle.run_state(t0), RunState::NotRunning { last_run_id: 7 });
+    }
+
+    #[test]
+    fn stall_is_confirmed_only_for_the_same_run_past_the_threshold() {
+        let t0 = Instant::now();
+        let limit = Duration::from_secs(30);
+        let inner = running(3, t0);
+        // 同じ実行・閾値以上
+        assert!(inner.is_stalled(3, limit, t0 + Duration::from_secs(30)));
+        // 閾値未満
+        assert!(!inner.is_stalled(3, limit, t0 + Duration::from_secs(29)));
+        // 別の実行（前の実行は完了し、新しい実行が始まっている）
+        assert!(!inner.is_stalled(2, limit, t0 + Duration::from_secs(60)));
+        // Running でない（完了した）
+        let idle = Inner {
+            state: State::Idle,
+            pending: None,
+            last_run_id: 3,
+        };
+        assert!(!idle.is_stalled(3, limit, t0 + Duration::from_secs(60)));
     }
 
     #[test]
@@ -507,5 +646,7 @@ mod tests {
         // このクレートの単体テストは conv_cache::start を呼ばない
         // （converter 構築に実モデルが要るため）ので、グローバル CACHE は Idle のまま
         assert!(!has_converter());
+        assert_eq!(run_state(), RunState::NotRunning { last_run_id: 0 });
+        assert_eq!(confirm_stalled(0, Duration::ZERO), Some(false));
     }
 }
