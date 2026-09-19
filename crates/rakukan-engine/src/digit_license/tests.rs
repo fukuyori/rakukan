@@ -401,6 +401,70 @@ fn repeated_words_pass_and_reject() {
     }
 }
 
+// ─── 読みの長さの上限 ─────────────────────────────────────────────────────────
+
+/// 上限ちょうどの読みの語は根拠に使い、上限を超える読みの語は使わない
+#[test]
+fn reading_longer_than_limit_is_not_used() {
+    // 12 文字（上限ちょうど）と 13 文字（上限超え）
+    let at_limit = "きょうどうさんかくのくに";
+    let over_limit = "だんじょきょうどうさんかく";
+    assert_eq!(at_limit.chars().count(), MAX_READING_CHARS);
+    assert_eq!(over_limit.chars().count(), MAX_READING_CHARS + 1);
+    let source = FixedSource {
+        map: HashMap::from([
+            (at_limit, vec!["共同参画の国"]),
+            (over_limit, vec!["男女共同参画"]),
+        ]),
+        calls: Cell::new(0),
+    };
+    assert!(passes(
+        &format!("2にんの{at_limit}"),
+        &["2", "人の共同参画の国"],
+        Some(&source)
+    ));
+    // 上限を超える語の `参` は従来どおり数えるので拒否される
+    assert!(!passes(
+        &format!("2にんの{over_limit}"),
+        &["2", "人の男女共同参画"],
+        Some(&source)
+    ));
+}
+
+/// 繰り返しでない かな run（線形合同法で作る）
+fn aperiodic_kana(n: usize) -> String {
+    let kana: Vec<char> = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"
+        .chars()
+        .collect();
+    let mut x: u32 = 12345;
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            kana[(x >> 16) as usize % kana.len()]
+        })
+        .collect()
+}
+
+/// 引く部分文字列の数は、読みの長さの 2 乗ではなく長さに比例する
+#[test]
+fn substrings_grow_linearly_with_reading_length() {
+    let source = fixed_source();
+    for n in [30, 60, 120] {
+        // `2まい` + かな run（n 文字、末尾付近に `さんこう`）
+        let filler = aperiodic_kana(n - "まいさんこうに".chars().count());
+        let reading = format!("2まい{filler}さんこうに");
+        let cand = format!("枚{filler}参考に");
+        let (ok, stats) = passes_with_stats(&reading, &["2", &cand], Some(&source));
+        assert!(ok, "n={n}");
+        let run_len = n;
+        let expected: usize = (0..run_len)
+            .map(|ri| (run_len - ri).min(MAX_READING_CHARS))
+            .sum();
+        assert_eq!(stats.substrings, expected, "n={n}");
+        assert!(stats.substrings <= run_len * MAX_READING_CHARS, "n={n}");
+    }
+}
+
 // ─── 全探索との照合 ───────────────────────────────────────────────────────────
 
 /// テスト専用の全探索。対象ごとに「数える」か「覆う組を 1 つ割り当てる」かを

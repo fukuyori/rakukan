@@ -73,6 +73,23 @@ fn product(prefixes: &[&str], suffixes: &[&str], k: usize) -> Vec<String> {
     out
 }
 
+/// 繰り返しでない自然文のかな（辞書に当たる短い部分文字列が多い）
+const NATURAL_KANA: &str = "きのうはあさからあめがふっていたのでいえでほんをよんでいたがひるすぎにはれてきたのでちかくのこうえんまであるいていきべんちにすわってしばらくそらをながめていたらともだちからでんわがかかってきてこんどのしゅうまつにみんなでうみへいこうというはなしになった";
+
+/// 繰り返しでない かな（線形合同法。辞書に当たらない長い部分文字列が多い）
+fn aperiodic_kana(n: usize) -> String {
+    let kana: Vec<char> = "あいうえおかきくけこさしすせそたちつてとなにぬねのはひふへほまみむめもやゆよらりるれろわをん"
+        .chars()
+        .collect();
+    let mut x: u32 = 12345;
+    (0..n)
+        .map(|_| {
+            x = x.wrapping_mul(1_103_515_245).wrapping_add(12345);
+            kana[(x >> 16) as usize % kana.len()]
+        })
+        .collect()
+}
+
 struct Scenario {
     name: String,
     reading: String,
@@ -143,6 +160,24 @@ fn scenarios() -> Vec<Scenario> {
                 ),
             ],
         });
+    }
+    // 繰り返しでない長い かな run（n 文字、末尾付近に `さんこう`）。照合表の読みの
+    // 長さの上限（`MAX_READING_CHARS`）の効果を見る
+    for (kind, source) in [
+        ("random", aperiodic_kana(200)),
+        ("natural", NATURAL_KANA.to_string()),
+    ] {
+        for n in [30, 60, 120] {
+            let filler: String = source
+                .chars()
+                .take(n - "まいさんこうに".chars().count())
+                .collect();
+            out.push(Scenario {
+                name: format!("aperiodic/{kind} n={n}"),
+                reading: format!("2まい{filler}さんこうに"),
+                rc: vec![digit("2"), vec![format!("枚{filler}参考に")]],
+            });
+        }
     }
     for n in [10, 20, 40] {
         for tail in ["枚", "参枚"] {
@@ -223,11 +258,12 @@ fn synthetic() {
             let combined = combine_runs_with_origin(&sc.rc, 9).len();
             let mem: usize = s.memory_estimate(combined).iter().map(|(_, b)| b).sum();
             extra.push_str(&format!(
-                " | (0)={:.2} (1)={:.2} (2)={:.2} (3)={:.2} | lookups={} entries={} pairs={} dp_cands={} states={} trans={} | mem≈{}B",
+                " | (0)={:.2} (1)={:.2} (2)={:.2} (3)={:.2} | substr={} lookups={} entries={} pairs={} dp_cands={} states={} trans={} | mem≈{}B",
                 med(0),
                 med(1),
                 med(2),
                 med(3),
+                s.substrings,
                 s.lookups,
                 s.table_entries,
                 s.pairs_found,
