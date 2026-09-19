@@ -363,7 +363,6 @@ $forceDict = $env:RAKUKAN_FORCE_DICT -eq "1"
 # mozc dictionary (Apache 2.0)
 Write-Host "  [4a] mozc dictionary (Apache 2.0)..."
 $mozcDictOut    = Join-Path $dictDir "rakukan.dict"
-$mozcTsvDir     = Join-Path $dictDir "mozc_tsv"
 $dictBuilderExe = Join-Path $installDir "rakukan-dict-builder.exe"
 
 $mozcTsvFiles = @(
@@ -378,117 +377,159 @@ $mozcTsvFiles = @(
     "dictionary08.txt"
     "dictionary09.txt"
 )
-$mozcBaseUrl = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/dictionary_oss"
+# 取得元は完全なコミット SHA で固定する（Issue #62）。
+# ブランチ参照（refs/heads/master）だと、同じ版の rakukan でも作った時期によって
+# 辞書の中身が変わり、変換品質の差を実装の違いと切り分けられない。
+# upstream を取り込むときはこの値を上げる。辞書は SHA の不一致で自動的に作り直される
+# （RAKUKAN_FORCE_DICT=1 を手で指定する必要はない）。
+$mozcRev     = "cbbb6e1bd181cb9f3b409622d916a53a35400ec7"
+$mozcRepoUrl = "https://raw.githubusercontent.com/google/mozc/$mozcRev"
+$mozcBaseUrl = "$mozcRepoUrl/src/data/dictionary_oss"
+$symbolUrl   = "$mozcRepoUrl/src/data/symbol/symbol.tsv"
+$emojiUrl    = "$mozcRepoUrl/src/data/emoji/emoji_data.tsv"
+
+# 取得済み TSV は SHA ごとの作業フォルダに置く。別のリビジョンで取ったものを
+# 新しい SHA のものとして再利用しないため。
+$mozcTsvDir  = Join-Path $dictDir ("mozc_tsv_" + $mozcRev.Substring(0, 12))
 
 # cost 帯の版（rakukan-dict の cost_band::DICT_SCHEMA と同じ値にする）。
 # 辞書の隣の rakukan.dict.build.json にビルダーが書く。無い・古い辞書は再生成する。
 $dictSchemaExpected = 2
 $dictBuildInfo = "$mozcDictOut.build.json"
+
+# 復旧不能ならここで停止し、再生成判定や別の差し替えへ進まない（Issue #62）。
+. (Join-Path $PSScriptRoot 'dictionary-swap.ps1')
+$recovery = Restore-DictionarySwap -DictionaryPath $mozcDictOut
+if ($recovery -eq 'rolled_back') {
+    Write-Host "  -> restored the previous dictionary state after an interrupted swap"
+} elseif ($recovery -eq 'committed') {
+    Write-Host "  -> kept the committed dictionary pair and finished backup cleanup"
+}
+
 $dictUpToDate = $false
+$dictRebuildReason = $null
 if (Test-Path -LiteralPath $mozcDictOut) {
     if (Test-Path -LiteralPath $dictBuildInfo) {
         try {
             $info = Get-Content -LiteralPath $dictBuildInfo -Raw | ConvertFrom-Json
-            if ([int]$info.dict_schema -ge $dictSchemaExpected) { $dictUpToDate = $true }
+            if ([int]$info.dict_schema -lt $dictSchemaExpected) {
+                $dictRebuildReason = "dict_schema " + $info.dict_schema + " < " + $dictSchemaExpected
+            } elseif ([string]$info.mozc_rev -ne $mozcRev) {
+                $haveRev = if ($info.mozc_rev) { $info.mozc_rev } else { "unknown" }
+                $dictRebuildReason = "mozc_rev " + $haveRev + " != " + $mozcRev
+            } else {
+                $dictUpToDate = $true
+            }
         } catch {
-            Write-Host ("  [WARNING] " + $dictBuildInfo + " could not be read; rebuilding rakukan.dict")
+            $dictRebuildReason = "build info could not be read"
         }
     } else {
-        Write-Host "  -> rakukan.dict has no build info (built before dict_schema 2); rebuilding."
+        $dictRebuildReason = "no build info (built before dict_schema 2)"
     }
+}
+if ($dictRebuildReason) {
+    Write-Host ("  -> rebuilding rakukan.dict: " + $dictRebuildReason)
 }
 
 if ($dictUpToDate -and (-not $forceDict)) {
     $sizeMB = [math]::Round((Get-Item $mozcDictOut).Length / 1048576, 1)
-    Write-Host ("  -> rakukan.dict already built (" + $sizeMB + " MB, dict_schema " + $info.dict_schema + "), skipping.")
+    Write-Host ("  -> rakukan.dict already built (" + $sizeMB + " MB, dict_schema " + $info.dict_schema + ", mozc " + $mozcRev.Substring(0, 12) + "), skipping.")
     Write-Host "     (To rebuild, set RAKUKAN_FORCE_DICT=1 and re-run)"
 } elseif (-not (Test-Path -LiteralPath $dictBuilderExe)) {
     Write-Host "  [WARNING] rakukan-dict-builder.exe not found, skipping mozc dict."
 } else {
-    New-Item -ItemType Directory -Force -Path $mozcTsvDir | Out-Null
-    $downloadedTsvs = [System.Collections.Generic.List[string]]::new()
-    $ProgressPreference = "SilentlyContinue"
-
-    foreach ($tsv in $mozcTsvFiles) {
-        $tsvPath = Join-Path $mozcTsvDir $tsv
-        if ((-not (Test-Path -LiteralPath $tsvPath)) -or $forceDict) {
-            try {
-                $url     = $mozcBaseUrl + "/" + $tsv
-                $tmpPath = $tsvPath + ".tmp"
-                Invoke-WebRequest -Uri $url -OutFile $tmpPath -UseBasicParsing -TimeoutSec 120
-                Move-Item -LiteralPath $tmpPath -Destination $tsvPath -Force
-                Write-Host ("    Downloaded: " + $tsv)
-            } catch {
-                $tmpPath = $tsvPath + ".tmp"
-                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
-                Write-Host ("    [WARNING] Failed: " + $tsv + " - " + $_)
-            }
+    # 別のリビジョンで取得した TSV を残さない
+    Get-ChildItem -LiteralPath $dictDir -Directory -Filter "mozc_tsv*" -ErrorAction SilentlyContinue |
+        Where-Object { $_.FullName -ne $mozcTsvDir } |
+        ForEach-Object {
+            Write-Host ("    Removing TSV from another revision: " + $_.Name)
+            Remove-Item -LiteralPath $_.FullName -Recurse -Force -ErrorAction SilentlyContinue
         }
-        if (Test-Path -LiteralPath $tsvPath) { $downloadedTsvs.Add($tsvPath) }
+    New-Item -ItemType Directory -Force -Path $mozcTsvDir | Out-Null
+
+    # 必須入力。1 つでも欠けたら再生成を中止する（一部を欠いた辞書を作らない）。
+    $requiredInputs = @()
+    foreach ($tsv in $mozcTsvFiles) {
+        $requiredInputs += [pscustomobject]@{
+            Name = $tsv
+            Url  = ($mozcBaseUrl + "/" + $tsv)
+            Path = (Join-Path $mozcTsvDir $tsv)
+        }
+    }
+    $requiredInputs += [pscustomobject]@{
+        Name = "symbol.tsv"; Url = $symbolUrl; Path = (Join-Path $mozcTsvDir "symbol.tsv")
+    }
+    $requiredInputs += [pscustomobject]@{
+        Name = "emoji_data.tsv"; Url = $emojiUrl; Path = (Join-Path $mozcTsvDir "emoji_data.tsv")
     }
 
-    if ($downloadedTsvs.Count -eq 0) {
-        Write-Host "  [WARNING] No mozc TSV files downloaded. rakukan.dict will not be built."
+    $ProgressPreference = "SilentlyContinue"
+    $missingInputs = [System.Collections.Generic.List[string]]::new()
+
+    foreach ($item in $requiredInputs) {
+        # 同じ SHA のフォルダに既にあるものは取り直さない（中断からの再開）
+        if ((Test-Path -LiteralPath $item.Path) -and (-not $forceDict)) { continue }
+        $tmpPath = $item.Path + ".tmp"
+        try {
+            Invoke-WebRequest -Uri $item.Url -OutFile $tmpPath -UseBasicParsing -TimeoutSec 120
+            Move-Item -LiteralPath $tmpPath -Destination $item.Path -Force
+            Write-Host ("    Downloaded: " + $item.Name)
+        } catch {
+            if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
+            Write-Host ("    [WARNING] Failed: " + $item.Name + " - " + $_)
+            $missingInputs.Add($item.Name)
+        }
+    }
+
+    if ($missingInputs.Count -gt 0) {
+        # 一部の入力を欠いた辞書を、正常に生成できたものとして扱わない
+        Write-Host ("  [WARNING] " + $missingInputs.Count + " required input(s) missing: " + ($missingInputs -join ", "))
+        Write-Host "  -> skipping rebuild; keeping the existing rakukan.dict and build.json"
     } else {
-        # symbol.tsv (Apache 2.0)
-        $symbolTsvPath = Join-Path $mozcTsvDir "symbol.tsv"
-        $symbolUrl     = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/symbol/symbol.tsv"
-        if ((-not (Test-Path -LiteralPath $symbolTsvPath)) -or $forceDict) {
-            try {
-                $tmpPath = $symbolTsvPath + ".tmp"
-                Invoke-WebRequest -Uri $symbolUrl -OutFile $tmpPath -UseBasicParsing -TimeoutSec 60
-                Move-Item -LiteralPath $tmpPath -Destination $symbolTsvPath -Force
-                Write-Host "    Downloaded: symbol.tsv"
-            } catch {
-                $tmpPath = $symbolTsvPath + ".tmp"
-                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
-                Write-Host ("    [WARNING] Failed to download symbol.tsv: " + $_)
-            }
-        }
+        Write-Host ("  Building rakukan.dict from " + $mozcTsvFiles.Count + " TSV files + symbol.tsv + emoji_data.tsv (mozc " + $mozcRev.Substring(0, 12) + ")...")
 
-        # emoji_data.tsv (Apache 2.0)
-        $emojiTsvPath = Join-Path $mozcTsvDir "emoji_data.tsv"
-        $emojiUrl     = "https://raw.githubusercontent.com/google/mozc/refs/heads/master/src/data/emoji/emoji_data.tsv"
-        if ((-not (Test-Path -LiteralPath $emojiTsvPath)) -or $forceDict) {
-            try {
-                $tmpPath = $emojiTsvPath + ".tmp"
-                Invoke-WebRequest -Uri $emojiUrl -OutFile $tmpPath -UseBasicParsing -TimeoutSec 60
-                Move-Item -LiteralPath $tmpPath -Destination $emojiTsvPath -Force
-                Write-Host "    Downloaded: emoji_data.tsv"
-            } catch {
-                $tmpPath = $emojiTsvPath + ".tmp"
-                if (Test-Path -LiteralPath $tmpPath) { Remove-Item -LiteralPath $tmpPath -Force -ErrorAction SilentlyContinue }
-                Write-Host ("    [WARNING] Failed to download emoji_data.tsv: " + $_)
-            }
-        }
+        # いったん別名へ生成し、成功したときだけ差し替える。
+        # 途中で失敗しても既存の辞書と build.json を壊さない。
+        $newDictOut   = $mozcDictOut + ".new"
+        $newBuildInfo = "$newDictOut.build.json"
+        Remove-Item -LiteralPath $newDictOut -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $newBuildInfo -Force -ErrorAction SilentlyContinue
 
-        Write-Host ("  Building rakukan.dict from " + $downloadedTsvs.Count + " TSV files + symbol.tsv + emoji_data.tsv...")
         $inputArgs = @()
-        foreach ($f in $downloadedTsvs) {
+        foreach ($tsv in $mozcTsvFiles) {
             $inputArgs += "--input"
-            $inputArgs += $f
+            $inputArgs += (Join-Path $mozcTsvDir $tsv)
         }
-        if (Test-Path -LiteralPath $symbolTsvPath) {
-            $inputArgs += "--symbol"
-            $inputArgs += $symbolTsvPath
-        }
-        if (Test-Path -LiteralPath $emojiTsvPath) {
-            $inputArgs += "--emoji"
-            $inputArgs += $emojiTsvPath
-        }
+        $inputArgs += "--symbol"
+        $inputArgs += (Join-Path $mozcTsvDir "symbol.tsv")
+        $inputArgs += "--emoji"
+        $inputArgs += (Join-Path $mozcTsvDir "emoji_data.tsv")
+        $inputArgs += "--mozc-rev"
+        $inputArgs += $mozcRev
+        $inputArgs += "--mozc-source"
+        $inputArgs += $mozcRepoUrl
         $inputArgs += "--output"
-        $inputArgs += $mozcDictOut
+        $inputArgs += $newDictOut
+
+        $buildSucceeded = $false
         try {
             & $dictBuilderExe @inputArgs
-            if ($LASTEXITCODE -eq 0) {
-                $sizeMB = [math]::Round((Get-Item $mozcDictOut).Length / 1048576, 1)
-                Write-Host ("  -> " + $mozcDictOut + " (" + $sizeMB + " MB)")
-                Remove-Item -LiteralPath $mozcTsvDir -Recurse -Force -ErrorAction SilentlyContinue
-            } else {
-                Write-Host ("  [WARNING] rakukan-dict-builder failed (exit " + $LASTEXITCODE + ")")
+            $buildSucceeded = $LASTEXITCODE -eq 0 -and (Test-Path -LiteralPath $newDictOut) -and (Test-Path -LiteralPath $newBuildInfo)
+            if (-not $buildSucceeded) {
+                Write-Host ("  [WARNING] rakukan-dict-builder failed (exit " + $LASTEXITCODE + "); keeping the existing rakukan.dict")
             }
         } catch {
-            Write-Host ("  [WARNING] rakukan-dict-builder error: " + $_)
+            Write-Host ("  [WARNING] rakukan-dict-builder error: " + $_ + "; keeping the existing rakukan.dict")
+        }
+        if ($buildSucceeded) {
+            # 復元・掃除の失敗をビルダーの catch で握りつぶさない。
+            Install-DictionaryPair -DictionaryPath $mozcDictOut
+            $sizeMB = [math]::Round((Get-Item $mozcDictOut).Length / 1048576, 1)
+            Write-Host ("  -> " + $mozcDictOut + " (" + $sizeMB + " MB, mozc " + $mozcRev.Substring(0, 12) + ")")
+            Remove-Item -LiteralPath $mozcTsvDir -Recurse -Force -ErrorAction SilentlyContinue
+        } else {
+            Remove-Item -LiteralPath $newDictOut -Force -ErrorAction SilentlyContinue
+            Remove-Item -LiteralPath $newBuildInfo -Force -ErrorAction SilentlyContinue
         }
     }
 }

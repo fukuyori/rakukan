@@ -11,8 +11,8 @@
 //!
 //! # mozc TSV フォーマット
 //! ```
-//! 読み TAB 表記 TAB 品詞名 TAB lid TAB rid TAB cost
-//! にほん  日本    名詞-固有名詞-地名-一般  1849  1849  3394
+//! 読み TAB lid TAB rid TAB cost TAB 表記
+//! にほん  1849    1849    3394    日本
 //! ```
 //!
 //! # 出力バイナリフォーマット（rakukan.dict）
@@ -79,6 +79,17 @@ struct Args {
     /// Max cost threshold (default: no limit)
     #[arg(long, default_value = "65535")]
     max_cost: u16,
+
+    /// 入力 TSV を取得した upstream のコミット SHA（Issue #62）。
+    ///
+    /// `build.json` に記録する。インストーラはこの値と固定リビジョンを比べて、
+    /// 別のリビジョンで作られた辞書を作り直す。
+    #[arg(long)]
+    mozc_rev: Option<String>,
+
+    /// 入力 TSV の取得元（Issue #62）。`build.json` に記録する。
+    #[arg(long)]
+    mozc_source: Option<String>,
 }
 
 // ─── TSV パーサー ─────────────────────────────────────────────────────────────
@@ -556,14 +567,52 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
 
 /// 辞書の隣に `<output>.build.json` を書く。`install.ps1` が `dict_schema` を期待値と
 /// 比較し、cost 帯の版が古い辞書を再生成する（Step 12-2）。
-fn write_build_info(output: &Path) -> Result<()> {
+/// `build.json` の中身（Issue #62）。
+///
+/// `mozc_rev` / `mozc_source` は、取得元を固定した呼び出しでだけ入る。
+/// これらが欠けている辞書は「リビジョン不明」として、インストーラが作り直す。
+fn build_info_json(mozc_rev: Option<&str>, mozc_source: Option<&str>) -> String {
+    let mut fields = vec![
+        format!("  \"dict_schema\": {}", cost_band::DICT_SCHEMA),
+        format!("  \"format_version\": {VERSION}"),
+        format!("  \"builder_version\": \"{}\"", env!("CARGO_PKG_VERSION")),
+    ];
+    if let Some(rev) = mozc_rev {
+        fields.push(format!("  \"mozc_rev\": \"{}\"", json_escape(rev)));
+    }
+    if let Some(source) = mozc_source {
+        fields.push(format!("  \"mozc_source\": \"{}\"", json_escape(source)));
+    }
+    format!("{{\n{}\n}}\n", fields.join(",\n"))
+}
+
+/// JSON の文字列値に入れるための最小限のエスケープ。
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{08}' => out.push_str("\\b"),
+            '\u{0c}' => out.push_str("\\f"),
+            // JSON は U+001F 以下の制御文字をそのまま置けない
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+fn write_build_info(
+    output: &Path,
+    mozc_rev: Option<&str>,
+    mozc_source: Option<&str>,
+) -> Result<()> {
     let path = build_info_path(output);
-    let json = format!(
-        "{{\n  \"dict_schema\": {},\n  \"format_version\": {},\n  \"builder_version\": \"{}\"\n}}\n",
-        cost_band::DICT_SCHEMA,
-        VERSION,
-        env!("CARGO_PKG_VERSION")
-    );
+    let json = build_info_json(mozc_rev, mozc_source);
     std::fs::write(&path, json)
         .with_context(|| format!("build info 書き込み失敗: {}", path.display()))?;
     tracing::info!("出力: {}", path.display());
@@ -613,7 +662,11 @@ fn main() -> Result<()> {
 
     // バイナリ書き出し
     write_dict(&groups, &args.output)?;
-    write_build_info(&args.output)?;
+    write_build_info(
+        &args.output,
+        args.mozc_rev.as_deref(),
+        args.mozc_source.as_deref(),
+    )?;
 
     println!("完了: {} 読み → {}", groups.len(), args.output.display());
     Ok(())
@@ -898,5 +951,79 @@ mod tests {
         // n_readings
         let n_readings = u32::from_le_bytes(data[12..16].try_into().unwrap());
         assert_eq!(n_readings, 2); // "にほん" と "にほんご"
+    }
+}
+
+#[cfg(test)]
+mod build_info_tests {
+    //! `build.json` に取得元とリビジョンを残す（Issue #62）
+    use super::build_info_json;
+
+    const REV: &str = "cbbb6e1bd181cb9f3b409622d916a53a35400ec7";
+    const SRC: &str =
+        "https://raw.githubusercontent.com/google/mozc/cbbb6e1bd181cb9f3b409622d916a53a35400ec7";
+
+    #[test]
+    fn records_the_revision_and_source() {
+        let json = build_info_json(Some(REV), Some(SRC));
+        assert!(json.contains("\"dict_schema\""), "{json}");
+        assert!(json.contains("\"format_version\""), "{json}");
+        assert!(json.contains("\"builder_version\""), "{json}");
+        assert!(
+            json.contains(&format!("\"mozc_rev\": \"{REV}\"")),
+            "リビジョンが残っていない: {json}"
+        );
+        assert!(
+            json.contains(&format!("\"mozc_source\": \"{SRC}\"")),
+            "取得元が残っていない: {json}"
+        );
+        // 最後の項目の後ろにカンマを残さない
+        assert!(!json.contains(",\n}"), "末尾にカンマがある: {json}");
+    }
+
+    #[test]
+    fn omits_the_revision_when_unknown() {
+        // 取得元を固定しない呼び出し（旧来の使い方）では欄を作らない。
+        // インストーラは欄が無い辞書を「リビジョン不明」として作り直す。
+        let json = build_info_json(None, None);
+        assert!(!json.contains("mozc_rev"), "{json}");
+        assert!(!json.contains("mozc_source"), "{json}");
+        assert!(json.contains("\"dict_schema\""), "{json}");
+        assert!(!json.contains(",\n}"), "末尾にカンマがある: {json}");
+    }
+
+    #[test]
+    fn records_only_the_value_that_is_known() {
+        let json = build_info_json(Some(REV), None);
+        assert!(json.contains("mozc_rev"), "{json}");
+        assert!(!json.contains("mozc_source"), "{json}");
+    }
+
+    #[test]
+    fn escapes_quotes_and_backslashes() {
+        let json = build_info_json(Some("a\"b\\c"), None);
+        assert!(
+            json.contains(r#""mozc_rev": "a\"b\\c""#),
+            "エスケープされていない: {json}"
+        );
+    }
+
+    #[test]
+    fn escapes_control_characters() {
+        // 改行・タブ・その他の制御文字をそのまま置くと JSON として壊れる
+        let json = build_info_json(Some("a\nb\tc\rd\u{0}e"), None);
+        assert!(
+            json.contains(r#""mozc_rev": "a\nb\tc\rd\u0000e""#),
+            "制御文字がエスケープされていない: {json}"
+        );
+        // 生の制御文字が残っていないこと（`{` `}` と改行の整形分を除く）
+        let value = json
+            .lines()
+            .find(|l| l.contains("mozc_rev"))
+            .expect("mozc_rev の行が無い");
+        assert!(
+            !value.chars().any(|c| (c as u32) < 0x20),
+            "生の制御文字が残っている: {value:?}"
+        );
     }
 }
