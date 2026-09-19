@@ -1328,3 +1328,152 @@ nick が 2026-09-17 に起票した #56 / #57 を、コードとフォークの�
   4. **`last_status` の具体的な遷移**。`observe_stall()` は `last_status` を更新せず、`observe()` は `last_status == status` で早期 return する。`conv_cache::start` は `pending` を積むだけで状態は `Done` のまま残るため、別キーの `bg_start` 直後の `apply_health_action` は `bg_status() = "done"` を観測して早期 return する。その後に詰まって `MarkUnrecoverable` になると `last_status` は `"done"` のままで、**次の成功も早期 return に遮られ `prior_attempts` が 0 に戻らず `clear_marker()` も呼ばれない**。成立条件は「その間に `"done"` 以外が 1 度も観測されない」ことで窓は狭い。コードを追った結果で実機未確認。成立するなら修正と回帰テストを求める。低リスクな直し方は `observe_stall()` 内で `last_status` を次の成功と一致しない値にすること。あわせて `failures = 0` の意図の説明を求めた
 - 指摘はするがマージ条件にしない: `run_state()` / `confirm_stalled()` の poison 分岐そのもの、`on_stall_confirmed` の繋ぎ（`process::exit` のためテストしづらい）
 - **次: nick の回答と更新差分を待つ。CI の成功とは別に、上の 4 件を解消してからマージ判断に進む**
+
+### 2026-09-19 PR と重ならない 3 件を起票・実装（#60 / #61 / #62）
+
+PR #58 / #59 と、その後に続く #56 の 3 つが触るファイルを避けて、独立に進められる
+問題を順に片付けた。いずれも「調査 → Issue 起票 → 実装 → レビュー → 修正」の順。
+
+#### #60 TSF のログがローテーション後も旧世代へ書き込まれる（`e37c645`）
+
+- 発端は #54 の 1 日分のログ量の確認。`rakukan.log` と `rakukan.log.1` の**内容の時間帯が
+  重なっている**ことに気づいた（`.1` の最終行 2026-09-18T06:20:58Z に対し、現行の 1 行目が
+  01:27:52Z。重なる区間に `.1` が 5,540 行、現行が 8,971 行で中身は別物）
+- 原因は 2 つ。**Windows では開いたハンドルが rename に追随する**ので、別プロセスが
+  ローテーションした後も既に動いていたプロセスは退避された世代へ書き続ける。
+  **サイズ判定が `DllMain` でしか走らない**ので上限 16 MiB を超えて伸びる
+  （退避世代の実測 16.28〜17.61 MiB）
+- 作成日時が 6 ファイルともミリ秒まで同一（`2026-03-16 20:54:06.811`）なのは、rename が
+  作成日時を引き継ぐことと NTFS の file system tunneling による。一時ディレクトリで再現を
+  確認した。**ファイルの時刻からローテーションの順序や境界は復元できない**
+- 方針（レモンの判断）: ファイル名は `rakukan-tsf-<PID>-<起動識別子>.log`。プロセス間で
+  共有しない。ローテーションを書き込み処理へ移し、同一プロセス内で排他する。調査用に
+  時刻順の統合スクリプトを用意する
+- 上限・世代は現行維持（16 MiB × 5）。TSF ログ全体の保持目安 256 MiB（**厳密な上限では
+  ない**。使用中は消さない）。掃除は**起動インスタンスごとのロックを排他で取得できた
+  ときだけ**行い、PID の生存では判断しない。旧方式の `rakukan.log` は自動削除の対象外
+- レビューで 5 件の指摘を受けて修正: 退避の失敗で履歴を全部失う経路、削除失敗後に
+  ロックだけ消える経路、`.log.backup` を削除対象にしていた点、開き直しの失敗から
+  復帰しない点、統合スクリプトの時刻比較（文字列比較で `Z` 付きの指定が落ちる）。
+  さらに「本体を移した後の失敗」で `.tmp` と未退避の世代を失う経路が残っており、
+  進行状態を持ち越す形（`RotationStep`）と、既存の退避先を上書きしない
+  `rename_log_to_empty` で塞いだ
+- 単体テスト 18 件。**実機確認は未実施**
+
+#### #61 config.toml が読めないと無言で全設定が既定値に戻る（`b31ef5c`）
+
+- `init_config_manager` / `ConfigManager::new` の `unwrap_or_default()` が原因。TOML に
+  誤字が 1 つあるだけで、警告も出ないまま全設定が既定値になる
+- **計画書 J-5 で「推測」としていた「既定値から作った設定がホストへ送られる」は、
+  コードで確認できた。** `state.rs:502` の `engine_reload` のスレッドは
+  `init_config_manager()` の直後に `build_engine_config_json()` を呼ぶ。設定画面の保存 →
+  `SignalReload` → `reload_watcher` がこの経路を通る
+- 同じ crate の `reload_if_changed` は以前から「前の設定を保つ」実装で、扱いが食い違って
+  いた
+- 方針（レモンの判断）: 再初期化は失敗時に**直前の有効な設定を保持**、初回だけ既定値。
+  どちらも**パスとエラー内容を警告に残す**。**ファイル不在も同じ扱い**にして、削除を
+  暗黙の「設定リセット」にしない。再初期化から `config_save_default()` は呼ばない
+- 失敗時に `last_modified` を進めないので、TOML を直せば次の読み込みで反映される
+- 単体テスト 10 件。うち 4 件は `tracing` の出力を捕捉して、警告にパスとエラー内容が
+  残ること・正常時に警告が出ないことを確認する。捕捉機構が生きていることの確認を
+  入れて、空振りしないようにした。**実機確認は未実施**
+
+#### #62 MOZC 辞書のリビジョンを固定・記録していない（`fbe7848`）
+
+- `refs/heads/master` から取得し、ビルド後に TSV を削除し、`build.json` にリビジョンを
+  書いていなかった。**同じ版の rakukan でも作った時期で辞書の中身が変わる**のに、
+  記録がないので変換品質の差を実装の違いと切り分けられない
+- 方針（レモンの判断）: 案 1（リビジョンの固定）。辞書 TSV・`symbol.tsv`・
+  `emoji_data.tsv` を**同じ完全な SHA** から取得し、取得元と SHA を `build.json` に記録。
+  `mozc_rev` が無い辞書と SHA が違う辞書は**自動的に**作り直す（`RAKUKAN_FORCE_DICT=1`
+  を手で指定しない）。`dict_schema` の不一致と `RAKUKAN_FORCE_DICT=1` という既存の
+  再生成条件は維持
+- 初期 SHA は `cbbb6e1bd181cb9f3b409622d916a53a35400ec7`（2026-09-13T05:57:53Z）。
+  `dictionary_oss` の最終変更コミットではなく**リポジトリ全体の master 先頭**を採り、
+  必須 12 ファイルの存在と raw URL の 200 を確認した（[確認結果](https://github.com/fukuyori/rakukan/issues/62#issuecomment-5740309247)）。
+  引継書にあった `8be758d` は既存辞書からの推定値なので採用根拠にしていない
+- レビューで 3 件 → さらに 2 件の指摘を受けて修正。最終的に辞書と `build.json` の
+  差し替えは `scripts/dictionary-swap.ps1` に分け、**ジャーナルに確定状態
+  （`preparing` / `prepared` / `committed` / `rolled_back`）を永続化**した。退避の有無
+  だけでは「片方しか退避できていない」と「確定後に片方だけ削除した」を区別できない。
+  確定後は復元せず掃除だけ続ける。復元やジャーナルの読み取りに失敗したらファイルを
+  残して停止する（失敗を握りつぶして「復元済み」と表示しない）
+- 回帰テスト `scripts/test-dictionary-swap.ps1` は PowerShell 7 と Windows PowerShell 5.1
+  の両方で 14 ケース。`rakukan-dict-builder` は 16 件
+- **保証しない範囲**: SHA の固定が保証するのは取得元データの一致で、生成される辞書の
+  バイト単位の一致は別の検証事項。ロックが守るのは復旧・差し替えの実行中だけで、
+  取得・ビルドを含む同時インストール全体の安全性は検証していない。**実機確認は未実施**
+
+#### 次
+
+- 3 件の**実機確認**（1 回のインストールでまとめて見る）。#62 は `mozc_rev` を持たない
+  既存辞書があるため、必ず再生成が走る（約 48 MB の取得 + ビルド）
+- そのあと **J-5 の (2)**（config の再読込がアプリごとにばらばら。reload イベント
+  `Local\rakukan.engine.reload` が auto-reset で 1 プロセスにしか届かない）。ただし
+  `state.rs` に手を入れるので、PR #59 と同じファイルになる点に注意
+
+### 2026-09-19 #60 / #61 / #62 の実機確認
+
+1 回のインストール（`fbe7848` を含むビルド）でまとめて確認した。主要な受入条件は
+すべて満たしている。
+
+#### #62 辞書のリビジョン固定
+
+インストールのログ:
+
+```
+-> rebuilding rakukan.dict: mozc_rev unknown != cbbb6e1bd181cb9f3b409622d916a53a35400ec7
+   Downloaded: dictionary00.txt 〜 dictionary09.txt / symbol.tsv / emoji_data.tsv
+Building rakukan.dict from 10 TSV files + symbol.tsv + emoji_data.tsv (mozc cbbb6e1bd181)...
+出力: ...\dict\rakukan.dict.new (47039357 bytes)
+-> ...\dict\rakukan.dict (44.9 MB, mozc cbbb6e1bd181)
+```
+
+- 既存の辞書は `mozc_rev` を持たないので、**`RAKUKAN_FORCE_DICT=1` なしで作り直された**
+- 取得は SHA 別の作業フォルダ `dict\mozc_tsv_cbbb6e1bd181\` から読んでいる
+- 一時ファイル `rakukan.dict.new` に出力してから差し替えている
+- `build.json` に `mozc_rev` と `mozc_source` が入った
+- 残骸なし（`.bak` / `.new` / journal / `mozc_tsv_*` のいずれも残っていない）
+- **`rakukan.dict.swap.lock`（0 バイト）は残る。これは設計どおり**（`Clear-DictionarySwapFiles`
+  は Lock を対象にしない。保持中のロックは消せず、消せば排他が崩れる）
+- 新しい辞書は 47,039,357 バイトで、**置き換える前（2026-09-12 作成）と同じサイズ**だった。
+  生成元が同じだった可能性を示すが、旧ファイルは差し替えで消えているため**内容の一致は
+  確認できていない**
+
+#### #60 プロセス別ログ
+
+- `rakukan-tsf-<PID>-<起動識別子>.log` が**プロセスごとにできた**（PID 11304 / 11856 /
+  14260 / 14300 / 36944、のちに 35552）。各プロセスに `.lock` がペアで存在する
+- 起動行に log stem が出る:
+  `rakukan TSF DLL loaded build=2026-09-19 08:34:22 UTC log=11856-1789812749923`
+- **旧 `rakukan.log` は 10:10:05Z の `Unregistered` を最後に更新が止まった**
+- `scripts/merge-logs.ps1` が 5 ファイル 289 行を時刻順に統合できた。凡例に PID・行数・
+  時刻範囲・元ファイル名が出る。**#61 の確認自体をこの統合ログで行った**
+
+#### #61 config 読み込み失敗時の設定保持
+
+`config.toml` の末尾に `[broken` を足して壊し、言語バーの「エンジン再起動」を実行した。
+
+```
+INFO  ...factory: langbar menu: ID_MENU_ENGINE_RELOAD selected
+WARN  ...engine::config: config.toml reload failed; keeping previous config:
+      path=C:\Users\n_fuk\AppData\Roaming\rakukan\config.toml
+      error=TOML parse error at line 66, column 8
+INFO  ...engine::state: engine_reload: invoked from ...factory.rs:174:13 force=true
+```
+
+- **警告にパスとエラー内容（行・桁まで）が残る**
+- ホストが再起動したあとのログが **`Selected backend (explicit): cuda`**。
+  既定値に戻っていれば `gpu_backend` が未指定になり `auto` の選択になるので、
+  **直前の設定が保たれてホストへ送られたことが確認できた**
+- `config.toml` を元に戻して再度「エンジン再起動」→ **警告なし**。直せば次の読み込みで
+  反映される
+
+#### 実機で未確認のまま残るもの
+
+- #60 の 16 MiB での退避（その量に達していない。日常利用で自然に到達する）
+- #61 の初回パース失敗時の既定値（DLL 読み込み前に壊す必要があり、サインアウト／
+  サインインを伴う。単体テストでは確認済み）
+- #62 の SHA 一致時のスキップ（次回のインストールで
+  `already built ... mozc cbbb6e1bd181, skipping` が出れば確認できる）
+- #62 の辞書のバイト単位の一致、取得・ビルドを含む同時インストール全体の安全性
