@@ -24,6 +24,18 @@
 //! 候補ごとの、組の位置）は、現行の判定で拒否され、かつ除外の対象がある連結候補の
 //! 判定で初めて必要になったときに作り、変換 1 回の中で再利用する。変換をまたいで
 //! 保持しない。
+//!
+//! # 既知の制限: 読みの長さの上限
+//!
+//! 照合表で引く読みの部分文字列は `MAX_READING_CHARS` 文字までに限る。上限が無いと
+//! 長さ n の かな run で n(n+1)/2 件を引くことになり、ライブ変換は打鍵ごとに照合表を
+//! 作り直すので、長文で遅延が 2 乗で増える。上限を入れると引く件数は約 n·L になる。
+//!
+//! 読みが上限を超える語（`だんじょきょうどうさんかく` → `男女共同参画` など）は除外の
+//! 根拠に使わず、その `参` / `拾` は従来どおり数字保存の検証で数える。システム辞書の
+//! 生成元（`dictionary00.txt`〜`dictionary09.txt`）で数えると、`参` / `拾` を含む
+//! 2 文字以上の表記を持つ組 766 件のうち、読みが 12 文字を超えるのは 13 件で、
+//! すべて固有名詞や複合語（`ロシア連邦軍参謀本部情報総局` など）。
 
 use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
@@ -32,6 +44,11 @@ use crate::digits::{Combined, NumericToken, PartRef, Run};
 
 /// 除外の対象になる大字
 const TARGET_CHARS: [char; 2] = ['参', '拾'];
+
+/// 照合表で辞書を引く、読みの部分文字列の長さの上限（文字数）。
+///
+/// これより長い読みの語は除外の根拠に使わない（モジュール冒頭の「既知の制限」）。
+pub(crate) const MAX_READING_CHARS: usize = 12;
 
 fn target_index(c: char) -> Option<usize> {
     TARGET_CHARS.iter().position(|&t| t == c)
@@ -77,9 +94,16 @@ pub(crate) fn is_exclusion_target(
 
 /// 文字位置 `pos` を含む区間
 fn part_at(parts: &[PartRef], pos: usize) -> Option<&PartRef> {
-    let i = parts.partition_point(|p| p.char_start <= pos);
-    let p = parts.get(i.checked_sub(1)?)?;
-    (pos < p.char_start + p.char_len).then_some(p)
+    parts.get(part_index_at(parts, pos)?)
+}
+
+/// 文字位置 `pos` を含む区間の添字
+fn part_index_at(parts: &[PartRef], pos: usize) -> Option<usize> {
+    let i = parts
+        .partition_point(|p| p.char_start <= pos)
+        .checked_sub(1)?;
+    let p = parts.get(i)?;
+    (pos < p.char_start + p.char_len).then_some(i)
 }
 
 // ─── 計測 ─────────────────────────────────────────────────────────────────────
@@ -103,7 +127,7 @@ pub struct LicenseStats {
 
     /// (1) 照合表を作った run の数
     pub tables_built: usize,
-    /// (1) 読みの部分文字列の数
+    /// (1) 読みの部分文字列の数（`MAX_READING_CHARS` 文字以下のもの）
     pub substrings: usize,
     /// (1) 実際に辞書を引いた回数（同じ文字列は 1 回）
     pub lookups: usize,
@@ -332,7 +356,9 @@ impl<'a> LicenseContext<'a> {
         }
     }
 
-    /// (1) かな run の照合表を、未作成なら作る
+    /// (1) かな run の照合表を、未作成なら作る。
+    ///
+    /// 引くのは長さ `MAX_READING_CHARS` 以下の部分文字列だけ。
     fn ensure_table(&mut self, run: usize) {
         if self.tables[run].is_some() {
             return;
@@ -344,7 +370,7 @@ impl<'a> LicenseContext<'a> {
         let mut index: [Vec<(usize, usize)>; 2] = [Vec::new(), Vec::new()];
         for ri in 0..n {
             let mut sub = String::new();
-            for (rj, c) in reading.iter().enumerate().skip(ri) {
+            for (rj, c) in reading.iter().enumerate().skip(ri).take(MAX_READING_CHARS) {
                 sub.push(*c);
                 let rj = rj + 1;
                 self.substrings += 1;
@@ -458,7 +484,8 @@ impl<'a> LicenseContext<'a> {
             else {
                 unreachable!("is_exclusion_target checks the shape");
             };
-            let part_idx = c.parts.partition_point(|p| p.char_start <= *start) - 1;
+            let part_idx = part_index_at(&c.parts, *start)
+                .expect("is_exclusion_target checks that a part covers the target");
             let part = c.parts[part_idx];
             self.ensure_matches(part.run, part.cand);
             let m = &self.matches[&(part.run, part.cand)];

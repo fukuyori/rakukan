@@ -791,7 +791,7 @@ fn extract_digits(s: &str, reading: &str) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum NumericToken {
     /// 算用数字・全角数字 1 文字（`digit` は半角の `b'0'..=b'9'` へ正規化済み）
-    Digit { pos: usize, digit: u8 },
+    Digit { digit: u8 },
     /// 連続した漢数字（大字を含む）の並び
     KanjiRun {
         start: usize,
@@ -881,7 +881,7 @@ pub(crate) fn scan_numeric_tokens(s: &str, reading: &str) -> Vec<NumericToken> {
             } else {
                 b'0' + (c as u32 - '０' as u32) as u8
             };
-            out.push(NumericToken::Digit { pos, digit });
+            out.push(NumericToken::Digit { digit });
             after_digit = true;
         } else if is_kanji_number_char(c) {
             if kanji_run.is_empty() {
