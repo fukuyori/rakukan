@@ -395,14 +395,54 @@ struct ConfigManager {
 
 impl ConfigManager {
     fn new() -> Self {
-        let path = config_path().unwrap_or_else(|_| PathBuf::from("config.toml"));
-        let current = load_app_config_from_path(&path).unwrap_or_default();
+        Self::from_path(config_path().unwrap_or_else(|_| PathBuf::from("config.toml")))
+    }
+
+    /// 初回の読み込み（Issue #61）。
+    ///
+    /// 保持すべき前の設定が無いので、失敗したら既定値を使う。ただし**必ず警告を
+    /// 残す**。無言で既定値へ戻すと、利用者からは「設定が勝手に初期化された」と
+    /// しか見えない。
+    fn from_path(path: PathBuf) -> Self {
+        let current = match load_app_config_from_path(&path) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                tracing::warn!(
+                    "config.toml load failed; starting with defaults: path={} error={e}",
+                    path.display()
+                );
+                AppConfig::default()
+            }
+        };
         let last_modified = file_modified(&path);
         publish_atomics(&current);
         Self {
             path,
             last_modified,
             current,
+        }
+    }
+
+    /// 再初期化（Issue #61）。**失敗したら直前の有効な設定を保つ。**
+    ///
+    /// ファイルが無い場合も保持する。削除を暗黙の「設定リセット」にしない。
+    /// ここでは `config_save_default()` を呼ばず、ファイルを作り直さない。
+    ///
+    /// 失敗時に `last_modified` を進めないので、利用者が TOML を直せば次の
+    /// 読み込みで反映される。
+    fn reinit(&mut self) {
+        match load_app_config_from_path(&self.path) {
+            Ok(cfg) => {
+                self.current = cfg;
+                self.last_modified = file_modified(&self.path);
+                publish_atomics(&self.current);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "config.toml reload failed; keeping previous config: path={} error={e}",
+                    self.path.display()
+                );
+            }
         }
     }
 
@@ -513,12 +553,15 @@ pub fn config_save_default() -> Result<()> {
     Ok(())
 }
 
+/// config.toml を読み直す。**読めなければ直前の設定を保つ**（Issue #61）。
+///
+/// 呼び出し元は DllMain（初回）、`engine_reload` のスレッド、言語バーの
+/// 「エンジン再起動」。このうち初回だけは、直前に `config_save_default()` が
+/// ファイルを作る。再初期化の経路ではファイルを作り直さない。
 pub fn init_config_manager() {
     if let Ok(mut mgr) = CONFIG_MANAGER.lock() {
         mgr.path = config_path().unwrap_or_else(|_| mgr.path.clone());
-        mgr.current = load_app_config_from_path(&mgr.path).unwrap_or_default();
-        mgr.last_modified = file_modified(&mgr.path);
-        publish_atomics(&mgr.current);
+        mgr.reinit();
     }
 }
 
@@ -814,5 +857,302 @@ enabled = true
         )
         .expect("config should parse");
         assert_eq!(cfg.live_conversion.min_chars, 3);
+    }
+}
+
+#[cfg(test)]
+mod config_load_failure_tests {
+    //! 読み込みに失敗したときの扱い（Issue #61）
+    use super::{ConfigManager, load_app_config_from_path};
+    use std::path::PathBuf;
+
+    pub(crate) fn temp_dir(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static SEQ: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rakukan-config-test-{tag}-{}-{}",
+            std::process::id(),
+            SEQ.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
+
+    pub(crate) fn write_config(path: &PathBuf, body: &str) {
+        std::fs::write(path, body).expect("write config");
+    }
+
+    /// `[conversion] num_candidates` は publish_atomics が触らないので、
+    /// 他のテストと干渉せずに「反映されたか」を見られる。
+    pub(crate) const VALID: &str = "[conversion]\nnum_candidates = 7\n";
+    pub(crate) const FIXED: &str = "[conversion]\nnum_candidates = 4\n";
+    pub(crate) const BROKEN: &str = "[conversion\nnum_candidates = ";
+
+    #[test]
+    fn broken_toml_is_a_parse_error() {
+        // 前提の確認: BROKEN は本当にパースできない
+        let dir = temp_dir("precond");
+        let path = dir.join("config.toml");
+        write_config(&path, BROKEN);
+        assert!(load_app_config_from_path(&path).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_load_uses_defaults_on_parse_error() {
+        let dir = temp_dir("first");
+        let path = dir.join("config.toml");
+        write_config(&path, BROKEN);
+
+        // 初回は保持すべき前の設定が無いので既定値を使う
+        let mgr = ConfigManager::from_path(path);
+        assert_eq!(
+            mgr.current.effective_num_candidates(),
+            super::AppConfig::default().effective_num_candidates()
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_keeps_the_previous_config_on_parse_error() {
+        let dir = temp_dir("keep");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+
+        let mut mgr = ConfigManager::from_path(path.clone());
+        assert_eq!(mgr.current.effective_num_candidates(), 7);
+
+        // 壊れた TOML に書き換えて読み直しても、既定値へ戻らない
+        write_config(&path, BROKEN);
+        mgr.reinit();
+        assert_eq!(
+            mgr.current.effective_num_candidates(),
+            7,
+            "壊れた TOML で設定が入れ替わった"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_keeps_the_previous_config_when_the_file_is_missing() {
+        let dir = temp_dir("missing");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+
+        let mut mgr = ConfigManager::from_path(path.clone());
+        assert_eq!(mgr.current.effective_num_candidates(), 7);
+
+        // 削除を暗黙の「設定リセット」にしない
+        std::fs::remove_file(&path).expect("remove");
+        mgr.reinit();
+        assert_eq!(
+            mgr.current.effective_num_candidates(),
+            7,
+            "ファイル不在で設定が入れ替わった"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_does_not_recreate_a_missing_file() {
+        let dir = temp_dir("norecreate");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+
+        let mut mgr = ConfigManager::from_path(path.clone());
+        std::fs::remove_file(&path).expect("remove");
+        mgr.reinit();
+
+        // 再初期化の経路では config_save_default() を呼ばない
+        assert!(!path.exists(), "再初期化がファイルを作り直した");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_applies_a_fixed_toml() {
+        let dir = temp_dir("fixed");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+
+        let mut mgr = ConfigManager::from_path(path.clone());
+        write_config(&path, BROKEN);
+        mgr.reinit();
+        assert_eq!(mgr.current.effective_num_candidates(), 7);
+
+        // 直せば次の読み込みで反映される
+        write_config(&path, FIXED);
+        mgr.reinit();
+        assert_eq!(
+            mgr.current.effective_num_candidates(),
+            4,
+            "直した TOML が反映されない"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod config_load_warning_tests {
+    //! 読み込み失敗の警告に何が残るか（Issue #61 の受入条件）
+    use super::ConfigManager;
+    use super::config_load_failure_tests::{BROKEN, VALID, temp_dir, write_config};
+    use std::io::Write;
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+
+    /// tracing の出力を受け取る writer。
+    #[derive(Clone)]
+    struct LogCapture(Arc<Mutex<Vec<u8>>>);
+
+    impl LogCapture {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+        fn text(&self) -> String {
+            let buf = self.0.lock().expect("lock");
+            String::from_utf8_lossy(&buf).into_owned()
+        }
+    }
+
+    impl Write for LogCapture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// `f` の間の WARN 以上を捕まえる。
+    ///
+    /// `with_default` はこのスレッドだけに効くので、並行して走る他のテストの
+    /// 出力は混ざらない。
+    fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
+        let capture = LogCapture::new();
+        let writer = capture.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .with_writer(move || writer.clone())
+            .finish();
+        let value = tracing::subscriber::with_default(subscriber, f);
+        (value, capture.text())
+    }
+
+    /// `error=` の後ろが空でないこと（エラー内容が残っていること）。
+    fn has_error_detail(text: &str) -> bool {
+        text.split("error=")
+            .skip(1)
+            .any(|rest| !rest.trim().is_empty())
+    }
+
+    fn assert_mentions_path(text: &str, path: &Path) {
+        assert!(
+            text.contains(&path.display().to_string()),
+            "警告にパスが無い: {text:?}"
+        );
+    }
+
+    #[test]
+    fn first_load_warns_with_path_and_error() {
+        let dir = temp_dir("warn-first");
+        let path = dir.join("config.toml");
+        write_config(&path, BROKEN);
+
+        let (_mgr, logs) = capture_warnings(|| ConfigManager::from_path(path.clone()));
+
+        assert!(logs.contains("WARN"), "WARN で出ていない: {logs:?}");
+        assert_mentions_path(&logs, &path);
+        assert!(has_error_detail(&logs), "エラー内容が無い: {logs:?}");
+        // 既定値を使ったことが分かる
+        assert!(
+            logs.contains("starting with defaults"),
+            "既定値を使う旨が無い: {logs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_warns_with_path_and_error_on_parse_error() {
+        let dir = temp_dir("warn-parse");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+        let mut mgr = ConfigManager::from_path(path.clone());
+
+        write_config(&path, BROKEN);
+        let (_, logs) = capture_warnings(|| mgr.reinit());
+
+        assert!(logs.contains("WARN"), "WARN で出ていない: {logs:?}");
+        assert_mentions_path(&logs, &path);
+        assert!(has_error_detail(&logs), "エラー内容が無い: {logs:?}");
+        // 前の設定を保持したことが分かる
+        assert!(
+            logs.contains("keeping previous config"),
+            "設定を保持した旨が無い: {logs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reinit_warns_with_path_and_error_when_the_file_is_missing() {
+        let dir = temp_dir("warn-missing");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+        let mut mgr = ConfigManager::from_path(path.clone());
+
+        std::fs::remove_file(&path).expect("remove");
+        let (_, logs) = capture_warnings(|| mgr.reinit());
+
+        assert!(logs.contains("WARN"), "WARN で出ていない: {logs:?}");
+        assert_mentions_path(&logs, &path);
+        // ファイル不在も理由が残る（OS のエラー文言に依存しないよう中身は問わない）
+        assert!(has_error_detail(&logs), "エラー内容が無い: {logs:?}");
+        assert!(
+            logs.contains("keeping previous config"),
+            "設定を保持した旨が無い: {logs:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn successful_load_does_not_warn() {
+        let dir = temp_dir("warn-none");
+        let path = dir.join("config.toml");
+        write_config(&path, VALID);
+
+        // 捕捉機構が生きていることを先に確かめる。
+        // これが無いと、捕まえ損ねているだけの「警告なし」でも通ってしまう。
+        let (_, sanity) = capture_warnings(|| tracing::warn!("capture check"));
+        assert!(
+            sanity.contains("capture check"),
+            "警告を捕まえられていない: {sanity:?}"
+        );
+
+        // 初回と再初期化のどちらも、成功時は警告を出さない
+        let (mut mgr, first) = capture_warnings(|| ConfigManager::from_path(path.clone()));
+        let (_, again) = capture_warnings(|| mgr.reinit());
+
+        for logs in [&first, &again] {
+            assert!(
+                !logs.contains("config.toml load failed"),
+                "成功したのに警告が出た: {logs:?}"
+            );
+            assert!(
+                !logs.contains("config.toml reload failed"),
+                "成功したのに警告が出た: {logs:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
