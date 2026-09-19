@@ -4,6 +4,8 @@
 //! LLM にはかな部分だけを渡す。数字・アルファベット・記号は原文を保持し、
 //! 半角・全角の両方を候補として提示する。
 
+pub use crate::digit_license::SurfaceSource;
+use crate::digit_license::{LicenseContext, LicenseStats, is_exclusion_target};
 use crate::kanji::KanaKanjiConverter;
 #[cfg(test)]
 use crate::segments::{Candidate, CandidateSource};
@@ -780,44 +782,142 @@ fn reading_licenses_units(reading: &str, units: &str) -> bool {
 /// 数字に隣接していない漢数字 run は従来どおり数値として解釈する。
 /// `2024ねん` → `二千二十四年` が `2024` に正規化されて一致する挙動は変わらない。
 fn extract_digits(s: &str, reading: &str) -> String {
-    let mut out = String::new();
+    digits_of_tokens(&scan_numeric_tokens(s, reading))
+}
+
+/// `scan_numeric_tokens` が返す、数を構成する単位。
+///
+/// 位置はすべて文字（`char`）単位。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NumericToken {
+    /// 算用数字・全角数字 1 文字（`digit` は半角の `b'0'..=b'9'` へ正規化済み）
+    Digit { digit: u8 },
+    /// 連続した漢数字（大字を含む）の並び
+    KanjiRun {
+        start: usize,
+        len: usize,
+        /// 並びの先頭の文字
+        first: char,
+        /// `parse_kanji_number_digits` の結果
+        digits: Option<String>,
+        /// 数字の直後の単位で、入力読みがそれを正当化するので数えないもの
+        unit_skipped: bool,
+    },
+}
+
+impl NumericToken {
+    /// 数字保存の判定で数える数字列。数えないものは `None`。
+    pub(crate) fn counted_digits(&self) -> Option<&str> {
+        match self {
+            NumericToken::Digit { digit, .. } => {
+                std::str::from_utf8(std::slice::from_ref(digit)).ok()
+            }
+            NumericToken::KanjiRun {
+                digits,
+                unit_skipped,
+                ..
+            } => {
+                if *unit_skipped {
+                    None
+                } else {
+                    digits.as_deref()
+                }
+            }
+        }
+    }
+}
+
+/// 文字列を走査して、数を構成する単位（数字 1 文字・漢数字の並び）の列を返す。
+///
+/// 数字の取り出しと区切りの規則はこの関数だけが持つ。`extract_digits`（数字保存の
+/// 判定）と、大字の除外の判定（`digit_license`）はどちらもこの結果から作る。
+///
+/// 漢数字の並びは、数字でも漢数字でもない文字、または数字で区切られる。数字の
+/// 直後の単位だけの並びは、入力読み `reading` が正当化するときだけ `unit_skipped`
+/// になる（`reading_licenses_units` を参照）。
+pub(crate) fn scan_numeric_tokens(s: &str, reading: &str) -> Vec<NumericToken> {
+    let mut out = Vec::new();
     let mut kanji_run = String::new();
+    let mut kanji_start = 0usize;
+    let mut kanji_len = 0usize;
     // 直前に出力した文字が数字だったか（漢字 run が数字に隣接しているかの判定用）
     let mut after_digit = false;
 
-    let flush_kanji_run = |out: &mut String, kanji_run: &mut String, after_digit: bool| {
-        if kanji_run.is_empty() {
+    let flush_kanji_run = |out: &mut Vec<NumericToken>,
+                           kanji_run: &mut String,
+                           start: usize,
+                           len: &mut usize,
+                           after_digit: bool| {
+        let Some(first) = kanji_run.chars().next() else {
             return;
-        }
+        };
         // 数字の直後の「万」「千」などは、入力読みに対応する数詞かなが
         // ある場合に限り、その数字に付いた単位として読み飛ばす
-        if !(after_digit
+        let unit_skipped = after_digit
             && is_unit_only_kanji_run(kanji_run)
-            && reading_licenses_units(reading, kanji_run))
-            && let Some(digits) = parse_kanji_number_digits(kanji_run)
-        {
-            out.push_str(&digits);
-        }
+            && reading_licenses_units(reading, kanji_run);
+        out.push(NumericToken::KanjiRun {
+            start,
+            len: *len,
+            first,
+            digits: parse_kanji_number_digits(kanji_run),
+            unit_skipped,
+        });
         kanji_run.clear();
+        *len = 0;
     };
 
-    for c in s.chars() {
-        if c.is_ascii_digit() {
-            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
-            out.push(c);
-            after_digit = true;
-        } else if ('０'..='９').contains(&c) {
-            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
-            out.push(char::from_u32(c as u32 - '０' as u32 + '0' as u32).unwrap_or(c));
+    for (pos, c) in s.chars().enumerate() {
+        if c.is_ascii_digit() || ('０'..='９').contains(&c) {
+            flush_kanji_run(
+                &mut out,
+                &mut kanji_run,
+                kanji_start,
+                &mut kanji_len,
+                after_digit,
+            );
+            let digit = if c.is_ascii_digit() {
+                c as u8
+            } else {
+                b'0' + (c as u32 - '０' as u32) as u8
+            };
+            out.push(NumericToken::Digit { digit });
             after_digit = true;
         } else if is_kanji_number_char(c) {
+            if kanji_run.is_empty() {
+                kanji_start = pos;
+            }
             kanji_run.push(c);
+            kanji_len += 1;
         } else {
-            flush_kanji_run(&mut out, &mut kanji_run, after_digit);
+            flush_kanji_run(
+                &mut out,
+                &mut kanji_run,
+                kanji_start,
+                &mut kanji_len,
+                after_digit,
+            );
             after_digit = false;
         }
     }
-    flush_kanji_run(&mut out, &mut kanji_run, after_digit);
+    flush_kanji_run(
+        &mut out,
+        &mut kanji_run,
+        kanji_start,
+        &mut kanji_len,
+        after_digit,
+    );
+    out
+}
+
+/// トークン列から、数字保存の判定で比べる数字列を作る。
+pub(crate) fn digits_of_tokens(tokens: &[NumericToken]) -> String {
+    let mut out = String::new();
+    for t in tokens {
+        if let Some(d) = t.counted_digits() {
+            out.push_str(d);
+        }
+    }
     out
 }
 
@@ -893,6 +993,11 @@ fn build_local_context(runs: &[Run], kana_index: usize, global_context: &str) ->
     ctx
 }
 
+/// `surfaces` は、かな run の読みが正当化する `参` / `拾` を数えないための辞書
+/// （`digit_license` を参照）。`None` なら現行と同じ判定になる。
+// 呼び出し元 2 か所（`Engine::convert` / 変換ワーカー）が設定を個別に持っているので、
+// 引数を構造体にまとめても組み立てが増えるだけになる。
+#[allow(clippy::too_many_arguments)]
 pub fn convert_with_digit_protection(
     converter: &KanaKanjiConverter,
     reading: &str,
@@ -901,6 +1006,7 @@ pub fn convert_with_digit_protection(
     digit_candidates_order: &[DigitCandidateKind],
     alpha_fullwidth_first: bool,
     symbol_fullwidth_first: bool,
+    surfaces: Option<&dyn SurfaceSource>,
 ) -> crate::kanji::error::Result<Vec<String>> {
     let runs = split_by_digits(reading);
 
@@ -981,12 +1087,62 @@ pub fn convert_with_digit_protection(
         }
     }
 
-    let combined = combine_runs(&run_candidates, num_candidates);
+    let (verified, stats) =
+        combine_and_verify(reading, &runs, &run_candidates, num_candidates, surfaces);
+    stats.log(reading);
+    Ok(verified)
+}
 
-    let mut verified: Vec<String> = combined
-        .into_iter()
-        .filter(|c| verify_digits_preserved(reading, c))
-        .collect();
+/// 混在経路の後半: run ごとの候補を連結し、数字保存の検証を通ったものを返す。
+///
+/// 変換器を呼ぶ部分と分けてあるので、テストと計測では `run_candidates` を
+/// 直接与えられる。`surfaces` があれば、かな run の読みで正当化できる
+/// `参` / `拾` を数えない判定も行う（`digit_license` を参照）。
+pub(crate) fn combine_and_verify(
+    reading: &str,
+    runs: &[Run],
+    run_candidates: &[Vec<String>],
+    num_candidates: usize,
+    surfaces: Option<&dyn SurfaceSource>,
+) -> (Vec<String>, LicenseStats) {
+    let mut stats = LicenseStats::default();
+    let t0 = std::time::Instant::now();
+    let combined = combine_runs_with_origin(run_candidates, num_candidates);
+    let input_digits = extract_digits(reading, reading);
+    let kana_runs: Vec<bool> = runs.iter().map(|r| !r.is_literal()).collect();
+    stats.origin_time += t0.elapsed();
+
+    let mut license = surfaces.map(|s| LicenseContext::new(s, runs, run_candidates));
+
+    let mut verified: Vec<String> = Vec::with_capacity(combined.len());
+    for c in combined {
+        let t = std::time::Instant::now();
+        let tokens = scan_numeric_tokens(&c.text, reading);
+        let current_ok = digits_of_tokens(&tokens) == input_digits;
+        let has_target = !current_ok
+            && tokens
+                .iter()
+                .any(|tok| is_exclusion_target(tok, &c.parts, &kana_runs));
+        stats.origin_time += t.elapsed();
+        stats.tokens_max = stats.tokens_max.max(tokens.len());
+        stats.parts_max = stats.parts_max.max(c.parts.len());
+
+        let ok = if current_ok {
+            true
+        } else if !has_target {
+            false
+        } else if let Some(ctx) = license.as_mut() {
+            ctx.judge(&c, &tokens, &kana_runs, input_digits.as_bytes(), &mut stats)
+        } else {
+            false
+        };
+        if ok {
+            verified.push(c.text);
+        }
+    }
+    if let Some(ctx) = &license {
+        ctx.fill_stats(&mut stats);
+    }
 
     // 数詞（「5まん」→「5万」）の救済は、かな run の候補へ漢数詞を足す形で
     // 上の run ループが行う。`extract_digits()` が数字直後の単位を独立した
@@ -999,40 +1155,81 @@ pub fn convert_with_digit_protection(
     verified.truncate(num_candidates);
 
     if verified.is_empty() {
-        Ok(vec![reading.to_string()])
+        (vec![reading.to_string()], stats)
     } else {
-        Ok(verified)
+        (verified, stats)
     }
 }
 
-fn combine_runs(run_candidates: &[Vec<String>], limit: usize) -> Vec<String> {
+/// 連結した候補の中で、ある run の候補が占める区間（文字位置）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct PartRef {
+    /// `run_candidates` の添字
+    pub run: usize,
+    /// `run_candidates[run]` の中の添字
+    pub cand: usize,
+    pub char_start: usize,
+    pub char_len: usize,
+}
+
+/// 連結した候補と、その生成元。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Combined {
+    pub text: String,
+    /// 候補が空の run は区間を作らない（連結でも読み飛ばすため）
+    pub parts: Vec<PartRef>,
+}
+
+/// `run_candidates` を前から組み合わせて連結する（生成元の区間つき）。
+///
+/// 組み合わせの順序・途中の打ち切り（`limit * 2`）・最終的な `limit` 件への切り詰めは
+/// `combine_runs` と同じ。
+pub(crate) fn combine_runs_with_origin(
+    run_candidates: &[Vec<String>],
+    limit: usize,
+) -> Vec<Combined> {
     if run_candidates.is_empty() {
         return vec![];
     }
 
-    let mut results: Vec<String> = vec![String::new()];
+    let mut results: Vec<(Combined, usize)> = vec![(
+        Combined {
+            text: String::new(),
+            parts: Vec::with_capacity(run_candidates.len()),
+        },
+        0,
+    )];
 
-    for cands in run_candidates {
+    let push = |dst: &mut (Combined, usize), run: usize, cand: usize, s: &str, len: usize| {
+        dst.0.text.push_str(s);
+        dst.0.parts.push(PartRef {
+            run,
+            cand,
+            char_start: dst.1,
+            char_len: len,
+        });
+        dst.1 += len;
+    };
+
+    for (run, cands) in run_candidates.iter().enumerate() {
         if cands.is_empty() {
             continue;
         }
+        let lens: Vec<usize> = cands.iter().map(|c| c.chars().count()).collect();
         if cands.len() == 1 {
             for r in &mut results {
-                r.push_str(&cands[0]);
+                push(r, run, 0, &cands[0], lens[0]);
             }
         } else {
             let mut new_results = Vec::with_capacity(results.len() * cands.len());
-            for r in &results {
-                for c in cands {
+            'outer: for r in &results {
+                for (cand, c) in cands.iter().enumerate() {
                     let mut combined = r.clone();
-                    combined.push_str(c);
+                    push(&mut combined, run, cand, c, lens[cand]);
                     new_results.push(combined);
                     if new_results.len() >= limit * 2 {
-                        break;
+                        break 'outer;
                     }
-                }
-                if new_results.len() >= limit * 2 {
-                    break;
                 }
             }
             results = new_results;
@@ -1040,7 +1237,14 @@ fn combine_runs(run_candidates: &[Vec<String>], limit: usize) -> Vec<String> {
     }
 
     results.truncate(limit);
-    results
+    results.into_iter().map(|(c, _)| c).collect()
+}
+
+fn combine_runs(run_candidates: &[Vec<String>], limit: usize) -> Vec<String> {
+    combine_runs_with_origin(run_candidates, limit)
+        .into_iter()
+        .map(|c| c.text)
+        .collect()
 }
 
 #[cfg(test)]
@@ -1546,9 +1750,10 @@ mod tests {
             "10まん",
             "3せん",
         ] {
-            let cands =
-                convert_with_digit_protection(&converter, reading, "", 9, &order, false, false)
-                    .unwrap_or_else(|e| panic!("{reading}: {e:?}"));
+            let cands = convert_with_digit_protection(
+                &converter, reading, "", 9, &order, false, false, None,
+            )
+            .unwrap_or_else(|e| panic!("{reading}: {e:?}"));
             println!("{reading:>12} -> {cands:?}");
         }
     }
@@ -1598,3 +1803,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "digits_bench.rs"]
+mod bench;

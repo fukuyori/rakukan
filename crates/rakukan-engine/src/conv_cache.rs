@@ -36,7 +36,7 @@
 use std::sync::{Arc, Condvar, LazyLock, Mutex};
 
 use crate::kanji::KanaKanjiConverter;
-use crate::{DigitCandidateKind, default_digit_candidates_order};
+use crate::{DictStore, DigitCandidateKind, default_digit_candidates_order};
 
 // ─── リクエスト ────────────────────────────────────────────────────────────────
 
@@ -52,6 +52,8 @@ struct Request {
     digit_candidates_order: Vec<DigitCandidateKind>,
     alpha_fullwidth_first: bool,
     symbol_fullwidth_first: bool,
+    /// 数字保存の検証で、大字の除外の根拠に使う辞書（`bg_start` の時点のもの）
+    dict: Option<DictStore>,
 }
 
 // ─── キャッシュ状態 ────────────────────────────────────────────────────────────
@@ -151,6 +153,7 @@ fn worker_loop(cache: Arc<Cache>) {
         let digit_candidates_order = req.digit_candidates_order.clone();
         let alpha_fullwidth_first = req.alpha_fullwidth_first;
         let symbol_fullwidth_first = req.symbol_fullwidth_first;
+        let dict = req.dict;
         let converter = req.converter;
 
         let t = std::time::Instant::now();
@@ -164,6 +167,8 @@ fn worker_loop(cache: Arc<Cache>) {
                     &digit_candidates_order,
                     alpha_fullwidth_first,
                     symbol_fullwidth_first,
+                    dict.as_ref()
+                        .map(|d| d as &dyn crate::digits::SurfaceSource),
                 )
             })) {
                 Ok(Ok(cands)) => {
@@ -224,6 +229,7 @@ pub fn start(
     digit_candidates_order: Vec<DigitCandidateKind>,
     alpha_fullwidth_first: bool,
     symbol_fullwidth_first: bool,
+    dict: Option<DictStore>,
 ) -> Option<KanaKanjiConverter> {
     if hiragana.is_empty() {
         return Some(converter);
@@ -260,6 +266,7 @@ pub fn start(
         },
         alpha_fullwidth_first,
         symbol_fullwidth_first,
+        dict,
     });
     cache.cond.notify_one();
     None
