@@ -25,7 +25,9 @@ static LLAMA_BACKEND: OnceLock<std::result::Result<LlamaBackend, String>> = Once
 /// 生成全体のウォールクロック上限秒数（greedy / beam 共通）。
 /// GPU ハング以外の「EOS が出ずに max_new_tokens まで走り続ける」ケースを打ち切る。
 /// GPU ハング（ctx.decode がブロッキングになる）はここでは防げないが、
-/// その場合は TSF 側のウォッチドッグ (bg_timeout_watchdog) が engine_reload で対処する。
+/// その場合はホストの詰まりの監視（`rakukan_engine_rpc::health::STALL_THRESHOLD`、Issue #57）が
+/// ホストを作り直して対処する。これは生成 1 回の上限で、変換 1 回は かな run ごとに
+/// 生成を呼ぶので、変換全体の上限ではない。
 const GEN_TIMEOUT_SECS: u64 = 15;
 
 /// Get or initialize the global llama.cpp backend

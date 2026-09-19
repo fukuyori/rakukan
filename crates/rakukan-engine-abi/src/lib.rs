@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 9;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 10;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
 
@@ -81,6 +81,83 @@ impl Segments {
     }
 }
 
+// ─── 詰まりの監視（Issue #57）──────────────────────────────────────────────────
+
+type BgRunStateFn = unsafe extern "C" fn(*mut u64, *mut u64) -> u8;
+type BgConfirmStalledFn = unsafe extern "C" fn(u64, u64) -> u8;
+
+/// BG 変換の実行の状態（DLL の `engine_bg_run_state`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgRunState {
+    /// 状態を読めない（ロックの poison）。完了にも詰まりにも数えない
+    Unknown,
+    /// 実行中でない。`last_run_id` は直前の実行の番号
+    NotRunning { last_run_id: u64 },
+    /// 実行番号 `run_id` が、`Running` に入ってから `elapsed` 経っている
+    Running {
+        run_id: u64,
+        elapsed: std::time::Duration,
+    },
+}
+
+/// 変換の詰まりを監視するための口（Issue #57）。
+///
+/// 変換キャッシュとワーカーは DLL に 1 つずつなので、監視の単位はエンジンの
+/// インスタンスではなく読み込んだ DLL になる。この口は DLL（`Arc<Library>`）を
+/// 保持するので、エンジンを作り直しても（`Reload` で `DynEngine` を落としても）
+/// 呼んでいる途中の DLL はアンロードされない。
+///
+/// エンジンのハンドルを取らないので、ホストはエンジンのロック（変換中は長く
+/// 保持される）を経由せずに呼べる。
+#[derive(Clone)]
+pub struct StallProbe {
+    run_state: BgRunStateFn,
+    confirm_stalled: BgConfirmStalledFn,
+    _lib: Arc<Library>, // 関数ポインタの先の DLL をアンロードしないよう保持
+}
+
+impl StallProbe {
+    /// 現在の実行の状態
+    pub fn run_state(&self) -> BgRunState {
+        let mut run_id = 0u64;
+        let mut elapsed_ms = 0u64;
+        let code = unsafe { (self.run_state)(&mut run_id, &mut elapsed_ms) };
+        decode_run_state(code, run_id, elapsed_ms)
+    }
+
+    /// 実行番号 `run_id` が、まだ `Running` のまま `threshold` 以上経っているかを
+    /// DLL の中で 1 回のロックで確かめる。状態を読めないときは `None`。
+    pub fn confirm_stalled(&self, run_id: u64, threshold: std::time::Duration) -> Option<bool> {
+        let threshold_ms = u64::try_from(threshold.as_millis()).unwrap_or(u64::MAX);
+        let code = unsafe { (self.confirm_stalled)(run_id, threshold_ms) };
+        decode_confirm_stalled(code)
+    }
+}
+
+/// `engine_bg_run_state` の戻り値の対応（DLL 側の `BG_RUN_*`）。
+/// 知らない値は `Unknown`（完了にも詰まりにも数えない）。
+fn decode_run_state(code: u8, run_id: u64, elapsed_ms: u64) -> BgRunState {
+    match code {
+        1 => BgRunState::NotRunning {
+            last_run_id: run_id,
+        },
+        2 => BgRunState::Running {
+            run_id,
+            elapsed: std::time::Duration::from_millis(elapsed_ms),
+        },
+        _ => BgRunState::Unknown,
+    }
+}
+
+/// `engine_bg_confirm_stalled` の戻り値の対応（DLL 側の `BG_STALL_*`）。
+fn decode_confirm_stalled(code: u8) -> Option<bool> {
+    match code {
+        1 => Some(true),
+        2 => Some(false),
+        _ => None,
+    }
+}
+
 // ─── EngineVTable ──────────────────────────────────────────────────────────────
 // DLL からロードした関数ポインタのコレクション
 
@@ -112,6 +189,9 @@ struct EngineVTable {
     bg_peek_top_candidate: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
     bg_reclaim: unsafe extern "C" fn(*mut c_void),
     bg_wait_ms: unsafe extern "C" fn(*mut c_void, u64) -> u8,
+    // 詰まりの監視（Issue #57、ABI v10）。ハンドルを取らない
+    bg_run_state: BgRunStateFn,
+    bg_confirm_stalled: BgConfirmStalledFn,
 
     // 確定・リセット
     commit: unsafe extern "C" fn(*mut c_void, *const c_char),
@@ -215,6 +295,8 @@ impl EngineVTable {
             bg_peek_top_candidate: load_sym!(lib, b"engine_bg_peek_top_candidate\0"),
             bg_reclaim: load_sym!(lib, b"engine_bg_reclaim\0"),
             bg_wait_ms: load_sym!(lib, b"engine_bg_wait_ms\0"),
+            bg_run_state: load_sym!(lib, b"engine_bg_run_state\0"),
+            bg_confirm_stalled: load_sym!(lib, b"engine_bg_confirm_stalled\0"),
             commit: load_sym!(lib, b"engine_commit\0"),
             commit_as_hiragana: load_sym!(lib, b"engine_commit_as_hiragana\0"),
             reset_preedit: load_sym!(lib, b"engine_reset_preedit\0"),
@@ -462,6 +544,15 @@ impl DynEngine {
     /// BG 変換を起動する。true = 起動した
     pub fn bg_start(&mut self, n_cands: usize) -> bool {
         unsafe { (self.vtable.bg_start)(self.handle, n_cands as u32) }
+    }
+
+    /// 詰まりの監視の口（Issue #57）。この DLL を保持する
+    pub fn stall_probe(&self) -> StallProbe {
+        StallProbe {
+            run_state: self.vtable.bg_run_state,
+            confirm_stalled: self.vtable.bg_confirm_stalled,
+            _lib: Arc::clone(&self._lib),
+        }
     }
 
     /// BG 状態文字列（診断用）
@@ -736,6 +827,38 @@ pub fn build_mismatch(host: &HostBuildId, dll: &EngineBuildInfo) -> Option<Strin
         ));
     }
     None
+}
+
+#[cfg(test)]
+mod stall_probe_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn run_state_codes_match_the_dll() {
+        assert_eq!(decode_run_state(0, 5, 9), BgRunState::Unknown);
+        assert_eq!(
+            decode_run_state(1, 5, 0),
+            BgRunState::NotRunning { last_run_id: 5 }
+        );
+        assert_eq!(
+            decode_run_state(2, 5, 31_000),
+            BgRunState::Running {
+                run_id: 5,
+                elapsed: Duration::from_secs(31)
+            }
+        );
+        // 知らない値は不明として扱う（詰まりにも完了にも数えない）
+        assert_eq!(decode_run_state(9, 5, 31_000), BgRunState::Unknown);
+    }
+
+    #[test]
+    fn confirm_codes_match_the_dll() {
+        assert_eq!(decode_confirm_stalled(0), None);
+        assert_eq!(decode_confirm_stalled(1), Some(true));
+        assert_eq!(decode_confirm_stalled(2), Some(false));
+        assert_eq!(decode_confirm_stalled(9), None);
+    }
 }
 
 #[cfg(test)]

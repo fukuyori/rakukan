@@ -560,13 +560,35 @@ GPU ドライバ更新・スリープ復帰・TDR でホストの GPU デバイ�
 - `dispatch_engine` の応答後に `bg_status()` を観測し、**状態が変わったときだけ**数える
   （`crates/rakukan-engine-rpc/src/health.rs` の `HealthTracker`）
 - 連続 3 回失敗 → `%LOCALAPPDATA%\rakukan\engine-recovery.txt` に
-  `<exited_at_ms> <attempt>` を書いてホストが自己終了し、次の呼び出しでクライアントが spawn し直す
+  `<exited_at_ms> <attempt> <reason>` を書いてホストが自己終了し、次の呼び出しでクライアントが spawn し直す
+  （`reason` は `inference_failed` / `stall`。旧形式の 2 列は `unknown` として読む）
 - マーカーが 5 分以内で `attempt >= 2` の状態からまた 3 回失敗 → `unrecoverable`（ホストは
   生き続け、辞書候補のみで動作）
 - 推論が 1 回成功したら失敗の回数とマーカーを捨てる
 - TSF は `EngineHealth` を問い合わせて status 行の文言を決めるだけ
 - 検証用に `[diagnostics] force_inference_failure` で推論を必ず失敗させられる
 - プロセス内でモデルだけ作り直す方式は、現在の ABI では converter を差し替えられないため採っていない
+
+### 変換の詰まりからの復帰（Issue #57）
+
+BG 変換が同じ実行のまま 30 秒（`health::STALL_THRESHOLD`）以上 `Running` を続けたら、ホストが
+上の段階を 1 つ進める（連続 3 回の判定は経由しない。マーカーと試行回数は推論の失敗と共通）。
+
+- 実行の識別はエンジン DLL の変換キャッシュが持つ。ワーカーが `Running` に入るたびに実行番号を進め、
+  入った時刻を記録する（ABI v10 の `engine_bg_run_state` / `engine_bg_confirm_stalled`。
+  どちらもエンジンのハンドルを取らない）
+- ホストの監視スレッドが 1 秒ごとに状態を読み、閾値を超えたら DLL 側の 1 回のロックの中で
+  「同じ実行がまだ `Running` か」を確かめてから、自己終了（または `unrecoverable`）する。
+  エンジンのロックは経由しない。監視の口（`StallProbe`）が DLL を保持するので、エンジンを作り
+  直しても呼んでいる DLL はアンロードされない
+- 発動ログに実行番号・経過時間・閾値・試行回数を残す
+- 30 秒は暫定の運用閾値で、正当な変換でも超えうる（生成の上限 15 秒は生成 1 回ぶんで、変換 1 回は
+  かな run ごとに生成を呼ぶ）。誤発動のコストと待たされるコストの釣り合いで選んでいる
+- 検出できないもの: 変換要求がキューに積まれたまま拾われない詰まり（`Idle && pending=Some`）。
+  状態を読めないとき（ロックの poison）は完了にも詰まりにも数えない
+- 以前は TSF 側の `bg_timeout_watchdog` が「running を観測した時刻」から数えて `engine_reload_force()`
+  を撃っていたが、起点が変換と結び付いておらず、完了を観測しない経路で古い時刻が残って誤発動したので
+  取り除いた
 
 ### config.toml の即時反映
 
@@ -583,7 +605,7 @@ AV を誘発するため）。
 3. ラッチを落とし、100ms 待ってから TSF 側のハンドルを捨てる（終了途中のパイプへ再接続する race を避ける）
 4. 次の呼び出しで `connect_or_spawn` が新しいホストを spawn し、新しい config で `Create` する
 
-`engine_reload_force()`（言語バーメニューの「エンジン再起動」と BG ウォッチドッグ）は比較せずに `Shutdown` を送る。
+`engine_reload_force()`（言語バーメニューの「エンジン再起動」）は比較せずに `Shutdown` を送る。
 
 TSF DLL はアプリごとに別プロセスで動くため、同じ config で複数プロセスが reload しても
 ホストの再起動は 1 回で済む（2 回目以降は `Bool(false)`）。ただし reload イベントは
