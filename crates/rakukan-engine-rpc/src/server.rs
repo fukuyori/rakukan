@@ -18,10 +18,10 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use rakukan_engine_abi::DynEngine;
+use rakukan_engine_abi::{BgRunState, DynEngine, StallProbe};
 
 use crate::codec::{read_frame, write_frame};
-use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker};
+use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker, RecoveryReason};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
 
@@ -44,20 +44,60 @@ pub struct HostShared {
     health: Mutex<HealthTracker>,
     /// 復帰のためにホストを終了する要求。応答を書いた後に見る。
     exit_after_response: AtomicBool,
+    /// 変換の詰まりを監視する口（Issue #57）。エンジンを作るたびに持ち替える。
+    ///
+    /// `state` とは別ロックにする: 監視スレッドは変換中（engine ロック保持中）でも
+    /// 状態を読めなければならない。ロックは口を複製する瞬間だけ保持する。
+    stall_probe: Mutex<Option<StallProbe>>,
 }
 
 impl HostShared {
     pub fn new() -> Self {
         // 直近に自己終了しているかをマーカーから読む（Issue #43）。
-        let prior = health::prior_attempts(health::load_marker(), health::now_ms());
+        let marker = health::load_marker();
+        let prior = health::prior_attempts(marker, health::now_ms());
         if prior > 0 {
-            tracing::warn!("recovery marker found: prior self-exit attempts={prior}");
+            let reason = marker.map_or(RecoveryReason::Unknown, |m| m.reason);
+            tracing::warn!(
+                "recovery marker found: prior self-exit attempts={prior} reason={}",
+                reason.as_str()
+            );
         }
         Self {
             state: Mutex::new(SharedEngineState { engine: None }),
             config_json: Mutex::new(None),
             health: Mutex::new(HealthTracker::new(prior)),
             exit_after_response: AtomicBool::new(false),
+            stall_probe: Mutex::new(None),
+        }
+    }
+
+    /// 変換の詰まりを 1 回観測し、ホストが取るべき動作と、自己終了するときに
+    /// マーカーへ書く試行回数を返す（Issue #57）。
+    fn health_observe_stall(&self) -> (Action, u32) {
+        let mut g = match self.health.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        let action = g.observe_stall();
+        (action, g.next_attempt())
+    }
+
+    /// 監視する DLL を、新しく作ったエンジンの DLL へ持ち替える。
+    ///
+    /// 同じ DLL を読み直した場合は OS 上は同じモジュール（変換キャッシュも同じ）
+    /// なので、持ち替えても実行番号は続きから数えられる。
+    fn set_stall_probe(&self, probe: StallProbe) {
+        match self.stall_probe.lock() {
+            Ok(mut g) => *g = Some(probe),
+            Err(p) => *p.into_inner() = Some(probe),
+        }
+    }
+
+    fn stall_probe(&self) -> Option<StallProbe> {
+        match self.stall_probe.lock() {
+            Ok(g) => g.clone(),
+            Err(p) => p.into_inner().clone(),
         }
     }
 
@@ -126,6 +166,7 @@ pub struct SharedEngineState {
 pub fn serve(engine: SharedEngine) -> Result<()> {
     let pipe_name = pipe_name_for_current_user();
     tracing::info!("engine host: listening on {pipe_name}");
+    spawn_stall_watchdog(engine.clone());
     loop {
         let stream = PipeStream::create_server(&pipe_name)
             .with_context(|| format!("create server pipe {pipe_name}"))?;
@@ -182,6 +223,7 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
             health::write_marker(RecoveryMarker {
                 exited_at_ms: health::now_ms(),
                 attempt,
+                reason: RecoveryReason::InferenceFailed,
             });
             std::thread::sleep(Duration::from_millis(50));
             tracing::warn!("rpc: exiting host for recovery (attempt={attempt})");
@@ -362,6 +404,7 @@ fn load_engine_into(
             if !eng.is_kanji_ready() {
                 eng.start_load_model();
             }
+            host.set_stall_probe(eng.stall_probe());
             slot.engine = Some(eng);
             host.set_config(config_json);
             Response::Unit
@@ -413,6 +456,109 @@ fn apply_health_action(shared: &SharedEngine, eng: &mut DynEngine) {
             tracing::info!("engine health: inference succeeded — recovery state cleared");
             health::clear_marker();
         }
+    }
+}
+
+// ─── 変換の詰まりの監視（Issue #57）─────────────────────────────────────────────
+
+/// 状態 1 回分の読みから、詰まりを確かめる対象の実行番号を選ぶ。
+///
+/// 同じ実行に対して動作するのは 1 回だけ（`acted` に覚える）。`unrecoverable` に
+/// なってホストが生き続けても、同じ詰まりで毎秒ログを出さないため。
+fn stall_candidate(state: BgRunState, threshold: Duration, acted: Option<u64>) -> Option<u64> {
+    match state {
+        BgRunState::Running { run_id, elapsed }
+            if elapsed >= threshold && acted != Some(run_id) =>
+        {
+            Some(run_id)
+        }
+        // 不明（poison）は完了にも詰まりにも数えない
+        _ => None,
+    }
+}
+
+/// 変換の詰まりを監視するスレッドを起動する（Issue #57）。
+///
+/// [`health::STALL_POLL_INTERVAL`] ごとに DLL の変換キャッシュから「実行番号と
+/// `Running` に入ってからの経過時間」を読み、同じ実行が [`health::STALL_THRESHOLD`]
+/// 以上 `Running` のままなら、DLL 側の 1 回のロックの中で「同じ実行がまだ
+/// `Running` で、経過時間が閾値以上か」を確かめてから段階を進める。確かめる
+/// 前に完了していたり次の実行に入っていたりすれば、何もしない。
+///
+/// 監視はエンジンのロック（変換中は長く保持される）を経由しない。DLL を保持する
+/// 口（[`StallProbe`]）を複製して使うので、途中でエンジンが作り直されても
+/// 呼んでいる DLL はアンロードされない。
+///
+/// 自己終了はこのスレッドから直接行う（詰まった変換に応答を待つ相手はいない）。
+/// その瞬間に処理中の要求があれば応答は失われ、クライアントは透過再接続で
+/// 新しいホストへ繋ぎ直す。
+fn spawn_stall_watchdog(shared: SharedEngine) {
+    let spawned = std::thread::Builder::new()
+        .name("rakukan-stall-watchdog".into())
+        .spawn(move || {
+            let mut acted: Option<u64> = None;
+            loop {
+                std::thread::sleep(health::STALL_POLL_INTERVAL);
+                let Some(probe) = shared.stall_probe() else {
+                    continue;
+                };
+                let Some(run_id) =
+                    stall_candidate(probe.run_state(), health::STALL_THRESHOLD, acted)
+                else {
+                    continue;
+                };
+                // 確認の直後に完了しても、この実行が閾値以上止まっていた事実は変わらない
+                match probe.confirm_stalled(run_id, health::STALL_THRESHOLD) {
+                    Some(true) => {}
+                    Some(false) => continue,
+                    None => {
+                        tracing::debug!(
+                            "stall watchdog: state unavailable while confirming run_id={run_id}"
+                        );
+                        continue;
+                    }
+                }
+                acted = Some(run_id);
+                // 確認の後の経過時間（ログ用。確認の時点で閾値以上だった）
+                let elapsed_ms = match probe.run_state() {
+                    BgRunState::Running {
+                        run_id: r, elapsed, ..
+                    } if r == run_id => elapsed.as_millis(),
+                    _ => health::STALL_THRESHOLD.as_millis(),
+                };
+                on_stall_confirmed(&shared, run_id, elapsed_ms);
+            }
+        });
+    if let Err(e) = spawned {
+        tracing::error!(
+            "stall watchdog: failed to spawn ({e}); stalled conversions will not be detected"
+        );
+    }
+}
+
+fn on_stall_confirmed(shared: &SharedEngine, run_id: u64, elapsed_ms: u128) {
+    let threshold_s = health::STALL_THRESHOLD.as_secs();
+    let (action, attempt) = shared.health_observe_stall();
+    match action {
+        Action::ExitHost => {
+            tracing::warn!(
+                "engine health: conversion stalled reason=stall run_id={run_id} elapsed_ms={elapsed_ms} threshold_s={threshold_s} attempt={attempt} — exiting host so a fresh one is spawned"
+            );
+            health::write_marker(RecoveryMarker {
+                exited_at_ms: health::now_ms(),
+                attempt,
+                reason: RecoveryReason::Stall,
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            std::process::exit(0);
+        }
+        Action::MarkUnrecoverable => {
+            tracing::error!(
+                "engine health: conversion stalled reason=stall run_id={run_id} elapsed_ms={elapsed_ms} threshold_s={threshold_s} attempt={attempt} limit={} — giving up (unrecoverable)",
+                health::UNRECOVERABLE_ATTEMPTS
+            );
+        }
+        Action::None | Action::Recovered => {}
     }
 }
 
@@ -600,4 +746,40 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
 #[allow(dead_code)]
 pub fn sleep_short() {
     std::thread::sleep(Duration::from_millis(50));
+}
+
+#[cfg(test)]
+mod stall_tests {
+    use super::*;
+
+    const LIMIT: Duration = Duration::from_secs(30);
+
+    fn running(run_id: u64, secs: u64) -> BgRunState {
+        BgRunState::Running {
+            run_id,
+            elapsed: Duration::from_secs(secs),
+        }
+    }
+
+    #[test]
+    fn candidate_only_past_the_threshold() {
+        assert_eq!(stall_candidate(running(4, 29), LIMIT, None), None);
+        assert_eq!(stall_candidate(running(4, 30), LIMIT, None), Some(4));
+    }
+
+    #[test]
+    fn same_run_is_acted_on_once() {
+        assert_eq!(stall_candidate(running(4, 90), LIMIT, Some(4)), None);
+        // 次の実行が詰まれば、また対象になる
+        assert_eq!(stall_candidate(running(5, 30), LIMIT, Some(4)), Some(5));
+    }
+
+    #[test]
+    fn unknown_or_idle_is_never_a_stall() {
+        assert_eq!(stall_candidate(BgRunState::Unknown, LIMIT, None), None);
+        assert_eq!(
+            stall_candidate(BgRunState::NotRunning { last_run_id: 4 }, LIMIT, None),
+            None
+        );
+    }
 }

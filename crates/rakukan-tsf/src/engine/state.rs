@@ -421,45 +421,8 @@ pub fn engine_force_recreate() {
 /// DLL マッピングをまとめて回収するため、unmap race が原理的に起きない。
 ///
 /// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** は
-/// 新 PID の `Create { config_json }` で反映される。client 側は `shutdown()` に
-/// BG 変換ワーカーが Running 状態で長時間詰まっていた場合に自動で engine_reload を起動する。
+/// 新 PID の `Create { config_json }` で反映される。
 ///
-/// `is_stuck=true` → 詰まり開始時刻を記録し、30 秒超で engine_reload を自動起動。
-/// `is_stuck=false` → タイマーをリセット（正常完了・回復時に呼ぶ）。
-///
-/// このウォッチドッグは「LLM が EOS なしに max_new_tokens まで走り切る」より
-/// 長い時間かかるケース（GPU ハング等）への最終防衛線。
-/// 通常の生成遅延は engine 側の GEN_TIMEOUT_SECS (15 秒) でカバーする。
-static BG_WATCHDOG: Mutex<Option<std::time::Instant>> = Mutex::new(None);
-
-pub fn bg_timeout_watchdog(is_stuck: bool) {
-    let Ok(mut guard) = BG_WATCHDOG.try_lock() else {
-        return;
-    };
-    if !is_stuck {
-        if guard.is_some() {
-            tracing::debug!("bg_timeout_watchdog: reset (recovered)");
-            *guard = None;
-        }
-        return;
-    }
-    let since = guard.get_or_insert_with(std::time::Instant::now);
-    let elapsed_secs = since.elapsed().as_secs();
-    tracing::debug!("bg_timeout_watchdog: conv worker stuck {elapsed_secs}s");
-    // 閾値はエンジン側 GEN_TIMEOUT_SECS (15 秒) より長くすること。
-    // 短くすると正常な長時間生成（beam 経路の上限 15 秒）中に誤発動して
-    // engine_reload が変換を殺してしまう。15 秒 + マージン 5 秒 = 20 秒。
-    if elapsed_secs >= 20 {
-        tracing::warn!(
-            "bg_timeout_watchdog: conv worker stuck {elapsed_secs}s, auto engine_reload"
-        );
-        *guard = None;
-        drop(guard);
-        // ハング復旧目的なので config が同じでも必ず再起動する
-        engine_reload_force();
-    }
-}
-
 /// 渡した `config_json` を保持し、再接続時に Create で再送する。
 ///
 /// **条件付き**: ホストが既に同じ config で動いている場合は再起動しない
@@ -469,8 +432,8 @@ pub fn bg_timeout_watchdog(is_stuck: bool) {
 /// config 比較はホスト側（`ShutdownIfConfigDiffers`）で行うので、
 /// 自プロセスのキャッシュが古くても「ホストは既に新 config」なら skip される。
 ///
-/// GPU ハング等からの復旧目的で無条件に再起動したい場合は
-/// `engine_reload_force()` を使うこと（ウォッチドッグ・メニュー用）。
+/// 無条件に再起動したい場合は `engine_reload_force()` を使うこと（メニュー用）。
+/// 変換の詰まりからの復旧はホストが自分で行う（Issue #57。TSF は判断しない）。
 #[track_caller]
 pub fn engine_reload() {
     let caller = std::panic::Location::caller();
@@ -478,8 +441,7 @@ pub fn engine_reload() {
 }
 
 /// config の異同に関わらず必ずホストを再起動する版。
-/// BG ウォッチドッグ（GPU ハング復旧）と langbar メニューの
-/// 「エンジン再起動」から呼ぶ。
+/// langbar メニューの「エンジン再起動」から呼ぶ。
 #[track_caller]
 pub fn engine_reload_force() {
     let caller = std::panic::Location::caller();

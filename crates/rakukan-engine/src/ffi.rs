@@ -17,7 +17,7 @@ use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
-pub const ENGINE_ABI_VERSION: u32 = 9;
+pub const ENGINE_ABI_VERSION: u32 = 10;
 
 static LOG_INIT: OnceLock<()> = OnceLock::new();
 
@@ -309,6 +309,66 @@ fn bg_status_cstr(status: &str) -> &'static CStr {
         "done" => c"done",
         "error" => c"error",
         _ => c"idle",
+    }
+}
+
+/// [`engine_bg_run_state`] の戻り値: 状態を読めない（ロックの poison）
+pub const BG_RUN_UNKNOWN: u8 = 0;
+/// [`engine_bg_run_state`] の戻り値: 実行中でない
+pub const BG_RUN_NOT_RUNNING: u8 = 1;
+/// [`engine_bg_run_state`] の戻り値: 実行中
+pub const BG_RUN_RUNNING: u8 = 2;
+
+/// BG 変換の実行番号と、実行中なら `Running` に入ってからの経過ミリ秒を返す（Issue #57）。
+///
+/// ホストの詰まりの監視が使う。エンジンのハンドルを取らない（変換キャッシュは
+/// DLL に 1 つ）ので、ホストはエンジンのロックを経由せずに呼べる。
+///
+/// 戻り値は [`BG_RUN_UNKNOWN`] / [`BG_RUN_NOT_RUNNING`] / [`BG_RUN_RUNNING`]。
+/// `out_run_id` には実行中ならその実行の番号、実行中でなければ直前の実行の番号、
+/// `out_elapsed_ms` には実行中なら経過ミリ秒（それ以外は 0）を書く。
+/// 不明のときはどちらも 0。null は書かずに無視する。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_run_state(out_run_id: *mut u64, out_elapsed_ms: *mut u64) -> u8 {
+    use crate::conv_cache::RunState;
+    let (code, run_id, elapsed_ms) = match crate::conv_cache::run_state() {
+        RunState::Unknown => (BG_RUN_UNKNOWN, 0, 0),
+        RunState::NotRunning { last_run_id } => (BG_RUN_NOT_RUNNING, last_run_id, 0),
+        RunState::Running { run_id, elapsed } => (
+            BG_RUN_RUNNING,
+            run_id,
+            u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX),
+        ),
+    };
+    unsafe {
+        if !out_run_id.is_null() {
+            *out_run_id = run_id;
+        }
+        if !out_elapsed_ms.is_null() {
+            *out_elapsed_ms = elapsed_ms;
+        }
+    }
+    code
+}
+
+/// [`engine_bg_confirm_stalled`] の戻り値: 状態を読めない
+pub const BG_STALL_UNKNOWN: u8 = 0;
+/// [`engine_bg_confirm_stalled`] の戻り値: 同じ実行が閾値以上 `Running` のまま
+pub const BG_STALL_CONFIRMED: u8 = 1;
+/// [`engine_bg_confirm_stalled`] の戻り値: 詰まっていない（完了した・別の実行・閾値未満）
+pub const BG_STALL_NOT_STALLED: u8 = 2;
+
+/// 実行番号 `run_id` が、まだ `Running` のまま `threshold_ms` 以上経っているかを
+/// 変換キャッシュのロックの中で確かめる（Issue #57）。
+///
+/// 戻り値は [`BG_STALL_UNKNOWN`] / [`BG_STALL_CONFIRMED`] / [`BG_STALL_NOT_STALLED`]。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_confirm_stalled(run_id: u64, threshold_ms: u64) -> u8 {
+    match crate::conv_cache::confirm_stalled(run_id, std::time::Duration::from_millis(threshold_ms))
+    {
+        None => BG_STALL_UNKNOWN,
+        Some(true) => BG_STALL_CONFIRMED,
+        Some(false) => BG_STALL_NOT_STALLED,
     }
 }
 
@@ -796,5 +856,24 @@ mod build_info_tests {
     #[test]
     fn bg_status_unknown_state_falls_back_to_idle() {
         assert_eq!(bg_status_cstr("なにか新しい状態").to_str().unwrap(), "idle");
+    }
+
+    /// このクレートの単体テストは変換を起動しない（実モデルが要る）ので、
+    /// 変換キャッシュは実行が 1 度も無い状態のまま。
+    #[test]
+    fn bg_run_state_on_untouched_cache() {
+        let mut run_id = u64::MAX;
+        let mut elapsed = u64::MAX;
+        assert_eq!(
+            engine_bg_run_state(&mut run_id, &mut elapsed),
+            BG_RUN_NOT_RUNNING
+        );
+        assert_eq!((run_id, elapsed), (0, 0));
+        // null は書かずに無視する
+        assert_eq!(
+            engine_bg_run_state(std::ptr::null_mut(), std::ptr::null_mut()),
+            BG_RUN_NOT_RUNNING
+        );
+        assert_eq!(engine_bg_confirm_stalled(0, 0), BG_STALL_NOT_STALLED);
     }
 }

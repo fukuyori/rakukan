@@ -1,4 +1,4 @@
-//! 推論が即時失敗する壊れ方からの復帰（Issue #43）。
+//! 推論が即時失敗する壊れ方（Issue #43）と、変換が詰まる壊れ方（Issue #57）からの復帰。
 //!
 //! GPU ドライバの更新・スリープ復帰・TDR で、ホストが掴んでいるデバイスだけが
 //! 無効になることがある。以後の推論は詰まらず**即座に失敗**して idle に戻るため、
@@ -20,6 +20,26 @@
 //!
 //! 推論が 1 回成功したら失敗の数もマーカーも捨てる。
 //!
+//! # 変換の詰まり（Issue #57）
+//!
+//! BG 変換が同じ実行のまま [`STALL_THRESHOLD`] 以上 `Running` を続けたら、
+//! ホストの監視スレッド（`server::spawn_stall_watchdog`）が
+//! [`HealthTracker::observe_stall`] を 1 回呼び、上の段階を 1 つ進める。
+//! 連続失敗の判定（[`FAILURE_THRESHOLD`]）は経由しない（詰まりは 1 回ごとに
+//! 閾値ぶん待たされるので、3 回は待てない）。マーカーと試行回数は推論の失敗と
+//! 共通なので、「詰まり → 再起動 → また詰まり」も [`UNRECOVERABLE_ATTEMPTS`] で
+//! 打ち切られる。推論が 1 回成功すれば、詰まりの試行回数も同じく捨てる。
+//!
+//! 実行の識別と経過時間はエンジン DLL の変換キャッシュが持つ（実行番号と
+//! `Running` に入った時刻）。TSF 側では観測しない（どのアプリから見ても同じ
+//! 起点になり、完了すれば `Running` でなくなるだけなので解除も要らない）。
+//!
+//! - 状態を読めない（DLL 側のロックの poison）は「不明」として、完了にも
+//!   詰まりにも数えない
+//! - `Idle && pending=Some`（変換要求がキューに積まれたまま拾われない詰まり）は
+//!   `Running` の開始時刻が無いので検出できない。TSF 側で監視していたときも
+//!   同じだった（`running` を見ないと時計が動かなかった）
+//!
 //! # プロセス内でモデルだけ作り直さない理由
 //!
 //! `engine_start_load_dict` / `engine_start_load_model` は「エンジンが converter を
@@ -29,6 +49,7 @@
 //! 差し替えるには ABI の追加が要るので、今はプロセスごと作り直す。
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 /// この回数だけ連続で失敗したら次の段階へ進む。
 pub const FAILURE_THRESHOLD: u32 = 3;
@@ -36,6 +57,20 @@ pub const FAILURE_THRESHOLD: u32 = 3;
 pub const MARKER_WINDOW_MS: u64 = 5 * 60 * 1000;
 /// マーカー上の試行回数がこれ以上なら、次の失敗で `unrecoverable` にする。
 pub const UNRECOVERABLE_ATTEMPTS: u32 = 2;
+
+/// 同じ実行がこれ以上 `Running` のままなら詰まりとみなす（Issue #57）。
+///
+/// **暫定の運用閾値で、正当な処理でも超えることがあり、そのときの誤発動を
+/// 許容している。** エンジン側の `GEN_TIMEOUT_SECS`（15 秒）は生成 1 回の上限で、
+/// 変換 1 回は かな run ごとに生成を呼ぶので、かな run が k 個ある読みは正当に
+/// k × 15 秒かかりうる（`3がつ5にちに10じから` なら最大 45 秒）。この値は
+/// 「本当の詰まりだけを拾える値」ではなく、誤発動のコスト（モデルの読み込み
+/// 直し、GPU では VRAM の確保し直し）と、詰まりで待たされるコストの釣り合いで
+/// 選んだもの。再評価は発動ログ（実行番号・経過時間・試行回数）を見て行う。
+pub const STALL_THRESHOLD: Duration = Duration::from_secs(30);
+
+/// 詰まりの監視スレッドが状態を読む間隔。
+pub const STALL_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 /// ホストが返す健全性。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -107,7 +142,7 @@ impl HealthTracker {
         // 健全性はホストのプロセスごとに持つので、自己終了した瞬間の
         // `Recovering` はそのプロセスと一緒に消える。新しいホストは `Ok` から
         // 始まるため、これが無いと再起動直後の文言が「応答していません」になり、
-        // 「再起動中（GPU ドライバ更新後に必要）」が利用者に届かない。
+        // 「再起動中」が利用者に届かない。
         // 推論が成功すれば `Action::Recovered` で `prior_attempts` が 0 に戻る。
         if self.health == Health::Ok && self.prior_attempts > 0 {
             return Health::Recovering;
@@ -156,30 +191,86 @@ impl HealthTracker {
             _ => Action::None,
         }
     }
+
+    /// 変換の詰まりを 1 回観測した（Issue #57）。
+    ///
+    /// 連続失敗の判定を経由せず、1 回で段階を進める。試行回数は推論の失敗と共通。
+    pub fn observe_stall(&mut self) -> Action {
+        self.failures = 0;
+        if self.prior_attempts >= UNRECOVERABLE_ATTEMPTS {
+            self.health = Health::Unrecoverable;
+            Action::MarkUnrecoverable
+        } else {
+            self.health = Health::Recovering;
+            Action::ExitHost
+        }
+    }
 }
 
-/// 自己終了のマーカー。`<exited_at_ms> <attempt>` の 1 行。
+/// 自己終了した理由（マーカーの 3 列目）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryReason {
+    /// 推論が連続で失敗した（Issue #43）
+    InferenceFailed,
+    /// 変換が詰まった（Issue #57）
+    Stall,
+    /// 理由の欄が無い（旧形式のマーカー）か、知らない値
+    Unknown,
+}
+
+impl RecoveryReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            RecoveryReason::InferenceFailed => "inference_failed",
+            RecoveryReason::Stall => "stall",
+            RecoveryReason::Unknown => "unknown",
+        }
+    }
+
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "inference_failed" => RecoveryReason::InferenceFailed,
+            "stall" => RecoveryReason::Stall,
+            _ => RecoveryReason::Unknown,
+        }
+    }
+}
+
+/// 自己終了のマーカー。`<exited_at_ms> <attempt> <reason>` の 1 行。
 ///
 /// JSON にしないのは、この crate に serde_json を足さずに済ませるため。
 /// 障害時に人が読む前提の 1 行なので、この形式で足りる。
+///
+/// 理由の欄（Issue #57）は後から足した。旧形式（2 列）は理由を
+/// [`RecoveryReason::Unknown`] として読み、旧バージョンは 3 列目を読み飛ばす。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RecoveryMarker {
     pub exited_at_ms: u64,
     pub attempt: u32,
+    pub reason: RecoveryReason,
 }
 
 impl RecoveryMarker {
     pub fn encode(&self) -> String {
-        format!("{} {}\n", self.exited_at_ms, self.attempt)
+        format!(
+            "{} {} {}\n",
+            self.exited_at_ms,
+            self.attempt,
+            self.reason.as_str()
+        )
     }
 
     pub fn decode(text: &str) -> Option<Self> {
         let mut it = text.split_whitespace();
         let exited_at_ms = it.next()?.parse().ok()?;
         let attempt = it.next()?.parse().ok()?;
+        let reason = it
+            .next()
+            .map_or(RecoveryReason::Unknown, RecoveryReason::from_str_lossy);
         Some(Self {
             exited_at_ms,
             attempt,
+            reason,
         })
     }
 }
@@ -313,10 +404,37 @@ mod tests {
     }
 
     #[test]
+    fn a_single_stall_exits_the_host() {
+        let mut t = HealthTracker::new(0);
+        assert_eq!(t.observe_stall(), Action::ExitHost);
+        assert_eq!(t.health(), Health::Recovering);
+        assert_eq!(t.next_attempt(), 1);
+    }
+
+    #[test]
+    fn stalls_share_the_attempt_limit_with_failures() {
+        // 直近に 2 回自己終了している（理由は問わない）
+        let mut t = HealthTracker::new(UNRECOVERABLE_ATTEMPTS);
+        assert_eq!(t.observe_stall(), Action::MarkUnrecoverable);
+        assert_eq!(t.health(), Health::Unrecoverable);
+    }
+
+    #[test]
+    fn success_after_a_stall_restart_clears_the_attempts() {
+        // 詰まりで 1 回自己終了して戻ってきた
+        let mut t = HealthTracker::new(1);
+        t.observe("running");
+        assert_eq!(t.observe("done"), Action::Recovered);
+        assert_eq!(t.health(), Health::Ok);
+        assert_eq!(t.next_attempt(), 1);
+    }
+
+    #[test]
     fn marker_expires_outside_the_window() {
         let m = RecoveryMarker {
             exited_at_ms: 1_000,
             attempt: 2,
+            reason: RecoveryReason::Stall,
         };
         assert_eq!(prior_attempts(Some(m), 1_000 + MARKER_WINDOW_MS), 2);
         assert_eq!(prior_attempts(Some(m), 1_000 + MARKER_WINDOW_MS + 1), 0);
@@ -325,12 +443,32 @@ mod tests {
 
     #[test]
     fn marker_round_trips() {
-        let m = RecoveryMarker {
-            exited_at_ms: 1_726_000_000_000,
-            attempt: 2,
-        };
-        assert_eq!(RecoveryMarker::decode(&m.encode()), Some(m));
+        for reason in [RecoveryReason::InferenceFailed, RecoveryReason::Stall] {
+            let m = RecoveryMarker {
+                exited_at_ms: 1_726_000_000_000,
+                attempt: 2,
+                reason,
+            };
+            assert_eq!(RecoveryMarker::decode(&m.encode()), Some(m));
+        }
         assert_eq!(RecoveryMarker::decode("こわれている"), None);
         assert_eq!(RecoveryMarker::decode(""), None);
+    }
+
+    #[test]
+    fn old_marker_without_reason_is_read_as_unknown() {
+        assert_eq!(
+            RecoveryMarker::decode("1726000000000 1\n"),
+            Some(RecoveryMarker {
+                exited_at_ms: 1_726_000_000_000,
+                attempt: 1,
+                reason: RecoveryReason::Unknown,
+            })
+        );
+        // 知らない理由も不明として読む
+        assert_eq!(
+            RecoveryMarker::decode("1726000000000 1 somethingnew").map(|m| m.reason),
+            Some(RecoveryReason::Unknown)
+        );
     }
 }
