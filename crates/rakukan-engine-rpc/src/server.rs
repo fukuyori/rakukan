@@ -47,8 +47,26 @@ pub struct HostShared {
     /// 変換の詰まりを監視する口（Issue #57）。エンジンを作るたびに持ち替える。
     ///
     /// `state` とは別ロックにする: 監視スレッドは変換中（engine ロック保持中）でも
-    /// 状態を読めなければならない。ロックは口を複製する瞬間だけ保持する。
-    stall_probe: Mutex<Option<StallProbe>>,
+    /// 状態を読めなければならない。ロックは口を複製する瞬間か、詰まりを確定
+    /// させる瞬間だけ保持する。
+    ///
+    /// **ロックの順序は `stall_probe` → `health`。** 逆向き（`health` を保持した
+    /// まま `stall_probe` を取る）は作らないこと。
+    stall_probe: Mutex<StallProbeSlot>,
+}
+
+/// 監視する口と、その世代（Issue #57）。
+///
+/// 口を持ち替える・取り外すたびに世代が 1 つ進む。世代が無いと、DLL の variant が
+/// 変わって新しい `CACHE` が実行番号を 0 から数え直したときに、「この実行番号は
+/// もう処理した」という監視スレッド側の記憶が誤って効き、詰まりを見逃す
+/// （`acted == Some(5)` のまま新しい DLL の run 5 が詰まる場合）。
+#[derive(Default)]
+struct StallProbeSlot {
+    /// 持ち替え・取り外しのたびに 1 つ進む。
+    generation: u64,
+    /// エンジンを外している間は `None`。
+    probe: Option<StallProbe>,
 }
 
 impl HostShared {
@@ -68,7 +86,7 @@ impl HostShared {
             config_json: Mutex::new(None),
             health: Mutex::new(HealthTracker::new(prior)),
             exit_after_response: AtomicBool::new(false),
-            stall_probe: Mutex::new(None),
+            stall_probe: Mutex::new(StallProbeSlot::default()),
         }
     }
 
@@ -83,22 +101,57 @@ impl HostShared {
         (action, g.next_attempt())
     }
 
-    /// 監視する DLL を、新しく作ったエンジンの DLL へ持ち替える。
-    ///
-    /// 同じ DLL を読み直した場合は OS 上は同じモジュール（変換キャッシュも同じ）
-    /// なので、持ち替えても実行番号は続きから数えられる。
-    fn set_stall_probe(&self, probe: StallProbe) {
+    fn lock_stall_probe(&self) -> std::sync::MutexGuard<'_, StallProbeSlot> {
         match self.stall_probe.lock() {
-            Ok(mut g) => *g = Some(probe),
-            Err(p) => *p.into_inner() = Some(probe),
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
         }
     }
 
-    fn stall_probe(&self) -> Option<StallProbe> {
-        match self.stall_probe.lock() {
-            Ok(g) => g.clone(),
-            Err(p) => p.into_inner().clone(),
+    /// 監視する DLL を、新しく作ったエンジンの DLL へ持ち替える。
+    ///
+    /// 同じ DLL を読み直した場合は OS 上は同じモジュール（変換キャッシュも同じ）
+    /// なので、持ち替えても実行番号は続きから数えられる。それでも世代は進める:
+    /// variant が変わって実行番号が 0 から数え直しになる場合と区別できないため。
+    fn set_stall_probe(&self, probe: StallProbe) {
+        let mut g = self.lock_stall_probe();
+        g.generation += 1;
+        g.probe = Some(probe);
+    }
+
+    /// エンジンを外したので監視も止める（Issue #57）。
+    ///
+    /// 口を残すと、古い DLL のワーカーが `Running` のまま残っていた場合に、
+    /// その観測を根拠に現在のホストを終了させてしまう。世代も進めるので、
+    /// 既に複製された口で進行中の確認も無効になる。
+    fn clear_stall_probe(&self) {
+        let mut g = self.lock_stall_probe();
+        if g.probe.is_some() {
+            g.generation += 1;
+            g.probe = None;
         }
+    }
+
+    /// 現在の口と、その世代。
+    fn stall_probe(&self) -> Option<(u64, StallProbe)> {
+        let g = self.lock_stall_probe();
+        g.probe.clone().map(|p| (g.generation, p))
+    }
+
+    /// 世代 `generation` の口がまだ現在なら、口のロックを保持したまま `f` を
+    /// 実行する（Issue #57）。持ち替わっていれば `None`。
+    ///
+    /// `set_stall_probe` / `clear_stall_probe` は同じロックを取るので、`f` の
+    /// 実行中に口が入れ替わることはない＝「確認に使った口が、終了を決める
+    /// 時点でも現在のものである」ことが保証される。
+    ///
+    /// `f` の中から `health` を取るのは順序どおり（`stall_probe` → `health`）。
+    fn with_current_probe<R>(&self, generation: u64, f: impl FnOnce() -> R) -> Option<R> {
+        let g = self.lock_stall_probe();
+        if g.generation != generation || g.probe.is_none() {
+            return None;
+        }
+        Some(f())
     }
 
     /// `bg_status()` を 1 件観測し、ホストが取るべき動作を返す（Issue #43）。
@@ -338,6 +391,10 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             let mut g = lock_engine(engine);
             tracing::info!("rpc: Reload requested, dropping current engine");
             g.engine = None;
+            // エンジンを外す時点で監視も止める。ロードに失敗した場合に、
+            // 古い DLL の `Running` を根拠に現在のホストを終了させないため
+            // （成功すれば load_engine_into が新しい口を入れ直す）。
+            engine.clear_stall_probe();
             load_engine_into(engine, &mut g, config_json)
         }
         Request::Bye => Response::Unit,
@@ -465,10 +522,19 @@ fn apply_health_action(shared: &SharedEngine, eng: &mut DynEngine) {
 ///
 /// 同じ実行に対して動作するのは 1 回だけ（`acted` に覚える）。`unrecoverable` に
 /// なってホストが生き続けても、同じ詰まりで毎秒ログを出さないため。
-fn stall_candidate(state: BgRunState, threshold: Duration, acted: Option<u64>) -> Option<u64> {
+///
+/// `acted` は**口の世代と実行番号の組**で覚える。DLL の variant が変わると
+/// 新しい `CACHE` は実行番号を 0 から数え直すので、番号だけで覚えると
+/// 「新しい DLL の同じ番号の実行」を処理済みとみなして見逃す。
+fn stall_candidate(
+    state: BgRunState,
+    threshold: Duration,
+    generation: u64,
+    acted: Option<(u64, u64)>,
+) -> Option<u64> {
     match state {
         BgRunState::Running { run_id, elapsed }
-            if elapsed >= threshold && acted != Some(run_id) =>
+            if elapsed >= threshold && acted != Some((generation, run_id)) =>
         {
             Some(run_id)
         }
@@ -489,6 +555,14 @@ fn stall_candidate(state: BgRunState, threshold: Duration, acted: Option<u64>) -
 /// 口（[`StallProbe`]）を複製して使うので、途中でエンジンが作り直されても
 /// 呼んでいる DLL はアンロードされない。
 ///
+/// **閾値の超過を確認した時点で復帰を決定する。** 確認の直後にその変換が完了して
+/// も、直後に始まった別の実行が巻き添えになっても、設計どおりの挙動として扱う
+/// （「閾値以上止まっていた」という事実は確認の後に変わらないため）。
+///
+/// 複製した口が古くなる場合は、確定の直前に世代を照合して捨てる。エンジンを
+/// 作り直した／外した後に、古い DLL の `Running` を根拠に現在のホストを終了
+/// させないため（[`HostShared::with_current_probe`]）。
+///
 /// 自己終了はこのスレッドから直接行う（詰まった変換に応答を待つ相手はいない）。
 /// その瞬間に処理中の要求があれば応答は失われ、クライアントは透過再接続で
 /// 新しいホストへ繋ぎ直す。
@@ -496,15 +570,19 @@ fn spawn_stall_watchdog(shared: SharedEngine) {
     let spawned = std::thread::Builder::new()
         .name("rakukan-stall-watchdog".into())
         .spawn(move || {
-            let mut acted: Option<u64> = None;
+            // (口の世代, 実行番号)
+            let mut acted: Option<(u64, u64)> = None;
             loop {
                 std::thread::sleep(health::STALL_POLL_INTERVAL);
-                let Some(probe) = shared.stall_probe() else {
+                let Some((generation, probe)) = shared.stall_probe() else {
                     continue;
                 };
-                let Some(run_id) =
-                    stall_candidate(probe.run_state(), health::STALL_THRESHOLD, acted)
-                else {
+                let Some(run_id) = stall_candidate(
+                    probe.run_state(),
+                    health::STALL_THRESHOLD,
+                    generation,
+                    acted,
+                ) else {
                     continue;
                 };
                 // 確認の直後に完了しても、この実行が閾値以上止まっていた事実は変わらない
@@ -518,7 +596,6 @@ fn spawn_stall_watchdog(shared: SharedEngine) {
                         continue;
                     }
                 }
-                acted = Some(run_id);
                 // 確認の後の経過時間（ログ用。確認の時点で閾値以上だった）
                 let elapsed_ms = match probe.run_state() {
                     BgRunState::Running {
@@ -526,7 +603,18 @@ fn spawn_stall_watchdog(shared: SharedEngine) {
                     } if r == run_id => elapsed.as_millis(),
                     _ => health::STALL_THRESHOLD.as_millis(),
                 };
-                on_stall_confirmed(&shared, run_id, elapsed_ms);
+                // 口のロックを保持したまま観測から動作までを行う。ここで
+                // 世代が違えば、確認に使った口はもう現在のものではない。
+                let acted_now = shared.with_current_probe(generation, || {
+                    on_stall_confirmed(&shared, run_id, elapsed_ms);
+                });
+                if acted_now.is_none() {
+                    tracing::debug!(
+                        "stall watchdog: probe replaced while confirming run_id={run_id} generation={generation} — ignoring"
+                    );
+                    continue;
+                }
+                acted = Some((generation, run_id));
             }
         });
     if let Err(e) = spawned {
@@ -536,6 +624,15 @@ fn spawn_stall_watchdog(shared: SharedEngine) {
     }
 }
 
+/// 詰まりを確定させ、段階を 1 つ進める（Issue #57）。
+///
+/// 呼び出し元が口のロックを保持したまま呼ぶ（[`HostShared::with_current_probe`]）。
+/// この関数の中で `health` を取るのはロックの順序どおり。
+///
+/// 自己終了の前に待たない: #43 の `handle_session` 側は「応答をパイプに書いてから
+/// 相手が読むまで」を待つための sleep だが、詰まりの経路には応答を待つ相手が
+/// いない。ホストのログの出力先は素の `File`（`with_writer(Mutex::new(file))`）
+/// なので、`tracing::warn!` の時点で OS へ渡っており、sleep は要らない。
 fn on_stall_confirmed(shared: &SharedEngine, run_id: u64, elapsed_ms: u128) {
     let threshold_s = health::STALL_THRESHOLD.as_secs();
     let (action, attempt) = shared.health_observe_stall();
@@ -549,7 +646,6 @@ fn on_stall_confirmed(shared: &SharedEngine, run_id: u64, elapsed_ms: u128) {
                 attempt,
                 reason: RecoveryReason::Stall,
             });
-            std::thread::sleep(Duration::from_millis(50));
             std::process::exit(0);
         }
         Action::MarkUnrecoverable => {
@@ -761,25 +857,75 @@ mod stall_tests {
         }
     }
 
+    /// 世代 1 の口で見ている、という既定。
+    const GEN: u64 = 1;
+
     #[test]
     fn candidate_only_past_the_threshold() {
-        assert_eq!(stall_candidate(running(4, 29), LIMIT, None), None);
-        assert_eq!(stall_candidate(running(4, 30), LIMIT, None), Some(4));
+        assert_eq!(stall_candidate(running(4, 29), LIMIT, GEN, None), None);
+        assert_eq!(stall_candidate(running(4, 30), LIMIT, GEN, None), Some(4));
     }
 
     #[test]
     fn same_run_is_acted_on_once() {
-        assert_eq!(stall_candidate(running(4, 90), LIMIT, Some(4)), None);
+        assert_eq!(
+            stall_candidate(running(4, 90), LIMIT, GEN, Some((GEN, 4))),
+            None
+        );
         // 次の実行が詰まれば、また対象になる
-        assert_eq!(stall_candidate(running(5, 30), LIMIT, Some(4)), Some(5));
+        assert_eq!(
+            stall_candidate(running(5, 30), LIMIT, GEN, Some((GEN, 4))),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn same_run_id_in_a_new_generation_is_acted_on_again() {
+        // DLL を持ち替えると実行番号は 0 から数え直しになりうる。
+        // 世代が違えば、同じ番号でも処理済みとみなさない。
+        assert_eq!(
+            stall_candidate(running(4, 90), LIMIT, GEN + 1, Some((GEN, 4))),
+            Some(4)
+        );
+        // 同じ世代なら従来どおり 1 回だけ
+        assert_eq!(
+            stall_candidate(running(4, 90), LIMIT, GEN + 1, Some((GEN + 1, 4))),
+            None
+        );
     }
 
     #[test]
     fn unknown_or_idle_is_never_a_stall() {
-        assert_eq!(stall_candidate(BgRunState::Unknown, LIMIT, None), None);
+        assert_eq!(stall_candidate(BgRunState::Unknown, LIMIT, GEN, None), None);
         assert_eq!(
-            stall_candidate(BgRunState::NotRunning { last_run_id: 4 }, LIMIT, None),
+            stall_candidate(BgRunState::NotRunning { last_run_id: 4 }, LIMIT, GEN, None),
             None
         );
+    }
+
+    /// 口を持ち替えると世代が進み、古い世代での確定は捨てられる。
+    #[test]
+    fn probe_generation_advances_and_gates_actions() {
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        // 口が無い間は世代を照合しても通さない
+        assert!(shared.stall_probe().is_none());
+        assert!(shared.with_current_probe(0, || ()).is_none());
+
+        let probe = StallProbe::null_for_tests();
+        shared.set_stall_probe(probe.clone());
+        let (generation, _) = shared.stall_probe().expect("probe is set");
+
+        assert!(shared.with_current_probe(generation, || ()).is_some());
+
+        // 持ち替え: 古い世代は通らない
+        shared.set_stall_probe(probe);
+        assert!(shared.with_current_probe(generation, || ()).is_none());
+        let (next_generation, _) = shared.stall_probe().expect("probe is set");
+        assert_eq!(next_generation, generation + 1);
+
+        // 取り外し: 口が無くなり、直前の世代も通らない
+        shared.clear_stall_probe();
+        assert!(shared.stall_probe().is_none());
+        assert!(shared.with_current_probe(next_generation, || ()).is_none());
     }
 }

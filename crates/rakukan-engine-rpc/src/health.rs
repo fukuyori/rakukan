@@ -58,6 +58,13 @@ pub const MARKER_WINDOW_MS: u64 = 5 * 60 * 1000;
 /// マーカー上の試行回数がこれ以上なら、次の失敗で `unrecoverable` にする。
 pub const UNRECOVERABLE_ATTEMPTS: u32 = 2;
 
+/// 詰まりを観測した後に `last_status` へ入れる値（Issue #57）。
+///
+/// `bg_status()` が返しうる値（`idle` / `running` / `done` / `error`）のどれとも
+/// 一致しない文字列にする。詰まりの後は、次に観測した状態が**必ず**数えられる
+/// 必要があるため。
+const STALL_SENTINEL: &str = "<stalled>";
+
 /// 同じ実行がこれ以上 `Running` のままなら詰まりとみなす（Issue #57）。
 ///
 /// **暫定の運用閾値で、正当な処理でも超えることがあり、そのときの誤発動を
@@ -119,6 +126,10 @@ pub enum Action {
 /// `observe` には `bg_status()` の値をそのまま渡す。ポーリングのたびに呼ばれても
 /// よいように、**状態が変わったときだけ**数える。
 pub struct HealthTracker {
+    /// 直前に観測した `bg_status()` の値。同じ値なら数えない。
+    ///
+    /// 詰まりを観測したときは [`STALL_SENTINEL`] を入れる（`observe` の早期
+    /// return を外すため。[`HealthTracker::observe_stall`] を参照）。
     last_status: String,
     failures: u32,
     /// 起動時のマーカーから読んだ、直近の自己終了の回数。
@@ -195,8 +206,34 @@ impl HealthTracker {
     /// 変換の詰まりを 1 回観測した（Issue #57）。
     ///
     /// 連続失敗の判定を経由せず、1 回で段階を進める。試行回数は推論の失敗と共通。
+    ///
+    /// # `last_status` を捨てる理由
+    ///
+    /// `observe` は `last_status` と同じ値なら早期 return する。詰まりは
+    /// `observe` を通らないので、**詰まりの前後で同じ状態が観測されると、後ろの
+    /// 観測が落ちる**。[`STALL_SENTINEL`] を入れておけば、次の観測がどの値でも
+    /// 数えられる。
+    ///
+    /// 「完了 → 詰まり → 完了」で復帰（`Action::Recovered`）が落ちる経路は、
+    /// **今の実装では最後まで成立しない**。`"done"` を観測した時点で
+    /// `prior_attempts` が 0 に戻るので、その後の詰まりは `MarkUnrecoverable`
+    /// （ホストが生き続ける）ではなく `ExitHost` になり、プロセスごと消えるため
+    /// ＝ `last_status == "done"` と `prior_attempts >= UNRECOVERABLE_ATTEMPTS` は
+    /// 同時に成り立たない。この不変条件は暗黙で、`observe` の `"done"` 分岐が
+    /// `prior_attempts` を触らなくなれば破れるので、番兵はその保険として入れる。
+    ///
+    /// 番兵が無いときに今でも起こる数え落としは、詰まりの直前と同じ状態が直後に
+    /// 来た場合（`"error"` → 詰まり → `"error"` が #43 の連続失敗に数えられない）。
+    ///
+    /// # 連続失敗の数（`failures`）を捨てない理由
+    ///
+    /// 詰まりは推論の即時失敗（Issue #43）とは別の壊れ方で、`failures` は
+    /// 「即時失敗が連続した回数」を数えるもの。`ExitHost` ならプロセスごと消える
+    /// ので差は出ないが、`MarkUnrecoverable` でホストが生き続ける場合に捨てると、
+    /// それまでに積んだ #43 の連続失敗が失われて数え直しになる。詰まりの側で
+    /// 段階を進めるのに `failures` は使っていないので、触らない。
     pub fn observe_stall(&mut self) -> Action {
-        self.failures = 0;
+        self.last_status = STALL_SENTINEL.to_string();
         if self.prior_attempts >= UNRECOVERABLE_ATTEMPTS {
             self.health = Health::Unrecoverable;
             Action::MarkUnrecoverable
@@ -417,6 +454,59 @@ mod tests {
         let mut t = HealthTracker::new(UNRECOVERABLE_ATTEMPTS);
         assert_eq!(t.observe_stall(), Action::MarkUnrecoverable);
         assert_eq!(t.health(), Health::Unrecoverable);
+    }
+
+    /// 詰まりを挟んでも、次に観測した状態が落ちない。
+    ///
+    /// `observe` は `last_status` と同じ値なら早期 return するが、詰まりは
+    /// `observe` を通らないので、番兵を入れておかないと詰まりの前後で同じ状態が
+    /// 観測されたときに後ろが落ちる。
+    ///
+    /// 番兵が無ければ 2 回目の `"error"` が落ちて、3 回目でも連続 3 回に
+    /// 届かない（`Action::None`）。
+    #[test]
+    fn a_stall_does_not_swallow_the_next_observation() {
+        let mut t = HealthTracker::new(0);
+        assert_eq!(t.observe("error"), Action::None); // 1 回目
+        assert_eq!(t.observe_stall(), Action::ExitHost);
+        assert_eq!(t.observe("error"), Action::None); // 2 回目（番兵が無いと落ちる）
+        t.observe("idle");
+        assert_eq!(
+            t.observe("error"),
+            Action::ExitHost,
+            "連続 3 回に届く＝詰まりの直後の観測が数えられている"
+        );
+    }
+
+    /// 完了を観測した時点でマーカー由来の回数は捨てられるので、その後の詰まりは
+    /// `MarkUnrecoverable` ではなく `ExitHost`（＝ホストはその場で終了する）。
+    ///
+    /// 「完了 → 詰まり → 完了」で復帰が数えられなくなる経路は、この不変条件
+    /// （`last_status == "done"` なら `prior_attempts == 0`）に阻まれて最後まで
+    /// 成立しない。暗黙の不変条件なので、番兵はその保険として入れてある。
+    #[test]
+    fn a_completed_conversion_clears_the_attempts_before_a_stall() {
+        let mut t = HealthTracker::new(UNRECOVERABLE_ATTEMPTS);
+        assert_eq!(t.observe("done"), Action::Recovered);
+        assert_eq!(t.next_attempt(), 1);
+        assert_eq!(t.observe_stall(), Action::ExitHost);
+    }
+
+    /// 詰まりは #43 の連続失敗の数を捨てない。
+    #[test]
+    fn a_stall_keeps_the_inference_failure_count() {
+        // ホストが生き続ける側（MarkUnrecoverable）で差が出る
+        let mut t = HealthTracker::new(UNRECOVERABLE_ATTEMPTS);
+        t.observe("error");
+        t.observe("idle");
+        t.observe("error"); // 連続 2 回
+        assert_eq!(t.observe_stall(), Action::MarkUnrecoverable);
+        t.observe("idle");
+        assert_eq!(
+            t.observe("error"),
+            Action::MarkUnrecoverable,
+            "連続 3 回目。捨てていれば 1 回目に戻って Action::None になる"
+        );
     }
 
     #[test]

@@ -113,10 +113,36 @@ pub enum BgRunState {
 pub struct StallProbe {
     run_state: BgRunStateFn,
     confirm_stalled: BgConfirmStalledFn,
-    _lib: Arc<Library>, // 関数ポインタの先の DLL をアンロードしないよう保持
+    // 関数ポインタの先の DLL をアンロードしないよう保持する。
+    // `None` はテスト用の口（`null_for_tests`）だけ。
+    _lib: Option<Arc<Library>>,
+}
+
+/// `null_for_tests` の口が返す「状態が読めない」（DLL 側の `BG_RUN_UNKNOWN`）。
+unsafe extern "C" fn stall_probe_stub_run_state(_run_id: *mut u64, _elapsed_ms: *mut u64) -> u8 {
+    0
+}
+
+/// `null_for_tests` の口が返す「状態が読めない」（DLL 側の `BG_STALL_UNKNOWN`）。
+unsafe extern "C" fn stall_probe_stub_confirm(_run_id: u64, _threshold_ms: u64) -> u8 {
+    0
 }
 
 impl StallProbe {
+    /// DLL を保持しない口。**テスト専用**。
+    ///
+    /// ホスト側の「口の世代」の扱い（持ち替え・取り外しで世代が進む、古い世代
+    /// では確定しない）を、実際の DLL を読み込まずに確かめるために使う。呼んでも
+    /// 常に「状態が読めない」を返すので、詰まりにも完了にも数えられない。
+    #[doc(hidden)]
+    pub fn null_for_tests() -> Self {
+        Self {
+            run_state: stall_probe_stub_run_state,
+            confirm_stalled: stall_probe_stub_confirm,
+            _lib: None,
+        }
+    }
+
     /// 現在の実行の状態
     pub fn run_state(&self) -> BgRunState {
         let mut run_id = 0u64;
@@ -551,7 +577,7 @@ impl DynEngine {
         StallProbe {
             run_state: self.vtable.bg_run_state,
             confirm_stalled: self.vtable.bg_confirm_stalled,
-            _lib: Arc::clone(&self._lib),
+            _lib: Some(Arc::clone(&self._lib)),
         }
     }
 
