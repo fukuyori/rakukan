@@ -1477,3 +1477,208 @@ INFO  ...engine::state: engine_reload: invoked from ...factory.rs:174:13 force=t
 - #62 の SHA 一致時のスキップ（次回のインストールで
   `already built ... mozc cbbb6e1bd181, skipping` が出れば確認できる）
 - #62 の辞書のバイト単位の一致、取得・ビルドを含む同時インストール全体の安全性
+
+
+### 2026-09-20 #63 文節の対応付け方式の検討を起票
+
+レモンの質問「rakukan が変換に使う LLM に文節の区切りを教えてもらえるか」への回答をまとめ、
+[#63](https://github.com/fukuyori/rakukan/issues/63) に記録した。実装の予定は無く、方式の記録と再開点。
+
+- **直接は不可**。jinen（v1: GPT-2 系 / v2: Qwen3 系）はかな→漢字変換専用に学習したモデルで、
+  指示追従の入口が無い。プロンプトは `build_jinen_prompt` で固定（CONTEXT / INPUT_START /
+  OUTPUT_START の 3 トークンだけ）、出力側に区切りを表すトークンは無く、生成トークンはサブワード
+- **方式 1（かなアンカー法）は不採用**。S に残るかなを錨に R と対応付ける案は、
+  「にわにはにわにわとりがいる」→「庭には二羽鶏がいる」で、錨の「に」「は」「が」が漢字の読み
+  （にわ・にわ・にわとり）の中にも現れて成立しない。「東京都と京都」も同型
+- **候補として残る 3 方式**: 2 辞書ラティス（`rakukan.dict` を R と S の同時消費 DP で引く。
+  品詞が無いので文節化は規則で代用）、3 形態素解析器（vibrato / lindera + UniDic 等。
+  辞書のライセンス・サイズ・配布形態の確認が要る）、4 jinen の NLL スコアリング
+  （`NllScorer::compute_nll` を分割点ごとに比べる。合計 NLL を返す変種が要り、遅い）
+- 進める前に決めること: 文節の定義（補助動詞・複合名詞・数詞＋助数詞）、発火タイミング
+  （毎変換か文節操作キーだけか）、実験の順番（4 の計測が先か、3 の辞書選定が先か）
+- 起票時の本文にあった「9〜10 月の計画には含めず再開点として残す」の一文はレモンの指示で削除した
+
+### 2026-09-21 #58 / #59 の回答確認とマージ
+
+#### #58（#53）
+
+- nick は 2026-09-20 に記述の書き分けを PR 本文に反映（[コメント](https://github.com/fukuyori/rakukan/pull/58#issuecomment-5746996338)、コード変更なし）。
+  「生成元の TSV 上では `吉祥院新田参ノ段` の 1 件」「通常語フィルター
+  （`lookup_system_normal` の `cost_band::Class::Normal`）適用後の件数は未確認」の 2 文に分けた
+- **レモンの判断でマージ**（HEAD `5c19241`、CI 2 件成功、競合なし、追加の修正依頼なし）。
+  過去の PR（#48 / #52）に合わせて rebase。main のコミットは `9d6ba20`（本体）と `5bad674`（L = 12 の上限）
+- #53 は `Refs` 表記どおり自動クローズされず OPEN のまま。インストール後に `digits::license:` の
+  発動を確認してからクローズする
+
+#### #59（#57）: `e94fe83` の確認
+
+nick の対応 `e94fe83`（[回答](https://github.com/fukuyori/rakukan/pull/59#issuecomment-5747071018)。
+abi +28 / health.rs +91 / server.rs +173−27 / DESIGN.md +10）を、差分・周辺コード・テスト実走で確認した。
+
+- **1. `acted` を (口の世代, 実行番号) に — 成立**。`StallProbeSlot { generation, probe }` を
+  1 つの Mutex に置き、`set_stall_probe` / `clear_stall_probe` で世代を進める。
+  `with_current_probe(generation, f)` はロックを保持したまま世代を照合して `f` を実行するので、
+  確認に使った口が確定時点でも現在のものであることが保証される。世代は単調増加なので ABA は無い。
+  不一致のときは `acted` を更新せず `continue`
+- **2. 50 ms sleep の削除 — 根拠は成立**。`engine-host/src/main.rs:74` の writer は
+  `with_writer(Mutex::new(file))` で `BufWriter` も `non_blocking` も挟んでいない
+- **3. `Reload` 時の口の取り外し — 成立**。`g.engine = None` の直後に `clear_stall_probe()`。
+  `Create` は `load_engine_into` 成功時だけ差し替え、失敗時は旧エンジン・旧の口が残る
+- **4. `last_status` の経路 — 前回の指摘は成立しない（撤回）**。`observe("done")` は
+  `prior_attempts = 0` にし、`prior_attempts` はコンストラクタ以外で増えないので、
+  `last_status == "done"` なら `prior_attempts == 0`、その後の `observe_stall` は
+  `MarkUnrecoverable` ではなく `ExitHost` になる。番兵 `"<stalled>"` は保険として入り、
+  今でも起こる数え落とし（`error` → 詰まり → `error`）は塞がれる。`self.failures = 0` の削除も確認
+- **ロック順序**: `engine → stall_probe`（Create / Reload）、`engine → health`（`dispatch` →
+  `apply_health_action`）、`stall_probe → health`（監視スレッド）の 3 本で逆向きは無い。`health` の
+  ロックは小さなメソッド内で完結。DLL 呼び出し（`run_state` / `confirm_stalled`）は `stall_probe`
+  ロックの外で、DLL 側のワーカーも変換中は `inner` を離しているので、詰まった変換で監視スレッドが
+  止まることは無い
+- **テスト**: PR の worktree で `cargo test -p rakukan-engine-rpc -p rakukan-engine-abi --lib`
+  （PowerShell）= 16 + 32 件成功。`observe_stall` を旧実装（`self.failures = 0`、番兵なし）に
+  戻すと新しい 2 件（`a_stall_does_not_swallow_the_next_observation` /
+  `a_stall_keeps_the_inference_failure_count`）が落ちる
+- **所見（指摘にしなかった）**: 同じ DLL を `Reload` すると世代だけ進んでキャッシュと実行番号は
+  同じなので、`unrecoverable` でホストが生きている間は同じ `run_id` に再度発動しうる（error ログが
+  1 行増えるだけ）。`StallProbe::null_for_tests()` は abi crate の通常ビルドにも入る `pub`
+  （`#[doc(hidden)]`、crate をまたぐテストのため）
+- **範囲外（既存）**: DLL の variant が変わって旧 `Library` の最後の `Arc` が落ちると `FreeLibrary`
+  が走り、旧 DLL のワーカーがまだ動いていれば危険。口が `Arc` を持つことで時期が遅れるだけ。
+  **別件として起票する**（引継書 5 節）
+- [確認結果を返信](https://github.com/fukuyori/rakukan/pull/59#issuecomment-5755508624)（本文はレモンが起案）。
+  **レモンの判断でマージ**（rebase）。main のコミットは `fb656e1` / `cce2f17`。#57 は OPEN のまま
+  （実機未確認）。**engine ABI は main で 10**
+
+#### 統合後の CI
+
+- 両 PR が `crates/rakukan-engine/src/conv_cache.rs` と `docs/DESIGN.md` に触れていたが、
+  `git merge-tree --write-tree origin/main pr-59` は競合なし。GitHub の判定も clean
+- **`cce2f17`（両方を入れた main）の CI は Build & Test (Windows) / Format Check とも成功**
+- **`5bad674`（#58 だけの時点）の CI は失敗**（[run 35562159411](https://github.com/fukuyori/rakukan/actions/runs/35562159411)）。
+  `kanji::backend::tests::test_default_model_beam_conversion` が
+  `Download(LockAcquisition("...\\models--togatogah--jinen-v1-small.gguf\\blobs\\....lock"))` で
+  panic。270 件成功・1 件失敗・7 件 ignored。**原因は未特定**。同じテストは `cce2f17` で成功した。
+  ※推測: `backend.rs:875` と `:892` の 2 テストが同じモデルを並列にダウンロードしてロックを
+  取り合った。main の失敗履歴は 9/1 以降で 10 件あり、同じ原因かはログを見ていない
+
+### 2026-09-21 #56 nick の回答と確認事項 5 点の返信
+
+nick から [回答](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5754617795)
+（現行 main `2e7e55b` を読んだ意見、実機未試行）:
+
+1. 要求番号は TSF 起動インスタンスごとの単調増加に賛成。**採番と識別子は `RpcEngine` ではなく
+   プロセスの static に置く**（`engine_reload_impl` が `guard.0 = None` で `RpcEngine` を捨てるため）。
+   記録は composition ごとでなく TSF インスタンスごとに「最後に適用した番号と応答」1 件で足りる
+2. 記録の回収は「生きている接続が 1 本も無いインスタンス」に限り、上限超は最終使用の古い順。
+   `Hello` にインスタンス識別子を載せ、記録の有無を返す
+3. 結果不明の要求は種類で分ける。読みを変える要求は復元後に新しい番号で送り直しても 1 回だけの
+   適用になる。読み以外に効果が残る要求（`Commit` / `BgTakeCandidates` / `Learn`）は送り直さない
+4. 変更 RPC の一覧（表）。同一世代の重複は番号で落ち、世代をまたいで番号で解決しないのは
+   `Learn` / `LearnForce` / `Shutdown` の 3 つ
+5. `Learn` / `LearnForce` / `Shutdown` / `Reload` に期待する世代を載せ、不一致なら適用しない
+   （`Shutdown` / `Reload` は「目的は果たされた」として成功を返す）。現行の `shutdown()` は
+   `call_with_retry` 経由なので応答を読む前にホストが終了すると再接続先へ再送し、再起動が
+   2 回走る（#56 の契機そのもの）
+
+レモンが起案した確認事項 5 点を、コードで照合してから[返信](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5755597587)した:
+
+1. **要求番号と未応答の要求の寿命**: `Mutex<Connection>`（`client.rs:122`）が直列化するのは RPC
+   呼び出しの間だけ。通信エラーを返した要求の適用結果が不明なまま次の変更要求へ進めない順序を定義する
+2. **記録回収と再接続**: 切断後もサーバ側で処理中・ロック待ちの要求があるセッションは回収を妨げる。
+   `Hello` の登録・記録の有無の確認と回収処理を同期させる。再接続を繰り返しても未解決の要求について
+   記録を失った事実を忘れない。回収対象が無いときの上限の扱い
+3. **読み取り RPC も世代・所有者の確認が必要**: `on_convert.rs:324-325` は `FlushPendingN` の後に
+   別 RPC で `PreeditIsEmpty` を呼び、空なら空白を確定する。その間にホストが入れ替わると新しい
+   エンジンの「空」を受け取る。**`preedit_is_empty` は失敗時に `true`、`preedit_display` /
+   `hiragana_text` は空文字を返す**（`client.rs:351-353`）。通信失敗を「空」に潰さない
+4. **`Shutdown` / `Reload` の成功条件と終了処理**: エンジンの世代変更とホストプロセスの入れ替わりは別
+   （同じホスト内の `Create` / `Reload` でも世代が変わる）。対象ホストの識別とエンジンの世代照合を
+   分ける。`handle_session`（`e94fe83` の `server.rs:253-291`）は先に `Shutdown` を記録して応答後に
+   終了するので、`dispatch` が世代不一致で成功を返すだけでは後段で終了してしまう。変換中でも応答
+   できる性質は維持。`Reload` は再接続時の `Create` と世代・設定の確認を含めて成功条件を限定する
+5. **復元後の再送と保証範囲**: 保証は「復元後の編集状態に、その打鍵の効果が 1 回分反映される」と書く
+   （`InputChar` は BG 変換を開始するので、処理が 1 回しか実行されない保証とは別）。復元 RPC の
+   応答消失、復元と再送の間の所有権移動、古い BG 変換結果、`Commit` の結果不明時の TSF 側の更新を
+   受入条件に含める
+
+**nick の回答待ち。設計に反映された内容を確認してから実装範囲を確定する。実装着手は未承認。**
+#59 はマージ済みなので「#57 の後」の順序は満たした。
+
+### 2026-09-21 時点の残作業
+
+| 項目 | 状態 |
+|---|---|
+| #53 | **クローズ済み**（2026-09-21、下の「#53 の実機確認とクローズ」） |
+| #57 | 実機で詰まりを起こす手段が無い。運用ログで確認 → クローズの判断 |
+| #56 | nick の設計回答待ち |
+| 旧 DLL アンロード | **#64 として起票済み**（2026-09-21、下の「#64 の起票」）。再現は未実施 |
+| #64 の対処方針の決定・必要な検証 | **未着手**。対処の方向（案）は Issue 本文。再現を含む検証は実運用のホストを落とすので別途扱う |
+| J-5 の (2) reload 通知の全プロセス反映 | 起票して着手することは決定済み。PR #59 のマージで `state.rs` の重複は解消 |
+
+### 2026-09-21 #53 の実機確認とクローズ
+
+`git pull --ff-only origin main` で手元を `cce2f17` に進め（文書の未コミット差分は保持）、
+レモンが engine / tsf をビルドしてインストールした（`abi=10 dll_git=cce2f17fefc4-dirty`、
+`dll_build_time=2026-09-21 05:31:04 UTC`。`-dirty` は文書の未コミット差分）。
+
+#### 実機（`rakukan-engine-dll.log`、`log_level = "debug"`）
+
+| 読み | 確定 | `digits::license:`（確定した変換の分） |
+|---|---|---|
+| `2まいめをさんこう` | **2枚目を参考** | `table=2009us(runs=1 substr=36 lookups=36 entries=2) match=(cands=5 pairs=5) dp=(cands=6 accepted=6)` |
+| `3にんがさんか` | **3人が参加** | `table=13549us(… substr=21 lookups=20 entries=2) match=(cands=3 pairs=3) dp=(cands=12 accepted=12)` |
+| `100えんひろう` | **100円拾う** | 1 回目 `table=32616us(… entries=2) dp=(cands=1 accepted=1)`、2 回目 `table=113us dp=(cands=6 accepted=4)` |
+| `2まい` | 2枚 | 行なし（LLM が `2参枚` を生成せず、検証対象が無かった） |
+
+- 通す側 3 件はすべて期待の候補が確定した。`2枚目を参考` は 0.11.7 では捨てられていた候補
+- `100えんひろう` の `cands=6 accepted=4` は DP が拒否も行っている実例。ただし集計 1 行なので
+  **どの候補が落ちたかは特定できない**。入力途中のライブ変換（`2まいめをさん` `3にんがさん`）でも
+  `cands=1 accepted=0` が出ており、根拠の無い中間の読みで拒否されている
+- `2まい` で `2参枚` が表示されなかった観察は、拒否経路の証拠に含めない
+- **照合表の作成時間（`table=`）は初回 5〜33 ms、2 回目約 0.1 ms。差の原因は未特定**
+  （辞書索引の状態が原因という見立ては断定しない）。PR #58 の計測（120 文字で 0.81 ms）は
+  暖まった状態の値で、初回の分は含まれていない
+
+#### 回帰テスト（インストール済み辞書）
+
+`cargo test --release -p rakukan-engine --lib installed_dictionary_meets_expected_results -- --ignored --nocapture`
+（PowerShell、辞書は 2026-09-19 に作り直した `rakukan.dict`、mozc `cbbb6e1bd181`）
+
+- **62 判定すべて期待どおり**（`pass (expected pass)` 38、`reject (expected reject)` 24、不一致 0）。
+  50 組 + 対照 + 繰り返し語 N = 4 / 10 / 20 / 40 の通過・拒否
+- 拒否の候補単位の証拠（抜粋）: `2まい` → `2参枚` / `23枚`、`10えん` → `10拾円`、
+  `さんこうに2まい` → `参考に2参枚`、`2まいをさんこうに` → `2参枚をみほんに`（読みの使い回し）、
+  `さんこうとさんかに2まい` → `参加と参考に2枚`（順序）、`2ばんとじゅうばん` → `2番と拾番と拾番`
+  （対照）、`1じゅう` → `壱十`、繰り返し語 N = 4〜40 の `参枚`
+- 実機で確定した 3 件も同じ表で `pass`（いずれも `entries=2 pairs=1`）
+
+#### クローズ
+
+レモンの判断で #53 をクローズした（[コメント](https://github.com/fukuyori/rakukan/issues/53)）。
+通常語フィルター適用後に根拠を失う語の件数は、合意済みの既知の制限として残す。
+
+### 2026-09-21 #64 の起票（旧エンジン DLL のアンロード）
+
+PR #59 のレビューで範囲外として残した件を、コード上の成立条件だけで
+[#64](https://github.com/fukuyori/rakukan/issues/64) に起票した。**クラッシュの再現は行っていない**
+（実運用のホストを意図的に落とす検証は別途扱う、とレモンが判断）。
+
+- `Arc<Library>` の持ち主は `DynEngine::_lib` と `StallProbe::_lib` の 2 種類。ピン止めは無く、
+  最後の `Arc` が落ちると libloading の drop で `FreeLibrary`
+- アプリ側で明示的に生成しているスレッドは 3 系統（`rakukan-conv-worker`、モデル読み込み、辞書読み込み）で、
+  停止・join の仕組みが無い。`rakukan-conv-worker` は `CACHE` の初期化時に起動し、BG 変換だけでなく
+  `start_load_model` の `try_reclaim_done`（`ffi.rs:557`）や `engine_bg_run_state`（`ffi.rs:334`）からも
+  初期化される
+- **到達経路**: config 不一致の `Create`（`try_connect_once` が保存済み `config_json` で送る）。
+  再作成時の DLL はホストが `config.toml` を読み直して `detect_backend` で選ぶので、
+  古い `config_json` が古い `gpu_backend` を直接指定するわけではない（レモンの指摘で訂正。
+  当初の案は「`config_json` に `gpu_backend` が入っている」前提で書いていた）。
+  選択結果が現在の DLL と異なれば旧 DLL を解放する経路に入る
+- **潜在経路**: `Reload` は旧エンジンと監視用参照を先に解放する。複製済みの `StallProbe` が旧モジュールを
+  保持していなければ、同じ DLL でも参照数が一度 0 になりうる。TSF からは呼ばれていない
+- **#59 との関係**: ワーカーの終了を待たずに解放しうる構造は #59 以前から存在する（`2e7e55b` の
+  `Arc<Library>` の持ち主は `DynEngine::_lib` だけ。`state.rs:416-421` の doc に旧 `Reload` での AV の記録）。
+  #59 は保持参照と解放タイミングに影響するが、構造自体は解消していない
+- 起票前にレモンから 4 点の訂正: DLL の選択元は `config.toml`／ワーカー起動は BG 変換が必要条件では
+  ない／`Reload` の参照数 0 は条件付き／#59 との関係は根本原因と解放タイミングを分ける。
+  「最大 1 周回で解放」のような最大待ち時間の表現は使わない
