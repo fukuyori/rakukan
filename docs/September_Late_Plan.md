@@ -2142,8 +2142,8 @@ Issue の記述どおり。失敗が記録されるのは、パイプに**接続
   改名の後、既存の `rakukan-engine-host.exe` プロセスを終了させ（言語バーの「エンジン再起動」は
   Shutdown の後に spawn を試みるので、それ自体が最初の失敗になる）、プロセス一覧で不在を確認してから
   打鍵する
-- **exe を確実に元へ戻す。** 改名と復元をスクリプトで行い、復元を `finally` に置く。終了後にファイル名と
-  サイズ（またはハッシュ）が元と一致することを確認する。復元後に打鍵してホストが起動し、
+- **exe を確実に元へ戻す。** 復元後にファイルのハッシュ（SHA256）が元と一致することを確認する。
+  復元の手段は下の注記のとおり未設計（`finally` に任せる手順は使わない）。復元後に打鍵してホストが起動し、
   **#55 で追加する `Hello`・`Create` 成功のログと、実際の変換の回復**で判定する。既存のログは補助記録に
   する: ホストの `listening` は待受開始であって `Create` の成功ではない、TSF の `engine connected via RPC` は
   `create_engine`（`state.rs:595`）の初回生成経路だけで既存 `RpcEngine` の再接続では出ない、ホストには
@@ -2151,10 +2151,17 @@ Issue の記述どおり。失敗が記録されるのは、パイプに**接続
   必須条件にしない。閾値到達で回数が 0 に戻り、期限後の `can_spawn()` が `blocked_until` を消すので、
   その後の成功では `record_success` の条件（回数が 0 でない、または抑止中）が偽になり、このログは
   出ない（`client.rs:748-756`）。出た場合は補助記録として扱う
+- **2026-09-22 の実機試験で、`finally` による復元は実行されなかった。** 復元前にターミナルが強制終了され、
+  `finally` は走らなかった。`finally` は例外時には実行される（PowerShell で確認済み）が、**プロセスの強制終了では
+  実行が保証されない**。今回の復元は SHA256 の一致で確認した。**この手順は再使用しない**。
+  今回は復元操作をするターミナル自体が操作不能になったので、コピーを取って手動で戻すだけでは対策にならない。
+  **次回の手順は未設計・未検証**
 
 **E. 範囲外（別に扱う）**
 
 - **入力停止時間の問題は #55 では扱わず、#56 の範囲確定後に別 Issue として起票する**（判断済み）。
+  2026-09-22 の実機試験で、EmEditor のキー処理が **15.35 秒**止まる実測が得られた（起票時の根拠にする。
+  どの打鍵・どの段階の停止かはログと合わせて起票時に整理する）。
   受入条件は 2 つに分ける: (1) 応答待ちの期限（5 秒はパイプ接続待ちの設定で、`Hello` / `Create` の
   応答待ち `ReadFile` には期限が無い）、(2) キー処理のスレッドで再接続する構造。(1) はタイムアウトしても
   ホストで要求が未実行とは限らないので、#56 の結果不明・再送の設計と整合させる必要がある
@@ -2193,4 +2200,58 @@ nick の手元で作業していない証拠にはならないので、伝えて
 nick への先行方針と変更範囲の連絡は 2026-09-22 に #55 へ投稿した
 （https://github.com/fukuyori/rakukan/issues/55#issuecomment-5772061363 。レモンの確認を経て、
 再試行回数と再送の仕様は変更しない・計画書は未コミットで実装 PR で共有する、と書き分けた）。
-`Reload` 廃止の調整は #56 宛ての別コメントに分ける（未作成）。実装は指示を待ってから行う（未着手）。
+`Reload` 廃止の調整は #56 宛ての別コメントに分ける（未作成）。
+
+#### 2026-09-22 #55 の実装（未コミット・実機確認は範囲付き）
+
+レモンの着手指示を受け、`crates/rakukan-engine-rpc/src/client.rs` を設計どおりに変更した。プロトコル変更なし。
+
+- **接続・spawn・時刻・待機の口** `HostTransport` trait を切り、本番は `PipeTransport`（`PipeStream::connect_client` /
+  `spawn_host` / `thread::sleep` / 単調時計）。`Connection<T: HostTransport>` に generic 化し、`RpcEngine` は
+  `Connection<PipeTransport>` を持つ。公開 API（`RpcEngine` のメソッド）は変えていない
+- **終了処理の共通化**: `try_connect_once` を `run_attempt`（接続 → spawn → `Hello` → `Create`。途中経過を
+  `AttemptContext` に残し、失敗したストリームは破棄）と `finish_attempt`（`HostSpawnGuard` への記録は
+  ここでだけ）に分けた。spawn の失敗は WARN を出して接続待ちに進む（別プロセスが起動したホストへ
+  `Hello` / `Create` まで通れば成功扱いでリセット）
+- **抑止中の扱い**: 試行開始時と spawn 直前に抑止中かを `AttemptContext::blocked` に持ち、抑止中の失敗は
+  どの段階でも数えず期限も延ばさない。`HostSpawnGuard::record_failure` 自体も抑止中なら数えない
+  （同じプロセスの別の試行が途中で抑止に入った場合の保護）。`is_blocked(now)` を追加し、`can_spawn` はそれを使う
+- **維持したもの**: 閾値 3 回・窓 15 秒・抑止 30 秒、`ensure_connected` の 2 回と 200 ms、
+  `call_with_retry_inner` の 2 周、`Request` / `Response` の variant。Guard のロックは記録の間だけ
+- **ログ**: 失敗は `recorded host startup failure: stage=… spawn=… count=… blocked_until=…`、抑止開始は
+  `host startup failed 3 times within 15000ms; spawn suppressed for 30000ms (…)`、抑止中の失敗は
+  `host connect failed while spawn suppressed: … blocked_during_attempt=… blocked_now=… count=… blocked_until=… (not counted, cooldown unchanged)`
+  （レモンのレビューで、非計数の分岐にも計数後の状態と期限を出すよう修正。`blocked_during_attempt` は試行途中の
+  抑止履歴、`blocked_now` は記録時点の抑止状態で、期限をまたいだ試行を判別できる）、成功は
+  `host connected: Hello/Create ok spawn=… spawn_to_connect_ms=… while_blocked=…`（`Hello` / `Create` の
+  成功を必ず 1 行記録する。実機手順の回復判定に使う）。`host connection recovered` は従来どおり回数か抑止が
+  あったときだけ
+- `ensure_connected` のコメント（旧 611〜614 行）を訂正した。定数 `INITIAL_CONNECT_MS` / `CONNECT_AFTER_SPAWN_MS` /
+  `RECONNECT_RETRY_DELAY_MS` を名前付きにした（値は従来どおり 300 / 5000 / 200）
+- `docs/DESIGN.md` のホストのライフサイクル 6 項を新しい数え方に書き換えた
+
+テスト（`cargo test -p rakukan-engine-rpc --lib`、PowerShell）: **42 件成功**（うち `client::tests` 17 件。
+Guard のテストは `host_spawn_guard_resets_after_window_expires` を `host_spawn_guard_window_boundary` に置き換え、
+`host_spawn_guard_does_not_extend_cooldown_while_blocked` を追加（純増 1 件）。接続経路は fake transport で
+実際の再試行処理を通す 9 件を追加。設計のテスト表 8 項目に対応）。レモンの環境でも 42 件成功。
+`cargo make check` / `cargo fmt --check` / `cargo clippy -p rakukan-engine-rpc --lib --tests` は警告なし。
+`cargo test -p rakukan-tsf --lib`（`RpcEngine` の API は変えていないので回帰確認）: クロの実行では 141 件成功。
+**レモンの初回実行では `engine::config::config_load_warning_tests::first_load_warns_with_path_and_error` が
+1 件失敗して 140 件成功、その後は単独実行が成功し、全体も計 6 回成功した。原因は未特定**（このテストは
+#61 のもので、今回の変更は `rakukan-engine-rpc` の中に閉じている。関係の有無も未確認）。
+
+**実機確認（2026-09-22、レモン）**: `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` の後、
+上の実機手順（exe の改名、既存ホストの終了と不在確認）で確認した。受入条件との照合結果:
+
+| 項目 | 実機結果 |
+|---|---|
+| spawn 失敗後の接続失敗を加算 | 確認済み |
+| 3 回で抑止に入る | 確認済み |
+| 抑止中に加算・期限延長しない | 確認済み |
+| 復元後の `Hello`・`Create` 成功、変換回復 | 確認済み |
+| ホスト不在のまま、30 秒経過後に再試行（数え直し） | **今回のログでは未確認** |
+| `Hello` / `Create` 各段階の失敗、Shutdown 直後の競合 | 単体テストで確認済み。実機では未確認 |
+
+あわせて、EmEditor のキー処理が 15.35 秒止まる実測が得られた（入力停止時間の
+別 Issue の根拠。上の E）。手順の `finally` による復元は実行されなかった（上の実機手順の注記）。
+コミットは指示待ち。

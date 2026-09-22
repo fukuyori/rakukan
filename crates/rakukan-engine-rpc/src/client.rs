@@ -11,9 +11,10 @@
 //! 複数スレッドから同時に呼ばれても安全だが、llama の応答を待つ間ロックを
 //! 保持するので並列実行はされない（DynEngine でも同じ前提）。
 
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -25,11 +26,22 @@ use crate::protocol::{InputCharKind, PIPE_BASE_NAME, PROTOCOL_VERSION, Request, 
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
 
 /// ホスト起動が短時間に連続失敗した場合、TSF ホスト（Explorer など）からの
-/// 再 spawn を一時停止して不安定化を防ぐ。
+/// 再 spawn を一時停止して不安定化を防ぐ（Issue #55 で数え方を整理）。
+///
+/// 数えるのは**接続試行 1 回の最終結果**。接続 → spawn → `Hello` → `Create` の
+/// どこで失敗しても 1 試行につき 1 回だけ記録し、`Hello` / `Create` まで成功したら
+/// 回数と抑止を消す。抑止中の試行は、どの段階の失敗も数えず期限も延ばさない。
 const HOST_FAILURE_THRESHOLD: u32 = 3;
 const HOST_FAILURE_WINDOW_MS: u64 = 15_000;
 const HOST_FAILURE_COOLDOWN_MS: u64 = 30_000;
+/// 最初の接続試行（ホストが既に動いている場合はここで繋がる）。
+const INITIAL_CONNECT_MS: u64 = 300;
+/// spawn した後、ホストがパイプを作るまで待つ上限。
+const CONNECT_AFTER_SPAWN_MS: u64 = 5_000;
+/// 抑止中（spawn しない）に、別プロセスが起動したホストへ繋ぐ試み。
 const CONNECT_WHILE_BLOCKED_MS: u64 = 500;
+/// `ensure_connected` が 1 回目の失敗後に再試行するまでの待ち。
+const RECONNECT_RETRY_DELAY_MS: u64 = 200;
 
 /// spawn するホストへ渡すエンジン DLL のログレベル（`RAKUKAN_LOG`）。
 ///
@@ -115,20 +127,55 @@ fn rpc_stats_record(elapsed_us: u64) {
 }
 
 static HOST_FAILURE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
-static HOST_SPAWN_GUARD: LazyLock<Mutex<HostSpawnGuard>> =
-    LazyLock::new(|| Mutex::new(HostSpawnGuard::default()));
+static HOST_SPAWN_GUARD: LazyLock<Arc<Mutex<HostSpawnGuard>>> =
+    LazyLock::new(|| Arc::new(Mutex::new(HostSpawnGuard::default())));
 
 pub struct RpcEngine {
-    inner: Mutex<Connection>,
+    inner: Mutex<Connection<PipeTransport>>,
 }
 
-struct Connection {
-    stream: Option<PipeStream>,
+/// 接続・spawn・時刻・待機の口。実装は Named Pipe と `CreateProcess`（`PipeTransport`）。
+/// テストでは失敗の順序を台本で返す fake に差し替え、実際の再試行処理を通す（Issue #55）。
+pub(crate) trait HostTransport {
+    type Stream: Read + Write;
+    /// パイプへ接続する。`timeout` は接続待ちの上限（応答待ちの期限ではない）。
+    fn connect(&mut self, timeout: Duration) -> Result<Self::Stream>;
+    /// ホストプロセスを起動する。起動できたかしか分からない（listen までは待たない）。
+    fn spawn(&mut self) -> Result<()>;
+    fn sleep(&mut self, d: Duration);
+    /// `HostSpawnGuard` の時刻（単調、ms）。
+    fn now_ms(&mut self) -> u64;
+}
+
+/// 本番の transport。
+pub(crate) struct PipeTransport;
+
+impl HostTransport for PipeTransport {
+    type Stream = PipeStream;
+    fn connect(&mut self, timeout: Duration) -> Result<PipeStream> {
+        PipeStream::connect_client(&pipe_name_for_current_user(), timeout)
+    }
+    fn spawn(&mut self) -> Result<()> {
+        spawn_host()
+    }
+    fn sleep(&mut self, d: Duration) {
+        std::thread::sleep(d);
+    }
+    fn now_ms(&mut self) -> u64 {
+        monotonic_now_ms()
+    }
+}
+
+struct Connection<T: HostTransport> {
+    transport: T,
+    stream: Option<T::Stream>,
     /// 直近で使った EngineConfig JSON。
     /// パイプが切れて再接続するとき、ホストがちょうど再起動していたケースでは
     /// Create を送り直す必要がある。そのときに使う。
     /// `reload()` を呼ぶと新しい config で上書きされる。
     config_json: Option<String>,
+    /// spawn の抑止。本番はプロセスで 1 つ（`HOST_SPAWN_GUARD`）、テストは個別。
+    guard: Arc<Mutex<HostSpawnGuard>>,
 }
 
 #[derive(Debug, Default)]
@@ -145,21 +192,40 @@ impl HostSpawnGuard {
         self.blocked_until_ms = None;
     }
 
-    fn can_spawn(&mut self, now_ms: u64) -> Result<()> {
-        if let Some(until_ms) = self.blocked_until_ms {
-            if now_ms < until_ms {
-                let remaining_ms = until_ms.saturating_sub(now_ms);
-                bail!(
-                    "host spawn temporarily disabled for {}ms after repeated startup failures",
-                    remaining_ms
-                );
+    /// 抑止中かどうか。期限を過ぎていれば抑止を解いて `false`。
+    fn is_blocked(&mut self, now_ms: u64) -> bool {
+        match self.blocked_until_ms {
+            Some(until_ms) if now_ms < until_ms => true,
+            Some(_) => {
+                self.blocked_until_ms = None;
+                false
             }
-            self.blocked_until_ms = None;
+            None => false,
+        }
+    }
+
+    fn can_spawn(&mut self, now_ms: u64) -> Result<()> {
+        if self.is_blocked(now_ms) {
+            let remaining_ms = self
+                .blocked_until_ms
+                .map(|until| until.saturating_sub(now_ms))
+                .unwrap_or(0);
+            bail!(
+                "host spawn temporarily disabled for {}ms after repeated startup failures",
+                remaining_ms
+            );
         }
         Ok(())
     }
 
-    fn record_failure(&mut self, now_ms: u64) {
+    /// 失敗を 1 回数える。閾値に達したら抑止を開始して `true` を返す。
+    ///
+    /// 集計窓は**最初の失敗から** `HOST_FAILURE_WINDOW_MS` を超えた次の失敗で区切り直す
+    /// （常に直近 15 秒を集計する方式ではない）。既に抑止中なら数えず、期限も延ばさない。
+    fn record_failure(&mut self, now_ms: u64) -> bool {
+        if self.is_blocked(now_ms) {
+            return false;
+        }
         let reset_window = self
             .window_start_ms
             .map(|start| now_ms.saturating_sub(start) > HOST_FAILURE_WINDOW_MS)
@@ -175,17 +241,56 @@ impl HostSpawnGuard {
             self.window_start_ms = None;
             self.failure_count = 0;
             self.blocked_until_ms = Some(now_ms.saturating_add(HOST_FAILURE_COOLDOWN_MS));
+            return true;
+        }
+        false
+    }
+}
+
+/// 接続試行 1 回の途中経過。終了処理（`finish_attempt`）が記録とログに使う。
+#[derive(Debug, Default)]
+struct AttemptContext {
+    /// 試行の開始時、または spawn の直前に抑止中だった。
+    /// 抑止中の失敗はどの段階でも数えず、期限も延ばさない。
+    blocked: bool,
+    /// spawn を試みた結果（試みていなければ `None`）。失敗しても接続待ちは続ける
+    /// （別プロセスが起動したホストへ繋がれば成功扱い）。
+    spawn: Option<std::result::Result<(), String>>,
+    /// spawn してから接続できるまでの時間（接続できた場合）。
+    spawn_to_connect_ms: Option<u64>,
+}
+
+/// 接続試行が失敗した段階。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttemptStage {
+    /// spawn 後の接続待ちで失敗（spawn 自体の成否は `AttemptContext::spawn`）。
+    ConnectAfterSpawn,
+    /// 抑止中の接続で失敗。
+    ConnectWhileBlocked,
+    Hello,
+    Create,
+}
+
+impl AttemptStage {
+    fn as_str(self) -> &'static str {
+        match self {
+            AttemptStage::ConnectAfterSpawn => "connect_after_spawn",
+            AttemptStage::ConnectWhileBlocked => "connect_while_blocked",
+            AttemptStage::Hello => "hello",
+            AttemptStage::Create => "create",
         }
     }
+}
+
+struct AttemptFailure {
+    stage: AttemptStage,
+    error: anyhow::Error,
 }
 
 impl RpcEngine {
     /// 接続だけ試行して生成する。config_json は Create リクエストで送られる。
     pub fn connect_or_spawn(config_json: Option<String>) -> Result<Self> {
-        let mut conn = Connection {
-            stream: None,
-            config_json,
-        };
+        let mut conn = Connection::new(PipeTransport, config_json, HOST_SPAWN_GUARD.clone());
         conn.ensure_connected()?;
         Ok(Self {
             inner: Mutex::new(conn),
@@ -553,7 +658,16 @@ impl RpcEngine {
     }
 }
 
-impl Connection {
+impl<T: HostTransport> Connection<T> {
+    fn new(transport: T, config_json: Option<String>, guard: Arc<Mutex<HostSpawnGuard>>) -> Self {
+        Self {
+            transport,
+            stream: None,
+            config_json,
+            guard,
+        }
+    }
+
     /// 1 回の RPC。所要時間を計測して区間カウンタへ足し、閾値を超えたら WARN を
     /// 出す（Step 13-2）。再接続のリトライも含めた実時間を測る。
     fn call_with_retry(&mut self, req: Request) -> Result<Response> {
@@ -608,19 +722,21 @@ impl Connection {
     /// `engine_reload()` でホストに `Shutdown` を送った直後、ホストが応答後 50ms
     /// sleep してから `process::exit(0)` する間に新しい client が connect →
     /// Hello を投げると、host が exit したタイミングで read が "read length"
-    /// で死ぬ。これを 1 回だけリトライする。1 回目の失敗で host_spawn_guard に
-    /// failure が記録されても、2 回目で成功すれば record_success が呼ばれて
-    /// カウンタはリセットされる（仕様: HOST_FAILURE_THRESHOLD=3 なので 1 回の
-    /// 余分な失敗で本物の cooldown に入ることはない）。
+    /// で死ぬ。これを 1 回だけリトライする。1 回目の失敗は `HostSpawnGuard` に
+    /// 1 回数えられ、2 回目で成功すれば `Hello` / `Create` の成功で回数は 0 に戻る。
+    /// ただし、既に 2 回の失敗が窓の中に記録されていれば、この 1 回で閾値に達して
+    /// 抑止に入る（その場合も 2 回目は抑止中の接続として既存ホストを試すので、
+    /// ホストが起動していれば回復し、抑止も解ける）。
     fn ensure_connected(&mut self) -> Result<()> {
         if self.stream.is_some() {
             return Ok(());
         }
         if let Err(first_err) = self.try_connect_once() {
             tracing::warn!(
-                "ensure_connected: handshake failed ({first_err}); retrying after 200ms"
+                "ensure_connected: handshake failed ({first_err}); retrying after {RECONNECT_RETRY_DELAY_MS}ms"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            self.transport
+                .sleep(Duration::from_millis(RECONNECT_RETRY_DELAY_MS));
             return self
                 .try_connect_once()
                 .with_context(|| format!("retry after first failure: {first_err}"));
@@ -628,90 +744,211 @@ impl Connection {
         Ok(())
     }
 
-    /// `ensure_connected` の本体（connect → Hello → Create）。失敗時は
-    /// `self.stream = None` に戻して `host_spawn_guard` に failure を記録する。
-    /// リトライは `ensure_connected` 側で行う。
+    /// 接続試行 1 回（connect → spawn → Hello → Create）。
+    ///
+    /// 途中の結果は `run_attempt` が `AttemptContext` に残し、**終了処理
+    /// `finish_attempt` だけ**が `HostSpawnGuard` に記録する（Issue #55）。
+    /// 失敗したストリームは `run_attempt` の中で破棄され、成功したものだけが
+    /// `self.stream` に入る。リトライは `ensure_connected` 側で行う。
     fn try_connect_once(&mut self) -> Result<()> {
-        let pipe_name = pipe_name_for_current_user();
+        let now_ms = self.transport.now_ms();
+        let mut ctx = AttemptContext {
+            blocked: self.with_guard(|g| g.is_blocked(now_ms)),
+            ..AttemptContext::default()
+        };
+        let result = self.run_attempt(&mut ctx);
+        self.finish_attempt(&ctx, result)
+    }
 
-        // 1. まず接続を試行
-        match PipeStream::connect_client(&pipe_name, Duration::from_millis(300)) {
-            Ok(s) => {
-                self.stream = Some(s);
-            }
+    fn run_attempt(&mut self, ctx: &mut AttemptContext) -> std::result::Result<(), AttemptFailure> {
+        // 1. まず接続を試行（ホストが動いていればここで繋がる）
+        let mut stream = match self
+            .transport
+            .connect(Duration::from_millis(INITIAL_CONNECT_MS))
+        {
+            Ok(s) => s,
             Err(initial_err) => {
-                // 2. 失敗: 既存ホストへ短時間だけ再接続を試み、それでも駄目なら spawn。
-                // 短時間に連続失敗している間は spawn を一時停止し、Explorer などの
-                // TSF ホストから外部プロセス起動を連打しない。
-                match host_spawn_guard_can_spawn() {
+                // 2. 失敗: spawn の直前にも許可を確認する。短時間に連続失敗している間は
+                // spawn を一時停止し、Explorer などの TSF ホストから外部プロセス起動を
+                // 連打しない。抑止中でも、別プロセスが起動したホストには繋ぎに行く。
+                let now_ms = self.transport.now_ms();
+                match self.with_guard(|g| g.can_spawn(now_ms)) {
                     Ok(()) => {
-                        if let Err(e) = spawn_host() {
+                        let spawn = self.transport.spawn();
+                        if let Err(e) = &spawn {
+                            // 起動できなくても接続待ちは続ける（別プロセスが起動した
+                            // ホストへ繋がれば成功扱い）。診断ログだけ残す。
                             tracing::warn!("spawn_host failed: {e}");
                         }
-                        let s = PipeStream::connect_client(&pipe_name, Duration::from_secs(5))
-                            .with_context(|| format!("connect after spawn to {pipe_name}"))?;
-                        self.stream = Some(s);
+                        ctx.spawn = Some(spawn.map_err(|e| e.to_string()));
+                        let spawned_at_ms = self.transport.now_ms();
+                        match self
+                            .transport
+                            .connect(Duration::from_millis(CONNECT_AFTER_SPAWN_MS))
+                        {
+                            Ok(s) => {
+                                ctx.spawn_to_connect_ms =
+                                    Some(self.transport.now_ms().saturating_sub(spawned_at_ms));
+                                s
+                            }
+                            Err(e) => {
+                                return Err(AttemptFailure {
+                                    stage: AttemptStage::ConnectAfterSpawn,
+                                    error: e.context(format!(
+                                        "connect after spawn (initial error: {initial_err})"
+                                    )),
+                                });
+                            }
+                        }
                     }
                     Err(blocked_err) => {
+                        ctx.blocked = true;
                         tracing::warn!(
                             "host spawn suppressed after repeated failures: {blocked_err}"
                         );
-                        let s = PipeStream::connect_client(
-                            &pipe_name,
-                            Duration::from_millis(CONNECT_WHILE_BLOCKED_MS),
-                        )
-                        .with_context(|| {
-                            format!(
-                                "connect while spawn suppressed to {pipe_name} (initial error: {initial_err})"
-                            )
-                        })?;
-                        self.stream = Some(s);
+                        match self
+                            .transport
+                            .connect(Duration::from_millis(CONNECT_WHILE_BLOCKED_MS))
+                        {
+                            Ok(s) => s,
+                            Err(e) => {
+                                return Err(AttemptFailure {
+                                    stage: AttemptStage::ConnectWhileBlocked,
+                                    error: e.context(format!(
+                                        "connect while spawn suppressed (initial error: {initial_err})"
+                                    )),
+                                });
+                            }
+                        }
                     }
                 }
             }
+        };
+
+        // 3. Hello 交換
+        if let Err(error) = Self::handshake_hello(&mut stream) {
+            return Err(AttemptFailure {
+                stage: AttemptStage::Hello,
+                error,
+            });
         }
+        // 4. Create（保存済み config_json を使う）
+        if let Err(error) = Self::handshake_create(&mut stream, self.config_json.clone()) {
+            return Err(AttemptFailure {
+                stage: AttemptStage::Create,
+                error,
+            });
+        }
+        self.stream = Some(stream);
+        Ok(())
+    }
 
-        let result = (|| -> Result<()> {
-            // 3. Hello 交換
-            let s = self.stream.as_mut().expect("connected");
-            write_frame(
-                s,
-                &Request::Hello {
-                    protocol_version: PROTOCOL_VERSION,
-                },
-            )?;
-            match read_frame::<_, Response>(s)? {
-                Response::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => {}
-                Response::Hello { protocol_version } => {
-                    bail!("protocol version mismatch: server={protocol_version}")
-                }
-                Response::Error(e) => bail!("hello error: {e}"),
-                other => bail!("unexpected hello response: {:?}", other),
+    fn handshake_hello(stream: &mut T::Stream) -> Result<()> {
+        write_frame(
+            stream,
+            &Request::Hello {
+                protocol_version: PROTOCOL_VERSION,
+            },
+        )?;
+        match read_frame::<_, Response>(stream)? {
+            Response::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => Ok(()),
+            Response::Hello { protocol_version } => {
+                bail!("protocol version mismatch: server={protocol_version}")
             }
+            Response::Error(e) => bail!("hello error: {e}"),
+            other => bail!("unexpected hello response: {:?}", other),
+        }
+    }
 
-            // 4. Create（保存済み config_json を使う）
-            write_frame(
-                s,
-                &Request::Create {
-                    config_json: self.config_json.clone(),
-                },
-            )?;
-            match read_frame::<_, Response>(s)? {
-                Response::Unit => Ok(()),
-                Response::Error(e) => bail!("create error: {e}"),
-                other => bail!("unexpected create response: {:?}", other),
-            }
-        })();
+    fn handshake_create(stream: &mut T::Stream, config_json: Option<String>) -> Result<()> {
+        write_frame(stream, &Request::Create { config_json })?;
+        match read_frame::<_, Response>(stream)? {
+            Response::Unit => Ok(()),
+            Response::Error(e) => bail!("create error: {e}"),
+            other => bail!("unexpected create response: {:?}", other),
+        }
+    }
 
+    /// 接続試行の終了処理。`HostSpawnGuard` への記録はここでだけ行う。
+    ///
+    /// - 成功（`Hello` / `Create` まで）: 回数と抑止を消す
+    /// - 失敗: 通常の試行なら 1 回数える。抑止中の試行はどの段階でも数えず、期限も延ばさない
+    ///
+    /// Guard のロックは記録の間だけ持ち、接続待ちや I/O の間は持たない。
+    fn finish_attempt(
+        &mut self,
+        ctx: &AttemptContext,
+        result: std::result::Result<(), AttemptFailure>,
+    ) -> Result<()> {
+        let now_ms = self.transport.now_ms();
+        let spawn_label = match &ctx.spawn {
+            None => "not_attempted",
+            Some(Ok(())) => "ok",
+            Some(Err(_)) => "failed",
+        };
         match result {
             Ok(()) => {
-                host_spawn_guard_record_success();
+                let (had_failures, was_blocked) = self.with_guard(|g| {
+                    let state = (g.failure_count != 0, g.blocked_until_ms.is_some());
+                    g.reset();
+                    state
+                });
+                tracing::info!(
+                    "host connected: Hello/Create ok spawn={spawn_label} spawn_to_connect_ms={:?} while_blocked={}",
+                    ctx.spawn_to_connect_ms,
+                    ctx.blocked
+                );
+                if had_failures || was_blocked {
+                    tracing::info!("host connection recovered; clearing startup failure guard");
+                }
                 Ok(())
             }
-            Err(e) => {
-                self.stream = None;
-                host_spawn_guard_record_failure();
-                Err(e)
+            Err(failure) => {
+                let stage = failure.stage.as_str();
+                // 記録の可否は「試行の途中で抑止中だったか」(ctx.blocked) で決め、
+                // ログには現在の抑止状態も添える（期限をまたいだ試行を判別できるように）。
+                let outcome = self.with_guard(|g| {
+                    if ctx.blocked {
+                        None
+                    } else {
+                        Some(g.record_failure(now_ms))
+                    }
+                    .map(|newly_blocked| (newly_blocked, g.failure_count, g.blocked_until_ms))
+                    .unwrap_or((false, g.failure_count, g.blocked_until_ms))
+                });
+                let (newly_blocked, count, blocked_until) = outcome;
+                let blocked_now = blocked_until.is_some_and(|until| now_ms < until);
+                if ctx.blocked || (!newly_blocked && blocked_now) {
+                    // 抑止中の試行（開始時・spawn 直前）か、試行の途中で同じプロセスの別の試行が
+                    // 抑止に入った（record_failure は抑止中なら数えない）。どちらも数えない
+                    tracing::warn!(
+                        "host connect failed while spawn suppressed: stage={stage} spawn={spawn_label} blocked_during_attempt={} blocked_now={blocked_now} count={count} blocked_until={blocked_until:?} (not counted, cooldown unchanged): {}",
+                        ctx.blocked,
+                        failure.error
+                    );
+                } else if newly_blocked {
+                    tracing::warn!(
+                        "host startup failed {HOST_FAILURE_THRESHOLD} times within {HOST_FAILURE_WINDOW_MS}ms; spawn suppressed for {HOST_FAILURE_COOLDOWN_MS}ms (stage={stage} spawn={spawn_label} count={count} blocked_until={blocked_until:?}): {}",
+                        failure.error
+                    );
+                } else {
+                    tracing::warn!(
+                        "recorded host startup failure: stage={stage} spawn={spawn_label} count={count} blocked_until={blocked_until:?}: {}",
+                        failure.error
+                    );
+                }
+                Err(failure.error)
+            }
+        }
+    }
+
+    fn with_guard<R>(&self, f: impl FnOnce(&mut HostSpawnGuard) -> R) -> R {
+        match self.guard.lock() {
+            Ok(mut guard) => f(&mut guard),
+            Err(poisoned) => {
+                tracing::warn!("host spawn guard mutex poisoned, recovering");
+                let mut guard = poisoned.into_inner();
+                f(&mut guard)
             }
         }
     }
@@ -728,45 +965,8 @@ fn spawn_host() -> Result<()> {
     spawn_detached(&exe)
 }
 
-fn host_spawn_guard_can_spawn() -> Result<()> {
-    let now_ms = monotonic_now_ms();
-    with_host_spawn_guard(|guard| guard.can_spawn(now_ms))
-}
-
-fn host_spawn_guard_record_failure() {
-    let now_ms = monotonic_now_ms();
-    with_host_spawn_guard(|guard| {
-        guard.record_failure(now_ms);
-        tracing::warn!(
-            "recorded host startup failure: count={} blocked_until={:?}",
-            guard.failure_count,
-            guard.blocked_until_ms
-        );
-    });
-}
-
-fn host_spawn_guard_record_success() {
-    with_host_spawn_guard(|guard| {
-        if guard.failure_count != 0 || guard.blocked_until_ms.is_some() {
-            tracing::info!("host connection recovered; clearing startup failure guard");
-        }
-        guard.reset();
-    });
-}
-
 fn monotonic_now_ms() -> u64 {
     HOST_FAILURE_CLOCK.elapsed().as_millis() as u64
-}
-
-fn with_host_spawn_guard<T>(f: impl FnOnce(&mut HostSpawnGuard) -> T) -> T {
-    match HOST_SPAWN_GUARD.lock() {
-        Ok(mut guard) => f(&mut guard),
-        Err(poisoned) => {
-            tracing::warn!("host spawn guard mutex poisoned, recovering");
-            let mut guard = poisoned.into_inner();
-            f(&mut guard)
-        }
-    }
 }
 
 #[cfg(target_os = "windows")]
@@ -842,16 +1042,18 @@ mod tests {
         assert_eq!(spawn_log_env(false, Some("  ".into())), None);
     }
 
+    // ── HostSpawnGuard 単体 ───────────────────────────────────────────────
+
     #[test]
     fn host_spawn_guard_blocks_after_repeated_failures() {
         let mut guard = HostSpawnGuard::default();
 
         assert!(guard.can_spawn(0).is_ok());
-        guard.record_failure(100);
+        assert!(!guard.record_failure(100));
         assert!(guard.can_spawn(101).is_ok());
-        guard.record_failure(200);
+        assert!(!guard.record_failure(200));
         assert!(guard.can_spawn(201).is_ok());
-        guard.record_failure(300);
+        assert!(guard.record_failure(300), "3 回目で抑止に入る");
 
         let blocked = guard.can_spawn(301).unwrap_err().to_string();
         assert!(blocked.contains("temporarily disabled"));
@@ -859,12 +1061,17 @@ mod tests {
     }
 
     #[test]
-    fn host_spawn_guard_resets_after_window_expires() {
+    fn host_spawn_guard_window_boundary() {
+        // 集計窓は最初の失敗から 15,000ms までが同じ窓、15,001ms で新しい窓
         let mut guard = HostSpawnGuard::default();
+        guard.record_failure(100);
+        guard.record_failure(100 + HOST_FAILURE_WINDOW_MS);
+        assert_eq!(guard.failure_count, 2, "ちょうど 15,000ms は同じ窓");
 
+        let mut guard = HostSpawnGuard::default();
         guard.record_failure(100);
         guard.record_failure(100 + HOST_FAILURE_WINDOW_MS + 1);
-        assert_eq!(guard.failure_count, 1);
+        assert_eq!(guard.failure_count, 1, "15,001ms は新しい窓");
         assert!(guard.blocked_until_ms.is_none());
     }
 
@@ -881,5 +1088,376 @@ mod tests {
         assert!(guard.can_spawn(302).is_ok());
         assert_eq!(guard.failure_count, 0);
         assert!(guard.blocked_until_ms.is_none());
+    }
+
+    #[test]
+    fn host_spawn_guard_does_not_extend_cooldown_while_blocked() {
+        let mut guard = HostSpawnGuard::default();
+        guard.record_failure(100);
+        guard.record_failure(200);
+        assert!(guard.record_failure(300));
+        let until = guard.blocked_until_ms.expect("blocked");
+
+        // 抑止中の失敗は数えず、期限も動かさない
+        assert!(!guard.record_failure(1_000));
+        assert_eq!(guard.failure_count, 0);
+        assert_eq!(guard.blocked_until_ms, Some(until));
+
+        // 期限直前は抑止、期限到達で解ける
+        assert!(guard.is_blocked(until - 1));
+        assert!(!guard.is_blocked(until));
+        assert!(guard.blocked_until_ms.is_none());
+    }
+
+    // ── 接続経路（fake transport で実際の再試行処理を通す）────────────────
+
+    use std::collections::VecDeque;
+    use std::io::Cursor;
+
+    /// 台本どおりの応答を返し、書き込まれた要求を記録するストリーム。
+    struct FakeStream {
+        incoming: Cursor<Vec<u8>>,
+        outgoing: Vec<u8>,
+    }
+
+    impl Read for FakeStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.incoming.read(buf)
+        }
+    }
+
+    impl Write for FakeStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.outgoing.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// ホストの応答を台本にしたストリーム。空なら最初の read で EOF（"read length"）。
+    fn stream_with(responses: &[Response]) -> FakeStream {
+        let mut bytes = Vec::new();
+        for r in responses {
+            write_frame(&mut bytes, r).unwrap();
+        }
+        FakeStream {
+            incoming: Cursor::new(bytes),
+            outgoing: Vec::new(),
+        }
+    }
+
+    fn hello_ok() -> Response {
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        }
+    }
+
+    /// 接続・spawn の結果を台本で返し、仮想時計を進める transport。
+    #[derive(Default)]
+    struct FakeTransport {
+        connects: VecDeque<std::result::Result<FakeStream, &'static str>>,
+        spawns: VecDeque<std::result::Result<(), &'static str>>,
+        now_ms: u64,
+        connect_timeouts: Vec<u64>,
+        spawn_calls: u32,
+        slept_ms: u64,
+    }
+
+    impl HostTransport for FakeTransport {
+        type Stream = FakeStream;
+        fn connect(&mut self, timeout: Duration) -> Result<FakeStream> {
+            self.connect_timeouts.push(timeout.as_millis() as u64);
+            match self.connects.pop_front() {
+                Some(Ok(s)) => {
+                    self.now_ms += 10;
+                    Ok(s)
+                }
+                Some(Err(e)) => {
+                    self.now_ms += timeout.as_millis() as u64;
+                    Err(anyhow!("connect_client: timeout: {e}"))
+                }
+                None => {
+                    self.now_ms += timeout.as_millis() as u64;
+                    Err(anyhow!("connect_client: timeout: no host (unscripted)"))
+                }
+            }
+        }
+        fn spawn(&mut self) -> Result<()> {
+            self.spawn_calls += 1;
+            match self.spawns.pop_front() {
+                Some(Ok(())) | None => Ok(()),
+                Some(Err(e)) => Err(anyhow!("host exe not found: {e}")),
+            }
+        }
+        fn sleep(&mut self, d: Duration) {
+            let ms = d.as_millis() as u64;
+            self.slept_ms += ms;
+            self.now_ms += ms;
+        }
+        fn now_ms(&mut self) -> u64 {
+            self.now_ms
+        }
+    }
+
+    fn connection(transport: FakeTransport) -> Connection<FakeTransport> {
+        Connection::new(
+            transport,
+            None,
+            Arc::new(Mutex::new(HostSpawnGuard::default())),
+        )
+    }
+
+    fn guard_state(conn: &Connection<FakeTransport>) -> (u32, Option<u64>) {
+        conn.with_guard(|g| (g.failure_count, g.blocked_until_ms))
+    }
+
+    #[test]
+    fn spawn_ok_then_connect_failure_counts_once() {
+        // 初回接続失敗 → spawn 成功 → 5 秒の接続待ちも失敗: 1 試行につき 1 回だけ
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Err("no host"), Err("still no host")]),
+            ..Default::default()
+        });
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(guard_state(&conn), (1, None));
+        assert_eq!(conn.transport.spawn_calls, 1);
+        assert_eq!(
+            conn.transport.connect_timeouts,
+            vec![INITIAL_CONNECT_MS, CONNECT_AFTER_SPAWN_MS]
+        );
+        assert!(conn.stream.is_none());
+    }
+
+    #[test]
+    fn spawn_failure_then_connect_failure_counts_once() {
+        // spawn 自体が失敗（exe 無し）→ それでも接続待ちに進み → 失敗: 1 回だけ
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Err("no host"), Err("still no host")]),
+            spawns: VecDeque::from([Err("missing")]),
+            ..Default::default()
+        });
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(guard_state(&conn), (1, None));
+        assert_eq!(conn.transport.spawn_calls, 1);
+        assert_eq!(
+            conn.transport.connect_timeouts.len(),
+            2,
+            "spawn 失敗でも接続待ちに進む"
+        );
+    }
+
+    #[test]
+    fn spawn_failure_but_other_host_connects_resets_guard() {
+        // spawn は失敗したが、別プロセスが起動したホストへ接続・Hello・Create が成功
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Err("no host"),
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            spawns: VecDeque::from([Err("missing")]),
+            ..Default::default()
+        });
+        conn.with_guard(|g| {
+            g.record_failure(0);
+        });
+        assert!(conn.try_connect_once().is_ok());
+        assert_eq!(guard_state(&conn), (0, None), "失敗を数えず、リセットする");
+        assert!(conn.stream.is_some());
+    }
+
+    #[test]
+    fn hello_and_create_failures_count_once_and_drop_stream() {
+        // Hello がエラー応答
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[Response::Error("nope".into())]))]),
+            ..Default::default()
+        });
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(guard_state(&conn), (1, None));
+        assert!(conn.stream.is_none());
+
+        // Hello は通るが Create がエラー応答
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[
+                hello_ok(),
+                Response::Error("load_auto failed".into()),
+            ]))]),
+            ..Default::default()
+        });
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(guard_state(&conn), (1, None));
+        assert!(conn.stream.is_none());
+
+        // 接続できたが応答が来ない（Shutdown 直後の "read length"）
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[]))]),
+            ..Default::default()
+        });
+        let err = conn.try_connect_once().unwrap_err().to_string();
+        assert!(err.contains("read length"), "{err}");
+        assert_eq!(guard_state(&conn), (1, None));
+        assert!(conn.stream.is_none());
+    }
+
+    #[test]
+    fn double_retry_reaches_threshold_within_one_rpc() {
+        // ホストが起動できない状態で 1 回の RPC:
+        // ensure_connected 2 回 × try_connect_once 2 回 = 4 試行。3 試行目で抑止に入り、
+        // 4 試行目は spawn せず抑止中の接続だけ試して数えない。
+        let mut conn = connection(FakeTransport::default());
+        let err = conn.call_with_retry_inner(Request::Bye).unwrap_err();
+        assert!(
+            err.to_string().contains("retry after first failure"),
+            "{err}"
+        );
+
+        let (count, blocked_until) = guard_state(&conn);
+        assert_eq!(count, 0, "閾値到達で回数は 0 に戻る");
+        let until = blocked_until.expect("3 試行目で抑止に入る");
+        assert_eq!(conn.transport.spawn_calls, 3, "4 試行目は spawn しない");
+        assert_eq!(
+            conn.transport.connect_timeouts,
+            vec![
+                INITIAL_CONNECT_MS,
+                CONNECT_AFTER_SPAWN_MS,
+                INITIAL_CONNECT_MS,
+                CONNECT_AFTER_SPAWN_MS,
+                INITIAL_CONNECT_MS,
+                CONNECT_AFTER_SPAWN_MS,
+                INITIAL_CONNECT_MS,
+                CONNECT_WHILE_BLOCKED_MS,
+            ],
+            "RPC 回数（1）と接続試行数（4）は別"
+        );
+        assert_eq!(conn.transport.slept_ms, 2 * RECONNECT_RETRY_DELAY_MS);
+        // 3 試行目の失敗時刻 + 抑止時間。4 試行目で延びていない
+        let third_failure_at =
+            3 * (INITIAL_CONNECT_MS + CONNECT_AFTER_SPAWN_MS) + RECONNECT_RETRY_DELAY_MS;
+        assert_eq!(until, third_failure_at + HOST_FAILURE_COOLDOWN_MS);
+    }
+
+    #[test]
+    fn failures_while_blocked_do_not_count_or_extend() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                // 抑止中: 初回接続失敗 → spawn せず 500ms 接続も失敗
+                Err("no host"),
+                Err("no host"),
+                // 抑止中: 最初の 300ms 接続で繋がったが Hello で失敗
+                Ok(stream_with(&[Response::Error("nope".into())])),
+                // 抑止中: 繋がったが Create で失敗
+                Ok(stream_with(&[hello_ok(), Response::Error("nope".into())])),
+            ]),
+            ..Default::default()
+        });
+        conn.with_guard(|g| {
+            g.record_failure(0);
+            g.record_failure(1);
+            assert!(g.record_failure(2));
+        });
+        let until = guard_state(&conn).1.expect("blocked");
+
+        for _ in 0..3 {
+            assert!(conn.try_connect_once().is_err());
+            assert_eq!(
+                guard_state(&conn),
+                (0, Some(until)),
+                "回数も期限も変わらない"
+            );
+        }
+        assert_eq!(conn.transport.spawn_calls, 0);
+        assert_eq!(
+            conn.transport.connect_timeouts,
+            vec![
+                INITIAL_CONNECT_MS,
+                CONNECT_WHILE_BLOCKED_MS,
+                INITIAL_CONNECT_MS,
+                INITIAL_CONNECT_MS
+            ]
+        );
+    }
+
+    #[test]
+    fn success_while_blocked_clears_block_and_deadline_allows_spawn() {
+        // 抑止中に既存ホストへ完全に接続できたら解除
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Err("no host"),
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        conn.with_guard(|g| {
+            g.record_failure(0);
+            g.record_failure(1);
+            assert!(g.record_failure(2));
+        });
+        assert!(conn.try_connect_once().is_ok());
+        assert_eq!(guard_state(&conn), (0, None));
+        assert_eq!(conn.transport.spawn_calls, 0, "抑止中は spawn しない");
+
+        // 期限直前は抑止（spawn しない）、期限到達後は spawn できる
+        let mut conn = connection(FakeTransport::default());
+        conn.with_guard(|g| {
+            g.record_failure(0);
+            g.record_failure(1);
+            assert!(g.record_failure(2));
+        });
+        let until = guard_state(&conn).1.unwrap();
+        conn.transport.now_ms = until - 1 - INITIAL_CONNECT_MS;
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(conn.transport.spawn_calls, 0, "期限直前は抑止");
+        conn.transport.now_ms = until;
+        assert!(conn.try_connect_once().is_err());
+        assert_eq!(conn.transport.spawn_calls, 1, "期限到達後は spawn できる");
+        assert_eq!(guard_state(&conn).0, 1, "抑止が解けた後の失敗は数え直す");
+    }
+
+    #[test]
+    fn shutdown_race_recovers_on_retry() {
+        // 1 回目: 繋がったが旧ホストが exit して応答なし → 1 回数える
+        // 2 回目（200ms 後）: 新ホストへ接続・Hello・Create 成功 → リセット
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Ok(stream_with(&[])),
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        assert!(conn.ensure_connected().is_ok());
+        assert_eq!(guard_state(&conn), (0, None));
+        assert_eq!(conn.transport.slept_ms, RECONNECT_RETRY_DELAY_MS);
+        assert!(conn.stream.is_some());
+    }
+
+    #[test]
+    fn shutdown_race_with_two_prior_failures_enters_cooldown_then_recovers() {
+        // 既に 2 失敗が窓の中にあると、race の 1 回で閾値に達して抑止に入る。
+        // それでも再試行は抑止中の接続として既存ホストを試すので、起動していれば回復し、抑止も解ける。
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Ok(stream_with(&[])),
+                Err("exiting"),
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        conn.with_guard(|g| {
+            g.record_failure(0);
+            g.record_failure(1);
+        });
+        assert!(conn.ensure_connected().is_ok());
+        assert_eq!(guard_state(&conn), (0, None), "成功で抑止も解ける");
+        assert_eq!(conn.transport.spawn_calls, 0, "抑止中なので spawn しない");
+        assert_eq!(
+            conn.transport.connect_timeouts,
+            vec![
+                INITIAL_CONNECT_MS,
+                INITIAL_CONNECT_MS,
+                CONNECT_WHILE_BLOCKED_MS
+            ]
+        );
     }
 }
