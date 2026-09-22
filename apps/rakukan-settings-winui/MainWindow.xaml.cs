@@ -753,8 +753,8 @@ public sealed partial class MainWindow : Window
             {
                 SignalReload();
                 StatusBar.Severity = InfoBarSeverity.Success;
-                StatusBar.Title = "反映しました";
-                StatusBar.Message = "設定を保存し、現在の IME に反映しました。";
+                StatusBar.Title = "保存しました";
+                StatusBar.Message = "設定を保存しました。設定は各アプリの IME に順次反映されます。";
             }
             else
             {

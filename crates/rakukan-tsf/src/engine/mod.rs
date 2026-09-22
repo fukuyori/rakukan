@@ -1,6 +1,7 @@
 pub(super) mod client_action;
 pub(super) mod composition;
 pub(crate) mod config;
+pub(super) mod config_watch;
 pub(super) mod ime_mode;
 pub(super) mod keymap;
 pub(super) mod state;

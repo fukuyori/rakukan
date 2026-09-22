@@ -169,7 +169,8 @@ fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
         }
         ID_MENU_ENGINE_RELOAD => {
             tracing::info!("langbar menu: ID_MENU_ENGINE_RELOAD selected");
-            crate::engine::config::init_config_manager();
+            // 共通の読込処理を同期で通してから送る（Issue #65）
+            let _ = crate::engine::config::reload_config("manual_restart");
             // 手動の「エンジン再起動」はハング復旧用途なので config が同じでも必ず再起動する
             crate::engine::state::engine_reload_force();
         }
@@ -917,18 +918,23 @@ impl TextServiceFactory_Impl {
 
     /// 入力モード切替時の設定再読込。
     ///
-    /// config と keymap はそれぞれ mtime gate を持ち、変わっていなければファイルを
-    /// 読まない（キースレッド上の同期 I/O を避ける）。両者の失敗は互いに影響しない。
+    /// config は `reload_on_mode_switch = true` のとき共通の読込処理を同期で通す
+    /// （本文比較。mtime では省略しない。Issue #65）。エンジンへの反映は、本文が
+    /// 変わったかではなく**反映待ちがあるか**で決める（背景の監視が先に読んでいても、
+    /// 反映待ちが残っていればここで処理する）。keymap は mtime gate のまま。
+    /// 両者の失敗は互いに影響しない。
     fn maybe_reload_runtime_config(&self) {
-        let config_changed = crate::engine::config::maybe_reload_on_mode_switch();
+        let pending = crate::engine::config::maybe_reload_on_mode_switch();
         if let Some(new_keymap) = crate::engine::keymap::Keymap::reload_if_changed()
             && let Ok(mut inner) = self.inner.try_borrow_mut()
         {
             inner.keymap = new_keymap;
         }
-        if config_changed {
-            tracing::info!("runtime config reloaded on input mode switch");
-            crate::engine::state::engine_reload();
+        if pending {
+            tracing::info!("config apply pending; applying on input mode switch");
+            crate::engine::state::engine_reload_for(
+                crate::engine::config::ApplyTrigger::ModeSwitch,
+            );
         }
     }
 }

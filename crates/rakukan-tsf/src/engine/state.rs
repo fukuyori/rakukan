@@ -10,6 +10,7 @@ use super::ime_mode::ImeMode;
 // 既存コードの大部分が触らないよう `DynEngine` の名前で re-export する。
 // 実体は `rakukan-engine-rpc` を通じて `rakukan-engine-host.exe` へ Named Pipe で
 // 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
+use super::config::ApplyTrigger;
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
@@ -406,8 +407,7 @@ pub fn engine_force_recreate() {
     }
 }
 
-/// トレイから「エンジン再起動」が要求されたとき、または config.toml 変更後の
-/// IME モード切替で呼ばれる。
+/// 設定の変更をホストへ反映する（保存イベント・条件付きモード切替から）。
 ///
 /// Phase A（out-of-process 化）以降は、TSF 側のハンドル (RpcEngine) を捨てずに
 /// ホストプロセスを終了させ、次回 API 呼び出しで新プロセスを自動 spawn させる
@@ -423,21 +423,35 @@ pub fn engine_force_recreate() {
 /// `n_gpu_layers` や `model_variant` のような **エンジン生成時決定パラメータ** は
 /// 新 PID の `Create { config_json }` で反映される。
 ///
-/// 渡した `config_json` を保持し、再接続時に Create で再送する。
+/// Issue #65 以降の判断:
+/// - 設定の読み直しはここでは行わない。呼び出し元（監視スレッド・モード切替）が
+///   `config::reload_config` を通してから呼ぶ
+/// - ラッチのリセットは反映待ちの有無に関係なく行う（ホストが知らないうちに入れ替わって
+///   いると、ラッチが立ったままでは辞書・モデルの注入を二度と poll しないため）。
+///   ただし `RAKUKAN_ENGINE` のロック下で行い、監視スレッドからは直接触らない
+/// - 反映待ちが無ければ RPC は送らない。あれば `ShutdownIfConfigDiffers` を送り、
+///   応答を `config::finish_apply` に渡す。解除は送った組が一致し成功応答のときだけ
+///   （通信失敗では保持。`config::ApplyOutcome`）
 ///
 /// **条件付き**: ホストが既に同じ config で動いている場合は再起動しない
 /// （reload storm 対策）。TSF DLL はアプリごとに別プロセスで動くため、
 /// 設定保存 1 回を各プロセスが独立に検出し、共有シングルトンホストを
 /// 順番に殺す連鎖が起きていた（2026-07-13 実ログ: 5 分間に 4 回再起動）。
-/// config 比較はホスト側（`ShutdownIfConfigDiffers`）で行うので、
-/// 自プロセスのキャッシュが古くても「ホストは既に新 config」なら skip される。
+/// config 比較はホスト側（`ShutdownIfConfigDiffers`）で行う。
 ///
 /// 無条件に再起動したい場合は `engine_reload_force()` を使うこと（メニュー用）。
 /// 変換の詰まりからの復旧はホストが自分で行う（Issue #57。TSF は判断しない）。
 #[track_caller]
 pub fn engine_reload() {
     let caller = std::panic::Location::caller();
-    engine_reload_impl(false, caller);
+    engine_reload_impl(ApplyTrigger::SaveEvent, false, caller);
+}
+
+/// 契機を指定する版（モード切替から）。
+#[track_caller]
+pub fn engine_reload_for(trigger: ApplyTrigger) {
+    let caller = std::panic::Location::caller();
+    engine_reload_impl(trigger, false, caller);
 }
 
 /// config の異同に関わらず必ずホストを再起動する版。
@@ -445,29 +459,29 @@ pub fn engine_reload() {
 #[track_caller]
 pub fn engine_reload_force() {
     let caller = std::panic::Location::caller();
-    engine_reload_impl(true, caller);
+    engine_reload_impl(ApplyTrigger::ManualRestart, true, caller);
 }
 
-fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static>) {
-    // 診断: 誰がこの関数を呼んだかをログに残す。0.7.x で調査中の
-    // 「reload event/runtime config 由来でない engine_reload」を切り分けるため。
+fn engine_reload_impl(
+    trigger: ApplyTrigger,
+    force: bool,
+    caller: &'static std::panic::Location<'static>,
+) {
+    use super::config::{ApplyOutcome, begin_apply, finish_apply};
+    use rakukan_engine_rpc::ShutdownOutcome;
+
+    // 診断: 誰がこの関数を呼んだかをログに残す。
     tracing::info!(
-        "engine_reload: invoked from {}:{}:{} force={}",
+        "engine_reload: invoked from {}:{}:{} trigger={:?} force={}",
         caller.file(),
         caller.line(),
         caller.column(),
+        trigger,
         force
     );
-    // バックグラウンドで shutdown（UI スレッドをブロックしない）
+    // バックグラウンドで shutdown（UI スレッド・監視スレッドをブロックしない）
     std::thread::spawn(move || {
         let t_start = std::time::Instant::now();
-
-        // config.toml をディスクから再読み込みしてから EngineConfig JSON を生成する。
-        // 設定画面の保存ボタン → SignalReload → reload_watcher 経由で呼ばれた場合、
-        // CONFIG_MANAGER のキャッシュは古いままなので、ここで明示的にリロードする。
-        // （モード切替経由では `maybe_reload_on_mode_switch` が先に実ファイルを読む）
-        super::config::init_config_manager();
-        let cfg = build_engine_config_json();
 
         let mut guard = match RAKUKAN_ENGINE.lock() {
             Ok(g) => g,
@@ -476,35 +490,53 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
                 p.into_inner()
             }
         };
+        // ラッチは反映待ちの有無に関係なく落とす（ロック下）。
+        reset_ready_latches();
+
+        // 反映待ちが無ければ RPC は送らない（force は現在の組を送る）
+        let Some((sent, cfg)) = begin_apply(trigger, force) else {
+            tracing::info!(
+                "engine_reload: no pending config change; latches reset only ({:?})",
+                t_start.elapsed()
+            );
+            return;
+        };
+
         match guard.0.as_mut() {
             Some(eng) => {
                 if !force {
-                    // まずホスト側と config を比較。同一なら再起動しない
-                    // （ハンドルは現状維持）。
+                    // まずホスト側と config を比較。同一なら再起動しない（ハンドルは現状維持）。
                     match eng.shutdown_if_config_differs(Some(cfg.clone())) {
                         Ok(false) => {
+                            finish_apply(&sent, ApplyOutcome::SameConfig);
                             tracing::info!(
                                 "engine_reload: host already running with same config, skipping restart ({:?})",
                                 t_start.elapsed()
                             );
-                            // ホストは維持するがラッチは落とす。ホストが我々の
-                            // 知らないうちに入れ替わっていると（クラッシュ・外部
-                            // 終了・再 spawn）、ラッチが立ったままでは辞書・モデル
-                            // の注入を二度と poll しない。次の poll で実態を確認
-                            // させる。余分な RPC は ready になるまでの数回だけ。
-                            reset_ready_latches();
                             return;
                         }
                         Ok(true) => {
-                            // ホストは exit 中。以降は従来の shutdown 後処理に合流。
+                            // ホストは exit 中。再起動の受理（新設定での起動確認ではない）。
+                            finish_apply(&sent, ApplyOutcome::RestartAccepted);
                         }
                         Err(e) => {
                             // 旧プロトコルのホスト・half-dead なホスト等、比較不能。
                             // 従来どおり無条件 Shutdown にフォールバックする。
+                            // 解除の根拠は「比較に失敗した」ではなく「終了応答を実際に受けた」こと。
                             tracing::warn!(
                                 "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
                             );
-                            let _ = eng.shutdown(Some(cfg.clone()));
+                            match eng.shutdown(Some(cfg.clone())) {
+                                Ok(ShutdownOutcome::Acknowledged) => {
+                                    finish_apply(
+                                        &sent,
+                                        ApplyOutcome::ShutdownAcknowledged { fallback: true },
+                                    );
+                                }
+                                Ok(ShutdownOutcome::NoResponse) | Err(_) => {
+                                    finish_apply(&sent, ApplyOutcome::CommFailure);
+                                }
+                            }
                         }
                     }
                 } else {
@@ -513,19 +545,31 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
                     let r = eng.shutdown(Some(cfg.clone()));
                     let elapsed = t_start.elapsed();
                     match r {
-                        Ok(()) => {
+                        Ok(ShutdownOutcome::Acknowledged) => {
+                            finish_apply(
+                                &sent,
+                                ApplyOutcome::ShutdownAcknowledged { fallback: false },
+                            );
                             tracing::info!("engine_reload: host shutdown requested ({:?})", elapsed)
                         }
-                        Err(e) => tracing::warn!(
-                            "engine_reload: host shutdown call returned error ({:?}): {e}",
-                            elapsed
-                        ),
+                        Ok(ShutdownOutcome::NoResponse) => {
+                            finish_apply(&sent, ApplyOutcome::CommFailure);
+                            tracing::warn!(
+                                "engine_reload: host shutdown sent but no response ({:?})",
+                                elapsed
+                            )
+                        }
+                        Err(e) => {
+                            finish_apply(&sent, ApplyOutcome::CommFailure);
+                            tracing::warn!(
+                                "engine_reload: host shutdown call returned error ({:?}): {e}",
+                                elapsed
+                            )
+                        }
                     }
                 }
-                // reload 後は辞書・モデルが再ロードされるのでラッチもリセットする
-                reset_ready_latches();
                 // ホスト側は応答送信後 50ms sleep してから `process::exit(0)` する
-                // (server.rs:73-77)。ここでハンドルを即 drop すると、次の
+                // (server.rs)。ここでハンドルを即 drop すると、次の
                 // `engine_try_get_or_create()` がその 50ms 内に死にゆくパイプへ
                 // connect → Hello で host が exit → "read length" エラーになる
                 // race が発生する。RAKUKAN_ENGINE mutex を握ったまま 100ms 待つ
@@ -539,8 +583,9 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
             }
             None => {
                 // ハンドル未作成 = まだ一度も使われていない or 前回落ちた状態。
-                // 通常の初回ロードパスに合流させる。
-                reset_ready_latches();
+                // 送る相手がいないので反映待ちは残し（次の契機で送る）、
+                // 通常の初回ロードパスに合流させる。新しい接続は現在の組で Create する。
+                finish_apply(&sent, ApplyOutcome::CommFailure);
                 drop(guard);
                 ENGINE_INIT_STARTED.store(false, AO::Release);
                 engine_start_bg_init();
@@ -549,42 +594,9 @@ fn engine_reload_impl(force: bool, caller: &'static std::panic::Location<'static
     });
 }
 
-/// 名前付きイベント `Local\rakukan.engine.reload` を監視するバックグラウンドスレッドを起動する。
-/// トレイプロセスがこのイベントを SetEvent したとき engine_reload() を呼ぶ。
+/// `config.toml` の変更監視を起動する（DllMain から 1 回）。実体は `config_watch`。
 pub fn start_reload_watcher() {
-    std::thread::Builder::new()
-        .name("rakukan-reload-watcher".into())
-        .spawn(|| {
-            use windows::Win32::System::Threading::{CreateEventW, INFINITE, WaitForSingleObject};
-            let name: Vec<u16> = "Local\\rakukan.engine.reload\0".encode_utf16().collect();
-            let evt = unsafe {
-                CreateEventW(
-                    None,
-                    false, // auto-reset
-                    false,
-                    windows::core::PCWSTR(name.as_ptr()),
-                )
-            };
-            let evt = match evt {
-                Ok(h) => h,
-                Err(e) => {
-                    tracing::error!("reload_watcher: CreateEventW failed: {e}");
-                    return;
-                }
-            };
-            tracing::info!("reload_watcher: listening on Local\\rakukan.engine.reload");
-            loop {
-                let ret = unsafe { WaitForSingleObject(evt, INFINITE) };
-                if ret.0 != 0 {
-                    // WAIT_ABANDONED or WAIT_FAILED
-                    tracing::error!("reload_watcher: WaitForSingleObject failed ({:?})", ret);
-                    break;
-                }
-                tracing::info!("reload_watcher: reload event received");
-                engine_reload();
-            }
-        })
-        .ok();
+    super::config_watch::start_watcher();
 }
 
 /// エンジン（= rakukan-engine-host への RPC クライアント）を生成する。
@@ -604,59 +616,10 @@ fn create_engine() -> anyhow::Result<DynEngine> {
     Ok(engine)
 }
 
-/// %APPDATA%\rakukan\config.toml を読んで EngineConfig JSON を生成する。
+/// 公開済みの設定の組から EngineConfig JSON を取る（Issue #65: 組は同じ読み取りから作られ、
+/// 変更後に書き換えない。生成は `config::engine_config_json`）。
 fn build_engine_config_json() -> String {
-    let cfg = super::config::current_config();
-    let num_candidates = cfg.effective_num_candidates();
-    let main_gpu = cfg.general.main_gpu;
-    let n_gpu_layers = cfg.general.n_gpu_layers.unwrap_or(u32::MAX);
-    let model_variant = cfg.general.model_variant.clone();
-    let digit_width = match cfg.input.digit_width {
-        super::config::DigitWidth::Fullwidth => "fullwidth",
-        super::config::DigitWidth::Halfwidth => "halfwidth",
-    };
-    let alpha_width = match cfg.input.alpha_width {
-        super::config::AlphaWidth::Fullwidth => "fullwidth",
-        super::config::AlphaWidth::Halfwidth => "halfwidth",
-    };
-    let symbol_width = match cfg.input.symbol_width {
-        super::config::SymbolWidth::Fullwidth => "fullwidth",
-        super::config::SymbolWidth::Halfwidth => "halfwidth",
-    };
-    let live_conv_beam_size = cfg.live_conversion.beam_size.clamp(1, 9);
-    let convert_beam_size = cfg.conversion.beam_size.clamp(1, 30);
-    let digit_separator_auto = cfg.input.digit_separator_auto;
-    let digit_candidates_order = cfg
-        .input
-        .digit_candidates_order
-        .iter()
-        .map(|kind| match kind {
-            super::config::DigitCandidateKind::Arabic => r#""arabic""#,
-            super::config::DigitCandidateKind::Fullwidth => r#""fullwidth""#,
-            super::config::DigitCandidateKind::Positional => r#""positional""#,
-            super::config::DigitCandidateKind::PerDigit => r#""per_digit""#,
-            super::config::DigitCandidateKind::Daiji => r#""daiji""#,
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    tracing::info!(
-        "engine config: num_candidates={num_candidates} n_gpu_layers={n_gpu_layers} main_gpu={main_gpu} model_variant={model_variant:?} digit_width={digit_width} alpha_width={alpha_width} symbol_width={symbol_width} digit_separator_auto={digit_separator_auto} digit_candidates_order=[{digit_candidates_order}] live_conv_beam_size={live_conv_beam_size} convert_beam_size={convert_beam_size}"
-    );
-    // 診断用の強制失敗（Issue #43）。既定 false なので通常は JSON に載らない。
-    let force_inference_failure = cfg.diagnostics.force_inference_failure;
-    if force_inference_failure {
-        tracing::warn!(
-            "engine config: diagnostics.force_inference_failure=true — inference will always fail"
-        );
-    }
-    let mv_json = match &model_variant {
-        Some(v) => format!(r#","model_variant":"{}""#, v),
-        None => String::new(),
-    };
-    format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","alpha_width":"{alpha_width}","symbol_width":"{symbol_width}","digit_separator_auto":{digit_separator_auto},"digit_candidates_order":[{digit_candidates_order}],"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size},"force_inference_failure":{force_inference_failure}{mv_json}}}"#
-    )
+    super::config::current_snapshot().engine_json.clone()
 }
 
 /// config.toml から num_candidates を読む（ホットパスで使う軽量版）

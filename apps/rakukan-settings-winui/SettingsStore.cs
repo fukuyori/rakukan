@@ -1,3 +1,4 @@
+using System.Text;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -324,8 +325,38 @@ internal sealed class SettingsStore
                 return false;
             }
         }
-        File.WriteAllText(path, normalized);
+        WriteAtomically(path, normalized);
         return true;
+    }
+
+    /// <summary>
+    /// 同じディレクトリの一時ファイルへ書き込みを完了してから置き換える（Issue #65）。
+    /// 直接 WriteAllText すると、切り詰めてから書く間に IME 側が途中の本文を読みうる。
+    /// 元ファイルを先に削除するフォールバックは設けない。置換に失敗したら例外にして、
+    /// 呼び出し側は成功通知を出さずエラーを表示する（元ファイルはそのまま残る）。
+    /// </summary>
+    private static void WriteAtomically(string path, string contents)
+    {
+        var dir = Path.GetDirectoryName(path) ?? ".";
+        var temp = Path.Combine(dir, $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
+        try
+        {
+            using (var stream = new FileStream(temp, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+            using (var writer = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false)))
+            {
+                writer.Write(contents);
+                writer.Flush();
+                stream.Flush(flushToDisk: true);
+            }
+            File.Move(temp, path, overwrite: true);
+        }
+        finally
+        {
+            if (File.Exists(temp))
+            {
+                try { File.Delete(temp); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
     }
 
     private static string NormalizeToCrlf(string text)

@@ -134,6 +134,15 @@ pub struct RpcEngine {
     inner: Mutex<Connection<PipeTransport>>,
 }
 
+/// `RpcEngine::shutdown` の結果。通信失敗は `Err` ではなく `NoResponse`。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    /// ホストから `Unit` を受信した（終了要求の受理）。
+    Acknowledged,
+    /// 送ったが応答を受け取れなかった（相手が先に exit した等）。
+    NoResponse,
+}
+
 /// 接続・spawn・時刻・待機の口。実装は Named Pipe と `CreateProcess`（`PipeTransport`）。
 /// テストでは失敗の順序を台本で返す fake に差し替え、実際の再試行処理を通す（Issue #55）。
 pub(crate) trait HostTransport {
@@ -324,8 +333,9 @@ impl RpcEngine {
     /// - 成否に関わらず内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
     /// - `config_json` は保持する（次回 `connect_or_spawn` 時に再送する）
     /// - サーバが応答を返す前に exit してしまい read が失敗するケースも想定し、
-    ///   read エラーはログだけ出して Ok として扱う（exit が目的なので）
-    pub fn shutdown(&self, config_json: Option<String>) -> Result<()> {
+    ///   通信失敗は `Err` にせず `Ok(ShutdownOutcome::NoResponse)` で返す（exit が目的なので）。
+    ///   呼び出し側は、設定の反映待ちを解除する根拠に `Acknowledged` だけを使う（Issue #65）
+    pub fn shutdown(&self, config_json: Option<String>) -> Result<ShutdownOutcome> {
         let mut guard = self
             .inner
             .lock()
@@ -339,14 +349,15 @@ impl RpcEngine {
         match result {
             Ok(Response::Unit) => {
                 tracing::info!("rpc: Shutdown acknowledged by host");
-                Ok(())
+                Ok(ShutdownOutcome::Acknowledged)
             }
             Ok(Response::Error(e)) => bail!("shutdown error: {e}"),
             Ok(other) => bail!("unexpected shutdown response: {:?}", other),
             Err(e) => {
-                // 応答を読む前に相手が exit した可能性が高い。警告にとどめて成功扱い。
+                // 応答を読む前に相手が exit した可能性が高い。警告にとどめ、エラーにはしない。
+                // ただし「終了応答を受けた」とは区別する。
                 tracing::warn!("rpc: shutdown call failed (likely host exited early): {e}");
-                Ok(())
+                Ok(ShutdownOutcome::NoResponse)
             }
         }
     }

@@ -685,10 +685,10 @@ pub fn show_with_status(
 
     let n = page_candidates.len();
 
-    // 設定アプリの保存イベント（auto-reset で 1 プロセスにしか届かない）を
-    // 受け取れなかったプロセスでも最新のフォントサイズを拾えるよう、
-    // 表示のたびに config.toml の mtime を確認して appearance だけ更新する。
-    crate::engine::config::refresh_appearance_if_changed();
+    // 設定の変更検出は背景の監視（ディレクトリ変更通知 + 定期確認 + 本文比較、Issue #65）が
+    // 行う。表示の経路では同期の読み取りをせず、背景へ読込を要求するだけにする。
+    // この表示は公開済みの設定で描き、変更は読込完了後の次回表示から効く。
+    crate::engine::config::request_background_reload();
 
     // ここでレイアウトを 1 回だけ確定させ、以降の描画・幅計測・再配置は
     // すべてこのスナップショットを使う。表示中に設定が変わっても寸法は

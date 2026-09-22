@@ -1,7 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::sync::{LazyLock, Mutex};
-use std::time::SystemTime;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -386,11 +385,198 @@ impl Default for DiagnosticsConfig {
     }
 }
 
-#[derive(Debug)]
-struct ConfigManager {
+// ─── 設定の組（Issue #65）─────────────────────────────────────────────
+//
+// 設定の読込・公開、反映待ちの管理、エンジンへの送信を分ける。
+// 「設定が変わったこと」と「エンジンへの反映を依頼されたこと」は別に持つ。
+// - 読込は全経路を `reload_config` に集約する（読込専用ロック → 読取・本文比較・解析・
+//   JSON 生成 → 設定状態のロックで一括公開）。設定状態のロックはファイル I/O 中に持たない
+// - 読込からエンジンへの RPC は呼ばない。反映は既存の契機（保存イベント・条件付き
+//   モード切替・手動再起動）が `state::engine_reload*` で行う
+// - 反映待ち（`pending_apply`）の解除は、送った組と現在の反映待ちが一致し、成功応答を
+//   得た場合だけ。通信失敗では保持する
+
+/// 設定の出どころ。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigSource {
+    /// `config.toml` を読んで解析できた。`bytes` は読み取った元の本文（次回の比較に使う）、
+    /// `sha256` はそのハッシュ（正規化前のバイト列から計算する。#66 でホストへ渡す識別子）。
+    File { bytes: Arc<[u8]>, sha256: [u8; 32] },
+    /// 初回に正常な本文を得られず、既定値で始めた（Issue #61）。
+    /// 実在する本文のハッシュを持つ扱いにはしない。
+    Defaults,
+}
+
+impl ConfigSource {
+    pub fn sha256(&self) -> Option<[u8; 32]> {
+        match self {
+            ConfigSource::File { sha256, .. } => Some(*sha256),
+            ConfigSource::Defaults => None,
+        }
+    }
+}
+
+/// 同じ読み取りから作った、変更後に書き換えない設定の組。
+#[derive(Debug, Clone)]
+pub struct ConfigSnapshot {
+    /// プロセス内の更新連番（応答の照合用）。
+    pub revision: u64,
+    pub source: ConfigSource,
+    pub app_config: AppConfig,
+    /// `app_config` だけから生成した EngineConfig JSON。
+    pub engine_json: String,
+}
+
+impl ConfigSnapshot {
+    pub fn apply_id(&self) -> ApplyId {
+        ApplyId {
+            revision: self.revision,
+            sha256: self.source.sha256(),
+        }
+    }
+}
+
+/// 反映待ち・送信中の組の識別子。既定値由来は `sha256 = None`。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ApplyId {
+    pub revision: u64,
+    pub sha256: Option<[u8; 32]>,
+}
+
+impl std::fmt::Display for ApplyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.sha256 {
+            Some(h) => write!(f, "rev={} sha256={}", self.revision, hex_prefix(&h)),
+            None => write!(f, "rev={} sha256=none(defaults)", self.revision),
+        }
+    }
+}
+
+fn hex_prefix(h: &[u8; 32]) -> String {
+    h[..6].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// エンジンへの反映を求める契機。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyTrigger {
+    /// 名前付きイベント（設定アプリの保存・トレイの「エンジン再起動」）
+    SaveEvent,
+    /// IME モード切替（`reload_on_mode_switch = true`）
+    ModeSwitch,
+    /// 言語バーの「エンジン再起動」（反映待ちが無くても送る）
+    ManualRestart,
+}
+
+/// ホストへ送った結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ApplyOutcome {
+    /// `ShutdownIfConfigDiffers` が `Bool(false)`（ホストは同じ設定で動作中）
+    SameConfig,
+    /// `ShutdownIfConfigDiffers` が `Bool(true)`（再起動の受理。新設定での起動確認ではない）
+    RestartAccepted,
+    /// `Shutdown` の `Unit` を受信した。`fallback` は比較に失敗して無条件終了へ回った場合
+    ShutdownAcknowledged { fallback: bool },
+    /// 通信失敗・異常応答（`Ok(())` に潰した通信失敗を含む）。反映待ちは保持する
+    CommFailure,
+}
+
+/// 送信中の組と契機。
+#[derive(Debug, Clone)]
+pub struct InFlight {
+    pub id: ApplyId,
+    pub trigger: ApplyTrigger,
+}
+
+/// 読込の結果。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoadOutcome {
+    /// 本文が前回と同じ（解析・公開を省略した）
+    Unchanged,
+    /// 新しい組を公開した
+    Updated,
+    /// 読めない・解析できない。直前の組を保持した
+    Failed,
+}
+
+pub struct ConfigManager {
     path: PathBuf,
-    last_modified: Option<SystemTime>,
-    current: AppConfig,
+    current: Arc<ConfigSnapshot>,
+    next_revision: u64,
+    pending_apply: Option<ApplyId>,
+    in_flight: Option<InFlight>,
+    /// 直近の読込失敗（エラー文）。同じ失敗が続く間は WARN を繰り返さず、
+    /// 失敗の内容が変わったときと、読めるようになったときに記録する。再確認自体は続ける
+    last_load_failure: Option<String>,
+}
+
+/// 読込失敗の記録。戻り値は「新しい失敗として WARN すべきか」。
+fn note_load_failure(last: &mut Option<String>, error: &str) -> bool {
+    if last.as_deref() == Some(error) {
+        return false;
+    }
+    *last = Some(error.to_string());
+    true
+}
+
+/// 読込成功の記録。戻り値は「失敗から回復したか」。
+fn note_load_success(last: &mut Option<String>) -> bool {
+    last.take().is_some()
+}
+
+fn sha256_of(bytes: &[u8]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(bytes).into()
+}
+
+/// 読み取った本文から組を作る（ロックなし）。
+fn build_snapshot_from_bytes(bytes: Vec<u8>, revision: u64) -> Result<ConfigSnapshot> {
+    let text = std::str::from_utf8(&bytes)?;
+    let cfg: AppConfig = toml::from_str(text)?;
+    let engine_json = engine_config_json(&cfg);
+    Ok(ConfigSnapshot {
+        revision,
+        source: ConfigSource::File {
+            sha256: sha256_of(&bytes),
+            bytes: bytes.into(),
+        },
+        app_config: cfg,
+        engine_json,
+    })
+}
+
+fn defaults_snapshot(revision: u64) -> ConfigSnapshot {
+    let cfg = AppConfig::default();
+    ConfigSnapshot {
+        revision,
+        source: ConfigSource::Defaults,
+        engine_json: engine_config_json(&cfg),
+        app_config: cfg,
+    }
+}
+
+/// 読み取り（ロックなし）。本文が前回と同じなら `Ok(None)`（解析も公開もしない）。
+fn read_and_build(
+    path: &Path,
+    prev: &ConfigSnapshot,
+    revision: u64,
+) -> Result<Option<ConfigSnapshot>> {
+    let bytes = std::fs::read(path)?;
+    if let ConfigSource::File {
+        bytes: prev_bytes, ..
+    } = &prev.source
+        && prev_bytes[..] == bytes[..]
+    {
+        return Ok(None);
+    }
+    Ok(Some(build_snapshot_from_bytes(bytes, revision)?))
+}
+
+fn log_engine_config(snapshot: &ConfigSnapshot) {
+    tracing::info!(
+        "engine config: {} ({})",
+        snapshot.engine_json,
+        snapshot.apply_id()
+    );
 }
 
 impl ConfigManager {
@@ -402,60 +588,165 @@ impl ConfigManager {
     ///
     /// 保持すべき前の設定が無いので、失敗したら既定値を使う。ただし**必ず警告を
     /// 残す**。無言で既定値へ戻すと、利用者からは「設定が勝手に初期化された」と
-    /// しか見えない。
-    fn from_path(path: PathBuf) -> Self {
-        let current = match load_app_config_from_path(&path) {
-            Ok(cfg) => cfg,
+    /// しか見えない。既定値由来の組は `ConfigSource::Defaults` で、本文のハッシュを持たない。
+    pub(crate) fn from_path(path: PathBuf) -> Self {
+        let snapshot = match std::fs::read(&path)
+            .map_err(anyhow::Error::from)
+            .and_then(|bytes| build_snapshot_from_bytes(bytes, 1))
+        {
+            Ok(s) => s,
             Err(e) => {
                 tracing::warn!(
                     "config.toml load failed; starting with defaults: path={} error={e}",
                     path.display()
                 );
-                AppConfig::default()
+                defaults_snapshot(1)
             }
         };
-        let last_modified = file_modified(&path);
-        publish_atomics(&current);
+        publish_atomics(&snapshot.app_config);
+        log_engine_config(&snapshot);
         Self {
             path,
-            last_modified,
-            current,
+            current: Arc::new(snapshot),
+            next_revision: 2,
+            pending_apply: None,
+            in_flight: None,
+            last_load_failure: None,
         }
     }
 
-    /// 再初期化（Issue #61）。**失敗したら直前の有効な設定を保つ。**
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> Arc<ConfigSnapshot> {
+        self.current.clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn app_config(&self) -> &AppConfig {
+        &self.current.app_config
+    }
+
+    /// 読み直し（単一スレッド版。本番の経路はすべて `reload_config` を通る）。
     ///
-    /// ファイルが無い場合も保持する。削除を暗黙の「設定リセット」にしない。
-    /// ここでは `config_save_default()` を呼ばず、ファイルを作り直さない。
-    ///
-    /// 失敗時に `last_modified` を進めないので、利用者が TOML を直せば次の
-    /// 読み込みで反映される。
-    fn reinit(&mut self) {
-        match load_app_config_from_path(&self.path) {
-            Ok(cfg) => {
-                self.current = cfg;
-                self.last_modified = file_modified(&self.path);
-                publish_atomics(&self.current);
+    /// **読めなければ直前の組を保つ**（Issue #61）。ファイルが無い場合も保持する
+    /// （削除を暗黙の「設定リセット」にしない）。ここでは `config_save_default()` を
+    /// 呼ばず、ファイルを作り直さない。本文が同じなら解析も公開もしない。
+    #[cfg(test)]
+    pub(crate) fn reinit(&mut self) -> LoadOutcome {
+        let prev = self.current.clone();
+        let path = self.path.clone();
+        match read_and_build(&path, &prev, self.next_revision) {
+            Ok(None) => {
+                self.note_success();
+                LoadOutcome::Unchanged
+            }
+            Ok(Some(snapshot)) => {
+                self.note_success();
+                self.publish(snapshot);
+                LoadOutcome::Updated
             }
             Err(e) => {
-                tracing::warn!(
-                    "config.toml reload failed; keeping previous config: path={} error={e}",
-                    self.path.display()
-                );
+                self.note_failure(&e, "reinit");
+                LoadOutcome::Failed
             }
         }
     }
 
-    fn reload_if_changed(&mut self) -> Result<bool> {
-        let modified = file_modified(&self.path);
-        if modified == self.last_modified {
-            return Ok(false);
+    /// 読込失敗を記録する。同じ失敗の間は WARN を繰り返さない（#65: 「WARN を 1 回」）。
+    fn note_failure(&mut self, e: &anyhow::Error, reason: &str) {
+        let text = e.to_string();
+        if note_load_failure(&mut self.last_load_failure, &text) {
+            tracing::warn!(
+                "config.toml reload failed; keeping previous config: path={} error={text} ({reason})",
+                self.path.display()
+            );
+        } else {
+            tracing::debug!(
+                "config.toml still unreadable; keeping previous config: path={} ({reason})",
+                self.path.display()
+            );
         }
-        let cfg = load_app_config_from_path(&self.path)?;
-        publish_atomics(&cfg);
-        self.current = cfg;
-        self.last_modified = modified;
-        Ok(true)
+    }
+
+    fn note_success(&mut self) {
+        if note_load_success(&mut self.last_load_failure) {
+            tracing::info!("config.toml readable again: path={}", self.path.display());
+        }
+    }
+
+    /// 新しい組を公開する。
+    ///
+    /// - `engine_json` が変わったら、現在の組を反映待ちにする
+    /// - 変わっていなくても既に反映待ちなら、識別子を新しい組へ更新する
+    ///   （コメントだけの変更でも、応答との対応を崩さない）
+    fn publish(&mut self, snapshot: ConfigSnapshot) {
+        let prev = std::mem::replace(&mut self.current, Arc::new(snapshot));
+        self.next_revision = self.current.revision.saturating_add(1);
+        publish_atomics(&self.current.app_config);
+        let json_changed = prev.engine_json != self.current.engine_json;
+        if json_changed {
+            log_engine_config(&self.current);
+        }
+        let id = self.current.apply_id();
+        if json_changed || self.pending_apply.is_some() {
+            self.pending_apply = Some(id.clone());
+        }
+        tracing::info!(
+            "config published: {id} engine_json_changed={json_changed} pending_apply={}",
+            self.pending_apply.is_some()
+        );
+    }
+
+    pub(crate) fn has_pending_apply(&self) -> bool {
+        self.pending_apply.is_some()
+    }
+
+    /// 送信を始める。`force` でなければ反映待ちが無いときは `None`（送らない）。
+    /// 返す JSON は送信時点の組に固定する。
+    pub(crate) fn begin_apply(
+        &mut self,
+        trigger: ApplyTrigger,
+        force: bool,
+    ) -> Option<(ApplyId, String)> {
+        if !force && self.pending_apply.is_none() {
+            return None;
+        }
+        let id = self.current.apply_id();
+        self.in_flight = Some(InFlight {
+            id: id.clone(),
+            trigger,
+        });
+        Some((id, self.current.engine_json.clone()))
+    }
+
+    /// 応答を反映する。反映待ちを解除するのは、送った組が現在の反映待ちと一致し、
+    /// 成功応答（同じ設定・再起動受理・終了応答）を得たときだけ。通信失敗では保持する。
+    /// 戻り値は解除したかどうか。
+    pub(crate) fn finish_apply(&mut self, sent: &ApplyId, outcome: ApplyOutcome) -> bool {
+        let trigger = match self.in_flight.take_if(|f| &f.id == sent) {
+            Some(f) => Some(f.trigger),
+            None => None,
+        };
+        let cleared = match outcome {
+            ApplyOutcome::CommFailure => false,
+            ApplyOutcome::SameConfig
+            | ApplyOutcome::RestartAccepted
+            | ApplyOutcome::ShutdownAcknowledged { .. } => {
+                if self.pending_apply.as_ref() == Some(sent) {
+                    self.pending_apply = None;
+                    true
+                } else {
+                    false
+                }
+            }
+        };
+        tracing::info!(
+            "config apply: sent=({sent}) trigger={trigger:?} outcome={outcome:?} cleared={cleared} pending_now={}",
+            self.pending_apply
+                .as_ref()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "none".into())
+        );
+        cleared
     }
 }
 
@@ -487,54 +778,35 @@ pub fn candidate_font_height() -> i32 {
     CANDIDATE_FONT_HEIGHT.load(Ordering::Relaxed)
 }
 
-/// `refresh_appearance_if_changed` 用の mtime キャッシュ。
-/// 外側の Option は「未チェック」、内側の Option は「ファイルが無い」を表す。
-/// CONFIG_MANAGER の last_modified とは独立に持つ（下記コメント参照）。
-static APPEARANCE_MTIME: Mutex<Option<Option<SystemTime>>> = Mutex::new(None);
-
-/// 候補ウィンドウの表示直前に呼ぶ軽量チェック。config.toml の mtime が変わって
-/// いれば読み直し、描画用アトミック（フォントサイズ）だけを更新する。
-///
-/// 設定アプリの保存は名前付きイベント `Local\rakukan.engine.reload` で通知されるが、
-/// これは auto-reset イベントで、SetEvent が起こすのは待機スレッド 1 本だけ。
-/// TSF DLL はアプリごとに別プロセスで動くため、イベントを受け取れなかった
-/// プロセスでは `publish_atomics` が走らず、フォントサイズの変更が反映されない
-/// ことがあった。表示 1 回につき stat 1 回のコストで、表示するプロセス自身が
-/// 最新値を拾う。
-///
-/// CONFIG_MANAGER の current や last_modified は**意図的に触らない**。ここで
-/// 消費すると、手編集された config.toml をモード切替時の `reload_if_changed` が
-/// 「変更なし」と誤判定し、エンジン再起動がスキップされてしまうため。
-pub fn refresh_appearance_if_changed() {
-    let Ok(path) = config_path() else {
-        return;
-    };
-    let modified = file_modified(&path);
-    let Ok(mut last) = APPEARANCE_MTIME.lock() else {
-        return;
-    };
-    if *last == Some(modified) {
-        return;
-    }
-    *last = Some(modified);
-    match load_app_config_from_path(&path) {
-        Ok(cfg) => publish_atomics(&cfg),
-        Err(e) => tracing::warn!("refresh_appearance: config.toml load failed: {e}"),
-    }
+/// 候補ウィンドウの表示直前に呼ぶ。同期読込はせず、背景の監視へ読込を要求するだけ。
+/// 描画は公開済みの設定で行い、変更は読込完了後の次回表示から効く（Issue #65）。
+pub fn request_background_reload() {
+    super::config_watch::request_reload();
 }
+
+/// 読込専用ロック。古い読み取りが遅れて公開される順序を防ぐ。
+/// 設定状態（`CONFIG_MANAGER`）のロックはファイル I/O 中に持たない。
+static LOAD_LOCK: Mutex<()> = Mutex::new(());
 
 static CONFIG_MANAGER: LazyLock<Mutex<ConfigManager>> =
     LazyLock::new(|| Mutex::new(ConfigManager::new()));
+
+fn lock_manager() -> std::sync::MutexGuard<'static, ConfigManager> {
+    match CONFIG_MANAGER.lock() {
+        Ok(g) => g,
+        Err(p) => {
+            tracing::warn!("config manager poisoned, recovering");
+            p.into_inner()
+        }
+    }
+}
 
 pub fn config_path() -> Result<PathBuf> {
     let appdata = std::env::var("APPDATA").map_err(|_| anyhow::anyhow!("APPDATA not set"))?;
     Ok(PathBuf::from(appdata).join("rakukan").join("config.toml"))
 }
 
-fn file_modified(path: &PathBuf) -> Option<SystemTime> {
-    std::fs::metadata(path).ok()?.modified().ok()
-}
-
+#[cfg(test)]
 pub fn load_app_config_from_path(path: &PathBuf) -> Result<AppConfig> {
     let text = std::fs::read_to_string(path)?;
     let cfg: AppConfig = toml::from_str(&text)?;
@@ -553,23 +825,60 @@ pub fn config_save_default() -> Result<()> {
     Ok(())
 }
 
-/// config.toml を読み直す。**読めなければ直前の設定を保つ**（Issue #61）。
+/// 共通の読込処理（すべての読込経路がここを通る、Issue #65）。
 ///
-/// 呼び出し元は DllMain（初回）、`engine_reload` のスレッド、言語バーの
-/// 「エンジン再起動」。このうち初回だけは、直前に `config_save_default()` が
-/// ファイルを作る。再初期化の経路ではファイルを作り直さない。
-pub fn init_config_manager() {
-    if let Ok(mut mgr) = CONFIG_MANAGER.lock() {
-        mgr.path = config_path().unwrap_or_else(|_| mgr.path.clone());
-        mgr.reinit();
+/// 読込専用ロック → ファイル読取 → 本文比較 → ハッシュ・解析・JSON 生成 →
+/// 設定状態のロックで一括公開。**読めなければ直前の組を保つ**（Issue #61）。
+/// この処理からエンジンへの RPC は呼ばない。
+pub fn reload_config(reason: &'static str) -> LoadOutcome {
+    let _load = match LOAD_LOCK.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+    };
+    let (path, prev, revision) = {
+        let mgr = lock_manager();
+        (mgr.path.clone(), mgr.current.clone(), mgr.next_revision)
+    };
+    match read_and_build(&path, &prev, revision) {
+        Ok(None) => {
+            tracing::debug!("config unchanged ({reason})");
+            lock_manager().note_success();
+            LoadOutcome::Unchanged
+        }
+        Ok(Some(snapshot)) => {
+            let mut mgr = lock_manager();
+            // 読込専用ロックの下なので、prev から進んだ組は無い
+            mgr.note_success();
+            mgr.publish(snapshot);
+            LoadOutcome::Updated
+        }
+        Err(e) => {
+            // 同じ失敗の間は WARN を繰り返さない（定期確認・候補表示・通知で再読込は続く）
+            lock_manager().note_failure(&e, reason);
+            LoadOutcome::Failed
+        }
     }
 }
 
+/// config.toml を読み直す。**読めなければ直前の設定を保つ**（Issue #61）。
+///
+/// 呼び出し元は DllMain（初回）と言語バーの「エンジン再起動」。初回だけは、
+/// 直前に `config_save_default()` がファイルを作る。
+pub fn init_config_manager() {
+    {
+        let mut mgr = lock_manager();
+        mgr.path = config_path().unwrap_or_else(|_| mgr.path.clone());
+    }
+    let _ = reload_config("init");
+}
+
 pub fn current_config() -> AppConfig {
-    CONFIG_MANAGER
-        .lock()
-        .map(|g| g.current.clone())
-        .unwrap_or_default()
+    lock_manager().current.app_config.clone()
+}
+
+/// 公開済みの設定の組（変更後に書き換えない）。
+pub fn current_snapshot() -> Arc<ConfigSnapshot> {
+    lock_manager().current.clone()
 }
 
 pub fn effective_num_candidates() -> usize {
@@ -580,36 +889,89 @@ pub fn keyboard_layout() -> KeyboardLayout {
     current_config().keyboard.layout
 }
 
-pub fn maybe_reload_on_mode_switch() -> bool {
-    let mut mgr = match CONFIG_MANAGER.lock() {
-        Ok(g) => g,
-        Err(p) => {
-            tracing::warn!("config manager poisoned, recovering");
-            p.into_inner()
-        }
-    };
+pub fn has_pending_apply() -> bool {
+    lock_manager().has_pending_apply()
+}
 
-    if !mgr.current.keyboard.reload_on_mode_switch {
+/// 送信を始める（`state::engine_reload*` から、`RAKUKAN_ENGINE` のロック下で呼ぶ）。
+pub fn begin_apply(trigger: ApplyTrigger, force: bool) -> Option<(ApplyId, String)> {
+    lock_manager().begin_apply(trigger, force)
+}
+
+/// 応答を反映する（同上）。
+pub fn finish_apply(sent: &ApplyId, outcome: ApplyOutcome) -> bool {
+    lock_manager().finish_apply(sent, outcome)
+}
+
+/// IME モード切替時の読み直し。`reload_on_mode_switch = true` のときだけ、共通の
+/// 読込処理を同期で通す。戻り値は**エンジンへの反映待ちがあるか**（本文が変わったか
+/// ではない。背景の監視が先に読んでいても、反映待ちが残っていれば処理する）。
+pub fn maybe_reload_on_mode_switch() -> bool {
+    if !lock_manager()
+        .current
+        .app_config
+        .keyboard
+        .reload_on_mode_switch
+    {
         return false;
     }
-
-    match mgr.reload_if_changed() {
-        Ok(changed) => {
-            if changed {
-                tracing::info!(
-                    "config.toml reloaded on mode switch: layout={:?} num_candidates={} live_conversion={}",
-                    mgr.current.keyboard.layout,
-                    mgr.current.effective_num_candidates(),
-                    mgr.current.live_conversion.enabled,
-                );
-            }
-            changed
-        }
-        Err(e) => {
-            tracing::warn!("config.toml reload failed; keeping previous config: {e}");
-            false
-        }
+    let outcome = reload_config("mode_switch");
+    let pending = has_pending_apply();
+    if outcome == LoadOutcome::Updated {
+        let cfg = current_config();
+        tracing::info!(
+            "config.toml reloaded on mode switch: layout={:?} num_candidates={} live_conversion={} pending_apply={pending}",
+            cfg.keyboard.layout,
+            cfg.effective_num_candidates(),
+            cfg.live_conversion.enabled,
+        );
     }
+    pending
+}
+
+/// `AppConfig` から EngineConfig JSON を作る（純粋。途中で `current_config()` を読まない）。
+pub fn engine_config_json(cfg: &AppConfig) -> String {
+    let num_candidates = cfg.effective_num_candidates();
+    let main_gpu = cfg.general.main_gpu;
+    let n_gpu_layers = cfg.general.n_gpu_layers.unwrap_or(u32::MAX);
+    let model_variant = cfg.general.model_variant.clone();
+    let digit_width = match cfg.input.digit_width {
+        DigitWidth::Fullwidth => "fullwidth",
+        DigitWidth::Halfwidth => "halfwidth",
+    };
+    let alpha_width = match cfg.input.alpha_width {
+        AlphaWidth::Fullwidth => "fullwidth",
+        AlphaWidth::Halfwidth => "halfwidth",
+    };
+    let symbol_width = match cfg.input.symbol_width {
+        SymbolWidth::Fullwidth => "fullwidth",
+        SymbolWidth::Halfwidth => "halfwidth",
+    };
+    let live_conv_beam_size = cfg.live_conversion.beam_size.clamp(1, 9);
+    let convert_beam_size = cfg.conversion.beam_size.clamp(1, 30);
+    let digit_separator_auto = cfg.input.digit_separator_auto;
+    let digit_candidates_order = cfg
+        .input
+        .digit_candidates_order
+        .iter()
+        .map(|kind| match kind {
+            DigitCandidateKind::Arabic => r#""arabic""#,
+            DigitCandidateKind::Fullwidth => r#""fullwidth""#,
+            DigitCandidateKind::Positional => r#""positional""#,
+            DigitCandidateKind::PerDigit => r#""per_digit""#,
+            DigitCandidateKind::Daiji => r#""daiji""#,
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    // 診断用の強制失敗（Issue #43）。既定 false なので通常は JSON に載らない。
+    let force_inference_failure = cfg.diagnostics.force_inference_failure;
+    let mv_json = match &model_variant {
+        Some(v) => format!(r#","model_variant":"{}""#, v),
+        None => String::new(),
+    };
+    format!(
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","alpha_width":"{alpha_width}","symbol_width":"{symbol_width}","digit_separator_auto":{digit_separator_auto},"digit_candidates_order":[{digit_candidates_order}],"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size},"force_inference_failure":{force_inference_failure}{mv_json}}}"#
+    )
 }
 
 fn default_config_text() -> &'static str {
@@ -908,7 +1270,7 @@ mod config_load_failure_tests {
         // 初回は保持すべき前の設定が無いので既定値を使う
         let mgr = ConfigManager::from_path(path);
         assert_eq!(
-            mgr.current.effective_num_candidates(),
+            mgr.app_config().effective_num_candidates(),
             super::AppConfig::default().effective_num_candidates()
         );
 
@@ -922,13 +1284,13 @@ mod config_load_failure_tests {
         write_config(&path, VALID);
 
         let mut mgr = ConfigManager::from_path(path.clone());
-        assert_eq!(mgr.current.effective_num_candidates(), 7);
+        assert_eq!(mgr.app_config().effective_num_candidates(), 7);
 
         // 壊れた TOML に書き換えて読み直しても、既定値へ戻らない
         write_config(&path, BROKEN);
         mgr.reinit();
         assert_eq!(
-            mgr.current.effective_num_candidates(),
+            mgr.app_config().effective_num_candidates(),
             7,
             "壊れた TOML で設定が入れ替わった"
         );
@@ -943,13 +1305,13 @@ mod config_load_failure_tests {
         write_config(&path, VALID);
 
         let mut mgr = ConfigManager::from_path(path.clone());
-        assert_eq!(mgr.current.effective_num_candidates(), 7);
+        assert_eq!(mgr.app_config().effective_num_candidates(), 7);
 
         // 削除を暗黙の「設定リセット」にしない
         std::fs::remove_file(&path).expect("remove");
         mgr.reinit();
         assert_eq!(
-            mgr.current.effective_num_candidates(),
+            mgr.app_config().effective_num_candidates(),
             7,
             "ファイル不在で設定が入れ替わった"
         );
@@ -982,13 +1344,13 @@ mod config_load_failure_tests {
         let mut mgr = ConfigManager::from_path(path.clone());
         write_config(&path, BROKEN);
         mgr.reinit();
-        assert_eq!(mgr.current.effective_num_candidates(), 7);
+        assert_eq!(mgr.app_config().effective_num_candidates(), 7);
 
         // 直せば次の読み込みで反映される
         write_config(&path, FIXED);
         mgr.reinit();
         assert_eq!(
-            mgr.current.effective_num_candidates(),
+            mgr.app_config().effective_num_candidates(),
             4,
             "直した TOML が反映されない"
         );
@@ -1034,7 +1396,7 @@ mod config_load_warning_tests {
     ///
     /// `with_default` はこのスレッドだけに効くので、並行して走る他のテストの
     /// 出力は混ざらない。
-    fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
+    pub(crate) fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
         let capture = LogCapture::new();
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
@@ -1153,6 +1515,243 @@ mod config_load_warning_tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod config_snapshot_tests {
+    //! 設定の組と反映待ちの管理（Issue #65）
+    use super::config_load_failure_tests::{BROKEN, FIXED, VALID, temp_dir, write_config};
+    use super::{ApplyOutcome, ApplyTrigger, ConfigManager, ConfigSource, LoadOutcome};
+
+    fn mgr_with(body: &str) -> (ConfigManager, std::path::PathBuf, std::path::PathBuf) {
+        let dir = temp_dir("snap");
+        let path = dir.join("config.toml");
+        write_config(&path, body);
+        (ConfigManager::from_path(path.clone()), path, dir)
+    }
+
+    #[test]
+    fn first_load_from_file_has_hash_and_bytes() {
+        let (mgr, _path, dir) = mgr_with(VALID);
+        let snap = mgr.snapshot();
+        assert_eq!(snap.revision, 1);
+        match &snap.source {
+            ConfigSource::File { bytes, sha256 } => {
+                assert_eq!(&bytes[..], VALID.as_bytes());
+                assert_eq!(*sha256, super::sha256_of(VALID.as_bytes()));
+            }
+            ConfigSource::Defaults => panic!("ファイル由来のはず"),
+        }
+        assert!(snap.apply_id().sha256.is_some());
+        assert!(!mgr.has_pending_apply(), "初回は反映待ちにしない");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn first_load_failure_is_defaults_without_hash() {
+        let (mgr, _path, dir) = mgr_with(BROKEN);
+        let snap = mgr.snapshot();
+        assert_eq!(snap.source, ConfigSource::Defaults);
+        assert_eq!(
+            snap.apply_id().sha256,
+            None,
+            "既定値由来は本文のハッシュを持たない"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn same_bytes_are_not_reparsed_or_republished() {
+        let (mut mgr, _path, dir) = mgr_with(VALID);
+        assert_eq!(mgr.reinit(), LoadOutcome::Unchanged);
+        assert_eq!(mgr.snapshot().revision, 1, "同じ本文では組を作り直さない");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changed_engine_json_sets_pending_apply() {
+        // VALID → FIXED は num_candidates が変わるので JSON が変わる
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, FIXED);
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert_eq!(mgr.snapshot().revision, 2);
+        assert!(mgr.has_pending_apply());
+        assert_eq!(mgr.pending_apply.as_ref().unwrap().revision, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn comment_only_change_keeps_pending_but_moves_its_id() {
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        // 本文が変わり JSON も変わる → 反映待ち rev=2
+        write_config(&path, FIXED);
+        mgr.reinit();
+        assert_eq!(mgr.pending_apply.as_ref().unwrap().revision, 2);
+        // コメントだけの変更（JSON は同じ）→ 反映待ちは残り、識別子は rev=3 へ
+        write_config(&path, &format!("# comment\n{FIXED}"));
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert_eq!(mgr.pending_apply.as_ref().unwrap().revision, 3);
+        // 反映待ちが無い状態でコメントだけ変えても、反映待ちは立たない
+        mgr.pending_apply = None;
+        write_config(&path, &format!("# another\n{FIXED}"));
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert!(!mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn failed_reload_keeps_previous_snapshot_and_pending() {
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, FIXED);
+        mgr.reinit();
+        let before = mgr.snapshot();
+        write_config(&path, BROKEN);
+        assert_eq!(mgr.reinit(), LoadOutcome::Failed);
+        let after = mgr.snapshot();
+        assert_eq!(
+            after.revision, before.revision,
+            "壊れた本文で組を入れ替えない"
+        );
+        assert_eq!(
+            after.source, before.source,
+            "新しいハッシュと以前の設定を組み合わせない"
+        );
+        assert!(mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn begin_apply_only_when_pending_unless_forced() {
+        let (mut mgr, _path, dir) = mgr_with(VALID);
+        assert!(mgr.begin_apply(ApplyTrigger::SaveEvent, false).is_none());
+        let (id, json) = mgr
+            .begin_apply(ApplyTrigger::ManualRestart, true)
+            .expect("force sends the current snapshot");
+        assert_eq!(id.revision, 1);
+        assert_eq!(json, mgr.snapshot().engine_json);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn response_for_a_clears_only_a_not_b() {
+        // A を送信中に背景監視が B を読む → A の応答で B の反映待ちを消さない
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, FIXED);
+        mgr.reinit();
+        let (a, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("A pending");
+        // 送信中に B（num_candidates = 9）を検出
+        write_config(&path, "[conversion]\nnum_candidates = 9\n");
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        let b = mgr.pending_apply.clone().expect("B pending");
+        assert_ne!(a, b);
+        // A の成功応答
+        assert!(
+            !mgr.finish_apply(&a, ApplyOutcome::SameConfig),
+            "A の応答では解除しない"
+        );
+        assert_eq!(mgr.pending_apply.as_ref(), Some(&b), "B の反映待ちが残る");
+        // B を送って成功 → 解除
+        let (b2, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("B pending");
+        assert_eq!(b2, b);
+        assert!(mgr.finish_apply(&b2, ApplyOutcome::RestartAccepted));
+        assert!(!mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_to_b_to_a_does_not_let_an_old_response_clear_the_new_pending() {
+        // 同じ本文へ戻る A→B→A でも識別子（revision）が違うので、古い応答は新しい反映待ちを消さない
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, FIXED);
+        mgr.reinit();
+        let (a1, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("A pending");
+        write_config(&path, VALID);
+        mgr.reinit();
+        write_config(&path, FIXED);
+        mgr.reinit();
+        let a3 = mgr.pending_apply.clone().expect("A again");
+        assert_eq!(a1.sha256, a3.sha256, "本文は同じ");
+        assert_ne!(a1.revision, a3.revision);
+        assert!(!mgr.finish_apply(&a1, ApplyOutcome::SameConfig));
+        assert!(mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn comm_failure_keeps_pending() {
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, FIXED);
+        mgr.reinit();
+        let (id, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("pending");
+        assert!(!mgr.finish_apply(&id, ApplyOutcome::CommFailure));
+        assert!(mgr.has_pending_apply(), "通信失敗では反映待ちを保持する");
+        assert!(mgr.in_flight.is_none(), "送信中の記録は消す");
+        // フォールバックの Shutdown で Unit を受信したら解除する
+        let (id, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("pending");
+        assert!(mgr.finish_apply(&id, ApplyOutcome::ShutdownAcknowledged { fallback: true }));
+        assert!(!mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn repeated_identical_failure_warns_once_and_keeps_rechecking() {
+        use super::config_load_warning_tests::capture_warnings;
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        write_config(&path, BROKEN);
+        let (first, logs1) = capture_warnings(|| mgr.reinit());
+        assert_eq!(first, LoadOutcome::Failed);
+        assert!(
+            logs1.contains("reload failed"),
+            "最初の失敗は WARN: {logs1:?}"
+        );
+        // 同じ失敗の再確認では WARN を繰り返さない（再確認自体は行う）
+        let (again, logs2) = capture_warnings(|| mgr.reinit());
+        assert_eq!(again, LoadOutcome::Failed);
+        assert!(
+            !logs2.contains("reload failed"),
+            "同じ失敗で WARN を繰り返した: {logs2:?}"
+        );
+        // 失敗の内容が変わったら（欠落）改めて WARN
+        std::fs::remove_file(&path).expect("remove");
+        let (missing, logs3) = capture_warnings(|| mgr.reinit());
+        assert_eq!(missing, LoadOutcome::Failed);
+        assert!(
+            logs3.contains("reload failed"),
+            "別の失敗は WARN: {logs3:?}"
+        );
+        // 読めるようになったら回復し、次の失敗はまた WARN
+        write_config(&path, FIXED);
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        write_config(&path, BROKEN);
+        let (_, logs4) = capture_warnings(|| mgr.reinit());
+        assert!(
+            logs4.contains("reload failed"),
+            "回復後の失敗は WARN: {logs4:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn engine_json_is_pure_and_matches_snapshot() {
+        let (mgr, _path, dir) = mgr_with(VALID);
+        let snap = mgr.snapshot();
+        assert_eq!(
+            super::engine_config_json(&snap.app_config),
+            snap.engine_json
+        );
+        assert!(snap.engine_json.contains(r#""num_candidates":7"#));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

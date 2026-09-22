@@ -603,28 +603,59 @@ BG 変換が同じ実行のまま 30 秒（`health::STALL_THRESHOLD`）以上 `R
   を撃っていたが、起点が変換と結び付いておらず、完了を観測しない経路で古い時刻が残って誤発動したので
   取り除いた
 
-### config.toml の即時反映
+### config.toml の変更検出と反映（Issue #65）
 
-`engine_reload()`（IME モード切替時の config 変更検出、または設定アプリ保存時の名前付きイベント
-`Local\rakukan.engine.reload` から呼ばれる）は、エンジンをホスト内で作り直さず**ホストプロセスごと
-再起動する**（v0.7.1 M1.6 T-HOST1。DLL を drop すると BG スレッドが参照中の DLL が unmap されて
-AV を誘発するため）。
+設定の読込・公開、反映待ちの管理、エンジンへの送信を分けている（`crates/rakukan-tsf/src/engine/config.rs`、
+`config_watch.rs`、`state.rs`）。「設定が変わったこと」と「エンジンへの反映を依頼されたこと」は別に持つ。
 
-1. バックグラウンドスレッドで `config.toml` を読み直し、`build_engine_config_json()` で設定 JSON を作る
-2. `ShutdownIfConfigDiffers { config_json }` を送る
-   - `Bool(false)`（同じ config）: ホストを維持し、ready ラッチだけ落として終わる
-   - `Bool(true)`（異なる）: ホストは応答後に自己終了する
-   - エラー（比較できない）: 無条件の `Shutdown` にフォールバック
-3. ラッチを落とし、100ms 待ってから TSF 側のハンドルを捨てる（終了途中のパイプへ再接続する race を避ける）
-4. 次の呼び出しで `connect_or_spawn` が新しいホストを spawn し、新しい config で `Create` する
+**設定の組**: `ConfigManager` は同じ読み取りから作った `ConfigSnapshot`（更新連番 `revision`、
+出どころ `source` = 本文と SHA256 か既定値、`AppConfig`、それだけから作った `engine_json`）を公開し、
+変更後に書き換えない。初回に正常な本文を得られなければ既定値（`Defaults`、ハッシュなし）で始め、
+その後の欠落・破損では直前の組を保持する（Issue #61）。
 
-`engine_reload_force()`（言語バーメニューの「エンジン再起動」）は比較せずに `Shutdown` を送る。
+**読込**: すべての経路が `config::reload_config` を通る。読込専用ロック → ファイル読取 →
+本文のバイト列比較（同じなら解析も公開もしない。mtime・size で読み取りは省略しない）→
+ハッシュ・解析・JSON 生成 → 設定状態のロックで一括公開。設定状態のロックはファイル I/O 中に持たず、
+この処理からエンジンへの RPC は呼ばない。`engine_json` が変わったら反映待ち（`pending_apply`）に
+現在の組の識別子を置き、変わっていなくても既に反映待ちなら識別子を新しい組へ更新する。
 
-TSF DLL はアプリごとに別プロセスで動くため、同じ config で複数プロセスが reload しても
-ホストの再起動は 1 回で済む（2 回目以降は `Bool(false)`）。ただし reload イベントは
-auto-reset なので、1 回の Set で届くのは 1 プロセスだけである。
+**変更検出**（`config_watch`）: 各 TSF プロセスが監視スレッドで、名前付きイベント
+`Local\rakukan.engine.reload`（設定アプリの保存・トレイ操作。auto-reset で 1 プロセスにしか届かない）、
+`%APPDATA%\rakukan` のディレクトリ変更通知（各プロセスが登録し、通知のたびに
+`FindNextChangeNotification` で再設定。配送の保証ではない）、候補表示からの背景読込要求、
+定期確認（最後の読込確認の完了から 30 秒。通知では延ばさない）を待つ。連続通知は
+デバウンス 300 ms でまとめ、途切れなくても 2 秒で読む。ディレクトリ不在やハンドルの失敗でも
+定期確認を続け、その機会に監視の復旧を試みる。
 
-`Request::Reload`（ホスト内でエンジンを drop → 再生成）はプロトコルに残っているが、TSF からは使っていない。
+**エンジンへの反映**: 監視からは反映待ちを立てるだけで送信しない。契機は 3 つ。
+
+1. 名前付きイベント: 読込後に `engine_reload()`。反映待ちが無ければ RPC は送らず、
+   `RAKUKAN_ENGINE` のロック下で ready ラッチだけ落とす（ホストが知らないうちに入れ替わっていたときの再 poll 用）
+2. IME モード切替（`reload_on_mode_switch = true`）: 共通の読込処理を同期で通し、**反映待ちがあれば**
+   `engine_reload_for(ModeSwitch)`（本文が変わったかではなく反映待ちの有無で決める）
+3. 言語バーの「エンジン再起動」: 同期で読み直してから `engine_reload_force()`（反映待ちが無くても送る）
+
+送信は `config::begin_apply` で送信時点の組に固定し、`ShutdownIfConfigDiffers { config_json }` を送る。
+
+- `Bool(false)`（同じ config）: ホストを維持。送った組が現在の反映待ちと一致すれば解除
+- `Bool(true)`（異なる）: ホストは応答後に自己終了。再起動の受理として解除（新設定での起動確認ではない）
+- エラー（比較できない）: 無条件の `Shutdown` にフォールバック。`Unit` を実際に受信したときだけ解除
+- 通信失敗・異常応答（`Ok(())` に潰していた通信失敗を含む。`ShutdownOutcome::NoResponse`）: 反映待ちを保持
+
+その後、ラッチを落とし、100ms 待ってから TSF 側のハンドルを捨て、次の呼び出しで `connect_or_spawn` が
+新しいホストを spawn して公開済みの組の `engine_json` で `Create` する。`Create` の成功は
+「送信した組での `Create` 成功」であって、新ホストへの入れ替わりやモデル準備完了の確認ではない。
+
+TSF DLL はアプリごとに別プロセスで動くため、同じ config で複数プロセスが送っても
+ホストの再起動は 1 回で済む（2 回目以降は `Bool(false)`）。背景の監視から送信しないのは、
+全プロセスから発火させると再起動が増え、未確定文字の復元（#56）が無いうちは入力が壊れるため。
+古い設定の再送によるホスト設定の巻き戻り防止は #66 で扱う。
+
+設定アプリは同じディレクトリの一時ファイルへ書き込みを完了してから `File.Move(overwrite)` で
+置き換える（切り詰めてから書く方式だと、IME 側が途中の本文を読みうる）。
+
+`Request::Reload`（ホスト内でエンジンを drop → 再生成）はプロトコルに残っているが、TSF からは使っていない
+（#66 で廃止の方向）。
 
 ---
 

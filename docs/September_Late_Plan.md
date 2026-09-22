@@ -2367,3 +2367,135 @@ Guard のテストは `host_spawn_guard_resets_after_window_expires` を `host_s
 別 Issue の根拠。上の E）。手順の `finally` による復元は実行されなかった（上の実機手順の注記）。
 `b40b428` でコミット・プッシュし、**2026-09-22 に #55 をクローズした**（[クローズ時のコメント](https://github.com/fukuyori/rakukan/issues/55#issuecomment-5772858986)。
 実機確認の範囲と未確認項目、入力停止時間は #56 の範囲確定後に別 Issue、故障試験の手順は未設計・未検証、を明記）。
+
+#### 2026-09-22 #65 の実装（未コミット・実機確認は範囲付き）
+
+レモンの着手指示を受け、詳細設計の分割順「設定の組と読込処理 → 監視 → 反映待ちと送信 → 設定アプリ保存」を
+実装した。**再接続への組込み（再接続用の設定生成関数と `Create` への固定）は #56 との調整待ちなので含めていない**
+（再接続時の `Create` は従来どおり `RpcEngine` に保存済みの `config_json` を送る。公開済みの組から作った JSON を
+渡すのは `create_engine` の初回接続だけ）。プロトコル変更なし。
+
+**設定の組と読込処理**（`crates/rakukan-tsf/src/engine/config.rs`）
+
+- `ConfigSnapshot { revision, source: File { bytes, sha256 } | Defaults, app_config, engine_json }` を公開する。
+  初回の読込失敗は `Defaults`（ハッシュなし）。`engine_json` の生成は `engine_config_json(&AppConfig)`（純粋。
+  `state.rs` の `build_engine_config_json` から移し、そちらは公開済みの組の `engine_json` を返すだけにした）
+- `reload_config(reason)` がすべての読込経路: `LOAD_LOCK`（読込専用）→ 読取 → 本文のバイト列比較（同じなら
+  解析も公開もしない）→ SHA256・解析・JSON → `CONFIG_MANAGER` のロックで一括公開。設定状態のロックは I/O 中に
+  持たない。読めない・解析できないときは直前の組を保持（#61 の警告文は維持）
+- 公開時: `engine_json` が変わったら `pending_apply` に現在の組の識別子（`ApplyId { revision, sha256 }`）を置く。
+  変わっていなくても既に反映待ちなら識別子を新しい組へ更新する
+- `begin_apply(trigger, force)` は送信時点の組に固定して `(ApplyId, engine_json)` を返す（反映待ちが無く
+  `force` でもなければ `None`）。`finish_apply(sent, outcome)` は送った組が現在の反映待ちと一致し、
+  `SameConfig` / `RestartAccepted` / `ShutdownAcknowledged` のときだけ解除。`CommFailure` は保持
+- `maybe_reload_on_mode_switch()` は `reload_on_mode_switch` が真なら同期で `reload_config` を通し、
+  **反映待ちがあるか**を返す（本文が変わったかではない）。`refresh_appearance_if_changed()` と mtime の比較は
+  削除し、候補表示は `request_background_reload()` で背景へ要求するだけにした
+- `sha2 = "0.10"` を `rakukan-tsf` に追加（本文のハッシュ）。`windows` に `Win32_Storage_FileSystem` を追加
+
+**監視**（新規 `crates/rakukan-tsf/src/engine/config_watch.rs`）
+
+- `WatchScheduler`（Win32 に依存しない）: 定期確認の期限は最後の読込確認の完了から 30 秒で通知では延ばさない、
+  デバウンス 300 ms（最後の通知から）、最大待ち 2 秒（最初の通知から）、保存イベントは読込後に処理するまで保持。
+  `take_due` が要求を消してから読むので、読込中に届いた通知は次の要求になる
+- `run_loop`: 名前付きイベント・無名の要求イベント・ディレクトリ変更通知（`FindFirstChangeNotificationW`、
+  通知のたびに `FindNextChangeNotification`）を `WaitForMultipleObjects` で待つ。登録・再設定に失敗しても
+  定期確認を続け、読込のたびに復旧を試みる（ログは状態が変わったときだけ）。読込後、保存イベントを受けていれば
+  `state::engine_reload()` に依頼する（監視スレッドは RPC を待たない）
+- `state::start_reload_watcher()` はこのループを起動するだけになった
+
+**反映待ちと送信**（`crates/rakukan-tsf/src/engine/state.rs`、`crates/rakukan-engine-rpc/src/client.rs`）
+
+- `engine_reload_impl(trigger, force)`: 設定の読み直しはしない（呼び出し元が通す）。`RAKUKAN_ENGINE` のロック下で
+  **ラッチを無条件にリセット**し、`begin_apply` が `None`（反映待ちなし、force でない）なら RPC を送らずに終える。
+  送るときは `ShutdownIfConfigDiffers` → `Bool(false)` = `SameConfig`、`Bool(true)` = `RestartAccepted`、
+  `Err` = 無条件 `Shutdown` へフォールバックし、`Unit` を受信したときだけ `ShutdownAcknowledged { fallback: true }`。
+  `engine_reload_for(ApplyTrigger)` を追加（モード切替から）。言語バーは `reload_config("manual_restart")` の後に
+  `engine_reload_force()`（反映待ちが無くても送る）
+- `RpcEngine::shutdown()` は `Result<ShutdownOutcome>`（`Acknowledged` / `NoResponse`）を返す。通信失敗を
+  `Ok(())` に潰していた戻り値を、解除の根拠にしない
+- ハンドルが無い場合（初回未使用・前回落ちた）は送る相手がいないので `CommFailure` として反映待ちを残し、
+  従来どおり bg init へ合流する（新しい接続は公開済みの組で `Create` する）
+
+**設定アプリ**（`apps/rakukan-settings-winui`）
+
+- `SettingsStore.WriteIfDifferent` は同じディレクトリの一時ファイル（`config.toml.<guid>.tmp`）へ書き込み・
+  flush してから `File.Move(temp, path, overwrite: true)` で置き換える。元ファイルを先に削除しない。
+  置換に失敗したら例外にして成功通知を出さない（元ファイルは残る）。config・keymap・ユーザー辞書の一括更新は
+  保証しない
+- 保存後の表示を「保存しました。設定は各アプリの IME に順次反映されます」に変えた（非同期反映の完了確認ではない）
+
+**文書**: `docs/DESIGN.md` の「config.toml の即時反映」を「config.toml の変更検出と反映（Issue #65）」に書き換えた。
+
+**テスト**（PowerShell）
+
+| 確認 | 結果 |
+|---|---|
+| `cargo test -p rakukan-tsf --lib` | **161 件成功**（+20: `config_snapshot_tests` 11 件 = 組・反映待ち・A/B・A→B→A・通信失敗・JSON の純粋性、`config_watch::tests` 9 件 = 期限・デバウンス・最大待ち・定期確認を延ばさない・読込中の通知と保存イベント）。既存の #61 のテストは `mgr.app_config()` に合わせて更新 |
+| `cargo test -p rakukan-engine-rpc --lib` | 42 件成功 |
+| `cargo make check` / `cargo build -p rakukan-engine-host` / `cargo fmt --check` / `cargo clippy` | 警告なし |
+| 全体テストの不安定 | 並行実行で 1 回、`config_load_warning_tests::reinit_warns_with_path_and_error_on_parse_error` が失敗（WARN の捕捉漏れ）。単独 3 回・全体・全体の単一スレッドは成功。レモンが観測した `first_load_warns_with_path_and_error` と同じ捕捉機構（`tracing::subscriber::with_default`）で、`lib.rs:710` のログローテーションのテストも同じ方式を並行して使う。**原因は未特定**（※推測: 複数スレッドが同時に `with_default` を使うときの callsite の Interest / MAX_LEVEL の再計算との競合） |
+| 設定アプリのビルド | `dotnet build` は Visual Studio 側の MSBuild タスク（`Microsoft.Build.Packaging.Pri.Tasks`）が無く使えない。`cargo make build-tsf`（vswhere 経由の MSBuild）は成功（exit 0。tsf / tray / host / dict-builder / WinUI 設定アプリのコンパイルを通過。インストールはしていない） |
+
+**実装直後の時点では実機未確認だった。** その時点の確認予定は `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` の後、
+#65 の受入条件（全プロセスへの反映、同一 mtime の変更、背景監視後のモード切替、A 送信中の B、手動再起動、
+`learn_history.bin` の通知で読み取りが連打されない、監視登録失敗からの回復、保存イベントが背景読み取りより先に届く）
+を、各 TSF ログの `config published` / `config apply` / `config_watch:` の行で見ることだった。
+その後の実機結果と残る試験は下記に記録する。再接続への組込みは #56 との調整後に統合する。
+
+レモンのレビュー 3 点を反映（2026-09-22）: (1) 監視ループは名前付きイベント・要求イベント・ディレクトリ監視の
+どれが作れなくても終了せず、そろっている源だけを待ち（`WaitSet` が待つ順と起きた番号の対応を決める。源が無ければ
+sleep）、定期確認のたびに欠けている源の作り直しを試みる（ログは状態が変わったときだけ）。`WaitSet` のテストを追加。
+(2) 同じ読込失敗が続く間は WARN を繰り返さず（`last_load_failure` にエラー文を記録し、内容が変わったときと回復時に
+記録）、再確認は続ける。テスト `repeated_identical_failure_warns_once_and_keeps_rechecking` を追加。
+(3) `DESIGN.md` に混入していた CR（`\r` の展開）を文字列のバックスラッシュへ戻した。
+再検証: `cargo test -p rakukan-tsf --lib` 163 件成功（並行・単一スレッドとも）、clippy 警告なし。
+レモンの環境では並行実行で `reinit_warns_with_path_and_error_on_parse_error` が 1 回失敗（`WARN で出ていない: ""`、
+単独再実行は成功。原因は未特定のまま。今回の成功で解決したとは判断しない）。
+レモンの再確認（2026-09-22）: 追加の修正指摘なし。TSF 163 件成功、`git diff --check` 問題なし。
+**監視源の作成失敗からの復旧は実機では未確認**（実機確認の項目に含める）。
+
+**実機確認（2026-09-22、レモン）— 通常操作テスト 4 項目を実施。確認範囲は下表のとおり**:
+
+| 項目 | 結果 |
+|---|---|
+| 設定保存による両アプリへの反映 | メモ帳・EmEditor を開いたまま、候補文字サイズ 16 → 32 → 16 の表示反映を確認 |
+| 更新日時・サイズを維持した直接編集の反映 | 更新日時を元に戻した後の日時・サイズの一致と、両アプリでの 16 → 32 の反映を確認。ただし、監視が日時の復元前に読み込んだ可能性は除外していない。厳密な同一 mtime の検出確認は未完了 |
+| 背景読込後、モード切替で反映待ちを処理 | 候補数 19 → 18 の直接編集後、両プロセスで背景読込と `pending_apply=true` を確認。その後の各アプリのモード切替で `RestartAccepted`、反映待ち解除、Hello/Create 成功と実際の変換を確認 |
+| 反映待ちがない状態での手動再起動と、その後の変換 | 言語バーから `ManualRestart force=true` を実行。`ShutdownAcknowledged { fallback: false }` と `pending_now=none`、Hello/Create 成功、両アプリの変換を確認 |
+
+試験終了時、候補数は 19、候補文字サイズは 16 に復元し、`config.toml` と事前バックアップ
+`%APPDATA%\rakukan\config.issue65-20260922-174950.bak` の SHA256 一致を確認した。
+通常操作の確認は #65 の全受入条件の完了や、#66 の古い設定の採用防止を保証するものではない。
+
+**残る確認と必要な証拠**:
+
+| 項目 | 現在の確認範囲と残る試験 |
+|---|---|
+| 厳密な同一 mtime の変更検出 | 上記の実機試験は日時の復元と読込の順序を制御していない。日時・サイズを元に戻し終えてから読込を開始させ、本文の差で更新することを確認する |
+| 通知遮断時の 30 秒定期確認 | 通常時の定期読込ログは確認したが、通知を遮断した状態は未確認。保存イベント・ディレクトリ通知・背景読込要求に依存せず、定期確認で変更を取得することを確認する |
+| 連続保存と `learn_history.bin` の連続通知 | デバウンス・最大待ち・定期確認を延ばさないことはスケジューラの単体テストで確認。実際の通知での読込回数と期限、設定に無関係な書込みで読込が連打されないことは未確認 |
+| 監視源の作成失敗・再登録・復旧 | `WaitSet` のテストは待機番号と入力源の対応まで。名前付きイベント・要求イベント・ディレクトリ監視の一部または全部が作れなくても定期確認が継続し、失敗解除後に作成・監視を再開する経路は未確認 |
+| 保存イベントが背景読込より先に届く／読込中に次の通知が届く | 保存イベントの保持などはスケジューラの単体テストで確認。実際の待機ループから読込・反映依頼までの順序は未確認 |
+| A 送信中の B 更新、A → B → A | 古い応答が新しい反映待ちを消さないことは設定状態の単体テストで確認。送信・応答を制御した経路の試験を追加し、実機で偶然の競合を待つ方法にはしない |
+| 破損・欠落した設定と回復 | 正常設定の保持、同じ失敗の WARN 抑制、失敗内容の変化と回復は単体テストで確認。監視からの再確認・回復は実機未確認 |
+| 保存失敗 | ファイル置換に失敗しても元ファイルを保持し、保存成功の表示・通知を行わないことを確認する。正常保存の実機結果では代替しない |
+| RPC の通信失敗から反映待ち保持まで | `CommFailure` を渡す設定状態の単体テストはある。RPC の失敗・応答消失が成功扱いされず、反映待ち保持に至る処理経路を確認する |
+
+警告捕捉テストの間欠的な失敗も原因調査の対象とする。再実行の成功だけでは解決済みにしない。
+
+**この後の実施順序と完了条件（2026-09-22）**:
+
+| 順序・実施時期 | 作業 | 完了条件 |
+|---|---|---|
+| 1. 今回の記録更新 | 上記の結果・限界・残件を計画書と handoff に記録する | 次のセッションが実機と単体テストの証拠を区別できる |
+| 2. 次の作業 | 故障試験の詳細設計。通知遮断、監視源作成失敗、復旧を試験対象のプロセスに限定して制御する方法を決める | 操作するターミナルの終了に依存せず故障状態を解除できる。復旧方法を先に確認し、#55 のホスト無効化手順は再使用しない |
+| 3. 設計後 | 既存テストの対応範囲を点検し、不足する競合・通信失敗・保存失敗・通知順序の自動テストを補強する | 実際の処理経路に対して再現条件・期待値・結果が対応する。試験用に同じ処理を別実装して済ませない |
+| 4. 自動テスト後 | 専用ディレクトリ・イベント名を使う Windows 統合試験で、実際の Win32 待機・通知・ファイル置換を確認する | 通知なしの定期読込、監視作成失敗中の継続、復旧、連続通知の期限と読込回数を確認する |
+| 5. 統合試験が通った直後 | 試験用ビルドの対象アプリで通知遮断・監視失敗と復旧を確認する。操作は 1 つずつ案内する | TSF のログに加え、設定の表示反映と変換を確認し、終了後は通常版・元の設定へ復元する |
+| 6. 通常版への復元後 | 通常操作 4 項目の回帰確認と残件の整理を行う | 試験用の状態が残らず、各受入条件の証拠と未確認範囲が明確になっている |
+
+次の着手対象は 2 の試験設計。試験機構の詳細設計・追加実装・故障試験は未着手。
+再接続への組込みは #56 との調整待ちのまま、別の残件として追跡する。上の試験が通っても、それだけで
+#65 全体を完了扱いにせず、再接続への組込みの実装範囲・統合時の検証も完了判断に含める。
+#66 の古い設定の拒否・プロトコル変更は引き続き別の範囲。コミットは指示待ち。
