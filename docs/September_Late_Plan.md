@@ -2103,6 +2103,12 @@ config・keymap・ユーザー辞書の一括更新は保証しない。「設�
    **「負担は大きく変わらない」は未検証**（mtime 確認だけだった変更なしの場合にも本文を読むため。背景読込とのロック待ちも計測対象）。
    また、背景化しても契機を保持すれば読込後に送信できるので、背景化すると必ず次の契機まで遅れるわけではない（クロの前の意見の訂正）
 
+### 2026-09-24 #56 の設計反映の確認と実装着手の承認
+
+- 2026-09-23 08:27 UTC、nick が判断 2 点（Result 化は全経路を同じ PR で、`OwnerMismatch` と「ワーカー使用中」の区別、`BgTakeCandidates` の採番）を了解し、`Reload` の条件追加を取り下げ、統合ブランチ（実機ビルド `a737893`）にも `RpcEngine::reload()` の呼び出し元が無いことを確認。共通の形は「要求に `expect { engine_gen, owner }` と #66 の `config_version` を別フィールド、拒否は `Rejected(Reason)` 1 つ（Reason は #56 で `GenMismatch` / `OwnerMismatch`、#66 で `ConfigStale` / `ConfigUnavailable`）」の案
+- 2026-09-24 02:35 UTC、nick が実装着手の承認と rebase 先を確認
+- レモンの判断（選択肢 2: 着手可、PR を 2 本に分ける）で返信（https://github.com/fukuyori/rakukan/issues/56#issuecomment-5808610745 ）。内容は handoff.md の #56 の行を参照。3-7 の「実装着手は未承認」はこの時点で解除。マージとリリースの順序は Draft PR の時点で判断する
+
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 
 計画書 3-1 の項目。main `bae1e45` のコード（RPC クライアントは `bf809fc` から変更なし）と、手元の
