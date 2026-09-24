@@ -2186,11 +2186,28 @@ STA スレッドで動くので、ロックを使わずに登録・失効を欠�
    - `OnInitDocumentMgr(dm)`: `gen = next_gen++`、`slot[ptr] = { gen, alive: true }`（同じ ptr の古い slot は上書き = 再利用の検出）
    - `OnUninitDocumentMgr(dm)`: `slot[ptr].alive = false`（slot は消さない。以後に届く古いイベントを「死んだ世代」と判定するため）。
      そのうえで `dispose_dm_resources(DmRef)`
-   - **初回の目撃で登録**: `OnSetFocus` / Activate が台帳に無い ptr を見たら、その場で `{ gen: next_gen++, alive: true }` として登録する
-     （Activate 前に作られ `OnInitDocumentMgr` を観測していない既存 DM の扱い。生存は「まだ Uninit を見ていない」ことで表す）
-   - `current(ptr) -> Option<DmRef>`（alive のときだけ）、`is_live(DmRef) -> bool`（ptr の slot があり、gen が一致し、alive）
-   - 死んだ slot の掃除: 新しい Init で上書きされるまで残す。上限（案 1024）を超えたら古い死んだ slot から捨てる（ptr の再利用で
-     偽陽性は起きない。gen が一致しないだけで無視される）
+   - **Activate で既存 DM を列挙して登録する（初回目撃は採らない、2026-09-24 判断 2 回目）**: Activate で
+     `ITfThreadMgr::EnumDocumentMgrs`（呼び出しスレッドの DM を列挙する）の結果を全部登録する。Activate 前に作られ
+     `OnInitDocumentMgr` を観測していない既存 DM の扱い。列挙の登録は**生存中の ptr の世代を進めない**（sink 登録後に
+     `OnInitDocumentMgr` で登録済みの DM が列挙にも現れたとき、先の `DmRef` を無効にしないため）。死んだ slot の ptr が
+     列挙に現れたら、その DM は今生きているので新しい世代で登録する。`GetFocus()` の DM は列挙の成否にかかわらず照合し、
+     未登録なら登録して debug ログに残す。列挙の COM 呼び出しをまたいで台帳の `RefCell` を借り続けない（ptr を集めてから登録する）。
+     列挙に失敗したら warn を出し、`GetFocus()` の DM だけ登録する
+   - **台帳に無い ptr は死んだ扱い**: `OnSetFocus` の prev / next が台帳に無ければ登録せず、死んだ世代と同じ扱いにする
+     （prev なら保存しない、next なら復元も適用もしない）。debug ログ `unknown dm` を残す。根拠: Activate 後にフォーカスされた
+     ことのない DM には、こちらが適用したモードも利用者の操作も無いので保存すべきものが無く、Activate 後に新しく作られた
+     DM は `OnInitDocumentMgr` で登録されているはずなので、未知の next は「忘れた死んだ DM」か「Init 通知の漏れ」のどちらか
+   - **未登録の ptr への `OnUninitDocumentMgr`**: 新しい世代を割り当て、そのまま死んだ slot として記録する（登録と失効を同時に行う）。
+     以後その ptr に届く通知は死んだ世代に解決される。案 A では Activate 後に未登録の DM は原則存在しないので、この経路が通ったら
+     debug ログで残し、列挙漏れの検出に使う
+   - **Deactivate で生存 slot を全部失効させる**: Deactivate は通知 sink を解除するので、解除中に破棄された DM の Uninit は届かない。
+     失効させずに残すと、次の Activate に生存中の slot が持ち越される。次の Activate は列挙結果を登録し直す。`ModeStore` は
+     残るので、**世代番号は初期値に戻さず進め続ける**（Deactivate 前の `DmRef` と Activate 後の `DmRef` が衝突しないため）
+   - `lookup(ptr) -> Option<DmRef>`（slot があれば生死を問わずその世代。無ければ `None`）、`is_live(DmRef) -> bool`（ptr の slot が
+     あり、gen が一致し、alive）
+   - 死んだ slot の掃除: 新しい登録で上書きされるまで残す。上限（1024）を超えたら古い死んだ slot から捨てる。捨てた ptr に
+     古い通知が届いても「台帳に無い ptr は死んだ扱い」に落ちるので、生存と誤認しない（初回目撃を採らないことが前提。
+     初回目撃を残すと、掃除後の未知 ptr が生存として登録され、古い `OnSetFocus(prev=A)` の保存が走る）
 2. **キューに積む時点で世代を確定**: `FocusChange { prev: Option<DmRef>, next: Option<DmRef>, hwnd }`。`OnSetFocus`（msctf の
    コールバック内）で台帳から `DmRef` を取る。台帳は thread-local なので COM 再入もロックも無い。**処理時に最新世代を取り直して
    古いイベントに付け替えることはしない**
@@ -2198,13 +2215,14 @@ STA スレッドで動くので、ロックを使わずに登録・失効を欠�
    - `prev`: `is_live(prev)` のときだけ保存する。死んでいる（Uninit 済み）か世代が違う（再利用済み）なら保存しない。
      HWND への退避は Uninit 時の `doc_mode_remove` で済んでいる。debug ログに `skipped save for dead dm=… gen=…` を残す
    - `next`: `is_live(next)` でないなら、復元も `ime_sync::apply` もしない（その DM は無いか別物。新しい DM には別の
-     `OnSetFocus` が来る）。`TL_CURRENT_DM` はこの場合更新しない
-   - `TL_CURRENT_DM` を `DmRef` にする（`TL_CURRENT_DM_GEN` を追加）
+     `OnSetFocus` が来る）。`TL_CURRENT_DM` / `TL_CURRENT_HWND` はこの場合更新しない。**続けること**: 候補ウィンドウの
+     非表示（`hide`）、ライブタイマーの停止、生存中の prev の保存は、next が死んでいても現行どおり行う
+   - `TL_CURRENT_DM` を `Option<DmRef>` にする（世代を持つ）
 4. **`ModeStore` の鍵**: `dm_modes: HashMap<DmRef, ImeMode>`、`dm_to_hwnd: HashMap<DmRef, usize>`。ptr が再利用されても
    gen が違うので古い項目には当たらない（1 の掃除が遅れても安全）。`hwnd_modes` はそのまま
 5. **`doc_mode_remember_current`**: `TL_CURRENT_DM`（`DmRef`）が `is_live` のときだけ `dm_modes` / `dm_to_hwnd` を更新する。
    `hwnd_modes` の更新は従来どおり（HWND は DM の破棄と独立）
-6. **Activate の直接呼出し**: `GetFocus()` の DM を台帳で初回登録して `DmRef` を作り、`doc_mode_on_focus_change(None, Some(dm), hwnd)`
+6. **Activate の直接呼出し**: 1 の列挙と `GetFocus()` の照合で登録した `DmRef` を使い、`doc_mode_on_focus_change(None, Some(dm), hwnd)`
 7. **#51 の `TL_IME_APP_SESSION.base_dm`** も `DmRef` にする（アドレス再利用で新しい DM を本体と誤認しないため）。判定 `next != base` は
    `DmRef` の比較になる
 8. **`doc_mode_remove(DmRef)`**: 退避と削除は現行どおり。`dm_modes` の鍵が `DmRef` なので、同じ ptr の新しい世代の項目を消すことはない
@@ -2229,7 +2247,10 @@ STA スレッドで動くので、ロックを使わずに登録・失効を欠�
 | 同じアドレスで再初期化 → 古いイベント処理 | 旧 gen の `prev` / `next` は無視。新 gen の DM の最初のフォーカスは `hwnd_modes` か既定値から復元し、旧モードを引かない |
 | `next` DM の破棄（処理前に Uninit） | 復元も apply もしない。`TL_CURRENT_DM` は変えない |
 | 破棄後の手動変更保存 | `TL_CURRENT_DM` が dead なら `dm_modes` に入れず、`hwnd_modes` だけ更新 |
-| 初期化通知を観測していない DM での Activate | 初回目撃で登録され、以後の Uninit で失効する |
+| Activate の列挙で登録した DM | 以後の Uninit で失効する。列挙に生存中の ptr が現れても世代は進まない。死んだ slot の ptr が列挙に現れたら新しい世代で登録される |
+| Uninit → 掃除で slot が消える → 古い `OnSetFocus(prev=A / next=A)` | 台帳に無い ptr は登録されず、保存も復元もしない |
+| 未登録の ptr に Uninit → 続く `OnSetFocus` | 死んだ世代として無視される（生存に化けない） |
+| Deactivate → DM 破棄（通知は届かない）→ 再 Activate | Deactivate で生存 slot が失効し、Deactivate 前の `DmRef` は再 Activate 後も生存と判定されない。世代番号は戻らない |
 | ロック取得失敗時の登録・失効 | 台帳はロックを使わないので欠落しない（テストは `ModeStore` のロック失敗を模擬し、生死判定が変わらないことを見る） |
 | 正当な世代の復元と HWND 経由の引継ぎ | 同じ DM への再フォーカスで前回モード、DM 再作成で `hwnd_modes` から復元（回帰） |
 | `remember_last_kana_mode = false`、#51 対象アプリ | 挙動が変わらない（回帰） |
@@ -2242,7 +2263,78 @@ STA スレッドで動くので、ロックを使わずに登録・失効を欠�
 
 4 点とも推奨どおりに決定: (1) 台帳は TSF スレッドの thread-local（`ModeStore` の `Mutex` は残す）、(2) `next` が dead なら
 復元も apply もしない、(3) #51 の `base_dm` も `DmRef` にする、(4) 死んだ slot は新しい登録で上書きされるまで残し、
-上限 1024 を超えたら古いものから捨てる。**実装着手は別途の指示を待つ。**
+上限 1024 を超えたら古いものから捨てる。
+
+**2 回目（2026-09-24、実装着手の指示後）**: 実装前のレビューで 2 つの穴が見つかり、次のとおり決定した。
+
+- 穴 1: 上限で死んだ slot を捨てると「Uninit(A) → 掃除 → 古い `OnSetFocus(A)`」で A が未知の ptr になり、初回目撃の規則で生存として
+  登録される（「掃除しても偽陽性は起きない」は誤りだった）。穴 2: 未登録の DM への `OnUninitDocumentMgr` が未定義で、失効記録を
+  残さないと続く通知が初回目撃で登録される
+- **決定（案 A）**: 初回目撃を廃止し、Activate で `EnumDocumentMgrs` により既存 DM を全登録する。以後の未知 ptr は登録せず死んだ扱い。
+  未登録の ptr への Uninit は死んだ slot を作る。案 B（掃除の廃止、初回目撃の維持）は台帳の大きさが「DM が使ったことのある異なる
+  アドレス数」に比例し有界性を測っていないので採らない
+- **追加の条件（レモンの指摘）**: Deactivate で生存 slot を全部失効させ、次の Activate で列挙結果を登録する。世代番号は初期値に戻さない。
+  列挙の登録は生存中の ptr の世代を進めない。`GetFocus()` の DM は列挙の成否にかかわらず照合する。列挙の COM 呼び出しをまたいで
+  台帳の `RefCell` を借り続けない
+- 死んだ next でも `hide` / ライブタイマー停止 / 生存中 prev の保存は続ける（設計 3 に明記）
+- 残るリスク: 列挙や `OnInitDocumentMgr` に漏れがあると、その DM ではモードの復元・適用が起きない。実機では `unknown dm` のログの
+  有無で漏れを確認する
+
+#### 2026-09-24 #50 の実装（未コミット・実機未確認）
+
+案 A と追加条件のとおり実装した。RPC / エンジンには触れていない（TSF 内で閉じる）。
+
+| ファイル | 内容 |
+|---|---|
+| 新規 `crates/rakukan-tsf/src/engine/dm_registry.rs` | `DmRef { ptr, generation }`（`gen` は edition 2024 の予約語なので `generation`）、純粋な `DmRegistry`（`register` / `ensure_live` / `lookup` / `expire` / `expire_all` / `is_live`、死んだ slot の上限 1024 で世代の古いものから捨てる）、thread-local の入口、`DmSeen { Absent, Unknown(ptr), Known(DmRef) }` と `seen(ptr)`。`expire` は未知の ptr に死んだ slot を作る。`ensure_live` は生存中の ptr の世代を進めない |
+| `state.rs` `ModeStore` | 鍵を `DmRef` に。`save_on_focus_out`（生存中だけ保存。死んだ prev は `skipped save for dead dm` を debug で記録）/ `restore_on_focus_in` / `remember_current`（DM は生存中だけ、HWND は常に）/ `remove` をメソッドに分け、`focus_change_in(&Mutex<ModeStore>, &FocusInput) -> FocusOutcome { LockBusy, NoNext, NextDead, AppSession, Restore }` を純関数にした。`doc_mode_on_focus_change(prev: Option<DmRef>, next: Option<DmRef>, hwnd)` は config と台帳の生死を解決して `focus_change_in` を呼び、#51 の判定は `AppSession` のときだけ行う。`doc_mode_remove(DmRef)`、`dispose_dm_resources(ptr)` は台帳の `expire` → 生存中だった場合だけ `remove`。新設 `doc_mode_deactivate()` は `expire_all` で失効させた `DmRef` の項目を HWND へ退避して削除する。#51 の `base_dm` は `Option<DmRef>`、`should_apply_ime_on(DmRef, Option<DmRef>, bool)` |
+| `candidate_window.rs` | `TL_CURRENT_DM: Cell<Option<DmRef>>`、`current_dm_hwnd() -> (Option<DmRef>, usize)`、`FocusChange { prev: Option<DmRef>, next: DmSeen, hwnd_val }`、`post_focus_changed(prev, next, hwnd)`。`process_focus_change` は next が `Absent` か生存中の `Known` のときだけ `TL_CURRENT_DM` / `TL_CURRENT_HWND` を更新し、死んだ / 未知の next では変えない。`hide` / `stop_live_timer` / prev の保存は next の生死によらず行う |
+| `factory.rs` | `OnInitDocumentMgr` で `register`、`OnUninitDocumentMgr` は従来どおり `dispose_dm_resources`、`OnSetFocus` は `seen` で世代を確定してキューに積む（未知の ptr は `unknown dm` を debug で記録し登録しない）。Activate は `register_existing_document_mgrs`（`EnumDocumentMgrs` の結果を **COM 参照のまま保持して**登録し、登録後に解放する。解放後のアドレスを登録しない。台帳の `RefCell` は各 `ensure_live` の中でだけ借りる。`EnumDocumentMgrs` / `Next` の失敗は warn）→ `GetFocus()` の DM を **COM 参照を保持したまま** `ensure_live` で照合（未登録なら debug で記録）→ `doc_mode_on_focus_change(None, Some(dm), hwnd)`。Deactivate は `clear_thread_mgr` の後に `doc_mode_deactivate`。`clear_thread_mgr` は `TL_CURRENT_DM` / `TL_CURRENT_HWND` も空にする（残すと、次の Activate で別 DM にモードを適用したときの `doc_mode_remember_current` が旧 HWND の `hwnd_modes` を上書きする） |
+
+Deactivate で失効させた DM の項目は `hwnd_modes` に退避されるので、同じアプリで IME を切り替えて戻したときは `hwnd_modes`
+（HWND が同じ）か既定値から復元する。従来は `dm_modes` から直接復元していたので、この経路だけ復元元が変わる（HWND が違う
+入力先では既定値になる）。実機で確認する項目に入れる。
+
+**テスト**（`cargo test -p rakukan-tsf --lib`、PowerShell、2026-09-24）: 193 件成功（追加 20 件 + 更新 1 件）。
+
+| 場所 | 項目 |
+|---|---|
+| `dm_registry::tests`（10 件） | 登録 → 失効、同じアドレスの再初期化で世代が進む、`lookup` は未知の ptr を登録しない、失効後の `lookup` は死んだ世代、未知の ptr への `expire` が死んだ slot を作る、`ensure_live` が生存中の世代を進めない / 死んだ slot は新世代、`expire_all` → 再 Activate（世代は戻らない・Deactivate 前の `DmRef` は生存にならない）、上限超過で古い死んだ slot から捨てる、**Uninit → 掃除 → 古い `OnSetFocus(A)` が登録されない**、生存中の slot は捨てない |
+| `state::doc_mode_tests`（9 件） | キュー投入 → 破棄 → 保存で入れ直さない、破棄後に届いた通知は保存しない、同じアドレスの再利用で旧世代のモードを引かない（`hwnd_modes` から復元）、死んだ next は復元しないが生存中 prev は保存する、破棄後の `remember_current` は `hwnd_modes` だけ、ロック失敗は store をスキップし台帳の生死は変わらない、生存中 DM の復元と HWND 経由の引継ぎ（回帰）、`remember = false` と #51 対象アプリ（回帰。対象アプリでも死んだ next は判定に進まない）、**Deactivate → 別 HWND への再 Activate でキャッシュが空なら旧 HWND を上書きしない**（残っていた場合に上書きされることも確認） |
+| `candidate_window::tests::clear_thread_mgr_clears_current_dm_and_hwnd` | Deactivate で現在 DM / HWND のキャッシュが空になる |
+| `state::tests::ime_on_applies_once_for_a_non_base_input`（更新） | `DmRef` 版。同じアドレスでも世代が違えば別の入力先 |
+
+`cargo fmt --all -- --check`、`cargo clippy -p rakukan-tsf --all-targets -- -D warnings`（通常版と `--features config-watch-fault-test`）、
+`cargo make check`、`cargo test --workspace --lib`（dict 46 / engine 274 / abi 16 / rpc 42 / tsf 191、すべて成功）を確認した。
+
+**差分レビュー（レモン、2026-09-24）で直した 2 点**: (1) Deactivate 後も現在 DM / HWND のキャッシュが残っていた → `clear_thread_mgr` で
+両方を空にし、回帰テスト 2 件を追加。(2) 列挙した `ITfDocumentMgr` を解放した後で生ポインタを登録していた → COM 参照を保持したまま
+登録し、`Next` の途中失敗を warn にした。修正後に fmt / clippy（両ビルド）/ `cargo make check` / TSF 単体テスト 193 件を再確認した。
+2 回目のレビューで **(3) `GetFocus()` の DM も usize に変換して解放した後に登録していた** → COM 参照を保持したまま登録と初期モード適用を行う形に直した（同じ確認を再実行）。再実行の 1 回目で `config_load_warning_tests::reinit_warns_with_path_and_error_when_the_file_is_missing` が 1 件失敗した（`config.rs` は未変更。既知の間欠失敗で、続けて 3 回の全件実行と単一スレッドでの同モジュール実行は成功）。
+
+#### 2026-09-24 #50 の実機確認（範囲付き）
+
+`cargo make build-engine` / `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入
+（`%LOCALAPPDATA%\rakukan\rakukan_tsf.dll` 16:28:27、SHA256 先頭 B5C632AD、TSF ログの `build=2026-09-24 07:20:40 UTC`）。
+サインイン時（16:28:06）に起動した常駐プロセスは旧 DLL のままで、新 DLL は導入後に起動したアプリだけが読む。ログは `%LOCALAPPDATA%\rakukan`、時刻は UTC。
+
+| 対象 | 操作 | ログ | 判定 |
+|---|---|---|---|
+| Edge PID 28536（`ime_on_apps`） | 起動し直し、2 タブの入力欄でオン/オフを切り替えながら往復 | `enumerated 10 dm(s), registered 10 new`。フォーカス変化 55 回、すべて台帳にある生存中の DM（世代 1・2・4・10）。#51 の `→ On (ime_on_apps)` は本体以外の入力先で 1 回、ウィンドウを離れて戻ると再適用 | 回帰なし。Activate 後に新しい DM は作られておらず（世代 10 で止まる）、破棄・再利用の経路は通っていない |
+| ghostty PID 18356（`ime_off_apps`） | 通常操作 | `enumerated 1 dm(s), registered 1 new`、`ime_off_apps → Off` が従来どおり | 回帰なし |
+| メモ帳 PID 16344（対象外アプリ） | 起動 → オンで入力 → 別ウィンドウ → 戻る（2 回） | 列挙 0 件（DM は Activate 後に `OnInitDocumentMgr` で世代 1）。`saved mode=On` → `restored mode=On from dm=…/g1` | 記憶の復元は従来どおり |
+| メモ帳 | Win+Space で MS-IME へ（07:41:37） | `deactivate expired 2 live dm(s)`、`retained mode=On for hwnd=0xd0d26`、`rakukan Deactivate` | Deactivate の失効と HWND 退避 |
+| メモ帳 | Win+Space で Rakukan へ（07:47:01） | `enumerated 2 dm(s), registered 2 new`、**`restored mode=On from hwnd=0xd0d26 (dm=…/g3 is new)`**、`Activate: initial mode=On`。その後の離脱で `saved mode=On for dm=…/g3` | **設計どおり HWND 経由で復元**。世代は 1 → 3 に進み、Deactivate 前の世代は使われていない |
+| 全ログ | ― | `unknown dm` 0 件、`skipped save for dead dm` / `is dead, keeping current dm` / `recorded as dead` 0 件、`was not enumerated` 0 件、WARN は ghostty の `SLOW`（12 ms、無関係）のみ | 列挙漏れ・Init 通知漏れの兆候なし |
+
+確かめていないこと: DM の破棄後に届く古い通知（`skipped save for dead dm`）とアドレス再利用の実機再現（この操作では DM が破棄されず、
+判定は単体テストのみ）。Firefox / Chrome、上限 1024 の掃除、`EnumDocumentMgrs` の失敗経路。
+
+気付き: Activate 時の INFO `Activate: initial mode=On (config.input.default_mode)` は HWND から復元した場合も「config.input.default_mode」と
+書く（従来からの文言。実際の復元元は直前の DEBUG 行）。#50 の範囲外なので触っていない。
+
+レモンからの指摘（手順の段取り）: 切替系の操作は「戻す」と「戻した後に見る点」を同じ手順に書き、手順の前に見たい経路・期待結果・判定行を
+簡潔に説明する。オン/オフはログから読めるので操作者に報告させない。
 
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 

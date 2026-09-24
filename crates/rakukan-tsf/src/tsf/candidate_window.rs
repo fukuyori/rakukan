@@ -20,6 +20,7 @@
 //! タイマーコールバックでは候補ウィンドウの表示のみ行い、composition text の更新は
 //! 次のキー入力（Space 等）時の `waiting-poll` ブランチで行う。
 
+use crate::engine::dm_registry::{self, DmRef, DmSeen};
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicU64, Ordering as AO};
@@ -179,25 +180,31 @@ thread_local! {
     // ─── [M1.7 T-MODE2] フォーカス中 DM / HWND キャッシュ ─────────────────────────
     // `IMEState::set_mode` から呼ぶ `doc_mode_remember_current` が、モード変更の
     // 瞬間に現在の (dm_ptr, hwnd) を知るために使う。focus 処理の完了時に更新される。
-    static TL_CURRENT_DM: Cell<usize> = const { Cell::new(0) };
+    /// フォーカス中の DM（ポインタ + 世代、Issue #50）。`None` = フォーカス先なし。
+    static TL_CURRENT_DM: Cell<Option<DmRef>> = const { Cell::new(None) };
     static TL_CURRENT_HWND: Cell<usize> = const { Cell::new(0) };
 }
 
-/// 現在フォーカス中の DocumentManager ポインタと root HWND を返す。
+/// 現在フォーカス中の DocumentManager（ポインタ + 世代）と root HWND を返す。
 /// `IMEState::set_mode` が `doc_mode_remember_current` を呼ぶときに使用。
 /// TSF スレッド以外からの呼び出し（例: WinUI 設定 → TSF への通知）では
-/// TL が 0 を返すので、その場合は save を skip する設計にしてある。
-pub fn current_dm_hwnd() -> (usize, usize) {
-    let dm = TL_CURRENT_DM.try_with(|c| c.get()).unwrap_or(0);
+/// TL が空 / 0 を返すので、その場合は save を skip する設計にしてある。
+pub fn current_dm_hwnd() -> (Option<DmRef>, usize) {
+    let dm = TL_CURRENT_DM.try_with(|c| c.get()).unwrap_or(None);
     let hwnd = TL_CURRENT_HWND.try_with(|c| c.get()).unwrap_or(0);
     (dm, hwnd)
 }
 
 /// OnSetFocus から遅延処理キューへ積むフォーカス変化イベント。
+///
+/// DM の世代はキューに積む時点（`OnSetFocus`）で確定する（Issue #50）。処理時に
+/// 最新世代を取り直して古いイベントに付け替えることはしない。
 #[derive(Clone, Copy)]
 struct FocusChange {
-    prev_ptr: usize,
-    next_ptr: usize,
+    /// フォーカスを失った DM。`None` = なし、または台帳に無い ptr（保存対象なし）。
+    prev: Option<DmRef>,
+    /// フォーカスを得た DM。
+    next: DmSeen,
     hwnd_val: usize,
 }
 
@@ -914,6 +921,11 @@ pub fn clear_thread_mgr() {
     TL_THREAD_MGR.with(|c| *c.borrow_mut() = None);
     TL_CLIENT_ID.with(|c| c.set(0));
     TL_PENDING_FOCUS.with(|q| q.borrow_mut().clear());
+    // 現在 DM / HWND のキャッシュも空にする（Issue #50）。残すと、次の Activate で
+    // 別の DM にモードを適用したときの `doc_mode_remember_current` が、旧 HWND の
+    // `hwnd_modes` を新しいモードで上書きする。
+    TL_CURRENT_DM.with(|c| c.set(None));
+    TL_CURRENT_HWND.with(|c| c.set(0));
 }
 
 fn current_focus_dm_ptr() -> Option<usize> {
@@ -993,11 +1005,11 @@ fn process_openclose_change() {
 
 /// OnSetFocus から呼ばれる。イベントをキューに積み、WM_APP_FOCUS_CHANGED を
 /// PostMessage して即 return する（msctf._NotifyCallbacks からの再入を避ける）。
-pub fn post_focus_changed(prev_ptr: usize, next_ptr: usize, hwnd_val: usize) {
+pub fn post_focus_changed(prev: Option<DmRef>, next: DmSeen, hwnd_val: usize) {
     TL_PENDING_FOCUS.with(|q| {
         q.borrow_mut().push_back(FocusChange {
-            prev_ptr,
-            next_ptr,
+            prev,
+            next,
             hwnd_val,
         });
     });
@@ -1032,31 +1044,50 @@ fn handle_pending_focus_changes() {
 /// COM 再入 (set_open_close) や ITfContext の Drop (stop_live_timer) が安全。
 fn process_focus_change(fc: FocusChange) {
     tracing::debug!(
-        "OnSetFocus(deferred): prev_dm={:#x} next_dm={:#x} hwnd={:#x}",
-        fc.prev_ptr,
-        fc.next_ptr,
+        "OnSetFocus(deferred): prev_dm={:?} next_dm={:?} hwnd={:#x}",
+        fc.prev,
+        fc.next,
         fc.hwnd_val
     );
 
     // M1.7 T-MODE2: 現在フォーカス中の (DM, HWND) を TL に確定させる。
     // `doc_mode_on_focus_change` 内の `set_mode` や、その後のユーザのモード
     // 変更経路が `doc_mode_remember_current` を呼ぶときに使う。
-    // next_ptr == 0（フォーカスを失う）のケースでは 0 をセット。
-    TL_CURRENT_DM.with(|c| c.set(fc.next_ptr));
-    TL_CURRENT_HWND.with(|c| c.set(fc.hwnd_val));
+    // フォーカス先なしのケースでは None をセット。
+    //
+    // Issue #50: next が死んでいる（処理前に Uninit 済み / 世代違い）か台帳に無い
+    // ptr なら、その DM は無いか別物なので現在の (DM, HWND) は変えない。
+    // 新しい DM には別の OnSetFocus が来る。
+    let next = match fc.next {
+        DmSeen::Absent => {
+            TL_CURRENT_DM.with(|c| c.set(None));
+            TL_CURRENT_HWND.with(|c| c.set(fc.hwnd_val));
+            None
+        }
+        DmSeen::Known(dm) if dm_registry::is_live(dm) => {
+            TL_CURRENT_DM.with(|c| c.set(Some(dm)));
+            TL_CURRENT_HWND.with(|c| c.set(fc.hwnd_val));
+            Some(dm)
+        }
+        DmSeen::Known(dm) => {
+            tracing::debug!("OnSetFocus(deferred): next dm={dm:x} is dead, keeping current dm");
+            Some(dm)
+        }
+        DmSeen::Unknown(ptr) => {
+            tracing::debug!(
+                "OnSetFocus(deferred): next dm={ptr:#x} is unknown, keeping current dm"
+            );
+            None
+        }
+    };
 
     // 別コンテキストへの移動 → 候補ウィンドウを閉じる + ライブタイマー停止
+    // （next が死んでいても行う）
     hide();
     stop_live_timer();
 
-    // フォーカス先が null の場合は prev_dm のモード保存のみ
-    if fc.next_ptr == 0 {
-        let _ = crate::engine::state::doc_mode_on_focus_change(fc.prev_ptr, 0, fc.hwnd_val);
-        return;
-    }
-
-    let Some(new_mode) =
-        crate::engine::state::doc_mode_on_focus_change(fc.prev_ptr, fc.next_ptr, fc.hwnd_val)
+    // フォーカス先が無い / 死んでいる場合は prev のモード保存だけが走り None が返る
+    let Some(new_mode) = crate::engine::state::doc_mode_on_focus_change(fc.prev, next, fc.hwnd_val)
     else {
         return;
     };
@@ -2479,6 +2510,22 @@ pub fn on_live_timer() {
 
 #[cfg(test)]
 mod tests {
+    /// Deactivate（`clear_thread_mgr`）で現在 DM / HWND のキャッシュが空になる（Issue #50）。
+    /// 空にしないと、別 HWND への再 Activate 後の `doc_mode_remember_current` が旧 HWND の
+    /// `hwnd_modes` を上書きする。
+    #[test]
+    fn clear_thread_mgr_clears_current_dm_and_hwnd() {
+        let dm = crate::engine::dm_registry::DmRef {
+            ptr: 0x10,
+            generation: 1,
+        };
+        super::TL_CURRENT_DM.with(|c| c.set(Some(dm)));
+        super::TL_CURRENT_HWND.with(|c| c.set(0xA000));
+        assert_eq!(super::current_dm_hwnd(), (Some(dm), 0xA000));
+        super::clear_thread_mgr();
+        assert_eq!(super::current_dm_hwnd(), (None, 0));
+    }
+
     use super::{
         BG_ERROR_STATUS, BG_RECOVERING_STATUS, BG_UNRECOVERABLE_STATUS, FONT_HEIGHT_BASE,
         FONT_HEIGHT_MIN, Layout, fit_font_height, guard_preview_shrink, scaled_to,

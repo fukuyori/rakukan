@@ -11,6 +11,7 @@ use super::ime_mode::ImeMode;
 // 実体は `rakukan-engine-rpc` を通じて `rakukan-engine-host.exe` へ Named Pipe で
 // 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
 use super::config::ApplyTrigger;
+use super::dm_registry::{self, DmRef};
 pub use rakukan_engine_rpc::InputCharKind;
 pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
@@ -1205,8 +1206,8 @@ pub fn composition_clone() -> anyhow::Result<Option<ITfComposition>> {
 /// 古い経路の SetText が新しい経路の SetText を上書きする risk がある。
 ///
 /// 各 SetText 直前で `try_lock` を取り、busy なら skip して return。
-/// 取りこぼした apply は次のキー入力 / タイマー発火で最新 gen の SetText が
-/// 走るので整合は保てる（M1.8 T-MID1 の gen 機構と組合せて機能）。
+/// 取りこぼした apply は次のキー入力 / タイマー発火で最新 generation の SetText が
+/// 走るので整合は保てる（M1.8 T-MID1 の generation 機構と組合せて機能）。
 pub static COMPOSITION_APPLY_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
 /// `OnUninitDocumentMgr` から呼ばれる。
@@ -2357,143 +2358,253 @@ pub fn is_conversion_ready() -> bool {
 //   - なければ config.input.default_mode を返す
 
 struct ModeStore {
-    dm_modes: HashMap<usize, ImeMode>,   // DM ptr → mode
+    dm_modes: HashMap<DmRef, ImeMode>,   // DM（ポインタ + 世代）→ mode
     hwnd_modes: HashMap<usize, ImeMode>, // HWND → mode（DM 再作成時フォールバック）
-    dm_to_hwnd: HashMap<usize, usize>,   // DM ptr → HWND（保存時の HWND 特定用）
+    dm_to_hwnd: HashMap<DmRef, usize>,   // DM → HWND（保存時の HWND 特定用）
 }
 
-static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| {
-    Mutex::new(ModeStore {
-        dm_modes: HashMap::new(),
-        hwnd_modes: HashMap::new(),
-        dm_to_hwnd: HashMap::new(),
-    })
-});
+static DOC_MODE_STORE: LazyLock<Mutex<ModeStore>> = LazyLock::new(|| Mutex::new(ModeStore::new()));
+
+impl ModeStore {
+    fn new() -> Self {
+        Self {
+            dm_modes: HashMap::new(),
+            hwnd_modes: HashMap::new(),
+            dm_to_hwnd: HashMap::new(),
+        }
+    }
+
+    /// フォーカスを失う DM のモードを保存する（Issue #50: 生存中の DM だけ）。
+    ///
+    /// 死んでいる（Uninit 済み）か世代が違う（アドレス再利用済み）DM は保存しない。
+    /// HWND への退避は Uninit 時の [`ModeStore::remove`] で済んでいる。
+    /// 戻り値: 保存したか。
+    fn save_on_focus_out(
+        &mut self,
+        prev: DmRef,
+        live: bool,
+        remember: bool,
+        mode: ImeMode,
+    ) -> bool {
+        if !remember {
+            return false;
+        }
+        if !live {
+            tracing::debug!("doc_mode: skipped save for dead dm={prev:x}");
+            return false;
+        }
+        self.dm_modes.insert(prev, mode);
+        // HWND も更新（ブラウザが DM を再作成しても HWND 経由で復元できるように）
+        match self.dm_to_hwnd.get(&prev) {
+            Some(&hwnd) if hwnd != 0 => {
+                self.hwnd_modes.insert(hwnd, mode);
+                tracing::debug!("doc_mode: saved mode={mode:?} for dm={prev:x} hwnd={hwnd:#x}");
+            }
+            _ => tracing::debug!("doc_mode: saved mode={mode:?} for dm={prev:x} (hwnd unknown)"),
+        }
+        true
+    }
+
+    /// フォーカスを得た DM に適用するモードを決める。
+    /// 優先順: `dm_modes` → `hwnd_modes` → 既定値。`remember = false` なら毎回既定値。
+    fn restore_on_focus_in(
+        &mut self,
+        next: DmRef,
+        next_hwnd: usize,
+        remember: bool,
+        config_default: ImeMode,
+    ) -> ImeMode {
+        if !remember {
+            // remember=false: 毎回デフォルトモードを適用
+            tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
+            return config_default;
+        }
+        if let Some(&saved) = self.dm_modes.get(&next) {
+            // 既知の DM → 前回モードを復元
+            tracing::debug!("doc_mode: restored mode={saved:?} from dm={next:x}");
+            saved
+        } else if let Some(&saved) = self.hwnd_modes.get(&next_hwnd) {
+            // DM は新規だが同じ HWND → HWND 経由で復元（ブラウザの DM 再作成対応）
+            tracing::debug!(
+                "doc_mode: restored mode={saved:?} from hwnd={next_hwnd:#x} (dm={next:x} is new)"
+            );
+            self.dm_modes.insert(next, saved);
+            saved
+        } else {
+            // 完全初回 → デフォルトモードを記録して返す
+            tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
+            self.dm_modes.insert(next, config_default);
+            if next_hwnd != 0 {
+                self.hwnd_modes.insert(next_hwnd, config_default);
+            }
+            config_default
+        }
+    }
+
+    /// モード変更の瞬間に、フォーカス中の DM / HWND をキーに即時更新する。
+    /// DM は生存中のときだけ（Issue #50）。HWND は DM の破棄と独立なので常に更新する。
+    fn remember_current(&mut self, dm: Option<DmRef>, dm_live: bool, hwnd: usize, mode: ImeMode) {
+        match dm {
+            Some(dm) if dm_live => {
+                self.dm_modes.insert(dm, mode);
+                if hwnd != 0 {
+                    self.dm_to_hwnd.insert(dm, hwnd);
+                }
+            }
+            Some(dm) => tracing::debug!("doc_mode: skipped remember for dead dm={dm:x}"),
+            None => {}
+        }
+        if hwnd != 0 {
+            self.hwnd_modes.insert(hwnd, mode);
+        }
+        tracing::trace!("doc_mode: remembered mode={mode:?} for dm={dm:?} hwnd={hwnd:#x}");
+    }
+
+    /// DM 破棄時: モードを HWND へ退避してから `dm_modes` / `dm_to_hwnd` を削除する。
+    /// `hwnd_modes` は残す（同じ HWND で DM が再作成されたとき復元に使うため）。
+    fn remove(&mut self, dm: DmRef) {
+        if let (Some(&mode), Some(&hwnd)) = (self.dm_modes.get(&dm), self.dm_to_hwnd.get(&dm))
+            && hwnd != 0
+        {
+            self.hwnd_modes.insert(hwnd, mode);
+            tracing::debug!(
+                "doc_mode: retained mode={mode:?} for hwnd={hwnd:#x} before removing dm={dm:x}"
+            );
+        }
+        self.dm_modes.remove(&dm);
+        self.dm_to_hwnd.remove(&dm);
+        tracing::trace!("doc_mode: removed dm={dm:x}");
+    }
+}
+
+/// フォーカス変化の判定に必要な入力（純関数用）。DM の生死は呼び出し側が台帳で解決して渡す。
+struct FocusInput {
+    /// フォーカスを失った DM と、その生存状態。台帳に無い ptr は `None`（保存対象が無い）。
+    prev: Option<(DmRef, bool)>,
+    /// フォーカスを得た DM と、その生存状態。DM なし / 台帳に無い ptr は `None`。
+    next: Option<(DmRef, bool)>,
+    next_hwnd: usize,
+    current_mode: ImeMode,
+    remember: bool,
+    config_default: ImeMode,
+    /// `ime_on_apps` / `ime_off_apps` の対象アプリ（Issue #51。記憶による復元を通さない）。
+    app_listed: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum FocusOutcome {
+    /// `ModeStore` のロックが取れなかった。この回は保存も復元もしない。
+    LockBusy,
+    /// フォーカス先が無い（保存だけ行った）。
+    NoNext,
+    /// フォーカス先の DM が死んでいる（Uninit 済み / 世代違い）。復元も適用もしない。
+    NextDead(DmRef),
+    /// #51 の対象アプリ。適用の判定は呼び出し側のセッションに委ねる。
+    AppSession(DmRef),
+    /// 復元したモードを適用する。
+    Restore(ImeMode),
+}
+
+/// フォーカス変化の本体（純関数）。`DOC_MODE_STORE` 以外の状態に触れない。
+fn focus_change_in(store: &Mutex<ModeStore>, input: &FocusInput) -> FocusOutcome {
+    let mut store = match store.try_lock() {
+        Ok(g) => g,
+        Err(_) => return FocusOutcome::LockBusy,
+    };
+
+    // 前の DocumentManager のモードを保存（生存中のときだけ）
+    if let Some((prev, live)) = input.prev {
+        store.save_on_focus_out(prev, live, input.remember, input.current_mode);
+    }
+
+    let Some((next, live)) = input.next else {
+        return FocusOutcome::NoNext;
+    };
+    if !live {
+        tracing::debug!("doc_mode: focus to dead dm={next:x}, skipped restore");
+        return FocusOutcome::NextDead(next);
+    }
+
+    // DM→HWND マッピングを更新（フォーカスが来るたびに記録）
+    if input.next_hwnd != 0 {
+        store.dm_to_hwnd.insert(next, input.next_hwnd);
+    }
+
+    if input.app_listed {
+        return FocusOutcome::AppSession(next);
+    }
+
+    FocusOutcome::Restore(store.restore_on_focus_in(
+        next,
+        input.next_hwnd,
+        input.remember,
+        input.config_default,
+    ))
+}
 
 /// DocumentManager のフォーカス変化時に呼ぶ。
 ///
-/// - `prev_dm_ptr`: フォーカスを失った DocumentManager のポインタ（0 = なし）
-/// - `next_dm_ptr`: フォーカスを得た DocumentManager のポインタ（0 = なし）
+/// - `prev`: フォーカスを失った DocumentManager（`None` = なし、または台帳に無い ptr）
+/// - `next`: フォーカスを得た DocumentManager（`None` = なし、または台帳に無い ptr）
 /// - `next_hwnd`: フォーカス先ウィンドウの HWND（ターミナル判定用）
+///
+/// 生死は台帳（[`dm_registry`]）で解決する。死んだ `prev` は保存せず、死んだ `next` には
+/// 復元も適用もしない（Issue #50）。
 ///
 /// 返り値: フォーカス先に適用すべき ImeMode
 pub fn doc_mode_on_focus_change(
-    prev_dm_ptr: usize,
-    next_dm_ptr: usize,
+    prev: Option<DmRef>,
+    next: Option<DmRef>,
     next_hwnd: usize,
 ) -> Option<ImeMode> {
     use super::config::{DefaultImeMode, current_config};
 
     let cfg = current_config();
-    let remember = cfg.input.remember_last_kana_mode;
-
-    // config.input.default_mode → ImeMode へ変換
-    let config_default = match cfg.input.default_mode {
-        DefaultImeMode::Off => ImeMode::Off,
-        DefaultImeMode::On => ImeMode::On,
+    let on_listed = exe_listed(&cfg.input.ime_on_apps);
+    let off_listed = exe_listed(&cfg.input.ime_off_apps);
+    let input = FocusInput {
+        prev: prev.map(|d| (d, dm_registry::is_live(d))),
+        next: next.map(|d| (d, dm_registry::is_live(d))),
+        next_hwnd,
+        current_mode: ime_mode_get_atomic(),
+        remember: cfg.input.remember_last_kana_mode,
+        // config.input.default_mode → ImeMode へ変換
+        config_default: match cfg.input.default_mode {
+            DefaultImeMode::Off => ImeMode::Off,
+            DefaultImeMode::On => ImeMode::On,
+        },
+        app_listed: on_listed || off_listed,
     };
 
-    let mut store = match DOC_MODE_STORE.try_lock() {
-        Ok(g) => g,
-        Err(_) => return None,
-    };
-
-    // 前の DocumentManager のモードを保存
-    if prev_dm_ptr != 0 && remember {
-        let mode = ime_mode_get_atomic();
-        store.dm_modes.insert(prev_dm_ptr, mode);
-        // HWND も更新（ブラウザが DM を再作成しても HWND 経由で復元できるように）
-        if let Some(&hwnd) = store.dm_to_hwnd.get(&prev_dm_ptr) {
-            if hwnd != 0 {
-                store.hwnd_modes.insert(hwnd, mode);
+    match focus_change_in(&DOC_MODE_STORE, &input) {
+        FocusOutcome::LockBusy | FocusOutcome::NoNext | FocusOutcome::NextDead(_) => None,
+        FocusOutcome::Restore(mode) => Some(mode),
+        // アプリごとの IME 初期状態（Issue #51）。
+        //
+        // 対象アプリでは記憶による復元を通さない。アクティブ化のとき（off）または
+        // 本体とは別の入力先に入ったとき（on）に 1 回だけ適用し、その後は操作した
+        // 状態を維持する。インアクティブで状態は捨てられる。
+        FocusOutcome::AppSession(next) => TL_IME_APP_SESSION.with(|c| {
+            let mut sess = c.borrow_mut();
+            if sess.base_dm.is_none() {
+                // アクティブ化後に最初にフォーカスされた入力先 = アプリ本体
+                sess.base_dm = Some(next);
+                tracing::debug!("ime_app_session: base dm={next:x}");
+            }
+            if on_listed && should_apply_ime_on(next, sess.base_dm, sess.applied) {
+                sess.applied = true;
                 tracing::debug!(
-                    "doc_mode: saved mode={mode:?} for dm={prev_dm_ptr:#x} hwnd={hwnd:#x}"
+                    "ime_app_session: {} text input dm={next:x} (base={:?}) → On (ime_on_apps)",
+                    current_exe_name_lower(),
+                    sess.base_dm
                 );
+                Some(ImeMode::On)
+            } else {
+                // 対象アプリでは記憶を復元しない（今の状態を維持する）
+                None
             }
-        } else {
-            tracing::debug!("doc_mode: saved mode={mode:?} for dm={prev_dm_ptr:#x} (hwnd unknown)");
-        }
+        }),
     }
-
-    if next_dm_ptr == 0 {
-        return None;
-    }
-
-    // DM→HWND マッピングを更新（フォーカスが来るたびに記録）
-    if next_hwnd != 0 {
-        store.dm_to_hwnd.insert(next_dm_ptr, next_hwnd);
-    }
-
-    // アプリごとの IME 初期状態（Issue #51）。
-    //
-    // 対象アプリでは記憶による復元を通さない。アクティブ化のとき（off）または
-    // 本体とは別の入力先に入ったとき（on）に 1 回だけ適用し、その後は操作した
-    // 状態を維持する。インアクティブで状態は捨てられる。
-    let session_mode = {
-        let on_listed = exe_listed(&cfg.input.ime_on_apps);
-        let off_listed = exe_listed(&cfg.input.ime_off_apps);
-        if on_listed || off_listed {
-            TL_IME_APP_SESSION.with(|c| {
-                let mut sess = c.borrow_mut();
-                if sess.base_dm == 0 {
-                    // アクティブ化後に最初にフォーカスされた入力先 = アプリ本体
-                    sess.base_dm = next_dm_ptr;
-                    tracing::debug!("ime_app_session: base dm={next_dm_ptr:#x}");
-                }
-                if on_listed && should_apply_ime_on(next_dm_ptr, sess.base_dm, sess.applied) {
-                    sess.applied = true;
-                    tracing::debug!(
-                        "ime_app_session: {} text input dm={next_dm_ptr:#x} (base={:#x}) → On (ime_on_apps)",
-                        current_exe_name_lower(),
-                        sess.base_dm
-                    );
-                    Some(ImeMode::On)
-                } else {
-                    // 対象アプリでは記憶を復元しない（今の状態を維持する）
-                    None
-                }
-            })
-        } else {
-            None
-        }
-    };
-    if exe_listed(&cfg.input.ime_on_apps) || exe_listed(&cfg.input.ime_off_apps) {
-        return session_mode;
-    }
-
-    // 初回フォーカス時のデフォルトモードを決定
-    let resolve_default = |_hwnd: usize| -> ImeMode {
-        tracing::debug!("doc_mode: default={config_default:?} (config.input.default_mode)");
-        config_default
-    };
-
-    let mode = if remember {
-        if let Some(&saved) = store.dm_modes.get(&next_dm_ptr) {
-            // 既知の DM → 前回モードを復元
-            tracing::debug!("doc_mode: restored mode={saved:?} from dm={next_dm_ptr:#x}");
-            saved
-        } else if let Some(&saved) = store.hwnd_modes.get(&next_hwnd) {
-            // DM は新規だが同じ HWND → HWND 経由で復元（ブラウザの DM 再作成対応）
-            tracing::debug!(
-                "doc_mode: restored mode={saved:?} from hwnd={next_hwnd:#x} (dm={next_dm_ptr:#x} is new)"
-            );
-            store.dm_modes.insert(next_dm_ptr, saved);
-            saved
-        } else {
-            // 完全初回 → デフォルトモードを記録して返す
-            let m = resolve_default(next_hwnd);
-            store.dm_modes.insert(next_dm_ptr, m);
-            if next_hwnd != 0 {
-                store.hwnd_modes.insert(next_hwnd, m);
-            }
-            m
-        }
-    } else {
-        // remember=false: 毎回デフォルトモードを適用
-        resolve_default(next_hwnd)
-    };
-
-    Some(mode)
 }
 
 /// M1.7 T-MODE2: モード変更が起きた瞬間に現在フォーカス中の DM / HWND を
@@ -2505,24 +2616,16 @@ pub fn doc_mode_on_focus_change(
 /// 呼び出し元は [IMEState::set_ime_mode]。TL_CURRENT_DM / TL_CURRENT_HWND は
 /// focus 切替の deferred 処理で更新される。
 ///
-/// TSF スレッド以外（例: WinUI → 設定反映）からの呼び出しでは TL が 0 を返すため
-/// save を skip する。
+/// TSF スレッド以外（例: WinUI → 設定反映）からの呼び出しでは TL が空を返すため
+/// save を skip する。DM は生存中のときだけ更新する（Issue #50）。
 pub fn doc_mode_remember_current(mode: ImeMode) {
     let (dm, hwnd) = crate::tsf::candidate_window::current_dm_hwnd();
-    if dm == 0 && hwnd == 0 {
+    if dm.is_none() && hwnd == 0 {
         return;
     }
+    let dm_live = dm.is_some_and(dm_registry::is_live);
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
-        if dm != 0 {
-            store.dm_modes.insert(dm, mode);
-            if hwnd != 0 {
-                store.dm_to_hwnd.insert(dm, hwnd);
-            }
-        }
-        if hwnd != 0 {
-            store.hwnd_modes.insert(hwnd, mode);
-        }
-        tracing::trace!("doc_mode: remembered mode={mode:?} for dm={dm:#x} hwnd={hwnd:#x}");
+        store.remember_current(dm, dm_live, hwnd, mode);
     }
 }
 
@@ -2534,20 +2637,25 @@ pub fn doc_mode_remember_current(mode: ImeMode) {
 /// 通常の focus-out 経路では `dm_to_hwnd` が削除済みになっていて HWND 退避が
 /// 走らない。ここで破棄前に HWND へコピーしておくことで、同じ HWND で
 /// 新しい DM が作られたときに hwnd_modes から復元できる。
-pub fn doc_mode_remove(dm_ptr: usize) {
+pub fn doc_mode_remove(dm: DmRef) {
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
-        if let (Some(&mode), Some(&hwnd)) =
-            (store.dm_modes.get(&dm_ptr), store.dm_to_hwnd.get(&dm_ptr))
-            && hwnd != 0
-        {
-            store.hwnd_modes.insert(hwnd, mode);
-            tracing::debug!(
-                "doc_mode: retained mode={mode:?} for hwnd={hwnd:#x} before removing dm={dm_ptr:#x}"
-            );
+        store.remove(dm);
+    }
+}
+
+/// Deactivate 時: 通知 sink が外れる間は DM の破棄が観測できないので、生存中の DM を
+/// 全部失効させ、その項目を HWND へ退避して削除する（Issue #50）。次の Activate は
+/// 列挙で登録し直し、`hwnd_modes` から復元する。
+pub fn doc_mode_deactivate() {
+    let expired = dm_registry::expire_all();
+    if expired.is_empty() {
+        return;
+    }
+    tracing::debug!("doc_mode: deactivate expired {} live dm(s)", expired.len());
+    if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
+        for dm in expired {
+            store.remove(dm);
         }
-        store.dm_modes.remove(&dm_ptr);
-        store.dm_to_hwnd.remove(&dm_ptr);
-        tracing::trace!("doc_mode: removed dm={dm_ptr:#x}");
     }
 }
 
@@ -2555,10 +2663,18 @@ pub fn doc_mode_remove(dm_ptr: usize) {
 ///
 /// かつては `OnUninitDocumentMgr` から 3 つの関数を個別に呼んでいたが、
 /// どれか 1 つを忘れると DM ごとの状態がリークして不整合になるため、
-/// 追加先を 1 箇所に寄せておく。呼び出し順は既存のままで、モード退避 →
-/// ライブ変換 context の無効化 → composition の無効化。
+/// 追加先を 1 箇所に寄せておく。呼び出し順は既存のままで、台帳の失効 →
+/// モード退避 → ライブ変換 context の無効化 → composition の無効化。
+///
+/// 台帳に無い ptr は死んだ slot として記録される（Issue #50。以後その ptr に届く
+/// 通知は死んだ世代に解決される）。
 pub fn dispose_dm_resources(dm_ptr: usize) {
-    doc_mode_remove(dm_ptr);
+    let (dm, expired) = dm_registry::expire(dm_ptr);
+    if expired {
+        doc_mode_remove(dm);
+    } else {
+        tracing::debug!("doc_mode: uninit for unknown or dead dm={dm:x} (recorded as dead)");
+    }
     crate::tsf::candidate_window::invalidate_live_context_for_dm(dm_ptr);
     invalidate_composition_for_dm(dm_ptr);
 }
@@ -2593,7 +2709,8 @@ fn exe_listed(list: &[String]) -> bool {
 #[derive(Default)]
 struct ImeAppSession {
     /// アクティブ化後、最初にフォーカスを得た入力先。「アプリ本体」とみなす。
-    base_dm: usize,
+    /// ポインタ + 世代（Issue #50: アドレス再利用で新しい DM を本体と誤認しない）。
+    base_dm: Option<DmRef>,
     /// 設定値を適用済み（以後は操作した状態を維持する）。
     applied: bool,
 }
@@ -2607,11 +2724,11 @@ thread_local! {
 ///
 /// 戻り値 `true` = この入力先でオンにする。アクティブ化後 1 回だけで、
 /// 「アプリ本体」とみなした入力先では適用しない。
-fn should_apply_ime_on(next_dm: usize, base_dm: usize, applied: bool) -> bool {
-    if applied || next_dm == 0 {
+fn should_apply_ime_on(next_dm: DmRef, base_dm: Option<DmRef>, applied: bool) -> bool {
+    if applied {
         return false;
     }
-    base_dm != 0 && next_dm != base_dm
+    base_dm.is_some_and(|base| next_dm != base)
 }
 
 /// アプリがアクティブになったときに呼ぶ。戻り値 = 今すぐ適用すべきモード。
@@ -2641,11 +2758,282 @@ pub fn ime_app_session_activate() -> Option<ImeMode> {
 pub fn ime_app_session_deactivate() {
     TL_IME_APP_SESSION.with(|c| {
         let mut sess = c.borrow_mut();
-        if sess.base_dm != 0 || sess.applied {
+        if sess.base_dm.is_some() || sess.applied {
             tracing::debug!("ime_app_session: cleared");
         }
         *sess = ImeAppSession::default();
     });
+}
+
+/// Issue #50: 破棄済み DM ポインタの再挿入を防ぐ `ModeStore` / 台帳の判定。
+/// Win32 なしで、台帳（`DmRegistry`）と `focus_change_in` の純関数に対して確認する。
+#[cfg(test)]
+mod doc_mode_tests {
+    use super::super::dm_registry::DmRegistry;
+    use super::*;
+
+    const H: usize = 0xA000;
+
+    fn store() -> Mutex<ModeStore> {
+        Mutex::new(ModeStore::new())
+    }
+
+    fn input(prev: Option<(DmRef, bool)>, next: Option<(DmRef, bool)>, hwnd: usize) -> FocusInput {
+        FocusInput {
+            prev,
+            next,
+            next_hwnd: hwnd,
+            current_mode: ImeMode::On,
+            remember: true,
+            config_default: ImeMode::Off,
+            app_listed: false,
+        }
+    }
+
+    fn dm_mode(store: &Mutex<ModeStore>, dm: DmRef) -> Option<ImeMode> {
+        store.lock().unwrap().dm_modes.get(&dm).copied()
+    }
+
+    fn hwnd_mode(store: &Mutex<ModeStore>, hwnd: usize) -> Option<ImeMode> {
+        store.lock().unwrap().hwnd_modes.get(&hwnd).copied()
+    }
+
+    /// キュー投入 → 破棄 → 保存: prev が Uninit 済みなら dm_modes に入らない。
+    /// hwnd_modes は Uninit 時の退避のまま。
+    #[test]
+    fn stale_focus_out_after_uninit_does_not_reinsert_dead_dm() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        // A にフォーカスが来て Off が決まる（初回 → 既定値）
+        assert_eq!(
+            focus_change_in(&st, &input(None, Some((a, reg.is_live(a))), H)),
+            FocusOutcome::Restore(ImeMode::Off)
+        );
+        // Uninit(A): 台帳で失効、store から退避して削除
+        let (dead, expired) = reg.expire(0x10);
+        assert!(expired);
+        st.lock().unwrap().remove(dead);
+        assert_eq!(dm_mode(&st, a), None);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::Off));
+
+        // 遅延処理: prev=A（死んでいる）の保存。現在モードは On だが入れ直さない
+        let out = focus_change_in(&st, &input(Some((a, reg.is_live(a))), None, H));
+        assert_eq!(out, FocusOutcome::NoNext);
+        assert_eq!(dm_mode(&st, a), None);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::Off));
+    }
+
+    /// 破棄 → 通知（OnSetFocus が破棄後に届く）→ 保存: 台帳の目撃が死んだ世代を返し、保存しない。
+    #[test]
+    fn focus_notified_after_uninit_is_dead_and_not_saved() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        reg.expire(0x10);
+        let seen = reg.lookup(0x10).unwrap();
+        assert_eq!(seen, a);
+        let out = focus_change_in(&st, &input(Some((seen, reg.is_live(seen))), None, H));
+        assert_eq!(out, FocusOutcome::NoNext);
+        assert!(st.lock().unwrap().dm_modes.is_empty());
+    }
+
+    /// 同じアドレスで再初期化 → 古いイベント処理: 旧世代の prev / next は無視され、
+    /// 新世代の DM の最初のフォーカスは hwnd_modes から復元して旧モードを引かない。
+    #[test]
+    fn reused_address_does_not_inherit_old_generation_mode() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a1 = reg.register(0x10);
+        focus_change_in(&st, &input(None, Some((a1, true)), H));
+        // 旧世代の項目をわざと残す（Uninit の store 更新が走らなかった場合を模擬）
+        st.lock().unwrap().dm_modes.insert(a1, ImeMode::On);
+        st.lock().unwrap().hwnd_modes.insert(H, ImeMode::Off);
+        reg.expire(0x10);
+        let a2 = reg.register(0x10);
+        assert_ne!(a1, a2);
+
+        // 古いイベント: prev=a1 / next=a1 はどちらも無視
+        let out = focus_change_in(
+            &st,
+            &input(Some((a1, reg.is_live(a1))), Some((a1, reg.is_live(a1))), H),
+        );
+        assert_eq!(out, FocusOutcome::NextDead(a1));
+        assert_eq!(dm_mode(&st, a2), None);
+
+        // 新世代の最初のフォーカス: dm_modes[a1]=On ではなく hwnd_modes[H]=Off
+        let out = focus_change_in(&st, &input(None, Some((a2, reg.is_live(a2))), H));
+        assert_eq!(out, FocusOutcome::Restore(ImeMode::Off));
+        assert_eq!(dm_mode(&st, a2), Some(ImeMode::Off));
+    }
+
+    /// next DM の破棄（処理前に Uninit）: 復元も apply もしない。生存中 prev の保存は行う。
+    #[test]
+    fn dead_next_skips_restore_but_saves_live_prev() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        let b = reg.register(0x20);
+        focus_change_in(&st, &input(None, Some((a, true)), H));
+        reg.expire(0x20);
+        let out = focus_change_in(
+            &st,
+            &input(Some((a, reg.is_live(a))), Some((b, reg.is_live(b))), 0xB000),
+        );
+        assert_eq!(out, FocusOutcome::NextDead(b));
+        // prev=A は生存中なので現在モード On が保存されている
+        assert_eq!(dm_mode(&st, a), Some(ImeMode::On));
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::On));
+        // 死んだ next には何も記録しない
+        assert_eq!(dm_mode(&st, b), None);
+        assert!(!st.lock().unwrap().dm_to_hwnd.contains_key(&b));
+    }
+
+    /// 破棄後の手動変更保存: TL_CURRENT_DM が dead なら dm_modes に入れず、hwnd_modes だけ更新。
+    #[test]
+    fn remember_current_on_dead_dm_updates_only_hwnd() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        focus_change_in(&st, &input(None, Some((a, true)), H));
+        let (dead, _) = reg.expire(0x10);
+        st.lock().unwrap().remove(dead);
+
+        st.lock()
+            .unwrap()
+            .remember_current(Some(a), reg.is_live(a), H, ImeMode::On);
+        assert_eq!(dm_mode(&st, a), None);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::On));
+
+        // 生存中なら dm_modes / dm_to_hwnd も更新される
+        let a2 = reg.register(0x10);
+        st.lock()
+            .unwrap()
+            .remember_current(Some(a2), reg.is_live(a2), H, ImeMode::Off);
+        assert_eq!(dm_mode(&st, a2), Some(ImeMode::Off));
+        assert_eq!(st.lock().unwrap().dm_to_hwnd.get(&a2), Some(&H));
+    }
+
+    /// Deactivate → 別 HWND への再 Activate（回帰、Issue #50 レビュー指摘）:
+    /// Deactivate で現在 DM / HWND のキャッシュが空になるので、再 Activate 後にモードを
+    /// 適用しても旧 HWND の hwnd_modes は上書きされない。キャッシュが残っていた場合は
+    /// 死んだ DM を拒否しても旧 HWND が新しいモードで更新されてしまう。
+    #[test]
+    fn remember_after_deactivate_does_not_touch_old_hwnd() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        focus_change_in(&st, &input(None, Some((a, true)), H));
+        st.lock()
+            .unwrap()
+            .remember_current(Some(a), true, H, ImeMode::On);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::On));
+
+        // Deactivate: 台帳を全失効し、項目を HWND へ退避して削除する
+        for dm in reg.expire_all() {
+            st.lock().unwrap().remove(dm);
+        }
+        assert_eq!(dm_mode(&st, a), None);
+
+        // キャッシュが空（dm None, hwnd 0）の状態で再 Activate 後のモード適用が起きても、
+        // 旧 HWND の記憶は変わらない
+        st.lock()
+            .unwrap()
+            .remember_current(None, false, 0, ImeMode::Off);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::On));
+
+        // キャッシュが残っていた場合（旧 DM は dead、旧 HWND は生きたまま）は上書きされる。
+        // これが clear_thread_mgr で両キャッシュを空にする理由
+        st.lock()
+            .unwrap()
+            .remember_current(Some(a), reg.is_live(a), H, ImeMode::Off);
+        assert_eq!(hwnd_mode(&st, H), Some(ImeMode::Off));
+    }
+
+    /// ロック取得失敗時: store は何もしないが、台帳の登録・失効は独立に進む。
+    #[test]
+    fn lock_failure_skips_store_but_not_registry() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        let guard = st.lock().unwrap();
+        // ロック中に Uninit(A): 台帳は失効する（store の削除はこの回は走らない）
+        let (dead, expired) = reg.expire(0x10);
+        assert!(expired);
+        assert!(!reg.is_live(dead));
+        let out = focus_change_in(&st, &input(Some((a, reg.is_live(a))), None, H));
+        assert_eq!(out, FocusOutcome::LockBusy);
+        drop(guard);
+        // ロックが戻っても A は死んだまま: 保存されない
+        let out = focus_change_in(&st, &input(Some((a, reg.is_live(a))), None, H));
+        assert_eq!(out, FocusOutcome::NoNext);
+        assert!(st.lock().unwrap().dm_modes.is_empty());
+    }
+
+    /// 正当な世代の復元と HWND 経由の引継ぎ（回帰）。
+    #[test]
+    fn live_dm_restores_its_mode_and_new_dm_inherits_from_hwnd() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        let b = reg.register(0x20);
+        // A: 初回 → 既定値 Off
+        assert_eq!(
+            focus_change_in(&st, &input(None, Some((a, true)), H)),
+            FocusOutcome::Restore(ImeMode::Off)
+        );
+        // A → B: A は現在モード On で保存。B は同じ HWND なので On を引き継ぐ
+        assert_eq!(
+            focus_change_in(&st, &input(Some((a, true)), Some((b, true)), H)),
+            FocusOutcome::Restore(ImeMode::On)
+        );
+        // B → A: A の前回モード On を復元（B は Off で保存）
+        let mut back = input(Some((b, true)), Some((a, true)), H);
+        back.current_mode = ImeMode::Off;
+        assert_eq!(
+            focus_change_in(&st, &back),
+            FocusOutcome::Restore(ImeMode::On)
+        );
+        assert_eq!(dm_mode(&st, b), Some(ImeMode::Off));
+        // Uninit(B) → 同じ HWND で C を再作成: hwnd_modes から復元
+        let (dead_b, _) = reg.expire(0x20);
+        st.lock().unwrap().remove(dead_b);
+        let c = reg.register(0x30);
+        assert_eq!(
+            focus_change_in(&st, &input(Some((a, true)), Some((c, true)), H)),
+            FocusOutcome::Restore(ImeMode::On)
+        );
+    }
+
+    /// remember_last_kana_mode = false と #51 の対象アプリは挙動が変わらない（回帰）。
+    #[test]
+    fn remember_off_and_app_session_paths_are_unchanged() {
+        let mut reg = DmRegistry::default();
+        let st = store();
+        let a = reg.register(0x10);
+        let b = reg.register(0x20);
+
+        let mut no_remember = input(Some((a, true)), Some((b, true)), H);
+        no_remember.remember = false;
+        assert_eq!(
+            focus_change_in(&st, &no_remember),
+            FocusOutcome::Restore(ImeMode::Off)
+        );
+        // 保存も記録も行わない
+        assert!(st.lock().unwrap().dm_modes.is_empty());
+        assert!(st.lock().unwrap().hwnd_modes.is_empty());
+
+        let mut listed = input(Some((a, true)), Some((b, true)), H);
+        listed.app_listed = true;
+        assert_eq!(focus_change_in(&st, &listed), FocusOutcome::AppSession(b));
+        // 対象アプリでも prev の保存と dm_to_hwnd の記録は行う（従来どおり）
+        assert_eq!(dm_mode(&st, a), Some(ImeMode::On));
+        assert_eq!(st.lock().unwrap().dm_to_hwnd.get(&b), Some(&H));
+        // 死んだ next は対象アプリでも判定に進まない
+        reg.expire(0x20);
+        listed.next = Some((b, reg.is_live(b)));
+        assert_eq!(focus_change_in(&st, &listed), FocusOutcome::NextDead(b));
+    }
 }
 
 #[cfg(test)]
@@ -2656,17 +3044,33 @@ mod tests {
     /// （Issue #51）。2 回目以降は操作した状態を維持するので適用しない。
     #[test]
     fn ime_on_applies_once_for_a_non_base_input() {
+        let base = DmRef {
+            ptr: 0x10,
+            generation: 1,
+        };
+        let other = DmRef {
+            ptr: 0x20,
+            generation: 2,
+        };
+        let third = DmRef {
+            ptr: 0x30,
+            generation: 3,
+        };
         // アプリ本体（アクティブ化後に最初に見た入力先）では適用しない
-        assert!(!should_apply_ime_on(0x10, 0x10, false));
+        assert!(!should_apply_ime_on(base, Some(base), false));
         // 本体以外の入力先 → 適用
-        assert!(should_apply_ime_on(0x20, 0x10, false));
+        assert!(should_apply_ime_on(other, Some(base), false));
         // 適用済みなら以後は適用しない（操作した状態を維持する）
-        assert!(!should_apply_ime_on(0x20, 0x10, true));
-        assert!(!should_apply_ime_on(0x30, 0x10, true));
+        assert!(!should_apply_ime_on(other, Some(base), true));
+        assert!(!should_apply_ime_on(third, Some(base), true));
         // 本体が未確定（アクティブ化直後）のうちは適用しない
-        assert!(!should_apply_ime_on(0x20, 0, false));
-        // 入力先が無い（フォーカス喪失）
-        assert!(!should_apply_ime_on(0, 0x10, false));
+        assert!(!should_apply_ime_on(other, None, false));
+        // 本体と同じアドレスでも世代が違えば別の入力先（Issue #50）
+        let reused = DmRef {
+            ptr: 0x10,
+            generation: 4,
+        };
+        assert!(should_apply_ime_on(reused, Some(base), false));
     }
 
     #[test]

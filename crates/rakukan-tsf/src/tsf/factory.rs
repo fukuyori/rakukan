@@ -68,6 +68,7 @@ use windows::{
 use crate::{
     diagnostics::{self as diag, DiagEvent},
     engine::{
+        dm_registry::{self, DmSeen},
         ime_mode::ImeMode,
         keymap::Keymap,
         state::{
@@ -519,34 +520,42 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             }
         }
 
+        // Activate 前から存在する DM を台帳に登録する（Issue #50）。
+        // これらは OnInitDocumentMgr を観測していない。sink 登録後に作られた DM が
+        // 列挙にも現れた場合は世代を進めない（ensure_live）。
+        // 以後、台帳に無い ptr を OnSetFocus が見ても登録しない（死んだ扱い）。
+        let tm = self
+            .inner
+            .try_borrow()
+            .ok()
+            .and_then(|i| i.thread_mgr.clone());
+        if let Some(tm) = tm.as_ref() {
+            register_existing_document_mgrs(tm);
+        }
+
         // Activate 時点で現在フォーカス中の DM に対して初期モードを適用する。
         // ITfThreadMgrEventSink の OnSetFocus は最初のフォーカスに対して呼ばれないことがある
         // ため、ここで config.input.default_mode を確定・適用する。
         {
             let hwnd_val = foreground_root_hwnd();
-            let focused_dm_ptr = {
-                let inner = self.inner.try_borrow().ok();
-                inner.and_then(|g| {
-                    g.thread_mgr.as_ref().and_then(|tm| {
-                        unsafe { tm.GetFocus().ok() }.map(|dm| {
-                            use windows::core::Interface;
-                            dm.as_raw() as usize
-                        })
-                    })
-                })
-            };
-            if let Some(dm_ptr) = focused_dm_ptr
-                && let Some(mode) = doc_mode_on_focus_change(0, dm_ptr, hwnd_val)
-            {
-                tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
-                // 内部状態と KEYBOARD_OPENCLOSE を同時に揃える
-                let tm = self
-                    .inner
-                    .try_borrow()
-                    .ok()
-                    .and_then(|i| i.thread_mgr.clone());
-                ime_sync::apply(tm.as_ref(), tid, mode, true, "activate");
+            // GetFocus() の COM 参照は登録と初期モード適用が終わるまで保持する
+            // （解放後のアドレスを登録しない。列挙経路と同じ理由）。
+            let focused_dm: Option<ITfDocumentMgr> =
+                tm.as_ref().and_then(|tm| unsafe { tm.GetFocus().ok() });
+            if let Some(focused) = focused_dm.as_ref() {
+                use windows::core::Interface;
+                // 列挙の成否にかかわらず照合し、未登録なら登録する
+                let (dm, fresh) = dm_registry::ensure_live(focused.as_raw() as usize);
+                if fresh {
+                    tracing::debug!("Activate: focused dm={dm:x} was not enumerated, registered");
+                }
+                if let Some(mode) = doc_mode_on_focus_change(None, Some(dm), hwnd_val) {
+                    tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
+                    // 内部状態と KEYBOARD_OPENCLOSE を同時に揃える
+                    ime_sync::apply(tm.as_ref(), tid, mode, true, "activate");
+                }
             }
+            drop(focused_dm);
         }
 
         // Activate 中に初期モードや OPENCLOSE を補正した後、言語バー/トレイ表示を同期する。
@@ -611,6 +620,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         candidate_window::destroy();
         candidate_window::stop_live_timer();
         candidate_window::clear_thread_mgr();
+        // sink 解除中は DM の破棄を観測できないので、生存中の DM を全部失効させる（Issue #50）
+        crate::engine::state::doc_mode_deactivate();
         crate::tsf::mode_indicator::destroy();
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
@@ -1207,6 +1218,55 @@ fn langbar_mode_char() -> &'static str {
     }
 }
 
+/// Activate 前から存在する DocumentManager を台帳に登録する（Issue #50）。
+///
+/// `EnumDocumentMgrs` は呼び出しスレッドの DM を列挙する。列挙した COM 参照は登録が
+/// 終わるまで保持する（解放後のアドレスを登録しない）。台帳の `RefCell` は各
+/// `ensure_live` の中でだけ借りるので、COM 呼び出しをまたいで借り続けない。
+/// 列挙に失敗したら warn を出す（呼び出し側が `GetFocus()` の DM だけ登録する）。
+/// `Next` が途中で失敗した場合も warn を出し、そこまでの結果だけ登録する。
+fn register_existing_document_mgrs(tm: &ITfThreadMgr) {
+    use windows::core::Interface;
+    let e = match unsafe { tm.EnumDocumentMgrs() } {
+        Ok(e) => e,
+        Err(err) => {
+            tracing::warn!(
+                "Activate: EnumDocumentMgrs failed: {err}; only the focused dm will be registered"
+            );
+            return;
+        }
+    };
+    // 参照を保持したまま集める。登録前に解放すると、そのアドレスが別の DM に再利用
+    // されうる。
+    let mut dms: Vec<ITfDocumentMgr> = Vec::new();
+    loop {
+        let mut buf: [Option<ITfDocumentMgr>; 8] = Default::default();
+        let mut fetched = 0u32;
+        if let Err(err) = unsafe { e.Next(&mut buf, &mut fetched) } {
+            tracing::warn!(
+                "Activate: EnumDocumentMgrs Next failed after {} dm(s): {err}; enumeration may be incomplete",
+                dms.len()
+            );
+            break;
+        }
+        if fetched == 0 {
+            break;
+        }
+        dms.extend(buf.into_iter().take(fetched as usize).flatten());
+    }
+    let mut fresh = 0usize;
+    for dm in &dms {
+        if dm_registry::ensure_live(dm.as_raw() as usize).1 {
+            fresh += 1;
+        }
+    }
+    tracing::debug!(
+        "Activate: enumerated {} dm(s), registered {fresh} new",
+        dms.len()
+    );
+    drop(dms);
+}
+
 // ─── ITfThreadMgrEventSink ────────────────────────────────────────────────────
 //
 // フォーカスが変わるたびに OnSetFocus が呼ばれる。
@@ -1214,7 +1274,17 @@ fn langbar_mode_char() -> &'static str {
 // 次回フォーカス時に復元する（MS-IME準拠）。
 
 impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
-    fn OnInitDocumentMgr(&self, _pdim: Option<&ITfDocumentMgr>) -> windows::core::Result<()> {
+    fn OnInitDocumentMgr(&self, pdim: Option<&ITfDocumentMgr>) -> windows::core::Result<()> {
+        // 台帳に新しい世代として登録する（Issue #50）。同じアドレスの古い slot は
+        // 上書きされる＝アドレス再利用の検出。
+        if let Some(dm) = pdim {
+            let ptr = {
+                use windows::core::Interface;
+                dm.as_raw() as usize
+            };
+            let dm = dm_registry::register(ptr);
+            tracing::trace!("OnInitDocumentMgr: registered dm={dm:x}");
+        }
         Ok(())
     }
 
@@ -1224,6 +1294,7 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
                 use windows::core::Interface;
                 dm.as_raw() as usize
             };
+            // 台帳の失効（slot は残す）→ モード退避 → context / composition の無効化
             crate::engine::state::dispose_dm_resources(ptr);
             tracing::trace!("OnUninitDocumentMgr: removed dm={ptr:#x}");
         }
@@ -1253,8 +1324,19 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
             return Ok(());
         }
 
+        // 世代はここ（キューに積む時点）で確定する（Issue #50）。台帳は thread-local
+        // なので COM 再入もロックも無い。台帳に無い ptr は登録しない（死んだ扱い）。
+        let next = dm_registry::seen(next_ptr);
+        let prev = dm_registry::seen(prev_ptr);
+        if let DmSeen::Unknown(ptr) = next {
+            tracing::debug!("OnSetFocus: unknown dm={ptr:#x} as next (not registered)");
+        }
+        if let DmSeen::Unknown(ptr) = prev {
+            tracing::debug!("OnSetFocus: unknown dm={ptr:#x} as prev (not saved)");
+        }
+
         let hwnd_val = foreground_root_hwnd();
-        candidate_window::post_focus_changed(prev_ptr, next_ptr, hwnd_val);
+        candidate_window::post_focus_changed(prev.known(), next, hwnd_val);
         Ok(())
     }
 
