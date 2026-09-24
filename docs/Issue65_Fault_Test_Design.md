@@ -7,7 +7,7 @@
 - 監視ループの引数化、停止イベント、監視源生成・再設定の注入点、既定無効の `config-watch-fault-test` feature、制御ファイルの識別子・PID 照合と 90 秒の自動解除、試験用の別出力タスクを実装した。通常版は制御ファイルを読まない。
 - 実際の Win32 待機ループで、通知遮断中の定期読込と解除後の通知、三つの監視源の初回生成失敗と再登録、ディレクトリ通知の再設定失敗からの復旧、読込中に受けた保存イベントの保持、破損・欠落した設定の保持と修復後の更新、`learn_history.bin` の連続書込でも定期期限を延ばさないことを自動テストで確認した。制御ファイルの不一致・期限切れも単体テストで確認した。送信経路は試験用通信境界で通信失敗・無応答・A の送信中の B を確認した。
 - TSF 単体テストは通常版の並列実行で 173 件成功、試験 feature の単一スレッド実行で 174 件成功。試験 feature の並列実行では既存の警告捕捉テストが間欠的に失敗する。購読テストの直列化と callsite の再登録でも再発したため、両変更は戻した。原因未特定。通常版・試験 feature の clippy は成功。
-- `cargo make build-tsf-fault-test` と `cargo make build-tsf-normal-restore` は成功した。TSF DLL の SHA256 は試験用 `target/config-watch-fault-test/release/rakukan_tsf.dll` が `92BDF73FF42A2D2CC79BA1621738D2E905541494E371B7BBB479F42D9799185D`、復元用の通常版 `target/config-watch-normal-restore/release/rakukan_tsf.dll` が `B58E96BA28A6A6472478F0902095204381CE8949D2C6199D1121969EACFDDCAA`。故障制御の文字列は試験用 DLL だけで検出した。どちらも未インストールで、現行の導入版を示す証拠ではない。
+- `cargo make build-tsf-fault-test` と `cargo make build-tsf-normal-restore` は成功した。TSF DLL の SHA256 は試験用 `target/config-watch-fault-test/release/rakukan_tsf.dll` が `92BDF73FF42A2D2CC79BA1621738D2E905541494E371B7BBB479F42D9799185D`、復元用の通常版 `target/config-watch-normal-restore/release/rakukan_tsf.dll` が 署名後 `DB3B76BD21C1E6E353696825168681D97F295FAE7E71E23EF98D963275CF9EF0`（Authenticode `Valid`）。故障制御の文字列は試験用 DLL だけで検出した。どちらも未インストールで、現行の導入版を示す証拠ではない。
 - 個別の監視源失敗、設定アプリの保存失敗、同一 mtime・サイズの変更を待機ループで取得する試験、対象アプリの故障制御と通常版への復元は未確認。#65 の完了判定はしない。
 
 ## 試験経路と隔離
@@ -20,11 +20,13 @@
 
 故障制御は試験用ビルドだけに含め、起動時に渡す固有の制御ファイルと識別子で対象プロセスを限定する。既定は無効。制御ファイルの削除または単調時計による最大 90 秒の有効期間満了で自動解除する。監視ループは短い間隔で解除を確認し、欠けた監視源を次の定期期限より前に再登録する。操作するターミナルが終了しても自動解除されることを、設定変更の試験より先に確認する。通常版と設定バックアップを先に準備し、通常版には故障制御の読込を入れない。起動する対象アプリの環境変数に制御ファイルのパスと乱数識別子を渡す。起動後に判明した PID を制御ファイルへ記録し、環境変数の識別子と PID の両方が一致した TSF プロセスだけで故障を有効にする。試験 feature で制御ファイルのパスが渡された監視スレッドは、最初の監視源を作る前に、起動元が PID を書き込むのを最大 5 秒待つ。識別子と PID がそろわなければ故障を有効化せず通常の監視を始め、タイムアウトをログに残す。既存プロセスへの合流や子プロセスへの継承が起きた場合は PID 不一致で有効化せず、対象 PID のログで有効化を確認してから試験を始める。
 
+実機の対象起動には `scripts/issue65-start-fault-target.ps1` を使う。パッケージ版 Notepad は起動 launcher と入力プロセスの PID が異なるため、スクリプトは後者の出現を最大 3 秒待ち、`CONTROL=` に表示する `%TEMP%` の制御ファイルへその PID を書く。`config_watch: fault control armed pid=...` が対象 PID のログで `config_watch: sources` より先に出た場合だけ試験を始める。出なければその試行は不成立として止める。`CONTROL=` のファイルを削除すると次の制御確認で故障を解除でき、試験後は残った制御ファイルを削除する。
+
 ## 通常版と試験用ビルドの識別
 
 `rakukan-tsf` に既定無効の Cargo feature `config-watch-fault-test` を設けた。故障制御ファイルの読込コードは `#[cfg(feature = "config-watch-fault-test")]` でコンパイル時に分離した。通常の `cargo make build-tsf` は feature を指定せず、`cargo make build-tsf-fault-test` は `target/config-watch-fault-test` へ出力する。試験用タスクは設定アプリの共通出力を更新しない。通常版の導入経路が試験用 DLL を拾わないことは、実際の導入前後に確認する。
 
-導入には `cargo make install-tsf-fault-test`、復元には `cargo make install-tsf-normal-restore` を使う。両タスクはそれぞれ固定の別出力先から `scripts/install.ps1 -TsfOnly` を呼ぶ。専用モードは既存の導入先と `registered.txt` の一致を先に確かめ、`ctfmon`・`TextInputHost` の停止、TSF DLL のコピー、登録解除・再登録、`ctfmon` の起動を行う。tray・host・設定アプリは停止せず、tray・host・dict-builder・WinUI 設定アプリのコピー、辞書とモデルの準備、tray の再起動も行わない。コピー後は出力元と導入先の SHA256 の一致を確認して両方をログに残す。試験用と復元用の導入ログは別名で残す。`cargo make install` の通常経路は従来のまま。DLL が使用中でコピーできない場合は従来どおりサインアウト・サインイン後に同じ専用タスクを再実行する。専用モードは #65 の試験・復元のためだけに使い、通常のリリース手順には使わない。専用タスクの導入動作は未実施。
+導入には `cargo make install-tsf-fault-test`、復元には `cargo make install-tsf-normal-restore` を使う。両タスクはそれぞれ固定の別出力先から `scripts/install.ps1 -TsfOnly` を呼ぶ。専用モードは既存の導入先と `registered.txt` の一致を先に確かめ、`ctfmon`・`TextInputHost` の停止、TSF DLL のコピー、登録解除・再登録、`ctfmon` の起動を行う。tray・host・設定アプリは停止せず、tray・host・dict-builder・WinUI 設定アプリのコピー、辞書とモデルの準備、tray の再起動も行わない。コピー後は出力元と導入先の SHA256 の一致を確認して両方をログに残す。試験用と復元用の導入ログは別名で残す。`cargo make install` の通常経路は従来のまま。DLL が使用中でコピーできない場合は従来どおりサインアウト・サインイン後に同じ専用タスクを再実行する。専用モードは #65 の試験・復元のためだけに使い、通常のリリース手順には使わない。試験用の専用タスクは実行済みで、導入先の SHA256 は試験用 DLL と一致し、`registered.txt` と COM 登録先も一致した。復元用タスクは未実施。
 
 監視開始時に、feature の有無を `config_watch: build_kind=normal` または `config_watch: build_kind=fault-test` として INFO で一度記録する。ログの PID・起動識別子と DLL の読込先を併記する。TSF DLL はシステム全体に登録されるため、試験用 DLL の導入中は対象外の TSF プロセスも `fault-test` と記録する。ただし故障の有効化は制御識別子と PID が一致する対象に限る。試験前は対象アプリの新しいログで `fault-test` と故障有効化を確認する。復元後は起動し直したすべての確認対象アプリの新しい PID・起動識別子のログで `normal` を確認し、試験用 DLL を読み込んだままのプロセスが残っていないことを確認する。通常版では制御用環境変数とファイルを置いても故障制御を読み取らず、故障有効化のログが出ないことを確認する。古いログの印だけで導入版を判断しない。
 
@@ -33,6 +35,32 @@
 現行ループは欠けた監視源を読込後にだけ作り直す。試験 feature があり、対象プロセスの制御ファイルが指定されている場合だけ、待機時間を `min(WatchScheduler::wait_ms(now), control_poll_ms)` にし、`control_poll_ms` は初期値 1 秒の引数とする。この追加の起床は故障制御を確認するだけで、`on_notify` や `on_read_done` を呼ばず、30 秒の定期期限を動かさない。通常版では確認間隔を無効にし、従来の待機時間を使う。
 
 制御ファイルの削除、識別子・PID の不一致、または単調時計で測る 90 秒の期限切れを検出した瞬間に故障を解除し、欠けた監視源の生成を一度試みる。これは定期読込を待たずに行い、成功・失敗と解除理由をログに残す。生成がなお失敗した場合は、現行どおり次の定期読込後にも再試行する。故障開始時に既存の要求イベントのハンドルを強制的に閉じない。監視源の生成失敗を試すケースは対象アプリ起動前に故障指定を用意し、最初の生成から失敗させる。これにより `REQUEST_EVENT` の原子的な参照とハンドル close の競合を避ける。通知遮断のケースでは既存ハンドルを保持し、待機結果だけを読込契機から外す。
+
+## 起動スクリプトと実機の初回確認（2026-09-24、クロ）
+
+対象アプリの起動は `scripts/issue65-start-fault-target.ps1` で行う。固有の識別子と制御ファイルのパスを環境変数に載せて起動し、入力プロセスの PID を制御ファイルへ書き、対象 PID の TSF ログに `fault control armed` が出るかを待って `ARMED=yes|no` と `BUILD_KIND` を表示する。解除は表示された `CONTROL=` のファイルを削除する（試験後に `%TEMP%\rakukan-watch-*.toml` を消す）。
+
+- **既定の対象は `charmap.exe`**（System32 の従来型 Win32 アプリ）。ストア版 Notepad は exe を直接 `Process.Start` する方法では窓が作られず TSF DLL も読み込まれなかった（起動プロセスと子プロセスの 2 つが窓なしで残る）。EmEditor もこの環境ではパッケージ版で、同じ方法では試していない。パッケージアプリを対象にするには別の起動経路が要り、環境変数の継承も未確認
+- 導入済みの DLL は試験用（SHA256 `92BDF73F…`）。`charmap.exe` で確認した範囲:
+
+| 項目 | 結果（UTC） |
+|---|---|
+| `suppress_notifications` の有効化 | `fault control armed pid=16020`、`build_kind=fault-test`。有効化中も 30 秒後に `read (periodic) -> Unchanged`（05:10:09 → 05:10:39） |
+| 制御ファイル削除による解除 | 削除 05:10:51.857 → `fault control released reason=control missing or mismatched` 05:10:52.014（約 160 ms） |
+| `fail_dir_watch` の初回生成失敗 | 起動時 `sources save_event=true request=true dir_watch=false` |
+| 解除時の即時再登録 | 削除 05:12:12.173 → 解除 05:12:12.440 → 直後に `watching …` と `sources … dir_watch=true`（定期読込を待たない） |
+| `fail_save_event` | 起動時 `sources save_event=false request=true dir_watch=true` → 削除 05:17:16.352 → 解除 05:17:17.099 → `save_event=true` |
+| `fail_request_event` | 起動時 `request=false` → 削除 05:17:25.768 → 解除 05:17:26.272 → `request=true` |
+| `fail_rearm_once` | 設定ディレクトリに一時ファイルを作成（05:17:59.460）→ `FindNextChangeNotification failed: injected rearm failure (0x80004005)` 05:17:59.467 → デバウンス後の `read (notify)` 05:17:59.771 と同時に `watching …` / `dir_watch=true` に再登録 → 一時ファイル削除の通知も `read (notify)` 05:18:00.102 で受信（再登録後の監視が動いている） |
+| 通知遮断中の設定変更を定期確認で取得 | `suppress_notifications` 有効化中に `config.toml` へコメント 1 行を追記（05:18:56.123）。`read (notify)` は出ず、`read (periodic) -> Updated` 05:19:24.580 と `config published: rev=2 … engine_json_changed=false pending_apply=false`。試験後に元のバイト列へ戻し、SHA256 の一致を確認 |
+| 同一 mtime・同一サイズの変更を待機ループで取得 | 遮断中に `log_level = "debug"` の空白と `=` の位置を入れ替え（長さ同じ、値同じ）、読込前に更新日時を元へ戻した（mtime 同・サイズ同・ハッシュ異を記録、05:20:48.550）。`read (periodic) -> Updated` 05:21:17.037 と `config published: rev=2 … engine_json_changed=false`。元のバイト列と更新日時へ復元し一致を確認 |
+
+試験中の `config.toml` の変更はいずれも値を変えないもの（コメント追記・空白の並び替え）で、`pending_apply=false` のためホストへの送信は起きていない。
+**通常版への復元（2026-09-24 14:27 JST、レモンの操作）**: サインアウト → サインイン → `sudo cargo make install-tsf-normal-restore`。復元用 DLL は `5225cd1` 直後のビルド（SHA256 `DB3B76BD…`。上に記録した `B58E96BA…` はそれより前のビルドの値）。導入ログ `rakukan_install_tsf_20260924_142747_7028.log` で出力元と導入先の SHA256 一致を確認し、登録処理中に DLL を読み込んだ 5 プロセスのログは `build_kind=normal`。**復元の登録し直しでアクティブな入力方式が Rakukan から MS-IME に切り替わっていた**（※推測: [2/5] の登録解除による）ため、切り替え直後に起動した charmap には TSF ログが作られなかった。レモンが入力方式を Rakukan に戻した後、起動スクリプトで環境変数と制御ファイルを渡して charmap を起動すると、`build_kind=normal`、`ARMED=no`、`fault control` の行なしを確認（05:31:04 UTC、PID 18956）。**復元後の確認手順には「入力方式が Rakukan であることを先に確認する」を含める。**
+
+**復元後の回帰（2026-09-24 14:34〜14:36 JST、レモンの操作）**: 通常操作 4 項目のうち、`5225cd1` で変わった経路（背景読込 → 反映待ち → 名前付きイベント → `request_config_apply`）を通る「設定保存による両アプリへの反映」だけを再実施した。候補文字サイズ 16 → 32（05:34:08 UTC）→ 16（05:36:41 UTC）の各保存で、起動中の通常版 6〜7 プロセスがすべて同じ秒に `config published`（rev=2 → rev=3、`engine_json_changed=false pending_apply=false`）を記録し、名前付きイベントを受けた 1 プロセスだけが `engine_reload: no pending config change; latches reset only` で RPC を送らず、ホストは 05:30:46 の起動以来再起動していない。両アプリの表示反映はレモンが確認。終了時の `config.toml` は候補数 19・候補文字サイズ 16 で、9 月 22 日のバックアップとの差は `ime_on_apps` の 1 行（コメント → 設定値。9 月 22 日以降のレモンの設定変更で、試験由来ではない）だけ。残る 3 項目（直接編集、背景読込後のモード切替、手動再起動）は単体・統合テストで代え、実機では再実施しない。
+
+**未実施**: 設定アプリの保存失敗（GUI 操作が要る）。
 
 ## 試験ケース
 
