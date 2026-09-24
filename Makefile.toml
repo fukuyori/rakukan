@@ -36,6 +36,16 @@ description = "② tsf + tray + host + dict-builder + WinUI settings をビル�
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-tsf.ps1", "-Profile", "release"]
 
+[tasks.build-tsf-fault-test]
+description = "#65 故障試験用 TSF を通常版と別の出力先へビルド（インストールしない）"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-tsf.ps1", "-Profile", "release", "-ConfigWatchFaultTest", "-BuildDir", "target\\config-watch-fault-test"]
+
+[tasks.build-tsf-normal-restore]
+description = "#65 故障試験後に戻す通常版を別の出力先へビルド（インストールしない）"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-tsf.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-normal-restore"]
+
 [tasks.sign]
 description = "③ ビルド成果物に電子署名 (signtool, 任意)"
 command = "powershell"
@@ -45,6 +55,16 @@ args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\sign-artifacts.ps1", "-
 description = "④ %LOCALAPPDATA%\\rakukan\\ にコピー + TSF 登録 + tray 起動 ★管理者必要"
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
+
+[tasks.install-tsf-fault-test]
+description = "#65 故障試験用 TSF DLL だけを導入・登録 ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-fault-test", "-TsfOnly"]
+
+[tasks.install-tsf-normal-restore]
+description = "#65 通常版 TSF DLL だけを復元・登録 ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-normal-restore", "-TsfOnly"]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # まとめ実行

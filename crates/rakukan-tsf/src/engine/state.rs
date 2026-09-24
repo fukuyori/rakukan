@@ -462,13 +462,234 @@ pub fn engine_reload_force() {
     engine_reload_impl(ApplyTrigger::ManualRestart, true, caller);
 }
 
+trait ConfigShutdown {
+    fn conditional_shutdown(&self, config_json: Option<String>) -> anyhow::Result<bool>;
+    fn shutdown(
+        &self,
+        config_json: Option<String>,
+    ) -> anyhow::Result<rakukan_engine_rpc::ShutdownOutcome>;
+}
+
+impl ConfigShutdown for DynEngine {
+    fn conditional_shutdown(&self, config_json: Option<String>) -> anyhow::Result<bool> {
+        self.shutdown_if_config_differs(config_json)
+    }
+
+    fn shutdown(
+        &self,
+        config_json: Option<String>,
+    ) -> anyhow::Result<rakukan_engine_rpc::ShutdownOutcome> {
+        DynEngine::shutdown(self, config_json)
+    }
+}
+
+/// 送信と応答の境界。通信失敗を成功として扱わず、比較失敗時だけ Shutdown に落とす。
+fn request_config_apply(
+    engine: &impl ConfigShutdown,
+    config_json: String,
+    force: bool,
+) -> super::config::ApplyOutcome {
+    use super::config::ApplyOutcome;
+    use rakukan_engine_rpc::ShutdownOutcome;
+
+    if !force {
+        match engine.conditional_shutdown(Some(config_json.clone())) {
+            Ok(false) => return ApplyOutcome::SameConfig,
+            Ok(true) => return ApplyOutcome::RestartAccepted,
+            Err(e) => {
+                tracing::warn!(
+                    "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
+                );
+            }
+        }
+    }
+    match engine.shutdown(Some(config_json)) {
+        Ok(ShutdownOutcome::Acknowledged) => {
+            ApplyOutcome::ShutdownAcknowledged { fallback: !force }
+        }
+        Ok(ShutdownOutcome::NoResponse) => {
+            tracing::warn!("engine_reload: host shutdown sent but no response");
+            ApplyOutcome::CommFailure
+        }
+        Err(e) => {
+            tracing::warn!("engine_reload: host shutdown call returned error: {e}");
+            ApplyOutcome::CommFailure
+        }
+    }
+}
+
+#[cfg(test)]
+mod config_apply_tests {
+    use super::*;
+    use crate::engine::config::{ApplyOutcome, ConfigManager, LoadOutcome};
+    use rakukan_engine_rpc::ShutdownOutcome;
+    use std::sync::{Arc, Mutex, mpsc};
+    use std::time::Duration;
+
+    struct MockShutdown {
+        conditional: Result<bool, &'static str>,
+        shutdown: Result<ShutdownOutcome, &'static str>,
+        calls: Mutex<Vec<&'static str>>,
+        entered: Option<mpsc::Sender<()>>,
+        resume: Mutex<Option<mpsc::Receiver<()>>>,
+    }
+
+    impl MockShutdown {
+        fn new(
+            conditional: Result<bool, &'static str>,
+            shutdown: Result<ShutdownOutcome, &'static str>,
+        ) -> Self {
+            Self {
+                conditional,
+                shutdown,
+                calls: Mutex::new(Vec::new()),
+                entered: None,
+                resume: Mutex::new(None),
+            }
+        }
+    }
+
+    impl ConfigShutdown for MockShutdown {
+        fn conditional_shutdown(&self, _: Option<String>) -> anyhow::Result<bool> {
+            self.calls.lock().expect("calls").push("conditional");
+            if let Some(resume) = self.resume.lock().expect("gate").take() {
+                self.entered
+                    .as_ref()
+                    .expect("entered")
+                    .send(())
+                    .expect("send entered");
+                resume
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("resume send");
+            }
+            self.conditional.map_err(anyhow::Error::msg)
+        }
+
+        fn shutdown(&self, _: Option<String>) -> anyhow::Result<ShutdownOutcome> {
+            self.calls.lock().expect("calls").push("shutdown");
+            self.shutdown.map_err(anyhow::Error::msg)
+        }
+    }
+
+    #[test]
+    fn transport_outcomes_require_a_real_success_response() {
+        let same = MockShutdown::new(Ok(false), Err("must not call shutdown"));
+        assert_eq!(
+            request_config_apply(&same, "A".into(), false),
+            ApplyOutcome::SameConfig
+        );
+        assert_eq!(*same.calls.lock().unwrap(), ["conditional"]);
+
+        let no_response = MockShutdown::new(Err("compare failed"), Ok(ShutdownOutcome::NoResponse));
+        assert_eq!(
+            request_config_apply(&no_response, "A".into(), false),
+            ApplyOutcome::CommFailure
+        );
+        assert_eq!(
+            *no_response.calls.lock().unwrap(),
+            ["conditional", "shutdown"]
+        );
+
+        let acknowledged =
+            MockShutdown::new(Err("compare failed"), Ok(ShutdownOutcome::Acknowledged));
+        assert_eq!(
+            request_config_apply(&acknowledged, "A".into(), false),
+            ApplyOutcome::ShutdownAcknowledged { fallback: true }
+        );
+
+        let forced = MockShutdown::new(Err("must not compare"), Err("write failed"));
+        assert_eq!(
+            request_config_apply(&forced, "A".into(), true),
+            ApplyOutcome::CommFailure
+        );
+        assert_eq!(*forced.calls.lock().unwrap(), ["shutdown"]);
+    }
+
+    #[test]
+    fn response_for_a_in_flight_cannot_clear_b_after_real_send_boundary() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rakukan-config-apply-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[conversion]\nnum_candidates = 7\n").expect("initial config");
+        let mut manager = ConfigManager::from_path(path.clone());
+        std::fs::write(&path, "[conversion]\nnum_candidates = 4\n").expect("config A");
+        assert_eq!(manager.reinit(), LoadOutcome::Updated);
+        let (a, json_a) = manager
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("send A");
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (resume_tx, resume_rx) = mpsc::channel();
+        let sender = Arc::new(MockShutdown {
+            conditional: Ok(true),
+            shutdown: Err("must not call shutdown"),
+            calls: Mutex::new(Vec::new()),
+            entered: Some(entered_tx),
+            resume: Mutex::new(Some(resume_rx)),
+        });
+        let in_flight = sender.clone();
+        let send = std::thread::spawn(move || request_config_apply(&*in_flight, json_a, false));
+        entered_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("A reached transport");
+
+        std::fs::write(&path, "[conversion]\nnum_candidates = 9\n").expect("config B");
+        assert_eq!(manager.reinit(), LoadOutcome::Updated);
+        resume_tx.send(()).expect("complete A");
+        let a_outcome = send.join().expect("send thread");
+        assert_eq!(a_outcome, ApplyOutcome::RestartAccepted);
+        assert!(!manager.finish_apply(&a, a_outcome), "A response cleared B");
+        let (b, json_b) = manager
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("B pending");
+        assert_ne!(a, b);
+        let b_outcome = request_config_apply(&*sender, json_b, false);
+        assert!(manager.finish_apply(&b, b_outcome));
+        assert!(!manager.has_pending_apply());
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+
+    #[test]
+    fn missing_shutdown_response_keeps_pending_after_transport_attempt() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rakukan-config-no-response-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).expect("test dir");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, "[conversion]\nnum_candidates = 7\n").expect("initial config");
+        let mut manager = ConfigManager::from_path(path.clone());
+        std::fs::write(&path, "[conversion]\nnum_candidates = 4\n").expect("new config");
+        assert_eq!(manager.reinit(), LoadOutcome::Updated);
+        let (id, json) = manager
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("pending");
+        let sender = MockShutdown::new(
+            Err("comparison unavailable"),
+            Ok(ShutdownOutcome::NoResponse),
+        );
+        let outcome = request_config_apply(&sender, json, false);
+        assert_eq!(outcome, ApplyOutcome::CommFailure);
+        assert!(!manager.finish_apply(&id, outcome));
+        assert!(manager.has_pending_apply());
+        std::fs::remove_dir_all(dir).expect("remove test dir");
+    }
+}
+
 fn engine_reload_impl(
     trigger: ApplyTrigger,
     force: bool,
     caller: &'static std::panic::Location<'static>,
 ) {
     use super::config::{ApplyOutcome, begin_apply, finish_apply};
-    use rakukan_engine_rpc::ShutdownOutcome;
 
     // 診断: 誰がこの関数を呼んだかをログに残す。
     tracing::info!(
@@ -504,69 +725,20 @@ fn engine_reload_impl(
 
         match guard.0.as_mut() {
             Some(eng) => {
-                if !force {
-                    // まずホスト側と config を比較。同一なら再起動しない（ハンドルは現状維持）。
-                    match eng.shutdown_if_config_differs(Some(cfg.clone())) {
-                        Ok(false) => {
-                            finish_apply(&sent, ApplyOutcome::SameConfig);
-                            tracing::info!(
-                                "engine_reload: host already running with same config, skipping restart ({:?})",
-                                t_start.elapsed()
-                            );
-                            return;
-                        }
-                        Ok(true) => {
-                            // ホストは exit 中。再起動の受理（新設定での起動確認ではない）。
-                            finish_apply(&sent, ApplyOutcome::RestartAccepted);
-                        }
-                        Err(e) => {
-                            // 旧プロトコルのホスト・half-dead なホスト等、比較不能。
-                            // 従来どおり無条件 Shutdown にフォールバックする。
-                            // 解除の根拠は「比較に失敗した」ではなく「終了応答を実際に受けた」こと。
-                            tracing::warn!(
-                                "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
-                            );
-                            match eng.shutdown(Some(cfg.clone())) {
-                                Ok(ShutdownOutcome::Acknowledged) => {
-                                    finish_apply(
-                                        &sent,
-                                        ApplyOutcome::ShutdownAcknowledged { fallback: true },
-                                    );
-                                }
-                                Ok(ShutdownOutcome::NoResponse) | Err(_) => {
-                                    finish_apply(&sent, ApplyOutcome::CommFailure);
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // ホストに self-exit を依頼。応答は待つが失敗しても前進する
-                    // （相手が exit 中で応答が返らないのは想定内）。
-                    let r = eng.shutdown(Some(cfg.clone()));
-                    let elapsed = t_start.elapsed();
-                    match r {
-                        Ok(ShutdownOutcome::Acknowledged) => {
-                            finish_apply(
-                                &sent,
-                                ApplyOutcome::ShutdownAcknowledged { fallback: false },
-                            );
-                            tracing::info!("engine_reload: host shutdown requested ({:?})", elapsed)
-                        }
-                        Ok(ShutdownOutcome::NoResponse) => {
-                            finish_apply(&sent, ApplyOutcome::CommFailure);
-                            tracing::warn!(
-                                "engine_reload: host shutdown sent but no response ({:?})",
-                                elapsed
-                            )
-                        }
-                        Err(e) => {
-                            finish_apply(&sent, ApplyOutcome::CommFailure);
-                            tracing::warn!(
-                                "engine_reload: host shutdown call returned error ({:?}): {e}",
-                                elapsed
-                            )
-                        }
-                    }
+                let outcome = request_config_apply(eng, cfg, force);
+                finish_apply(&sent, outcome);
+                if outcome == ApplyOutcome::SameConfig {
+                    tracing::info!(
+                        "engine_reload: host already running with same config, skipping restart ({:?})",
+                        t_start.elapsed()
+                    );
+                    return;
+                }
+                if outcome == (ApplyOutcome::ShutdownAcknowledged { fallback: false }) {
+                    tracing::info!(
+                        "engine_reload: host shutdown requested ({:?})",
+                        t_start.elapsed()
+                    );
                 }
                 // ホスト側は応答送信後 50ms sleep してから `process::exit(0)` する
                 // (server.rs)。ここでハンドルを即 drop すると、次の

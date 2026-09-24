@@ -1744,6 +1744,34 @@ mod config_snapshot_tests {
     }
 
     #[test]
+    fn changed_bytes_with_same_mtime_and_size_are_published() {
+        use std::fs::{File, FileTimes};
+
+        let (mut mgr, path, dir) = mgr_with(VALID);
+        let before = std::fs::metadata(&path).expect("metadata");
+        let mtime = before.modified().expect("modified");
+        let revision = mgr.snapshot().revision;
+        assert_eq!(VALID.len(), FIXED.len());
+
+        write_config(&path, FIXED);
+        File::options()
+            .write(true)
+            .open(&path)
+            .expect("open")
+            .set_times(FileTimes::new().set_modified(mtime))
+            .expect("restore mtime");
+        let after = std::fs::metadata(&path).expect("metadata after");
+        assert_eq!(after.len(), before.len(), "size must be unchanged");
+        assert_eq!(after.modified().expect("modified after"), mtime);
+
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert_eq!(mgr.snapshot().revision, revision + 1);
+        assert_eq!(mgr.app_config().effective_num_candidates(), 4);
+        assert!(mgr.has_pending_apply());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn engine_json_is_pure_and_matches_snapshot() {
         let (mgr, _path, dir) = mgr_with(VALID);
         let snap = mgr.snapshot();

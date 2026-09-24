@@ -5,6 +5,7 @@
 #  正規の入口は以下の cargo make コマンドです:
 #
 #      cargo make install                (管理者権限が必要 / 自動昇格あり)
+#      cargo make install-tsf-fault-test / install-tsf-normal-restore (#65 試験専用)
 #
 #  ビルド成果物が必要なため、事前に以下を実行してください:
 #      cargo make build-engine
@@ -23,6 +24,7 @@
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
     [string]$BuildDir = "C:\rb",
+    [switch]$TsfOnly,   # #65 故障試験: TSF DLL だけを差し替えて登録する
     [switch]$NoElevate      # 自動昇格をスキップ (内部利用)
 )
 
@@ -70,7 +72,12 @@ if (-not $isAdmin -and -not $NoElevate) {
 }
 
 # --- Log file setup ---
-$LogFile  = Join-Path (Get-Location).Path "rakukan_install.log"
+$logName = if ($TsfOnly) {
+    "rakukan_install_tsf_{0:yyyyMMdd_HHmmss}_{1}.log" -f (Get-Date), $PID
+} else {
+    "rakukan_install.log"
+}
+$LogFile  = Join-Path (Get-Location).Path $logName
 Start-Transcript -Path $LogFile -Force | Out-Null
 Write-Host "Log: $LogFile"
 
@@ -198,7 +205,19 @@ if (-not (Test-Path -LiteralPath $srcDll)) {
     throw "[install] $srcDll not found. Run 'cargo make build-tsf' first."
 }
 
-if ($engineDlls.Count -eq 0) {
+if ($TsfOnly) {
+    $srcHash = (Get-FileHash -LiteralPath $srcDll -Algorithm SHA256).Hash
+    $installedDll = Join-Path $installDir "rakukan_tsf.dll"
+    if (-not (Test-Path -LiteralPath $installedDll) -or -not (Test-Path -LiteralPath $regFile)) {
+        throw "[install] -TsfOnly requires an existing registered installation: $installedDll"
+    }
+    $registeredDll = (Get-Content -LiteralPath $regFile -Raw).Trim()
+    if (-not $registeredDll.Equals($installedDll, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "[install] registered DLL differs from install destination: $registeredDll"
+    }
+}
+
+if (-not $TsfOnly -and $engineDlls.Count -eq 0) {
     # engine DLL がビルド出力になくても、既存インストール先にあれば使いまわす。
     # どちらも無ければ Activate() が失敗するのでエラー停止。
     $existingCpuDll = Join-Path $installDir "rakukan_engine_cpu.dll"
@@ -222,9 +241,11 @@ if (Test-Path -LiteralPath $regFile) {
     $oldDllEarly = Get-Content -LiteralPath $regFile -ErrorAction SilentlyContinue
     if ($oldDllEarly) { Invoke-Regsvr32UnregisterBestEffort $oldDllEarly }
 }
-Stop-ProcSilent "rakukan-tray"
-Stop-ProcSilent "rakukan-engine-host"
-Stop-ProcSilent "rakukan-settings"
+if (-not $TsfOnly) {
+    Stop-ProcSilent "rakukan-tray"
+    Stop-ProcSilent "rakukan-engine-host"
+    Stop-ProcSilent "rakukan-settings"
+}
 Stop-ProcSilent "ctfmon"
 Stop-ProcSilent "TextInputHost"
 Start-Sleep -Milliseconds 1200
@@ -233,7 +254,16 @@ Start-Sleep -Milliseconds 1200
 $dst = Join-Path $installDir "rakukan_tsf.dll"
 Copy-DllWithRetry -Source $srcDll -Destination $dst
 Write-Host "  -> $dst"
+if ($TsfOnly) {
+    $dstHash = (Get-FileHash -LiteralPath $dst -Algorithm SHA256).Hash
+    Write-Host "  TSF SHA256 source:    $srcHash"
+    Write-Host "  TSF SHA256 installed: $dstHash"
+    if ($srcHash -ne $dstHash) {
+        throw "[install] TSF DLL SHA256 mismatch after copy"
+    }
+}
 
+if (-not $TsfOnly) {
 # 古いタイムスタンプ付き DLL を削除
 Get-ChildItem -Path $installDir -Filter "rakukan_tsf_????????_??????.dll" -ErrorAction SilentlyContinue |
     ForEach-Object {
@@ -307,13 +337,15 @@ if (-not (Test-Path -LiteralPath $configDest)) {
 } else {
     Write-Host "  -> config.toml already exists, skipping"
 }
+}
 
 } catch [System.IO.IOException] {
     Write-Host ""
     Write-Host "[install] ファイルがロックされていてコピーできません:" -ForegroundColor Red
     Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ""
-    Write-Host "  対処: 一旦サインアウト→再ログオンしてから 'sudo cargo make install' を再実行してください。" -ForegroundColor Yellow
+    $retryTask = if ($TsfOnly) { "対応する install-tsf-* タスク" } else { "sudo cargo make install" }
+    Write-Host "  対処: 一旦サインアウト→再ログオンしてから '$retryTask' を再実行してください。" -ForegroundColor Yellow
     Write-Host "        (TSF DLL / engine DLL は再ログオンで自動解放されます)" -ForegroundColor Yellow
     Stop-Transcript | Out-Null
     exit 1
@@ -350,6 +382,14 @@ try {
 } catch {}
 
 Start-Process ctfmon | Out-Null
+
+if ($TsfOnly) {
+    Write-Host "Installed TSF DLL only: $dst"
+    Write-Host "TSF SHA256: $dstHash"
+    Stop-Transcript | Out-Null
+    Write-Host "Log saved: $LogFile"
+    exit 0
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 # [4/5] Dictionary & LLM model setup

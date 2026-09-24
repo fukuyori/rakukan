@@ -23,7 +23,8 @@
 
 param(
     [ValidateSet("debug","release")] [string]$Profile = "release",
-    [string]$BuildDir = "C:\rb"
+    [string]$BuildDir = "C:\rb",
+    [switch]$ConfigWatchFaultTest
 )
 
 $ErrorActionPreference = "Stop"
@@ -32,9 +33,10 @@ $ProgressPreference = "SilentlyContinue"
 Set-Location (Split-Path $PSScriptRoot)
 
 function Invoke-CargoBuild {
-    param([string]$Package, [string]$Profile)
+    param([string]$Package, [string]$Profile, [string]$Features = "")
     $argList = @("build", "-p", $Package)
     if ($Profile -eq "release") { $argList += "--release" }
+    if ($Features) { $argList += @("--features", $Features) }
     $prev = $ErrorActionPreference
     $ErrorActionPreference = "Continue"
     & cargo @argList 2>&1 | ForEach-Object {
@@ -48,13 +50,19 @@ function Invoke-CargoBuild {
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
+$BuildDir = [System.IO.Path]::GetFullPath($BuildDir)
+$normalBuildDir = [System.IO.Path]::GetFullPath("C:\rb")
+if ($ConfigWatchFaultTest -and $BuildDir.Equals($normalBuildDir, [System.StringComparison]::OrdinalIgnoreCase)) {
+    throw "[build-tsf] -ConfigWatchFaultTest requires a separate -BuildDir; the normal install uses C:\rb"
+}
+
 $env:CARGO_TARGET_DIR = $BuildDir
 $profileDir = if ($Profile -eq "release") { "release" } else { "debug" }
 $cfgName    = if ($Profile -eq "release") { "Release" } else { "Debug" }
 
 # rakukan-tsf does NOT depend on rakukan-engine features (uses DynEngine loader)
 Write-Host "[build-tsf] Building rakukan-tsf..."
-Invoke-CargoBuild -Package "rakukan-tsf"          -Profile $Profile
+Invoke-CargoBuild -Package "rakukan-tsf"          -Profile $Profile -Features $(if ($ConfigWatchFaultTest) { "config-watch-fault-test" } else { "" })
 Write-Host "[build-tsf] Building rakukan-tray..."
 Invoke-CargoBuild -Package "rakukan-tray"         -Profile $Profile
 Write-Host "[build-tsf] Building rakukan-engine-host..."
@@ -62,9 +70,11 @@ Invoke-CargoBuild -Package "rakukan-engine-host"  -Profile $Profile
 Write-Host "[build-tsf] Building rakukan-dict-builder..."
 Invoke-CargoBuild -Package "rakukan-dict-builder" -Profile $Profile
 
-Write-Host "[build-tsf] Building WinUI settings ($cfgName)..."
-& "$PSScriptRoot\build-settings-winui.ps1" -Configuration $cfgName
-if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+if (-not $ConfigWatchFaultTest) {
+    Write-Host "[build-tsf] Building WinUI settings ($cfgName)..."
+    & "$PSScriptRoot\build-settings-winui.ps1" -Configuration $cfgName
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 $env:CARGO_TARGET_DIR = $null
 
@@ -80,11 +90,11 @@ foreach ($p in $expected) {
 }
 
 $winuiBin = Join-Path $PSScriptRoot "..\apps\rakukan-settings-winui\bin\x64\$cfgName\net8.0-windows10.0.19041.0\win-x64"
-if (-not (Test-Path -LiteralPath (Join-Path $winuiBin "rakukan-settings.exe"))) {
+if (-not $ConfigWatchFaultTest -and -not (Test-Path -LiteralPath (Join-Path $winuiBin "rakukan-settings.exe"))) {
     throw "[build-tsf] Missing WinUI build output: $winuiBin\rakukan-settings.exe"
 }
 
 Write-Host ""
 Write-Host "[build-tsf] Done."
 Write-Host "  Cargo outputs: $BuildDir\$profileDir\"
-Write-Host "  WinUI output:  $winuiBin\"
+if (-not $ConfigWatchFaultTest) { Write-Host "  WinUI output:  $winuiBin\" }

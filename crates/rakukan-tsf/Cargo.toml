@@ -8,6 +8,11 @@ description = "rakukan TSF (Text Services Framework) DLL"
 crate-type = ["cdylib"]
 name = "rakukan_tsf"
 
+[features]
+default = []
+# Installed-device fault injection for Issue #65; never enabled by normal builds.
+config-watch-fault-test = []
+
 [dependencies]
 # Engine との通信は rakukan-engine-rpc 経由の Named Pipe のみ。
 # rakukan-engine-abi には依存しない（= rakukan_engine_*.dll を TSF プロセスに

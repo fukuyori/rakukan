@@ -19,6 +19,19 @@ use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
+#[cfg(feature = "config-watch-fault-test")]
+#[path = "config_watch_fault.rs"]
+mod fault_control;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct FaultFlags {
+    suppress_notifications: bool,
+    fail_save_event: bool,
+    fail_request_event: bool,
+    fail_dir_watch: bool,
+    fail_rearm_once: bool,
+}
+
 /// 連続通知をまとめる待ち（最後の通知から）。
 pub const DEBOUNCE_MS: u64 = 300;
 /// 通知が途切れなくても読む上限（最初の通知から）。
@@ -29,6 +42,7 @@ pub const PERIODIC_MS: u64 = 30_000;
 /// 読込の契機と期限を管理する（Win32 に依存しない純粋な部分）。
 #[derive(Debug)]
 pub struct WatchScheduler {
+    periodic_ms: u64,
     /// 次の定期確認時刻。読込確認の完了後から `PERIODIC_MS`。通知では延ばさない
     next_periodic_at: u64,
     /// 連続通知の開始時刻（最大待ちの基準）。要求が無ければ `None`
@@ -49,9 +63,15 @@ pub struct ReadJob {
 }
 
 impl WatchScheduler {
+    #[cfg(test)]
     pub fn new(now_ms: u64) -> Self {
+        Self::with_periodic(now_ms, PERIODIC_MS)
+    }
+
+    fn with_periodic(now_ms: u64, periodic_ms: u64) -> Self {
         Self {
-            next_periodic_at: now_ms.saturating_add(PERIODIC_MS),
+            periodic_ms,
+            next_periodic_at: now_ms.saturating_add(periodic_ms),
             burst_start_at: None,
             last_notify_at: None,
             save_event: false,
@@ -119,7 +139,7 @@ impl WatchScheduler {
     /// 読込確認が終わった（成功・失敗を問わない）。定期確認の期限をここから数え直す。
     /// 読込失敗時にも次の確認時刻を置くので、期限超過による連続再試行にならない。
     pub fn on_read_done(&mut self, now_ms: u64) {
-        self.next_periodic_at = now_ms.saturating_add(PERIODIC_MS);
+        self.next_periodic_at = now_ms.saturating_add(self.periodic_ms);
     }
 
     #[cfg(test)]
@@ -160,6 +180,7 @@ impl WaitSet {
         Self { order }
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.order.is_empty()
     }
@@ -214,8 +235,10 @@ pub fn start_watcher() {
 
 #[cfg(windows)]
 mod win32 {
-    use super::{REQUEST_EVENT, WatchScheduler, now_ms};
+    use super::{FaultFlags, REQUEST_EVENT, WatchScheduler, now_ms};
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
+    use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Foundation::{
         HANDLE, INVALID_HANDLE_VALUE, WAIT_EVENT, WAIT_FAILED, WAIT_OBJECT_0, WAIT_TIMEOUT,
     };
@@ -240,8 +263,8 @@ mod win32 {
     }
 
     /// ディレクトリ変更通知を登録する。失敗は `None`（呼び出し側が定期確認で復旧を試みる）。
-    fn register_dir_watch(log_failure: bool) -> Option<HANDLE> {
-        let dir = watch_dir()?;
+    fn register_dir_watch(dir: Option<&Path>, log_failure: bool) -> Option<HANDLE> {
+        let dir = dir?;
         let name = wide(&dir.to_string_lossy());
         let r = unsafe {
             FindFirstChangeNotificationW(
@@ -312,30 +335,132 @@ mod win32 {
         }
     }
 
+    struct LoopOptions {
+        dir: Option<PathBuf>,
+        event_name: String,
+        stop: Option<usize>,
+        publish_request: bool,
+        periodic_ms: u64,
+        control_poll_ms: Option<u64>,
+    }
+
+    fn retry_missing(
+        options: &LoopOptions,
+        faults: FaultFlags,
+        named: &mut Option<HANDLE>,
+        request: &mut Option<HANDLE>,
+        dir: &mut Option<HANDLE>,
+        logged_missing: &mut (bool, bool, bool),
+    ) {
+        let before = (named.is_some(), request.is_some(), dir.is_some());
+        if named.is_none() && !faults.fail_save_event {
+            *named = create_event(Some(&options.event_name), !logged_missing.0);
+            logged_missing.0 = named.is_none();
+        }
+        if request.is_none() && !faults.fail_request_event {
+            *request = create_event(None, !logged_missing.1);
+            if options.publish_request
+                && let Some(h) = request
+            {
+                REQUEST_EVENT.store(h.0 as usize, Ordering::Release);
+            }
+            logged_missing.1 = request.is_none();
+        }
+        if dir.is_none() && !faults.fail_dir_watch {
+            *dir = register_dir_watch(options.dir.as_deref(), !logged_missing.2);
+            logged_missing.2 = dir.is_none();
+        }
+        let after = (named.is_some(), request.is_some(), dir.is_some());
+        if before != after {
+            tracing::info!(
+                "config_watch: sources save_event={} request={} dir_watch={}, periodic={}ms",
+                after.0,
+                after.1,
+                after.2,
+                options.periodic_ms
+            );
+        }
+    }
+
     pub(super) fn run_loop() {
-        // どの入力源も、作れなくても監視を止めない。定期確認は常に動き、
-        // 読込のたびに欠けている源の作り直しを試みる。
-        let mut named = create_event(Some(RELOAD_EVENT_NAME), true);
-        let mut request = create_event(None, true);
-        if let Some(h) = request {
+        #[cfg(feature = "config-watch-fault-test")]
+        let mut control = super::fault_control::FileFaultControl::from_env();
+        #[cfg(feature = "config-watch-fault-test")]
+        let poll_ms = control.as_ref().map(|_| 1_000);
+        #[cfg(not(feature = "config-watch-fault-test"))]
+        let poll_ms = None;
+        tracing::info!(
+            "config_watch: build_kind={} pid={} module={}",
+            if cfg!(feature = "config-watch-fault-test") {
+                "fault-test"
+            } else {
+                "normal"
+            },
+            std::process::id(),
+            crate::globals::DllModule::get_path().unwrap_or_else(|e| format!("unavailable: {e}"))
+        );
+        let options = LoopOptions {
+            dir: watch_dir(),
+            event_name: RELOAD_EVENT_NAME.to_owned(),
+            stop: None,
+            publish_request: true,
+            periodic_ms: super::PERIODIC_MS,
+            control_poll_ms: poll_ms,
+        };
+        run_loop_with(
+            options,
+            |reason| format!("{:?}", super::super::config::reload_config(reason)),
+            super::super::state::engine_reload,
+            move || {
+                #[cfg(feature = "config-watch-fault-test")]
+                {
+                    control
+                        .as_mut()
+                        .map_or_else(FaultFlags::default, |c| c.poll())
+                }
+                #[cfg(not(feature = "config-watch-fault-test"))]
+                {
+                    FaultFlags::default()
+                }
+            },
+        );
+    }
+
+    fn run_loop_with<R, A, C>(options: LoopOptions, mut read: R, mut apply: A, mut control: C)
+    where
+        R: FnMut(&'static str) -> String,
+        A: FnMut(),
+        C: FnMut() -> FaultFlags,
+    {
+        let mut faults = control();
+        let mut named = (!faults.fail_save_event)
+            .then(|| create_event(Some(&options.event_name), true))
+            .flatten();
+        let mut request = (!faults.fail_request_event)
+            .then(|| create_event(None, true))
+            .flatten();
+        if options.publish_request
+            && let Some(h) = request
+        {
             REQUEST_EVENT.store(h.0 as usize, Ordering::Release);
         }
-        let mut dir = register_dir_watch(true);
-        // 失敗のログは状態が変わったときだけ（作り直しの試行ごとに繰り返さない）
+        let mut dir = (!faults.fail_dir_watch)
+            .then(|| register_dir_watch(options.dir.as_deref(), true))
+            .flatten();
         let mut logged_missing = (named.is_none(), request.is_none(), dir.is_none());
-
-        let mut sched = WatchScheduler::new(now_ms());
+        let mut rearm_failed_once = false;
+        let mut sched = WatchScheduler::with_periodic(now_ms(), options.periodic_ms);
         tracing::info!(
             "config_watch: sources save_event={} request={} dir_watch={}, periodic={}ms",
             named.is_some(),
             request.is_some(),
             dir.is_some(),
-            super::PERIODIC_MS
+            options.periodic_ms
         );
 
         loop {
             let set = super::WaitSet::new(named.is_some(), request.is_some(), dir.is_some());
-            let handles: Vec<HANDLE> = set
+            let mut handles: Vec<HANDLE> = set
                 .sources()
                 .iter()
                 .map(|s| match s {
@@ -344,80 +469,482 @@ mod win32 {
                     super::WatchSource::DirChange => dir.expect("present"),
                 })
                 .collect();
-            let wait = sched.wait_ms(now_ms()).min(u32::MAX as u64 - 1) as u32;
-
-            if set.is_empty() {
-                // 待てる源が無い: 定期確認だけで動き、その機会に作り直す
+            let stop_offset = if let Some(raw) = options.stop {
+                handles.insert(0, HANDLE(raw as *mut core::ffi::c_void));
+                1
+            } else {
+                0
+            };
+            let wait = sched
+                .wait_ms(now_ms())
+                .min(options.control_poll_ms.unwrap_or(u64::MAX))
+                .min(u32::MAX as u64 - 1) as u32;
+            if handles.is_empty() {
                 std::thread::sleep(std::time::Duration::from_millis(wait as u64));
             } else {
-                let r = unsafe { WaitForMultipleObjects(&handles, false, wait) };
+                let result = unsafe { WaitForMultipleObjects(&handles, false, wait) };
                 let now = now_ms();
-                match r {
+                match result {
                     WAIT_TIMEOUT => {}
                     WAIT_FAILED => {
-                        tracing::error!("config_watch: WaitForMultipleObjects failed ({:?})", r);
+                        tracing::error!("config_watch: WaitForMultipleObjects failed ({result:?})");
                         std::thread::sleep(std::time::Duration::from_secs(1));
                     }
-                    WAIT_EVENT(i) => match set.source_at(i.wrapping_sub(WAIT_OBJECT_0.0)) {
-                        Some(super::WatchSource::SaveEvent) => {
-                            tracing::info!("config_watch: reload event received");
-                            sched.on_save_event(now);
+                    WAIT_EVENT(i) => {
+                        let index = i.wrapping_sub(WAIT_OBJECT_0.0);
+                        if stop_offset == 1 && index == 0 {
+                            break;
                         }
-                        Some(super::WatchSource::Request) => sched.on_notify(now),
-                        Some(super::WatchSource::DirChange) => {
-                            sched.on_notify(now);
-                            if let Some(d) = dir
-                                && let Err(e) = unsafe { FindNextChangeNotification(d) }
+                        match set.source_at(index.saturating_sub(stop_offset)) {
+                            Some(super::WatchSource::SaveEvent)
+                                if !faults.suppress_notifications =>
                             {
-                                tracing::warn!(
-                                    "config_watch: FindNextChangeNotification failed: {e}; will re-register at the next check"
-                                );
-                                close_dir_watch(d);
-                                dir = None;
-                                logged_missing.2 = true;
+                                tracing::info!("config_watch: reload event received");
+                                sched.on_save_event(now);
+                            }
+                            Some(super::WatchSource::Request) if !faults.suppress_notifications => {
+                                sched.on_notify(now)
+                            }
+                            Some(super::WatchSource::DirChange) => {
+                                if !faults.suppress_notifications {
+                                    sched.on_notify(now);
+                                }
+                                if let Some(d) = dir {
+                                    let rearm = if faults.fail_rearm_once && !rearm_failed_once {
+                                        rearm_failed_once = true;
+                                        Err(windows::core::Error::new(
+                                            windows::Win32::Foundation::E_FAIL,
+                                            "injected rearm failure",
+                                        ))
+                                    } else {
+                                        unsafe { FindNextChangeNotification(d) }
+                                    };
+                                    if let Err(e) = rearm {
+                                        tracing::warn!(
+                                            "config_watch: FindNextChangeNotification failed: {e}; will re-register at the next check"
+                                        );
+                                        close_dir_watch(d);
+                                        dir = None;
+                                        logged_missing.2 = true;
+                                    }
+                                }
+                            }
+                            Some(_) => {}
+                            None => {
+                                tracing::warn!("config_watch: unexpected wait result {i}");
+                                std::thread::sleep(std::time::Duration::from_millis(100));
                             }
                         }
-                        None => {
-                            // WAIT_ABANDONED_0 など。イベントには起きないが、念のため記録して続行
-                            tracing::warn!("config_watch: unexpected wait result {i}");
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    },
+                    }
                 }
             }
-
-            let now = now_ms();
-            if let Some(job) = sched.take_due(now) {
-                let outcome = super::super::config::reload_config(job.reason);
+            let previous = faults;
+            faults = control();
+            if previous != FaultFlags::default() && faults == FaultFlags::default() {
+                retry_missing(
+                    &options,
+                    faults,
+                    &mut named,
+                    &mut request,
+                    &mut dir,
+                    &mut logged_missing,
+                );
+            }
+            if let Some(job) = sched.take_due(now_ms()) {
+                let outcome = read(job.reason);
                 sched.on_read_done(now_ms());
                 tracing::debug!(
-                    "config_watch: read ({}) -> {:?} save_event={}",
+                    "config_watch: read ({}) -> {} save_event={}",
                     job.reason,
                     outcome,
                     job.save_event
                 );
-                // 欠けている源の作り直し。ログは状態が変わったときだけ
-                if named.is_none() {
-                    named = create_event(Some(RELOAD_EVENT_NAME), !logged_missing.0);
-                    logged_missing.0 = named.is_none();
-                }
-                if request.is_none() {
-                    request = create_event(None, !logged_missing.1);
-                    if let Some(h) = request {
-                        REQUEST_EVENT.store(h.0 as usize, Ordering::Release);
-                    }
-                    logged_missing.1 = request.is_none();
-                }
-                if dir.is_none() {
-                    dir = register_dir_watch(!logged_missing.2);
-                    logged_missing.2 = dir.is_none();
-                }
+                retry_missing(
+                    &options,
+                    faults,
+                    &mut named,
+                    &mut request,
+                    &mut dir,
+                    &mut logged_missing,
+                );
                 if job.save_event {
-                    // 反映待ちの処理はエンジン処理側に依頼する（ラッチのリセットも含む）。
-                    // engine_reload は自前のスレッドで動くので、ここでは RPC を待たない
-                    super::super::state::engine_reload();
+                    apply();
                 }
             }
+        }
+        if let Some(h) = dir {
+            close_dir_watch(h);
+        }
+        if let Some(h) = request {
+            let _ = unsafe { CloseHandle(h) };
+        }
+        if let Some(h) = named {
+            let _ = unsafe { CloseHandle(h) };
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::sync::{Arc, Mutex, mpsc};
+        use std::time::Duration;
+        use windows::Win32::System::Threading::SetEvent;
+
+        struct TestRun {
+            stop: HANDLE,
+            thread: std::thread::JoinHandle<()>,
+            reads: mpsc::Receiver<(&'static str, String)>,
+            applies: mpsc::Receiver<()>,
+        }
+
+        fn fixture(tag: &str) -> (PathBuf, PathBuf, String) {
+            use std::sync::atomic::{AtomicU32, Ordering};
+            static NEXT: AtomicU32 = AtomicU32::new(0);
+            let id = NEXT.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir()
+                .join(format!("rakukan-watch-{tag}-{}-{id}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("test directory");
+            let path = dir.join("config.toml");
+            std::fs::write(&path, "A").expect("initial config");
+            let event = format!("Local\\rakukan.watch.test.{}.{id}", std::process::id());
+            (dir, path, event)
+        }
+
+        fn start(
+            dir: PathBuf,
+            path: PathBuf,
+            event_name: String,
+            periodic_ms: u64,
+            faults: Arc<Mutex<FaultFlags>>,
+        ) -> TestRun {
+            let stop = create_event(None, true).expect("stop event");
+            let stop_raw = stop.0 as usize;
+            let (reads_tx, reads_rx) = mpsc::channel();
+            let (apply_tx, apply_rx) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                run_loop_with(
+                    LoopOptions {
+                        dir: Some(dir),
+                        event_name,
+                        stop: Some(stop_raw),
+                        publish_request: false,
+                        periodic_ms,
+                        control_poll_ms: Some(20),
+                    },
+                    move |reason| {
+                        let body = std::fs::read_to_string(&path).expect("read config");
+                        reads_tx.send((reason, body)).expect("send read");
+                        "ok".to_owned()
+                    },
+                    move || {
+                        apply_tx.send(()).expect("send apply");
+                    },
+                    move || *faults.lock().expect("fault lock"),
+                );
+            });
+            TestRun {
+                stop,
+                thread,
+                reads: reads_rx,
+                applies: apply_rx,
+            }
+        }
+
+        fn stop(run: TestRun, dir: PathBuf) {
+            unsafe { SetEvent(run.stop) }.expect("signal stop");
+            run.thread.join().expect("watch thread");
+            let _ = unsafe { CloseHandle(run.stop) };
+            std::fs::remove_dir_all(dir).expect("remove test directory");
+        }
+
+        #[test]
+        fn real_wait_loop_reads_periodically_without_notifications_then_recovers() {
+            let (dir, path, event_name) = fixture("suppressed");
+            let faults = Arc::new(Mutex::new(FaultFlags {
+                suppress_notifications: true,
+                ..Default::default()
+            }));
+            let run = start(dir.clone(), path.clone(), event_name, 700, faults.clone());
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "B").expect("replace config");
+            let first = run
+                .reads
+                .recv_timeout(Duration::from_secs(3))
+                .expect("periodic read");
+            assert_eq!(first, ("periodic", "B".to_owned()));
+
+            *faults.lock().expect("fault lock") = FaultFlags::default();
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "C").expect("replace config again");
+            let mut notified = false;
+            for _ in 0..4 {
+                let (reason, body) = run
+                    .reads
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("next read");
+                if reason == "notify" && body == "C" {
+                    notified = true;
+                    break;
+                }
+            }
+            assert!(notified, "directory notification did not resume");
+            stop(run, dir);
+        }
+
+        #[test]
+        fn real_wait_loop_survives_all_source_creation_failures_and_recreates_them() {
+            let (dir, path, event_name) = fixture("sources");
+            let event = create_event(Some(&event_name), true).expect("named event");
+            let faults = Arc::new(Mutex::new(FaultFlags {
+                fail_save_event: true,
+                fail_request_event: true,
+                fail_dir_watch: true,
+                ..Default::default()
+            }));
+            let run = start(dir.clone(), path, event_name, 600, faults.clone());
+            assert_eq!(
+                run.reads
+                    .recv_timeout(Duration::from_secs(3))
+                    .expect("periodic read")
+                    .0,
+                "periodic"
+            );
+            *faults.lock().expect("fault lock") = FaultFlags::default();
+            std::thread::sleep(Duration::from_millis(100));
+            unsafe { SetEvent(event) }.expect("signal save event");
+            run.applies
+                .recv_timeout(Duration::from_secs(3))
+                .expect("apply after recovery");
+            stop(run, dir);
+            let _ = unsafe { CloseHandle(event) };
+        }
+
+        #[test]
+        fn real_wait_loop_rearms_after_one_notification_registration_failure() {
+            let (dir, path, event_name) = fixture("rearm");
+            let faults = Arc::new(Mutex::new(FaultFlags {
+                fail_rearm_once: true,
+                ..Default::default()
+            }));
+            let run = start(dir.clone(), path.clone(), event_name, 2_000, faults);
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "B").expect("first change");
+            assert_eq!(
+                run.reads
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("first read"),
+                ("notify", "B".to_owned())
+            );
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "C").expect("second change");
+            assert_eq!(
+                run.reads
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("second read"),
+                ("notify", "C".to_owned())
+            );
+            stop(run, dir);
+        }
+
+        #[test]
+        fn real_wait_loop_keeps_a_save_event_received_during_read() {
+            let (dir, path, event_name) = fixture("save-during-read");
+            let event = create_event(Some(&event_name), true).expect("named event");
+            let stop_event = create_event(None, true).expect("stop event");
+            let stop_raw = stop_event.0 as usize;
+            let (entered_tx, entered_rx) = mpsc::channel();
+            let (resume_tx, resume_rx) = mpsc::channel();
+            let (reads_tx, reads_rx) = mpsc::channel();
+            let (apply_tx, apply_rx) = mpsc::channel();
+            let watch_dir = dir.clone();
+            let thread = std::thread::spawn(move || {
+                let mut reads = 0;
+                run_loop_with(
+                    LoopOptions {
+                        dir: Some(watch_dir),
+                        event_name,
+                        stop: Some(stop_raw),
+                        publish_request: false,
+                        periodic_ms: 2_000,
+                        control_poll_ms: None,
+                    },
+                    move |reason| {
+                        if reads == 0 {
+                            entered_tx.send(()).expect("entered read");
+                            resume_rx
+                                .recv_timeout(Duration::from_secs(3))
+                                .expect("resume read");
+                        }
+                        reads += 1;
+                        reads_tx.send(reason).expect("send reason");
+                        "ok".to_owned()
+                    },
+                    move || {
+                        apply_tx.send(()).expect("send apply");
+                    },
+                    FaultFlags::default,
+                );
+            });
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "B").expect("change config");
+            entered_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("read started");
+            unsafe { SetEvent(event) }.expect("signal during read");
+            resume_tx.send(()).expect("finish first read");
+            assert_eq!(
+                reads_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("first read"),
+                "notify"
+            );
+            assert_eq!(
+                reads_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("second read"),
+                "notify"
+            );
+            apply_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("apply after second read");
+            assert!(
+                apply_rx.recv_timeout(Duration::from_millis(100)).is_err(),
+                "save event applied twice"
+            );
+            unsafe { SetEvent(stop_event) }.expect("signal stop");
+            thread.join().expect("watch thread");
+            let _ = unsafe { CloseHandle(event) };
+            let _ = unsafe { CloseHandle(stop_event) };
+            std::fs::remove_dir_all(dir).expect("remove test directory");
+        }
+
+        #[test]
+        fn real_wait_loop_keeps_last_good_config_after_parse_failure_and_recovers() {
+            use crate::engine::config::{ConfigManager, LoadOutcome};
+            let (dir, path, event_name) = fixture("parse-recovery");
+            std::fs::write(&path, "[conversion]\nnum_candidates = 7\n").expect("valid config");
+            let mut manager = ConfigManager::from_path(path.clone());
+            let stop_event = create_event(None, true).expect("stop event");
+            let stop_raw = stop_event.0 as usize;
+            let (results_tx, results_rx) = mpsc::channel();
+            let thread = std::thread::spawn(move || {
+                run_loop_with(
+                    LoopOptions {
+                        dir: Some(dir.clone()),
+                        event_name,
+                        stop: Some(stop_raw),
+                        publish_request: false,
+                        periodic_ms: 2_000,
+                        control_poll_ms: None,
+                    },
+                    move |_| {
+                        let result = manager.reinit();
+                        let candidates = manager.app_config().effective_num_candidates();
+                        results_tx
+                            .send((result, candidates))
+                            .expect("send config result");
+                        format!("{result:?}")
+                    },
+                    || {},
+                    FaultFlags::default,
+                );
+            });
+            std::thread::sleep(Duration::from_millis(80));
+            std::fs::write(&path, "[conversion\nnum_candidates = ").expect("broken config");
+            assert_eq!(
+                results_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("failed read"),
+                (LoadOutcome::Failed, 7)
+            );
+            std::fs::remove_file(&path).expect("remove config");
+            assert_eq!(
+                results_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("missing file read"),
+                (LoadOutcome::Failed, 7)
+            );
+            std::fs::write(&path, "[conversion]\nnum_candidates = 4\n").expect("fixed config");
+            let mut recovered = false;
+            for _ in 0..4 {
+                if results_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("recovery read")
+                    == (LoadOutcome::Updated, 4)
+                {
+                    recovered = true;
+                    break;
+                }
+            }
+            assert!(recovered, "last good config was not replaced after repair");
+            unsafe { SetEvent(stop_event) }.expect("signal stop");
+            thread.join().expect("watch thread");
+            let _ = unsafe { CloseHandle(stop_event) };
+            std::fs::remove_dir_all(path.parent().expect("parent")).expect("remove test directory");
+        }
+
+        #[test]
+        fn unrelated_directory_writes_do_not_delay_periodic_check_or_publish_config() {
+            use crate::engine::config::{ConfigManager, LoadOutcome};
+            let (dir, path, event_name) = fixture("unrelated-writes");
+            std::fs::write(&path, "[conversion]\nnum_candidates = 7\n").expect("valid config");
+            let mut manager = ConfigManager::from_path(path);
+            let stop_event = create_event(None, true).expect("stop event");
+            let stop_raw = stop_event.0 as usize;
+            let (results_tx, results_rx) = mpsc::channel();
+            let watch_dir = dir.clone();
+            let thread = std::thread::spawn(move || {
+                run_loop_with(
+                    LoopOptions {
+                        dir: Some(watch_dir),
+                        event_name,
+                        stop: Some(stop_raw),
+                        publish_request: false,
+                        periodic_ms: 800,
+                        control_poll_ms: None,
+                    },
+                    move |reason| {
+                        let result = manager.reinit();
+                        results_tx.send((reason, result)).expect("send result");
+                        format!("{result:?}")
+                    },
+                    || {},
+                    FaultFlags::default,
+                );
+            });
+            let start = std::time::Instant::now();
+            std::thread::sleep(Duration::from_millis(80));
+            for i in 0..12 {
+                std::fs::write(dir.join("learn_history.bin"), [i as u8]).expect("unrelated write");
+                std::thread::sleep(Duration::from_millis(80));
+            }
+            let mut saw_periodic = false;
+            while let Ok((reason, result)) = results_rx.recv_timeout(Duration::from_millis(200)) {
+                assert_eq!(
+                    result,
+                    LoadOutcome::Unchanged,
+                    "unrelated file republished config"
+                );
+                if reason == "periodic" {
+                    saw_periodic = true;
+                    break;
+                }
+            }
+            assert!(
+                saw_periodic,
+                "continuous notifications delayed the periodic read"
+            );
+            assert!(start.elapsed() < Duration::from_secs(2));
+            assert_eq!(
+                results_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("debounced read"),
+                ("notify", LoadOutcome::Unchanged)
+            );
+            unsafe { SetEvent(stop_event) }.expect("signal stop");
+            thread.join().expect("watch thread");
+            let _ = unsafe { CloseHandle(stop_event) };
+            std::fs::remove_dir_all(dir).expect("remove test directory");
         }
     }
 }
