@@ -32,7 +32,7 @@
 | J-1 | #53 大字 1 文字の扱い | (a) nick の案（大字 1 文字だけの漢字 run を数値と見なさない） (b) 大字候補の生成経路だけ例外にする (c) 別方式（読み・生成元による正当化） | **(a) は見送り（判断済み、2026-09-17）。構造は A（生成元の持ち回り）に決定。現在の (c3) は不採用。辞書による語と読みの対応付けは採用候補（数詞エントリの扱いと探索方法が固まるまで採用保留）** | (a) は実測で、混在経路の 1 桁の大字候補（`参枚` `壱枚と弐枚` `壱拾弐.参円` など）を捨てるうえ、`2参枚` `10拾円` のような数の書き換えを通した（9 節）。(c) は方式により結果が分かれ、読み全体への単純な contains は不正な `参` の追加を通し、数値の `参` を捨てる。(c3)（生成元とかな run ごとの読みの回数）は 33 組で良好だったが、追加ケース（`2まいをさんこうに` → `2参枚をみほんに` など 3 組）で、現行が拒否する数の書き換えを通したため不採用（9 節）。辞書による対応付け（読みの部分文字列を辞書で引き、2 文字以上の表記が出力中の大字を覆う組を、読み・出力の非重複と順序を満たして割り当てる）は、模擬検証で追加ケースを拒否し直したい症状を通した（9 節）。数詞エントリ（`拾番` など）は除外の根拠から外す方針で、方法は元辞書の識別材料を調べてから決める。判定は「条件を満たし数字保存の検証も通る割当てが存在するか」とし、探索込みの負荷を実装方式の決定時に確認する。以下は原案の検討事項: 数字単独の候補生成は検証前に return するため、検証だけの変更で単独の `壱` `弐` `参` は失われない。一方、`3まい` → `参枚` は混在経路の検証対象で、(a) の条件なら捨てられる。数字単独の経路と、混在経路における 1 桁の大字への影響を区別して確認する。`点` は漢数字 run に含まれるため `壱拾弐点参` は分割されず、小数は回帰確認の対象とする。複数数値を含む影響も確認する。「10 以上なら影響しない」「損失は 3 候補だけ」とは扱わない。(b) も必要な変更範囲を調べてから比較する |
 | J-2 | #45 の進め方 | (a) 依頼済みの PR を待ってレビュー (b) こちらで直す | **(a)** | PR 依頼は #40 で済んでいる。重複依頼は不要。提出時に差分とテストを確認し、main 上で連続入力時のプレビュー更新を検証する。nick の既存計測は統合ブランチ由来であり、main の修正後の実測とは区別する |
 | J-3 | #49 モデル切替の方式 | (a) converter の設定照合と破棄・再生成（ABI 変更の要否も調査） (b) モデル設定変更時にホストを終了し、再接続時に読み直す | **(b)** | #43 のプロセス単位の復帰方針と揃えられる。ただし設定の反映契機・新旧判定・ホスト再起動後の設定確定方法を 3-3 で決めることが前提。mtime の追加だけで巻き戻りや再起動の連鎖を防げるとは扱わない。再起動対象の設定と、それ以外の設定の反映方法も分けて定義する |
-| J-4 | #50 の方式 | (a) DM ポインタに世代と生存状態を持たせる (b) tombstone (c) 保存を同期へ移す | **(a)** | 初期化時の世代更新に加え、破棄時の失効が必要。deferred の前後両 DM、Activate 時の直接呼出し、手動変更時の保存も照合対象にする。現行の `OnInitDocumentMgr` は処理が無いため世代管理は新設になり、初期化通知を観測していない既存 DM を Activate 時にどう登録するかも設計事項になる。COM 再入を避ける deferred の構造を維持し、詳細は 3-2 で確定する |
+| J-4 | #50 の方式 | (a) DM ポインタに世代と生存状態を持たせる (b) tombstone (c) 保存を同期へ移す | **(a) に決定（2026-09-24）。詳細設計（案）は 9 節「2026-09-24 #50 破棄済み DM ポインタの再挿入」** | 初期化時の世代更新に加え、破棄時の失効が必要。deferred の前後両 DM、Activate 時の直接呼出し、手動変更時の保存も照合対象にする。現行の `OnInitDocumentMgr` は処理が無いため世代管理は新設になり、初期化通知を観測していない既存 DM を Activate 時にどう登録するかも設計事項になる。COM 再入を避ける deferred の構造を維持し、詳細は 3-2 で確定する |
 | J-5 | 既知の問題（Issue 未起票）の扱い | 起票する / しない | **2 件とも起票する**（(1) は #61 として起票・実装済み、2026-09-19） | (1) config 読込失敗の無警告な既定値化は、初期化だけでなく reload イベント経由でも起きる。影響は警告不足に限らず、既定値から作った設定がホストへ送られる（再起動・再生成につながるかは推測で、3-5 で再現確認する）。ログに実際の処置を記録し、失敗時の設定保持方針を整理する。(2) reload 通知の全プロセス反映と、ホストへの古い設定の再送防止は別の課題。3-3 で両方を扱い、#49 より先に設計する |
 | J-6 | #35 リーダー記号 | (a) 記号 run の Space 変換と `z` キー列 (b) Space 変換だけ (c) 見送る | **(b) を先に、`z` キー列は後回し** | 本線採用と詳細仕様の判断を分ける。参照先 3.1.1 の候補順位・学習粒度・対象範囲と対応表は未決。これらの判断後に実装する。`z` キー列は Step 10 の打鍵列の不変条件に触るため別に判断する。PR #31 はクローズ済みで、実装を依頼する場合は新規 PR とする |
 | J-7 | #16 かな run の辞書参照 | (a) 段 4 で設計から着手 (b) #32 の `DictLookup` 設計を待つ | **(a)** | `convert_with_digit_protection` と辞書引きはどちらもエンジン内にあるので、RPC / ABI の変更は要らない。ただしエンジン内部の配線は必要になる。数字を含む読みの変換は主に変換ワーカー（`conv_cache.rs:159`）で動き、ワーカーは変換器と要求だけを受け取っていて辞書を持たない。辞書の参照方法は 4-3 で設計する。#32 は本計画の対象外なので待つと止まる。設計上の推奨: run 単位の候補にはユーザー辞書とシステム辞書だけを引き、**学習履歴は読み全体のキーのまま**にする（Step 12 で決めた順位規則と永続形式を動かさない） |
@@ -2143,7 +2143,106 @@ akukan-tsf-*.log`（680 ファイル）を、行頭の時刻で日付ごとに�
 - 09-23 の 100,593 行の内訳は `candidate_window` 38,570、`on_compose` 13,947、`config` 12,549、`config_watch` 11,701、
   `dispatch` 11,460（DEBUG 81,258 / INFO 19,210 / WARN 125）。#65 以外は従来からの DEBUG の量
 - 以前の基準値（旧 `rakukan.log` の 1 日 73,033 行・9,736,860 バイト、#54 起票時）との比較は、ログ方式が違うので
-  同じ土俵ではないが、通常日はそれより少なく、試験日は同程度〜上回る。**#54 の残件（1 日分のログ量の確認）はこれで完了**
+  同じ土俵ではないが、通常日はそれより少なく、試験日は同程度〜上回る。**#54 の残件（1 日分のログ量の確認）はこれで完了**。
+  レモンの判断で 2026-09-24 に #54 をクローズした（https://github.com/fukuyori/rakukan/issues/54#issuecomment-5808769991 ）。
+  修正 `a981b07` は未リリース（0.11.9 に含める）
+
+### 2026-09-24 #50 破棄済み DM ポインタの再挿入: 調査と詳細設計（案、3-2）
+
+J-4 はレモンの判断で **(a) DM ポインタに世代と生存状態を持たせる** に決定（2026-09-24）。main `17a7ecf` のコードを
+読んで整理した。**設計は案の段階で、実装着手は未指示。**
+
+#### 現行の経路（確認した事実）
+
+| 場所 | 内容 |
+|---|---|
+| `state.rs` `ModeStore`（2360 行付近） | `dm_modes: HashMap<usize, ImeMode>`（DM ポインタ → モード）、`hwnd_modes`（HWND → モード、DM 再作成時のフォールバック）、`dm_to_hwnd`。`DOC_MODE_STORE` は `Mutex`、各関数は `try_lock` 失敗で何もしない |
+| `factory.rs` `OnInitDocumentMgr`（1217 行） | **何もしない** |
+| `factory.rs` `OnUninitDocumentMgr`（1221 行） | msctf のコールバック内で**同期**に `dispose_dm_resources(ptr)` → `doc_mode_remove(ptr)`（`dm_modes` のモードを `hwnd_modes` へ退避してから `dm_modes` / `dm_to_hwnd` を削除） |
+| `factory.rs` `OnSetFocus`（1233 行） | msctf のコールバック内では `prev_ptr` / `next_ptr` / `hwnd` を `post_focus_changed` でキューに積むだけ（COM 再入を避ける）。`prev == next` は無視 |
+| `candidate_window.rs` `process_focus_change`（1033 行） | `WM_APP_FOCUS_CHANGED` で**遅延**実行。`TL_CURRENT_DM` / `TL_CURRENT_HWND` を更新 → `hide()` / `stop_live_timer()` → `doc_mode_on_focus_change(prev, next, hwnd)` → `ime_sync::apply` |
+| `state.rs` `doc_mode_on_focus_change`（2380 行） | `prev_dm_ptr != 0 && remember` なら**無条件に** `dm_modes.insert(prev_dm_ptr, 現在モード)`。復元は `dm_modes[next]` → `hwnd_modes[next_hwnd]` → 既定値の順。#51 の対象アプリでは記憶を通さない |
+| `state.rs` `doc_mode_remember_current`（2510 行） | `set_ime_mode` から。`TL_CURRENT_DM` / `TL_CURRENT_HWND` を鍵に `dm_modes` / `hwnd_modes` を即時更新（生存確認なし） |
+| `factory.rs` Activate（538 行） | `GetFocus()` の DM に対し `doc_mode_on_focus_change(0, dm_ptr, hwnd)` を**直接**呼ぶ（キューを通らない。Activate 前に作られた DM は `OnInitDocumentMgr` を観測していない） |
+| `state.rs` `TL_IME_APP_SESSION`（#51） | `base_dm: usize`（アクティブ化後に最初にフォーカスされた DM のポインタ）と `applied` |
+
+`ModeStore` の単体テストは無い（`state.rs` の `tests` は選択・ライブ変換・学習の判定が対象）。
+
+#### 問題の成立（コード上）
+
+1. **破棄が同期、保存が遅延**: ブラウザのタブ切替のように「`OnUninitDocumentMgr(A)`（同期、`dm_modes[A]` 削除）→ `process_focus_change(prev=A, next=B)`（遅延）」の順になると、`doc_mode_on_focus_change` が `dm_modes[A]` に現在モードを**入れ直す**。`dm_to_hwnd[A]` は削除済みなので HWND への退避は起きず、`dm_modes` にだけ死んだポインタの項目が残る
+2. **アドレスの再利用**: OS が A のアドレスを新しい DM に使うと、その DM の最初のフォーカスで `dm_modes[A]` が見つかり、前のセッションのモードを復元する（`hwnd_modes` のフォールバックにも既定値にも進まない）
+3. **手動変更の即時保存も同じ**: `doc_mode_remember_current` は `TL_CURRENT_DM` が破棄済みでも `dm_modes` に入れる（`TL_CURRENT_DM` は次の遅延処理まで更新されない）
+4. **`OnSetFocus` の `next` が処理前に破棄されうる**: 遅延処理の時点で `next` が既に無い場合でも、復元と `ime_sync::apply` が走る
+5. `remember_last_kana_mode = false` では 1〜3 の保存経路を通らないので起きない（Issue の記述どおり）
+
+#### 設計（案）
+
+**基本**: DM を「ポインタ」ではなく **`DmRef { ptr, gen }`（ポインタ + 世代）** で識別し、世代の登録・失効は **TSF スレッドの
+thread-local な台帳**で行う（`OnInitDocumentMgr` / `OnUninitDocumentMgr` / `OnSetFocus` / 遅延処理 / Activate はすべて同じ
+STA スレッドで動くので、ロックを使わずに登録・失効を欠落なく記録できる）。`ModeStore`（`Mutex`）は `DmRef` を鍵にする。
+
+1. **台帳 `DmRegistry`（thread-local）**: `HashMap<usize /*ptr*/, DmSlot { gen: u64, alive: bool }>` と単調増加の `next_gen`
+   - `OnInitDocumentMgr(dm)`: `gen = next_gen++`、`slot[ptr] = { gen, alive: true }`（同じ ptr の古い slot は上書き = 再利用の検出）
+   - `OnUninitDocumentMgr(dm)`: `slot[ptr].alive = false`（slot は消さない。以後に届く古いイベントを「死んだ世代」と判定するため）。
+     そのうえで `dispose_dm_resources(DmRef)`
+   - **初回の目撃で登録**: `OnSetFocus` / Activate が台帳に無い ptr を見たら、その場で `{ gen: next_gen++, alive: true }` として登録する
+     （Activate 前に作られ `OnInitDocumentMgr` を観測していない既存 DM の扱い。生存は「まだ Uninit を見ていない」ことで表す）
+   - `current(ptr) -> Option<DmRef>`（alive のときだけ）、`is_live(DmRef) -> bool`（ptr の slot があり、gen が一致し、alive）
+   - 死んだ slot の掃除: 新しい Init で上書きされるまで残す。上限（案 1024）を超えたら古い死んだ slot から捨てる（ptr の再利用で
+     偽陽性は起きない。gen が一致しないだけで無視される）
+2. **キューに積む時点で世代を確定**: `FocusChange { prev: Option<DmRef>, next: Option<DmRef>, hwnd }`。`OnSetFocus`（msctf の
+   コールバック内）で台帳から `DmRef` を取る。台帳は thread-local なので COM 再入もロックも無い。**処理時に最新世代を取り直して
+   古いイベントに付け替えることはしない**
+3. **遅延処理 `process_focus_change`**:
+   - `prev`: `is_live(prev)` のときだけ保存する。死んでいる（Uninit 済み）か世代が違う（再利用済み）なら保存しない。
+     HWND への退避は Uninit 時の `doc_mode_remove` で済んでいる。debug ログに `skipped save for dead dm=… gen=…` を残す
+   - `next`: `is_live(next)` でないなら、復元も `ime_sync::apply` もしない（その DM は無いか別物。新しい DM には別の
+     `OnSetFocus` が来る）。`TL_CURRENT_DM` はこの場合更新しない
+   - `TL_CURRENT_DM` を `DmRef` にする（`TL_CURRENT_DM_GEN` を追加）
+4. **`ModeStore` の鍵**: `dm_modes: HashMap<DmRef, ImeMode>`、`dm_to_hwnd: HashMap<DmRef, usize>`。ptr が再利用されても
+   gen が違うので古い項目には当たらない（1 の掃除が遅れても安全）。`hwnd_modes` はそのまま
+5. **`doc_mode_remember_current`**: `TL_CURRENT_DM`（`DmRef`）が `is_live` のときだけ `dm_modes` / `dm_to_hwnd` を更新する。
+   `hwnd_modes` の更新は従来どおり（HWND は DM の破棄と独立）
+6. **Activate の直接呼出し**: `GetFocus()` の DM を台帳で初回登録して `DmRef` を作り、`doc_mode_on_focus_change(None, Some(dm), hwnd)`
+7. **#51 の `TL_IME_APP_SESSION.base_dm`** も `DmRef` にする（アドレス再利用で新しい DM を本体と誤認しないため）。判定 `next != base` は
+   `DmRef` の比較になる
+8. **`doc_mode_remove(DmRef)`**: 退避と削除は現行どおり。`dm_modes` の鍵が `DmRef` なので、同じ ptr の新しい世代の項目を消すことはない
+9. **ロック取得失敗の扱い**: 台帳の登録・失効はロック無しで欠落しない。`DOC_MODE_STORE.try_lock()` の失敗は現行どおり
+   「その回は何もしない」（保存・復元をスキップ）。世代の判定は台帳側なので、ロック失敗が生死の判定に影響しない
+
+#### 変えないもの
+
+- 復元の優先順（`dm_modes` → `hwnd_modes` → 既定値）、`hwnd_modes` による DM 再作成時の引継ぎ、`remember_last_kana_mode = false` の挙動、
+  #51 の対象アプリで記憶を通さない扱い、`OnSetFocus` を遅延させる構造（COM 再入の回避）
+- RPC / エンジンには触れない（TSF 内で閉じる）
+
+#### テスト（案）
+
+`DmRegistry` と `ModeStore` の判定を純粋な関数（`FocusChange` を受けて「保存する / しない、復元するモード、apply する / しない」を返す）に
+分け、Win32 なしで確認する。
+
+| 項目 | 期待 |
+|---|---|
+| キュー投入 → 破棄 → 保存 | `prev` が Uninit 済みなら `dm_modes` に入らない。`hwnd_modes` は Uninit 時の退避のまま |
+| 破棄 → 通知（`OnSetFocus` が破棄後に届く）→ 保存 | `prev` は台帳で dead → 保存しない |
+| 同じアドレスで再初期化 → 古いイベント処理 | 旧 gen の `prev` / `next` は無視。新 gen の DM の最初のフォーカスは `hwnd_modes` か既定値から復元し、旧モードを引かない |
+| `next` DM の破棄（処理前に Uninit） | 復元も apply もしない。`TL_CURRENT_DM` は変えない |
+| 破棄後の手動変更保存 | `TL_CURRENT_DM` が dead なら `dm_modes` に入れず、`hwnd_modes` だけ更新 |
+| 初期化通知を観測していない DM での Activate | 初回目撃で登録され、以後の Uninit で失効する |
+| ロック取得失敗時の登録・失効 | 台帳はロックを使わないので欠落しない（テストは `ModeStore` のロック失敗を模擬し、生死判定が変わらないことを見る） |
+| 正当な世代の復元と HWND 経由の引継ぎ | 同じ DM への再フォーカスで前回モード、DM 再作成で `hwnd_modes` から復元（回帰） |
+| `remember_last_kana_mode = false`、#51 対象アプリ | 挙動が変わらない（回帰） |
+
+実機: ブラウザ（Edge / Firefox）のタブ切替とターミナルで、操作・期待モード・実際のモードを記録して確認する。
+アドレス再利用そのものは再現性が低いので、実機ではログの `skipped save for dead dm` の有無と回帰の確認に留め、
+再利用の判定は単体テストで担う。
+
+#### 判断（レモン、2026-09-24）
+
+4 点とも推奨どおりに決定: (1) 台帳は TSF スレッドの thread-local（`ModeStore` の `Mutex` は残す）、(2) `next` が dead なら
+復元も apply もしない、(3) #51 の `base_dm` も `DmRef` にする、(4) 死んだ slot は新しい登録で上書きされるまで残し、
+上限 1024 を超えたら古いものから捨てる。**実装着手は別途の指示を待つ。**
 
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 
