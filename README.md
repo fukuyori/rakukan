@@ -1,4 +1,4 @@
-# rakukan v0.11.7
+# rakukan v0.11.9
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,7 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.11.7 はエンジンの異常からの復帰を中心に直したリリースです。エンジンホストが入れ替わったときに辞書・ユーザー辞書・学習履歴が黙って無効になる問題を修正しました（変換はできるのに辞書候補が出ず、学習もされない状態でした）。GPU ドライバの更新・スリープ復帰・TDR で推論が失敗する状態になったときに「⏳ 変換中...」のまま止まる問題も修正し（[Issue #43](https://github.com/fukuyori/rakukan/issues/43)）、連続して失敗した場合はエンジンが自分で再起動して復帰するようにしました。直らない場合は「⚠ GPU が使えません。Windows の再起動をお試しください」と表示し、辞書候補だけで使い続けられます。モデル読み込み中に変換したときは、読み込みが終わった時点で自動で変換をやり直します（[Issue #39](https://github.com/fukuyori/rakukan/issues/39)）。候補ウィンドウがタスクバーと Alt+Tab に出る問題（[PR #48](https://github.com/fukuyori/rakukan/pull/48)）、エンジン DLL のログレベルが `config.toml` に追随しない問題も直しています。
+v0.11.9 はログ・設定・IME 状態の扱いを直したリリースです。アプリごとの IME 初期状態を `config.toml` の `[input] ime_off_apps` / `ime_on_apps` で設定できるようにし（[Issue #51](https://github.com/fukuyori/rakukan/issues/51) の段 1）、ターミナル判定のコード直書きを廃止しました。設定の変更は IME を使っているすべてのアプリに反映されるようになり、保存通知を取りこぼした場合や手で編集した場合も、フォルダの変更通知と 30 秒ごとの定期確認で検出します（[Issue #65](https://github.com/fukuyori/rakukan/issues/65)）。TSF のログはアプリのプロセスごとのファイルになり（[Issue #60](https://github.com/fukuyori/rakukan/issues/60)）、旧 `rakukan.log` は書かれなくなります。エンジンホストとの通信も記録します（[Issue #54](https://github.com/fukuyori/rakukan/issues/54)）。タブ切替の多いブラウザで閉じた入力先の IME 状態が別の入力先に復元される問題（[Issue #50](https://github.com/fukuyori/rakukan/issues/50)）、`config.toml` が一時的に読めないと既定値に戻る問題（[Issue #61](https://github.com/fukuyori/rakukan/issues/61)）、ホストに接続できない状態で起動を繰り返す問題（[Issue #55](https://github.com/fukuyori/rakukan/issues/55)）を修正しました。nick20002005 さんの PR で、変換の詰まりの監視をホスト側へ移して誤った再起動を防ぎ（[Issue #57](https://github.com/fukuyori/rakukan/issues/57)）、「参」「拾」を含む変換結果の誤判定を直しました（[Issue #53](https://github.com/fukuyori/rakukan/issues/53)）。MOZC 辞書の取得元は SHA で固定しています（[Issue #62](https://github.com/fukuyori/rakukan/issues/62)）。engine ABI が 10 になるため、インストーラーでエンジンと TSF の両方が入れ替わります。
+
+- v0.11.7: **エンジンの異常からの復帰を中心に修正**。エンジンホストが入れ替わったときに辞書・ユーザー辞書・学習履歴が黙って無効になる問題、推論失敗で「⏳ 変換中...」のまま止まる問題（Issue #43）を修正し、連続して失敗した場合はエンジンが自分で再起動して復帰。モデル読み込み中の変換は読み込み後に自動でやり直す（Issue #39）。候補ウィンドウがタスクバーと Alt+Tab に出る問題（PR #48）、エンジン DLL のログレベルが `config.toml` に追随しない問題も修正。
 
 - v0.11.6: **候補の順位を「学習履歴 → ユーザー辞書 → システム辞書 → LLM」にした**（Issue #13）。記号・絵文字を通常語の後ろに mozc の優先順で並べ、「みぎ」で「右」が矢印記号に埋もれる問題を修正（Issue #42。辞書の再生成が要る）。読みそのものを明示的に選んだ確定も学習。ひらがな入力中の英単語が後ろの日本語ごと壊れる問題（Issue #38、PR #44）、辞書候補が多い読みで LLM 候補が入らない問題、ホスト再起動直後に Space が固まる問題も修正。
 
@@ -141,7 +143,7 @@ cargo make quick-install
 - 未指定は全レイヤー GPU オフロード
 - `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果は `rakukan-engine-host.log` に出る）
 
-`n_gpu_layers` と `model_variant` は config.toml を編集したあと IME をオン/オフするだけで即時反映されます（`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます）。
+`n_gpu_layers` と `model_variant` は config.toml を編集して保存すると自動で反映されます。変更は保存通知・フォルダの変更通知・30 秒ごとの定期確認で検出され、`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます。すぐに反映したい場合は言語バーの「エンジン再起動」を使います。
 
 `[input]` セクションでは起動時の IME 状態を指定できます。
 

@@ -22,7 +22,7 @@
 - インストール後、メモ帳・EmEditor で通常操作 4 項目を確認した。同一 mtime の試験は、日時復元と読込の順序を制御できていないため範囲付き。#65 の全受入条件を合格にした記録ではない
 - 終了時に設定を再確認し、候補数 19・候補文字サイズ 16、`config.toml` と `%APPDATA%\rakukan\config.issue65-20260922-174950.bak` の SHA256 一致を確認した。バックアップは残している。試験用の故障注入機構はまだ作成・導入していない
 
-**2026-09-24 夕方の状態（#50 実装・実機確認）**: main は `8296813`。**#50 の実装（新規 `crates/rakukan-tsf/src/engine/dm_registry.rs`、`engine/mod.rs`、`engine/state.rs`、`tsf/candidate_window.rs`、`tsf/factory.rs`）と計画書・handoff の記録が未コミット**。16:28 に engine / tsf を導入し（`%LOCALAPPDATA%\rakukan` の DLL、SHA256 先頭 B5C632AD、`build=2026-09-24 07:20:40 UTC`）、実機確認は範囲付きで完了。次回は `git status` で利用者によるコミットの有無を確認する。Issue 表の #50 行と計画書 9 節「2026-09-24 #50 の実装」が正。
+**2026-09-24 夕方の状態（#50 実装・実機確認 → 0.11.9 リリース準備）**: #50 は `c078e51` でコミット・プッシュ済み（main と一致）。**0.11.9 のリリース準備（版数 5 か所、CHANGELOG `[0.11.9]`、README）は作業ツリーに作成済みで未コミット。コミット・タグ・パッケージ作成はレモンの指示待ち**。16:28 に engine / tsf を導入し（`%LOCALAPPDATA%\rakukan` の DLL、SHA256 先頭 B5C632AD、`build=2026-09-24 07:20:40 UTC`）、実機確認は範囲付きで完了。次回は `git status` で利用者によるコミットの有無を確認する。Issue 表の #50 行と計画書 9 節「2026-09-24 #50 の実装」が正。
 
 **2026-09-24 の初期進捗記録**（下記の未着手の記述はその時点のもの。最新状態は冒頭と設計書を参照）:
 
@@ -53,14 +53,14 @@
 
 | 項目 | 値 |
 |---|---|
-| main | ローカル・GitHub ともに `7b3d832`（2026-09-22、`git ls-remote` で確認。2026-09-24 も同じ）。`7b3d832` の CI は成功。**2026-09-24 の故障試験機構（`config_watch.rs` / 新規 `config_watch_fault.rs` / `state.rs` の送信境界 / `config.rs` のテスト / `Cargo.toml` の feature / `Makefile.toml` の 2 タスク / `scripts/build-tsf.ps1`）と文書（handoff・計画書・新規 `Issue65_Fault_Test_Design.md`）は未コミット**。導入済みの DLL は `7b3d832` 時点のビルドのまま |
+| main | ローカル・GitHub ともに `c078e51`（2026-09-24、`git push` で確認。#50 の実装と実機確認の記録まで入っている）。**0.11.9 のリリース準備（VERSION / Cargo.toml / Cargo.lock / rakukan_installer.iss / csproj の版数、CHANGELOG の `[0.11.9]`、README の 1 行目と「最新の変更」）は 2026-09-24 に作業済みで未コミット**。導入済みの DLL は `c078e51` 相当（16:28 導入） |
 | 最新リリース | **0.11.7**（2026-09-14、タグ・GitHub Release あり） |
-| 次のリリース番号 | **0.11.9**。0.11.8 は取り消して欠番（タグもリリースも作っていない） |
+| 次のリリース番号 | **0.11.9**。0.11.8 は取り消して欠番（タグもリリースも作っていない）。**版数の更新と CHANGELOG は作業ツリーに作成済み（未コミット・未タグ）**。パッケージはレモンが `-Sign` で作る |
 | engine ABI | **main は 10**（PR #59 のマージ `fb656e1` で 9 → 10。`crates/rakukan-engine/src/ffi.rs` と `crates/rakukan-engine-abi/src/lib.rs` の 2 か所）。**次のインストールでは engine と tsf の両方をビルドし直す**（片方だけだと不一致でエンジンが起動しない） |
 | RPC protocol | 5（`crates/rakukan-engine-rpc/src/protocol.rs`）。#56 / #66 の実装で上げる見込み。共通の要求・応答を先に設計し、PR は分ける案 |
 | `dict_schema` | 2 |
 | 開いている PR | 無し。**#58（#53）と #59（#57）は 2026-09-21 に rebase でマージした**。下の「マージした PR と状態」を参照 |
-| CHANGELOG | `[Unreleased]` 節は無い。次のリリース作業で作る |
+| CHANGELOG | `## [0.11.9] - 2026-09-24` を作成済み（未コミット。リリース日がずれたら日付を直す）。次の開発開始時に `[Unreleased]` を再作成する |
 | 作業計画 | [September_Late_Plan.md](September_Late_Plan.md)（段 1〜4。判断事項 J-1〜J-9、9 節に実施記録） |
 | J-5 の (2) | [#65](https://github.com/fukuyori/rakukan/issues/65) は方式採用済み、実装・自動テスト済みで `7b3d832` にコミット・プッシュ済み。**通常操作 4 項目は範囲付きで実機確認済み**。2026-09-24 に故障試験機構と Win32 統合テストを実装（未コミット）。残るのは個別の監視源失敗、設定アプリの保存失敗、同一 mtime の待機ループ試験、対象アプリの故障試験と通常版への復元。再接続への組込みは #56 と調整待ち。[#66](https://github.com/fukuyori/rakukan/issues/66) は方式採用・実装着手が未承認 |
 

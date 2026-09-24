@@ -1672,7 +1672,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rakukan-dict"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "bincode",
@@ -1686,7 +1686,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-dict-builder"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -1698,7 +1698,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "hf-hub",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-abi"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "libloading",
@@ -1731,7 +1731,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-cli"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "clap",
@@ -1742,7 +1742,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-host"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "rakukan-engine-abi",
@@ -1754,7 +1754,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-engine-rpc"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "postcard",
@@ -1766,7 +1766,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tray"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "windows",
@@ -1774,7 +1774,7 @@ dependencies = [
 
 [[package]]
 name = "rakukan-tsf"
-version = "0.11.7"
+version = "0.11.9"
 dependencies = [
  "anyhow",
  "embed-resource",

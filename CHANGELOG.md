@@ -3,6 +3,30 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [0.11.9] - 2026-09-24
+
+0.11.8 は取り消したため欠番（タグ・リリースなし）。engine ABI が 9 → 10 に上がるため、インストーラーはエンジンと TSF の両方を入れ替える。
+
+### Added
+
+- **アプリごとの IME 初期状態を `config.toml` で設定できるようにした**（[Issue #51](https://github.com/fukuyori/rakukan/issues/51) の段 1、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）: `[input] ime_off_apps` に書いたアプリはアクティブになったときに IME をオフにする（既定値は `conhost.exe` / `WindowsTerminal.exe` / `mintty.exe` / `wezterm-gui.exe` / `ghostty.exe`）。`[input] ime_on_apps` に書いたアプリは、アクティブになった後にアプリ本体とは別の入力先（文字入力欄）に入ったときに 1 回だけオンにする（既定値は空）。どちらも利用者が IME を操作したらその状態を保ち、インアクティブになったら捨てる。対象アプリでは入力先ごとのモード記憶を使わない。従来のウィンドウクラス名によるターミナル判定は削除し、この設定を唯一の情報源にした。設定アプリからの編集は段 2 で対応する。
+- **設定の変更を、IME を使っているすべてのアプリに反映するようにした**（[Issue #65](https://github.com/fukuyori/rakukan/issues/65)）: 従来は設定アプリの保存通知を取りこぼしたプロセスに反映されず、`config.toml` を手で編集した場合や、更新日時とサイズが変わらない編集も見逃していた。保存通知に加えてフォルダの変更通知と 30 秒ごとの定期読込を行い、変更の有無は本文のハッシュで判定する。反映はエンジンの再起動 1 回にまとめ、反映待ちの間に同じ設定を何度も送らない。監視の一部が使えない環境でも残りの経路で反映される。
+- **エンジンホストとの通信のログを TSF のログに記録するようにした**（[Issue #54](https://github.com/fukuyori/rakukan/issues/54)）: 通信の遅延（`rpc SLOW`）、ホストの起動失敗と起動抑止、再起動要求への応答が残る。通常運用でのログ量の増加は 1 日数行。
+- **複数のログを時刻順に統合するスクリプト `scripts/merge-logs.ps1` を追加**: 下記のプロセス別ログを 1 本にまとめて調査に使う。
+
+### Changed
+
+- **TSF のログをアプリのプロセスごとに分けた**（[Issue #60](https://github.com/fukuyori/rakukan/issues/60)）: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log` に書く。1 ファイル 16 MiB × 5 世代、全体の保持目安は 256 MiB。複数のアプリが同じファイルに書いてローテーションで壊れる問題が無くなった。**旧 `rakukan.log` は書かれなくなり、自動では削除されない**（不要なら手で削除する）。
+- **変換の詰まりの監視をエンジンホスト側に移した**（[Issue #57](https://github.com/fukuyori/rakukan/issues/57) / [PR #59](https://github.com/fukuyori/rakukan/pull/59)、nick20002005）: 従来は TSF 側のタイマーが詰まりを判定しており、変換が 250 ms を超えて返ると開始時刻が残り、後の変換でエンジンが誤って再起動されることがあった。ホストが実行番号で数えて 30 秒で詰まりを確定し、自分で終了して次の変換で起動し直す。復帰の記録に理由（`stall` / `inference_failed`）が付いた。engine ABI 9 → 10。
+- **MOZC 辞書の取得元をリビジョンの SHA で固定した**（[Issue #62](https://github.com/fukuyori/rakukan/issues/62)）: 辞書の `build.json` に取得元と SHA を記録し、違う版から作られた辞書と記録の無い辞書はインストール時に作り直す。辞書の差し替えはコピー → 検証 → 入れ替えの順にし、途中で止まっても元の辞書が残る。
+
+### Fixed
+
+- **タブ切替の多いブラウザなどで、閉じた入力先の IME オン/オフが別の入力先に誤って復元されることがある問題を修正**（[Issue #50](https://github.com/fukuyori/rakukan/issues/50)）: 破棄された入力先（DocumentManager）への遅延したフォーカス通知が記憶を入れ直し、OS が同じアドレスを新しい入力先に再利用すると前の状態を引いていた。入力先をアドレスと世代で識別し、破棄済み・世代違いの入力先には保存も復元も行わない。IME を他の入力方式に切り替えて戻したときは、ウィンドウ単位の記憶から復元する。
+- **`config.toml` が読めないときに設定を既定値へ戻さないようにした**（[Issue #61](https://github.com/fukuyori/rakukan/issues/61)）: 保存直後などで一時的に読めなかった場合、従来は既定値で動いてしまっていた。失敗時は直前の設定を保ち、パスとエラー内容を警告に残す。ファイルが無い場合も同じ扱いで、削除を暗黙の「設定リセット」にしない（初回だけ既定値）。
+- **エンジンホストを起動できても接続できない状態が続くと、起動を繰り返す問題を修正**（[Issue #55](https://github.com/fukuyori/rakukan/issues/55)）: 起動後の接続失敗（接続・`Hello`・`Create` の各段階）も起動失敗として数え、連続 3 回で 30 秒間は起動を抑える。抑止中のログは `host spawn suppressed`。
+- **読みに「さん」「じゅう」を含む入力で、変換結果の「参」「拾」が数字の保存に反すると誤判定されていた問題を修正**（[Issue #53](https://github.com/fukuyori/rakukan/issues/53) / [PR #58](https://github.com/fukuyori/rakukan/pull/58)、nick20002005）: 辞書で語と読みを対応付け、読みが正当化する「参」「拾」は数字の保存の検証で数えない。照合する読みの長さは 12 文字まで。
+
 ## [0.11.7] - 2026-09-14
 
 ### Fixed

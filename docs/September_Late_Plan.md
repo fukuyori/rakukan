@@ -2336,6 +2336,23 @@ Deactivate で失効させた DM の項目は `hwnd_modes` に退避されるの
 レモンからの指摘（手順の段取り）: 切替系の操作は「戻す」と「戻した後に見る点」を同じ手順に書き、手順の前に見たい経路・期待結果・判定行を
 簡潔に説明する。オン/オフはログから読めるので操作者に報告させない。
 
+### 2026-09-24 段 2: 0.11.9 のリリース準備（未コミット）
+
+#50 を `c078e51` でコミット・プッシュした後、[version-update-checklist.md](version-update-checklist.md) に従って作業ツリーに作成した。
+
+| 対象 | 内容 |
+|---|---|
+| `VERSION` / `Cargo.toml` / `rakukan_installer.iss` / `Rakukan.Settings.WinUI.csproj` | 0.11.7 → 0.11.9 |
+| `Cargo.lock` | `cargo check --workspace --all-targets` で更新（rakukan-* の 9 項目） |
+| `CHANGELOG.md` | `## [0.11.9] - 2026-09-24` を新設。Added 4 件（#51 段 1、#65、#54、`merge-logs.ps1`）、Changed 3 件（#60、#57 / PR #59、#62）、Fixed 4 件（#50、#61、#55、#53 / PR #58）。冒頭に 0.11.8 の欠番と ABI 10 の注記 |
+| `README.md` | 1 行目を v0.11.9 に、「最新の変更」の段落を 0.11.9 の要約にし、0.11.7 を箇条書きへ繰り下げ |
+
+確認: `git diff --check` 問題なし。`git grep "0\.11\.7"`（生成物・Cargo.lock・docs・CHANGELOG・README を除く）の残りは `config.rs` の履歴コメント 1 件だけ（チェックリスト 5 節の「書き換えない」に該当）。
+辞書は `%LOCALAPPDATA%\rakukan\dict\rakukan.dict.build.json` に `mozc_rev` と `dict_schema = 2` があり、`build-installer.ps1` がそのまま同梱する（再生成不要）。
+
+リリース日は 2026-09-24 と書いた。ずれる場合は CHANGELOG の日付を直す。**コミット・タグ・パッケージ作成（`-Sign`）はレモンの指示と操作**。
+リリース後 1 週間の確認項目は上の「段 2」の表のとおり。
+
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 
 計画書 3-1 の項目。main `bae1e45` のコード（RPC クライアントは `bf809fc` から変更なし）と、手元の
