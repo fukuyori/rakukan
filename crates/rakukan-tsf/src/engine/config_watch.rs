@@ -553,12 +553,23 @@ mod win32 {
             if let Some(job) = sched.take_due(now_ms()) {
                 let outcome = read(job.reason);
                 sched.on_read_done(now_ms());
-                tracing::debug!(
-                    "config_watch: read ({}) -> {} save_event={}",
-                    job.reason,
-                    outcome,
-                    job.save_event
-                );
+                // 変更なしの読込は 30 秒ごとに起きるので trace。公開した・読めなかったときだけ debug
+                // （読めなかった WARN は config 側が失敗の内容が変わったときに 1 回出す）
+                if outcome == "Unchanged" {
+                    tracing::trace!(
+                        "config_watch: read ({}) -> {} save_event={}",
+                        job.reason,
+                        outcome,
+                        job.save_event
+                    );
+                } else {
+                    tracing::debug!(
+                        "config_watch: read ({}) -> {} save_event={}",
+                        job.reason,
+                        outcome,
+                        job.save_event
+                    );
+                }
                 retry_missing(
                     &options,
                     faults,

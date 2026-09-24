@@ -841,7 +841,9 @@ pub fn reload_config(reason: &'static str) -> LoadOutcome {
     };
     match read_and_build(&path, &prev, revision) {
         Ok(None) => {
-            tracing::debug!("config unchanged ({reason})");
+            // 変更なしの読込は定期確認で 30 秒ごとに起きるので trace に留める
+            // （debug 運用でプロセス数に比例してログが増えるのを避ける）
+            tracing::trace!("config unchanged ({reason})");
             lock_manager().note_success();
             LoadOutcome::Unchanged
         }
