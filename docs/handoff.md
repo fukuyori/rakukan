@@ -297,6 +297,7 @@ Issue への投稿・レビューは、いずれも本文をレモンが確認�
 | [DESIGN.md](DESIGN.md) | 全体設計（プロセス構成、RPC、ホストのライフサイクル、設定、辞書） |
 | [September_Revised_Plan.md](September_Revised_Plan.md) | 9 月前半の実行計画と、Step ごと・リリースごとの記録（Step 14 は September_Late_Plan.md に引き継いだ） |
 | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) | インストーラー改修（#33） |
+| [Issue_Status.md](Issue_Status.md) | 開いている Issue の概要・対応状況・次の動き（Issue の状態を変えたら同じコミットで更新） |
 | [Segment_Edit_Plan.md](Segment_Edit_Plan.md) | 文節変換の論点（#32） |
 | [Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) | リーダー記号の検討（#35） |
 | [Step10_Romaji_Rebuild_Plan.md](Step10_Romaji_Rebuild_Plan.md) | ローマ字入力の再構築（完了） |
