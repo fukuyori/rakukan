@@ -7,7 +7,7 @@
 対象: 0.11.9 以降（インストーラー再設計 #33 は 0.12 系。本計画の対象外）
 
 位置づけ: [handoff.md](handoff.md)（2026-09-17）と GitHub の Issue / PR を起点に、
-インストーラー改修（[October_Install_Plan.md](October_Install_Plan.md)）以外の作業の順序と判断を記述する。
+インストーラー改修（[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)）以外の作業の順序と判断を記述する。
 [September_Revised_Plan.md](September_Revised_Plan.md) の Step 14（リリースと再計測）を引き継ぐ。
 
 この文書は計画書であり、Issue への回答、PR のレビュー投稿、マージ、バージョン変更は含まない。
@@ -233,7 +233,7 @@ Step 14 の引継ぎとして、[旧計画 10 節](September_Revised_Plan.md#10-
 
 ## 5. 対象外
 
-- #33 / #46 / #51 段 2（インストーラー再設計と設定アプリ。[October_Install_Plan.md](October_Install_Plan.md)）
+- #33 / #46 / #51 段 2（インストーラー再設計と設定アプリ。[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)）
 - #32 文節変換（本計画とインストーラー改修の後）
 - #29（保留）
 - #18（棚卸しの記録。個別 Issue へ分割済み）
@@ -2402,7 +2402,7 @@ nick が 03:18 UTC に Draft [PR #67](https://github.com/fukuyori/rakukan/pull/6
 
 **#66**: 上の B「巻き戻り防止」の採用条件を `Some(hash)` とディスク上の本文のハッシュの一致に限定した。`None` は本文欠落と一致する値ではなく、設定の採用・変更・ホスト終了を認めない。受入条件に、本文が存在する場合と欠落している場合の双方で `None` を送る試験を追加した。これは #66 の設計案と試験条件の明確化であり、方式採用・実装着手の判断ではない。#56 の v6 にフィールドを予約しても、#66 の照合を実際に有効にするときのプロトコル版と旧ホストとの互換条件は別途決める。
 
-旧ホストを配布インストーラー側で停止する方針は、[October_Install_Plan.md](October_Install_Plan.md) の更新経路・完了条件・検証項目に組み込んだ（レモンの 2026-09-25 の指示）。インストーラーへの実装は本計画の対象外。
+旧ホストを配布インストーラー側で停止する方針は、[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の更新経路・完了条件・検証項目に組み込んだ（レモンの 2026-09-25 の指示）。インストーラーへの実装は本計画の対象外。
 
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 

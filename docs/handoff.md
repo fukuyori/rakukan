@@ -115,7 +115,7 @@
 ### #56 の最新状況（2026-09-25 更新）
 
 - **2026-09-25 03:18 UTC、nick が Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット、要求・応答の形だけ、v6、`rakukan-engine-rpc` のみ +275/-24、main `4399279` 上、CI 成功）を提出**。同日 07:15 UTC に[返信を投稿](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616)。5 点への回答（`Change` に包む形で進める・変更系の旧 variant は `_Reserved…` にしてホストは `Error`・型の幅はそのまま・`RequestRecord` は `server.rs` へ・`config_version` は別フィールドで今回足す・v6 は次版で (a)+(b) が入ってから 1 回リリース）と、型を確定する段階で決める追加 3 点（A: `Restored { engine_gen, then: Option<ChangeOutcome> }` と `Change` の応答を同じ型に、B: `ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`（9/22 §4 の `Bool(false)` とこちらの #66 受入条件の食い違いを明示し、こちらの判断で揃えた）、C: `config_version: Option<[u8; 32]>` を `Create` / `ShutdownIfConfigDiffers` / `Change` に `None` 固定で今回足す。`None` は #66 で「一致するハッシュ」として受理しない）。**A〜C の反映で形を確定、その後 (a) の残り**。TSF 側の `ShutdownSkipped` の扱いは #65 の再接続組込みでこちらが行う。**古いホストの残存**: 配布インストーラー（`rakukan_installer.iss`、`CloseApplications=no`）はホストを停止しないので、版上げを含むリリースの前に扱いを決める（インストーラー側で停止か、版不一致の `Hello` を受けた TSF が旧ホストの終了を試みるか）。記録は計画書 9 節「2026-09-25 #56 Draft PR #67 の形の確認と返信」
-- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（未コミット）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [October_Install_Plan.md](October_Install_Plan.md) に組み込み、実装はインストーラー再設計時に行う。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
+- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（`b3a0f9a` でコミット・プッシュ済み）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) に組み込み、実装はインストーラー再設計時に行う。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
 
 #### 2026-09-22 時点の経緯
 
@@ -223,7 +223,7 @@ sudo cargo make install
 | #45 | 速く打つとライブ変換のプレビューが更新されない | nick の PR 待ち（#40 の 2026-09-12 のコメントで依頼済み） |
 | #40 | 候補・予測の品質（統合ブランチ側の報告 7 件） | 1・3 は再現せず、7 は #45、2 は縮小版の PR 待ち（依頼済み）、4 は見送り |
 | #35 | 区読点だけの読みとリーダー記号 | 判断待ち。計画書の J-6（推奨: Space 変換の本線を先に、`z` キー列は後）。[Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) の 3.1.1 の A〜C が未決。**PR #31 は 2026-09-13 に nick が取り下げてクローズ済み**（方針が決まったら新しく出すとのこと） |
-| #33 | インストーラー再設計（`%ProgramFiles%` 移行、更新は実行 → 再起動で完了） | [October_Install_Plan.md](October_Install_Plan.md) |
+| #33 | インストーラー再設計（`%ProgramFiles%` 移行、インストーラー実行後に再起動またはサインアウト・サインインで完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) |
 | #32 | 文節変換 | 判断待ち。[Segment_Edit_Plan.md](Segment_Edit_Plan.md)。計画書では本計画とインストーラー改修の後。読みと変換結果の対応付け方式は #63 に分けた |
 | #64 | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。**対処方針は未決定、再現・実機検証は未実施**。2026-09-22 起票の #66 に、古い設定の拒否とホスト内のエンジン置き換え・`Reload` の廃止を組み合わせる案を記録した。#56 の復元との順序調整が必要。方式採用・実装着手は未承認 |
 | #63 | 読みと変換結果を文節単位で対応付ける方式の検討 | 2026-09-20 起票。実装予定なし。方式 1（かなアンカー）は不採用、2（辞書ラティス）/ 3（形態素解析）/ 4（jinen の NLL スコアリング）を比較して記録。進める前に決めること: 文節の定義、発火タイミング、実験の順番 |
@@ -296,7 +296,7 @@ Issue への投稿・レビューは、いずれも本文をレモンが確認�
 | [September_Late_Plan.md](September_Late_Plan.md) | **現在の作業計画**。段 1〜4、判断事項 J-1〜J-9、9 節に実施記録（#54 の修正と確認、#53 の設計と PR #58 のレビュー・マージ、#56 / #57 の設計と PR #59 のレビュー・マージ、#60 / #61 / #62 の起票・実装・実機確認、#63 の起票、#56 の確認事項 5 点と 2026-09-22 の設計回答・判断の返信） |
 | [DESIGN.md](DESIGN.md) | 全体設計（プロセス構成、RPC、ホストのライフサイクル、設定、辞書） |
 | [September_Revised_Plan.md](September_Revised_Plan.md) | 9 月前半の実行計画と、Step ごと・リリースごとの記録（Step 14 は September_Late_Plan.md に引き継いだ） |
-| [October_Install_Plan.md](October_Install_Plan.md) | インストーラー改修（#33） |
+| [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) | インストーラー改修（#33） |
 | [Segment_Edit_Plan.md](Segment_Edit_Plan.md) | 文節変換の論点（#32） |
 | [Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) | リーダー記号の検討（#35） |
 | [Step10_Romaji_Rebuild_Plan.md](Step10_Romaji_Rebuild_Plan.md) | ローマ字入力の再構築（完了） |
