@@ -17,7 +17,128 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v4: `MergeCandidatesForReading` を追加
 /// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
-pub const PROTOCOL_VERSION: u32 = 5;
+/// - v6: Issue #56 の host / engine / owner 識別子と変更要求・復元・終了応答の形を追加
+pub const PROTOCOL_VERSION: u32 = 6;
+
+/// ホストプロセスの起動インスタンス識別子。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct HostId(pub u128);
+
+/// TSF プロセスの起動インスタンス識別子。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct TsfId(pub u128);
+
+/// ホスト内のエンジン世代。ホストの入れ替わりと、同一ホスト内の再生成を区別する。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct EngineGen {
+    pub host_id: HostId,
+    pub generation: u64,
+}
+
+/// 共有エンジンの編集状態を所有する composition。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Owner {
+    pub tsf_id: TsfId,
+    pub composition: u64,
+}
+
+/// TSF インスタンスごとに単調増加する変更要求番号。
+pub type RequestSeq = u64;
+
+/// composition に依存する要求が前提とする状態。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Expect {
+    pub engine_gen: EngineGen,
+    pub owner: Owner,
+}
+
+/// 変更要求の種類。未解決要求の追跡に payload を保持しない形で使う。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeKind {
+    InputChar,
+    PushChar,
+    PushRaw,
+    PushFullwidthAlpha,
+    Backspace,
+    FlushPendingN,
+    BgStart,
+    BgTakeCandidates,
+    BgReclaim,
+    Commit,
+    CommitAsHiragana,
+    ResetPreedit,
+    ForcePreedit,
+    ResetAll,
+    Learn,
+    LearnForce,
+}
+
+/// 応答を受け取れず、適用済みか判断できない変更要求。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Unresolved {
+    pub seq: RequestSeq,
+    pub kind: ChangeKind,
+    pub owner: Owner,
+    pub engine_gen: EngineGen,
+}
+
+/// `Restore` と同じエンジンロック内で続けて適用できる変更要求。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeRequest {
+    InputChar {
+        c: u32,
+        kind: InputCharKind,
+        bg_start_n_cands: Option<u32>,
+    },
+    PushChar(u32),
+    PushRaw(u32),
+    PushFullwidthAlpha(u32),
+    Backspace,
+    FlushPendingN,
+    BgStart {
+        n_cands: u32,
+    },
+    BgTakeCandidates {
+        key: String,
+    },
+    BgReclaim,
+    Commit {
+        text: String,
+    },
+    CommitAsHiragana,
+    ResetPreedit,
+    ForcePreedit {
+        text: String,
+    },
+    ResetAll,
+    Learn {
+        reading: String,
+        surface: String,
+    },
+    LearnForce {
+        reading: String,
+        surface: String,
+    },
+}
+
+/// 要求を適用しなかった理由。#66 の理由は同じ enum に後から追加する。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Reason {
+    GenMismatch,
+    OwnerMismatch,
+    ResultUnavailable,
+}
+
+/// ホストが保持する TSF ごとの直近記録の形。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RequestRecord {
+    pub last_seq: Option<RequestSeq>,
+    pub last_response: Option<Response>,
+    pub floor: RequestSeq,
+    pub sessions: u32,
+    pub in_flight: u32,
+    pub last_used: u64,
+}
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,6 +157,8 @@ pub enum Request {
     /// 接続直後に必ず送る。ホスト側はバージョン不一致なら Error を返して切断する。
     Hello {
         protocol_version: u32,
+        tsf_id: TsfId,
+        highest_sent: RequestSeq,
     },
     /// エンジン側セッションの初期化要求。config_json は EngineConfig の JSON。
     /// 既に同じ config の DynEngine が存在する場合は何もしない。
@@ -191,14 +314,16 @@ pub enum Request {
     ///
     /// `Reload` の代替経路: 旧 `Reload` は engine DLL を drop → 新規 load で
     /// 反映していたが、BG スレッドが DLL を参照している瞬間に unmap が走ると
-    /// AV を誘発する。`Shutdown` を受けたホストは `Response::Unit` を返して
+    /// AV を誘発する。`Shutdown` を受けたホストは `Response::ShutdownAccepted` を返して
     /// flush 後、`std::process::exit(0)` でプロセスごと終了する。OS が
     /// 全スレッドと DLL マッピングをまとめて回収するため race が原理的に起きない。
     ///
     /// クライアント側は応答受信後、既存接続を破棄する。次回 API 呼び出し時に
     /// `connect_or_spawn` で自動的にホストを再 spawn する経路が既にあるため、
     /// TSF 側コードはほぼ無変更で済む。
-    Shutdown,
+    Shutdown {
+        expected_host_id: HostId,
+    },
 
     // ─── 学習（追加） ─────────────────────────────────────────
     /// 辞書ガードなしで学習する（候補ウィンドウからの明示選択、案C）。
@@ -234,6 +359,24 @@ pub enum Request {
     /// `Shutdown` にフォールバックするため互換性は保たれる。
     ShutdownIfConfigDiffers {
         config_json: Option<String>,
+        expected_host_id: HostId,
+    },
+
+    // ─── Issue #56: 採番された変更要求（v6）───────────────
+    Change {
+        seq: RequestSeq,
+        expect: Expect,
+        request: ChangeRequest,
+    },
+
+    // ─── Issue #56: 復元（v6）─────────────────────────────
+    /// 読みと未確定ローマ字を復元し、必要なら同じロック内で変更要求を適用する。
+    Restore {
+        owner: Owner,
+        seq: RequestSeq,
+        reading: String,
+        pending_romaji: String,
+        then: Option<ChangeRequest>,
     },
 }
 
@@ -241,6 +384,9 @@ pub enum Request {
 pub enum Response {
     Hello {
         protocol_version: u32,
+        host_id: HostId,
+        engine_gen: Option<EngineGen>,
+        record_found: bool,
     },
     Unit,
     Bool(bool),
@@ -262,5 +408,15 @@ pub enum Response {
         preedit: String,
         hiragana: String,
         bg_status: String,
+    },
+    /// 要求は適用されなかった。
+    Rejected(Reason),
+    /// 対象としていたホストが終了要求を受理した。
+    ShutdownAccepted,
+    /// 対象ホストは既に入れ替わっていたため、終了要求を適用しなかった。
+    ShutdownSkipped,
+    /// 復元後の世代。編集状態の詳細は (b) で応答へ追加する。
+    Restored {
+        engine_gen: EngineGen,
     },
 }

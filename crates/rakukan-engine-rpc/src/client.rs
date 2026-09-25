@@ -21,7 +21,9 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{InputCharKind, PIPE_BASE_NAME, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    HostId, InputCharKind, PIPE_BASE_NAME, PROTOCOL_VERSION, Request, Response, TsfId,
+};
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
 
@@ -329,7 +331,7 @@ impl RpcEngine {
     /// `Reload` の代替: DLL drop → 再ロードの race を避けるため、プロセス全体を
     /// 終了させて次回 API 呼び出しで自動 re-spawn させる。
     ///
-    /// - `Request::Shutdown` を送って `Response::Unit` を受信
+    /// - `Request::Shutdown` を送って `Response::ShutdownAccepted` を受信
     /// - 成否に関わらず内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
     /// - `config_json` は保持する（次回 `connect_or_spawn` 時に再送する）
     /// - サーバが応答を返す前に exit してしまい read が失敗するケースも想定し、
@@ -343,11 +345,14 @@ impl RpcEngine {
         if let Some(cfg) = config_json {
             guard.config_json = Some(cfg);
         }
-        let result = guard.call_with_retry(Request::Shutdown);
+        // TODO(#56a): use the host_id retained from the latest Hello response.
+        let result = guard.call_with_retry(Request::Shutdown {
+            expected_host_id: HostId::default(),
+        });
         // 応答の有無に関わらず既存接続は捨てる（サーバが exit 中か直後）。
         guard.stream = None;
         match result {
-            Ok(Response::Unit) => {
+            Ok(Response::ShutdownAccepted) => {
                 tracing::info!("rpc: Shutdown acknowledged by host");
                 Ok(ShutdownOutcome::Acknowledged)
             }
@@ -380,7 +385,11 @@ impl RpcEngine {
         if let Some(cfg) = config_json.clone() {
             guard.config_json = Some(cfg);
         }
-        let result = guard.call_with_retry(Request::ShutdownIfConfigDiffers { config_json });
+        // TODO(#56a): use the host_id retained from the latest Hello response.
+        let result = guard.call_with_retry(Request::ShutdownIfConfigDiffers {
+            config_json,
+            expected_host_id: HostId::default(),
+        });
         match result {
             Ok(Response::Bool(true)) => {
                 // ホストは応答後に exit する。既存接続はもう使えない。
@@ -859,11 +868,18 @@ impl<T: HostTransport> Connection<T> {
             stream,
             &Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                // TODO(#56a): generate one tsf_id per process and report the real highest_sent.
+                tsf_id: TsfId::default(),
+                highest_sent: 0,
             },
         )?;
         match read_frame::<_, Response>(stream)? {
-            Response::Hello { protocol_version } if protocol_version == PROTOCOL_VERSION => Ok(()),
-            Response::Hello { protocol_version } => {
+            Response::Hello {
+                protocol_version, ..
+            } if protocol_version == PROTOCOL_VERSION => Ok(()),
+            Response::Hello {
+                protocol_version, ..
+            } => {
                 bail!("protocol version mismatch: server={protocol_version}")
             }
             Response::Error(e) => bail!("hello error: {e}"),
@@ -1162,6 +1178,9 @@ mod tests {
     fn hello_ok() -> Response {
         Response::Hello {
             protocol_version: PROTOCOL_VERSION,
+            host_id: HostId::default(),
+            engine_gen: None,
+            record_found: false,
         }
     }
 
