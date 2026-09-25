@@ -1873,7 +1873,7 @@ DLL の選択は `DynEngine::load_auto` が `detect_backend()` で **ロード�
 - ホストは **`Create` のたび**（エンジンの有無に関わらず。初回の例外は設けない）と
   `ShutdownIfConfigDiffers` のたびに、ディスク上の `config.toml` を読んでバイト列のハッシュを取り、
   **採用条件を 1 つ**にする（TOML の解析はしない）
-  - **`config_version` が現在の本文のハッシュと一致するときだけ採用する。** それ以外（不一致、
+  - **`config_version = Some(hash)` が現在の本文のハッシュと一致するときだけ採用する。** `None` は初回に正常な設定本文を得られず既定値で始めた状態を表し、本文が無い場合も含めて一致とはみなさない。それ以外（不一致、
     ファイルが存在しない、読み取りエラー）では**ホストの設定を変更しない**（置き換えも終了もしない）
   - エンジンがあって採用しない場合は `Response::ConfigStale` を返す。エンジンが無くて採用しない場合は
     **受け入れず** `Response::ConfigUnavailable` を返し、起動を保留する。各 TSF が保持する「直前の
@@ -1955,6 +1955,7 @@ DLL の選択は `DynEngine::load_auto` が `detect_backend()` で **ロード�
 | 3-3 の項目 | 確認方法（案） |
 |---|---|
 | 2 プロセス以上で新旧の設定を逆順に送る | ホストのテストで `Create(旧, version=旧)` → `Create(新, version=新)` → `Create(旧, version=旧)`。ディスクが新のとき、1 番目は**エンジンが無いので `ConfigUnavailable`**（受理しない）、2 番目は受理、3 番目はエンジンがあるので `ConfigStale` でホストの設定が新のまま |
+| `config_version = None` | 設定本文が存在する場合と欠落している場合の両方で `Create` / `ShutdownIfConfigDiffers` を送る。いずれも一致として受理せず、エンジンがあれば `ConfigStale`、無ければ `ConfigUnavailable` として設定変更・終了・新規起動を行わないこと |
 | ホスト終了後に古い側が先に接続する | ディスクが新のとき、古い側の初回 `Create` が `ConfigUnavailable` → 古い側が読み直して再送 → 受理。「新ホスト → 古い B 先着 → 旧設定で起動」の順序が成立しないこと |
 | 通知を受けなかった側が後で操作する | **通知だけを遮断し、定期確認は動かした状態**（同じスレッドが定期確認を担うので、スレッドは止めない）で保存 → 定期確認の期限（最後の本文確認から 30 秒。通知で延長されない）で読み直されること。モード切替・再接続の各経路でも読み直されること |
 | 連続保存 | 300 ms 内の複数書き込みで読み直しが 1 回にまとまり、最後の内容で確定すること。通知が途切れなくても最大待ち時間（2 秒）で読むこと |
@@ -2352,6 +2353,56 @@ Deactivate で失効させた DM の項目は `hwnd_modes` に退避されるの
 
 リリース日は 2026-09-24 と書いた。ずれる場合は CHANGELOG の日付を直す。**コミット・タグ・パッケージ作成（`-Sign`）はレモンの指示と操作**。
 リリース後 1 週間の確認項目は上の「段 2」の表のとおり。
+
+### 2026-09-25 #56 Draft PR #67 の形の確認と返信
+
+nick が 03:18 UTC に Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット `c301361`、要求・応答の形だけ）を提出し、
+#56 にも案内した。`rakukan-engine-rpc` のみ +275/-24、main `4399279`（0.11.9）上、CI 2 件成功。挙動は変えず、`Change` / `Restore` はホストが
+`Error` を返し、`host_id` / `tsf_id` は既定値、`Shutdown` は常に `ShutdownAccepted`。CI 成功は形の確認であり復旧動作の確認ではない。
+
+#### 記録との照合
+
+識別子（`HostId` / `TsfId` / `EngineGen` / `Owner`）、`Unresolved`、`Restore { …, then }`、`Rejected(Reason)`、`Shutdown` の 2 応答、`Hello` の
+追加項目（`tsf_id` / `highest_sent` / `host_id` / `engine_gen` / `record_found`）、`PROTOCOL_VERSION` 5 → 6 は 9/21〜9/23 の記録どおり。
+`Reload` は未変更。#65 の `ShutdownOutcome` の区別は `ShutdownAccepted` を受けたときだけ `Acknowledged` にする形で維持。
+
+**見つけた点**（レモンの並行セッションの指摘を含む）
+
+1. `Restore.then` の結果を返す型が無い（応答は `Restored { engine_gen }` だけ）。9/22 §5 の「新しい composition の最初の打鍵を
+   `Restore { then: InputChar }` で送り RPC 回数を増やさない」前提が崩れる
+2. `ShutdownIfConfigDiffers` の `host_id` 不一致の応答が、nick の 9/22 §4（`Bool(false)`）と**こちらの計画書の #66 受入条件**
+   （「`host_id` 不一致の再送が `ShutdownSkipped` になること」）で食い違っていた。9/24 の着手承認ではどちらとも決めていなかった
+3. #66 の `config_version` が `Change` に後から足す案だけで、`Create` / `ShutdownIfConfigDiffers` の形が決まっていない。struct variant への
+   フィールド追加は線路の形が変わる
+4. 配布インストーラー（`rakukan_installer.iss`）は `CloseApplications=no` でホストを停止する処理が無い（停止するのは開発用 `install.ps1` のみ）。
+   「古いホストの残存は通常は起きない」とは言えない
+
+#### 返信（07:15 UTC、[コメント](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616)）
+
+- nick の 5 点: (1) `Change { seq, expect, request }` に包む形で進める。`Change` へ移行した変更系の旧 variant（読み取り RPC と `Reload` は対象外）は
+  削除せず `_Reserved…` にしてホストは `Error`（v4 の `MergeCandidates` と同じ。postcard の判別子は並び順）。`ChangeRequest::kind()` に寄せる。
+  (2) 型の幅（識別子 `u128`、世代・連番 `u64`、`Hello` 応答の `engine_gen` は `Option`）はそのまま。(3) `RequestRecord` は `server.rs` へ、
+  `Serialize` と再公開は不要。(4) `config_version` は別フィールドで賛成、今回足す。(5) 0.11.9 は公開済みなので v6 は次版。(a) 完成後にマージし、
+  (b) も入ってから 1 回リリース。古いホストの残存はリリース前にこちらで扱いを決める
+- 追加 3 点: **A** 変更要求の結果を表す enum（例 `ChangeOutcome`）を定め、`Response::Restored { engine_gen, then: Option<ChangeOutcome> }`、
+  `Change` の応答も同じ型。**B** `ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`（食い違いを明示し、こちらの判断で揃えた。
+  TSF が「同じ設定」と区別して反映待ちを残し、新しいホストへ `Create` し直せる。TSF 側の対応は #65 の再接続組込みでこちらが行う）。
+  **C** `config_version: Option<[u8; 32]>`（本文の SHA-256、`ConfigSnapshot.sha256` と同じ）を `Create` / `ShutdownIfConfigDiffers` / `Change` に
+  `None` 固定で今回足す。`None` は「設定本文が無い（既定値由来）」で、#66 では「一致するハッシュ」として受理しない（条件は #66 側で明記）。
+  フィールドの確定と、#66 の照合を有効にするときの版上げは別の判断。`Reason` の #66 用 variant は据え置き
+- A〜C の反映で形を確定、その後 (a) の残りへ
+
+#### こちらの宿題
+
+- #65 の再接続組込み: 公開済みの設定で `Create`、`ShutdownSkipped` を「同じ設定」と区別して反映待ちを残す
+- 版上げを含むリリースの前に、古いホストの残存の扱いを決める（#67 への返信時点の宿題。インストーラー側の停止設計はインストーラー再設計で扱う）
+- #66 の設計に「`config_version = None` は一致として受理しない」を明記する（下記で反映済み）
+
+#### 2026-09-25 #66 の `None` 条件
+
+**#66**: 上の B「巻き戻り防止」の採用条件を `Some(hash)` とディスク上の本文のハッシュの一致に限定した。`None` は本文欠落と一致する値ではなく、設定の採用・変更・ホスト終了を認めない。受入条件に、本文が存在する場合と欠落している場合の双方で `None` を送る試験を追加した。これは #66 の設計案と試験条件の明確化であり、方式採用・実装着手の判断ではない。#56 の v6 にフィールドを予約しても、#66 の照合を実際に有効にするときのプロトコル版と旧ホストとの互換条件は別途決める。
+
+旧ホストを配布インストーラー側で停止する方針は、[October_Install_Plan.md](October_Install_Plan.md) の更新経路・完了条件・検証項目に組み込んだ（レモンの 2026-09-25 の指示）。インストーラーへの実装は本計画の対象外。
 
 ### 2026-09-22 #55 spawn 後の接続失敗を `HostSpawnGuard` に数える: 調査と設計（案）
 

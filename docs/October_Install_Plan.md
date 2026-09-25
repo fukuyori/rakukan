@@ -8,7 +8,7 @@
 
 位置づけ: 2026-09-07 の検討（PR #30 の再検討から派生）で決めた方針を、実装計画として記述する
 
-関連 Issue: #33（問題点の記録）、PR #30、#8
+関連 Issue: #33（問題点の記録）、PR #30、#8、#56（プロトコル版上げ時の旧ホスト残存）
 
 ## 1. 背景と目的
 
@@ -18,6 +18,12 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 また、TSF の登録は HKLM（管理者必須）なのにファイルは `%LOCALAPPDATA%\rakukan`（ユーザー別）に
 置いており、権限と配置が一致していない。ソースからの `cargo make install`（`scripts/install.ps1`）と
 パッケージ（`rakukan_installer.iss`）でロック対処が別実装になっている点も保守負担になっている。
+
+2026-09-25 に #56 の Draft PR #67 を確認した際、現行の配布インストーラーは `CloseApplications=no` で、
+`[Code]` に `rakukan-engine-host.exe` の停止処理が無いことを確認した。開発用 `scripts/install.ps1` は
+ホストを停止する。配布版の更新では旧ホストが残り、新しい TSF が旧プロトコルのホストへ接続を試みる
+可能性がある。#56 で `PROTOCOL_VERSION` 5 → 6 を予定しているため、更新時の停止と版不一致の扱いを
+本計画の対象に含める。旧ホストが残った実機での再現は未実施。
 
 初期の rakukan で Windows が不安定になった経験からサインアウト前提の手順を採ってきたが、
 当時は原因が切り分けられておらず、差し替え方式が原因だと確認されたわけではない。
@@ -44,7 +50,8 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | ソースからの install | `cargo make install` = インストーラーをビルドしてサイレント実行 | 利用者と開発者の経路を同じにし、install.ps1 固有のバグをなくす |
 | Inno Setup | 開発環境の必須前提に加える | 経路一本化の帰結。`check-env` / `setup-env` に追加 |
 | 削除 | 「アプリと機能」または `winget uninstall`。ユーザーデータは残す | 一般アプリの慣習どおり |
-| 旧 DLL と新 host の混在 | 旧 TSF DLL の Hello が `PROTOCOL_VERSION` 不一致で失敗したら「エンジン未準備」と同じ扱い（無変換、ログ出力） | 混在はサインアウトまでの短時間。文字入力は壊さない |
+| 旧 DLL と新 host の混在 | 旧 TSF DLL が新 host と Hello を完了できない場合は「エンジン未準備」と同じ扱い（無変換、ログ出力） | 混在はサインアウトまでの短時間。文字入力は壊さない |
+| 旧 host と新 TSF の混在 | 更新時は旧 host を停止して終了を確認する。なお新 TSF が旧 host と Hello を完了できない場合は未接続として扱い、入力の適用を進めない | 旧 host の残存を更新手順で防ぎ、競合時も異なる通信形式を適用しない |
 | 開発専用の差し替え経路 | 持たない | 改名方式が本線なので不要 |
 | 配布 | GitHub Releases の exe を継続し、winget に登録 | winget は Releases の exe を参照する |
 | Microsoft Store | 対象外（調査のみ） | MSIX は配置・登録の前提が異なる。TSF IME を MSIX で配布できるか未確認 |
@@ -57,7 +64,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | 操作 | 利用者がすること | 内部の動き | 事後の操作 |
 |---|---|---|---|
 | 初回 | exe 実行、UAC 承認 | ファイル配置、regsvr32、TIP 登録、言語リストへ追加 | なし |
-| 更新 | 同じ exe 実行（または `winget upgrade`） | tray / host / 設定アプリを停止して置換。使用中の TSF DLL は改名退避して新版を配置。退避ファイルの遅延削除を予約 | サインアウト → サインイン |
+| 更新 | 同じ exe 実行（または `winget upgrade`） | 配置済みの host を特定して停止・終了確認した後、tray / host / 設定アプリを置換。使用中の TSF DLL は改名退避して新版を配置。退避ファイルの遅延削除を予約 | サインアウト → サインイン |
 | 削除 | 「アプリと機能」（または `winget uninstall`） | 言語リストから除去、regsvr32 /u、ファイル削除。ロード中の DLL は遅延削除 | サインアウト → サインイン |
 
 配置:
@@ -75,6 +82,11 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 - `DefaultDirName` を `{autopf}\rakukan` に変更。`PrivilegesRequired=admin` は維持。
 - `CheckDllLock`、`InstallFail` のサインアウト案内、`.backup` によるロールバックを削除。
+- ファイル置換前に、現行の `%LOCALAPPDATA%\rakukan` と新配置の `%ProgramFiles%\rakukan` のうち更新対象から起動した
+  `rakukan-engine-host.exe` を特定し、停止して終了を待つ。**同名というだけで他の場所のプロセスを停止しない**。
+  ホストが停止できない場合は旧版と新版が混在したまま成功扱いにせず、ファイルの置換前に中断する。
+  停止直後の再起動と、別ユーザーのセッションで実行中のホストをどう検出・調停するかは着手前に確認する。
+  サイレント実行ではダイアログに依存せず、失敗を終了コードとログで通知する。
 - `[Code]` で DLL 差し替えを実装: 上書きに失敗したら `RenameFile` で `<name>.locked-<日時>` へ退避し、
   退避ファイルに対して `MoveFileExW(path, NULL, MOVEFILE_DELAY_UNTIL_REBOOT)` を呼ぶ
   （`external` 宣言で Win32 API を直接呼ぶ。書き方は着手前に確認）。対象は `rakukan_tsf.dll` と
@@ -94,7 +106,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | `rakukan-engine-rpc::client::spawn_host()` | `install_dir()` + `rakukan-engine-host.exe` | 変更不要（`install_dir()` の修正で追随） |
 | `rakukan-dict` の辞書ディレクトリ | `%LOCALAPPDATA%\rakukan\dict` 固定 | `install_dir()\dict` に変更 |
 | `rakukan-engine::kanji::hf_download` | `%USERPROFILE%\.cache\huggingface\hub` に取得 | `%ProgramData%\rakukan\models` を第一候補にし、既存の HF キャッシュは移行期間の読み取りフォールバックとして残す |
-| `rakukan-tsf` の RPC 接続 | Hello の版不一致は `bail!` | 「エンジン未準備」と同じ状態に倒し、`rakukan.log` に版不一致を出す |
+| `rakukan-tsf` の RPC 接続 | Hello の版不一致は `bail!` | Hello の失敗を「エンジン未準備」と同じ状態に倒し、該当プロセスの `rakukan-tsf-<PID>-<起動識別子>.log` に理由を残す。版番号を受け取れた場合と、Hello 自体をデコードできなかった場合を区別する |
 | `settings_launcher` | DLL のディレクトリ基準 | 変更不要 |
 | ログ・設定パス | `%LOCALAPPDATA%` / `%APPDATA%` | 変更不要 |
 
@@ -125,8 +137,8 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | Step | 内容 | 完了条件 |
 |---|---|---|
 | 1 | コードのパス解決を配置非依存にする（4.2 の `install_dir()`、辞書ディレクトリ、モデルディレクトリ、RPC 版不一致の扱い） | 現行の `%LOCALAPPDATA%` 配置のまま全テストと実機動作が変わらない。`%ProgramFiles%` に手動配置しても動く |
-| 2 | インストーラーを新方式にする（4.1） | 新規 PC 相当（旧配置なし）で初回インストール → 変換 → 更新（サインアウトなしで完走） → サインアウト・サインイン後に新版で動作 → 再起動後に `.locked-*` が消えている → 削除で登録とファイルが消える |
-| 3 | 既存利用者の移行 | `%LOCALAPPDATA%\rakukan` に旧版がある状態から新インストーラーで更新し、旧 DLL の登録が消え、新配置で動作する |
+| 2 | インストーラーを新方式にする（4.1） | 新規 PC 相当（旧配置なし）で初回インストール → 変換 → 旧 host を動かしたまま更新（サインアウトなしで完走し、旧 host の終了と新版 host の起動を確認） → サインアウト・サインイン後に新版で動作 → 再起動後に `.locked-*` が消えている → 削除で登録とファイルが消える。停止失敗時は置換前に中断し、サイレント実行でも失敗が判別できる |
+| 3 | 既存利用者の移行 | `%LOCALAPPDATA%\rakukan` に旧版がある状態から新インストーラーで更新し、旧配置の host が残らず、旧 DLL の登録が消え、新配置で動作する |
 | 4 | 経路一本化（4.3）。install.ps1 / uninstall.ps1 の削除、Makefile、check-env / setup-env、README、CLAUDE.md、Stop hook | `cargo make build-engine` → `build-tsf` → `install` が完走し、README の手順どおりに反映できる |
 | 5 | winget 登録（4.4）。リリース後に manifest を提出 | `winget install` / `upgrade` / `uninstall` が通る |
 | 6 | PR #30 に結論コメント、`handoff.md` と `DESIGN.md` の配置記述を更新、CHANGELOG | 文書が実装と一致 |
@@ -134,7 +146,9 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 ## 6. 検証項目
 
 - 更新時: 更新前から IME を使っていたアプリ（メモ帳、ブラウザ、Explorer の検索欄）が更新直後も入力を受け付け、変換不能でも文字入力は壊れない。サインアウト → サインイン後に新版で変換できる。
-- `PROTOCOL_VERSION` を意図的に変えたビルドで更新し、旧 DLL のアプリが無変換になり `rakukan.log` に版不一致が出る。
+- `PROTOCOL_VERSION` と Hello の項目が異なるビルドで更新し、旧 TSF DLL → 新 host と新 TSF DLL → 旧 host の両方向で Hello が失敗する経路を確認する。該当プロセスの TSF ログに得られた理由が残り、異なる版の要求を適用せず、文字入力が壊れないことを確認する。版番号を受け取れずデコード失敗・切断となる場合も含める。
+- 旧 host の稼働中に更新し、対象 host の終了を確認してからファイルを置換する。停止失敗・停止後の再起動・別の場所の同名 exe がある場合も試し、旧 host が残る状態を成功扱いにせず、無関係の exe を停止しない。
+- `%LOCALAPPDATA%` から `%ProgramFiles%` への移行と、別ユーザーが host を使っている状態で更新を試す。停止対象・失敗時の処理・更新後の再接続をログとプロセス情報で確認する。
 - 再起動後に `.locked-*` が消えている（`PendingFileRenameOperations` に登録されていることを事前に確認）。
 - 別ユーザーアカウントでサインインし、「キーボードの追加」で rakukan を選べ、変換できる（モデルは共有ディレクトリから読める）。
 - 削除後にレジストリの CLSID / TIP 登録と言語リストの項目が残っていない。ユーザーデータは残っている。
@@ -145,6 +159,8 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 - Inno Setup の `[Code]` から `MoveFileExW` を `external` 宣言で呼ぶ書き方と、`MOVEFILE_DELAY_UNTIL_REBOOT` が管理者権限下で有効なこと。
 - Inno Setup がサイレント実行時に返す終了コードと、winget manifest の `ReturnCodes` / `ExpectedReturnCodes` の対応。winget の要件（公開 URL、ARP 登録、署名の要否）。
+- Inno Setup の昇格したプロセスから、旧・新配置の host を実行ファイルのパスで識別し、別ユーザーのセッションを含めて安全に停止・終了確認する方法。停止直後の再起動とファイル置換の競合、停止失敗時の中断位置・終了コード・ロールバックを決める。
+- #56 で Hello の要求・応答の項目が変わるため、新旧間で版番号を交換できるかを実際の v5 / v6 のエンコードで確認する。デコード失敗・切断だけの場合は「版不一致」と断定せず、ログと利用者向けの未接続状態をどう表すか決める。
 - `%ProgramData%\rakukan\models` の ACL 設定をインストーラーで行う方法（全ユーザー書込可）。
 - `%ProgramFiles%` 配置での `rakukan-dict-builder.exe` の扱い（配布物から外せるか）。
 - `hf_download` が書き込む先を `%ProgramData%` に変えたときの、既存の `.cache\huggingface` にあるモデルの扱い（コピーするか、読み取りフォールバックのみか）。

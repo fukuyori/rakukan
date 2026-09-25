@@ -112,14 +112,19 @@
 
 **PR と重ならない独立した 3 件（#60 / #61 / #62）を 2026-09-19 に起票・実装し、実機確認まで終えてクローズした。** 経緯は [September_Late_Plan.md](September_Late_Plan.md) 9 節の「2026-09-19 PR と重ならない 3 件を起票・実装」と「2026-09-19 #60 / #61 / #62 の実機確認」。
 
-### #56 の最新状況（2026-09-22）
+### #56 の最新状況（2026-09-25 更新）
+
+- **2026-09-25 03:18 UTC、nick が Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット、要求・応答の形だけ、v6、`rakukan-engine-rpc` のみ +275/-24、main `4399279` 上、CI 成功）を提出**。同日 07:15 UTC に[返信を投稿](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616)。5 点への回答（`Change` に包む形で進める・変更系の旧 variant は `_Reserved…` にしてホストは `Error`・型の幅はそのまま・`RequestRecord` は `server.rs` へ・`config_version` は別フィールドで今回足す・v6 は次版で (a)+(b) が入ってから 1 回リリース）と、型を確定する段階で決める追加 3 点（A: `Restored { engine_gen, then: Option<ChangeOutcome> }` と `Change` の応答を同じ型に、B: `ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`（9/22 §4 の `Bool(false)` とこちらの #66 受入条件の食い違いを明示し、こちらの判断で揃えた）、C: `config_version: Option<[u8; 32]>` を `Create` / `ShutdownIfConfigDiffers` / `Change` に `None` 固定で今回足す。`None` は #66 で「一致するハッシュ」として受理しない）。**A〜C の反映で形を確定、その後 (a) の残り**。TSF 側の `ShutdownSkipped` の扱いは #65 の再接続組込みでこちらが行う。**古いホストの残存**: 配布インストーラー（`rakukan_installer.iss`、`CloseApplications=no`）はホストを停止しないので、版上げを含むリリースの前に扱いを決める（インストーラー側で停止か、版不一致の `Hello` を受けた TSF が旧ホストの終了を試みるか）。記録は計画書 9 節「2026-09-25 #56 Draft PR #67 の形の確認と返信」
+- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（未コミット）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [October_Install_Plan.md](October_Install_Plan.md) に組み込み、実装はインストーラー再設計時に行う。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
+
+#### 2026-09-22 時点の経緯
 
 - nick の[設計回答](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5770284657)を受領（11:17 JST）。識別子を `host_id` / `engine_gen` / `owner` に分離し、プロセス static の未解決要求、記録の回収と `highest_sent` / `floor`、読み取りの照合、`Shutdown` / `Reload`、復元と再送を整理した提案。**設計全体の承認ではない**
 - 同日 14:17 JST に[返信を投稿済み](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5771571724)。composition 依存の読み取り関数は **全呼び出し箇所を同じ PR で `Result` 化**する。打鍵・候補表示・ライブ変換・タイマーを含め、失敗を空値に戻さないことを受入条件にする
 - 所有者不一致は **`OwnerMismatch`** として返す。該当 composition の候補待機・ライブ変換タイマーを停止し、表示と復元元を保持する。背景タイマーから所有権を取り返さず、入力フォーカスと composition の有効性を確認して復元する。復元後は `Waiting` → `Preedit`、次の Space まで自動再変換しない
 - 所有者が一致した後も旧所有者の BG 変換が実行中なら、所有者不一致や自分の変換待ちと区別して「ワーカー使用中」を返す。具体的な応答型と遷移は設計への反映を確認する
 - **`BgTakeCandidates` は変更要求として採番・応答保持の対象**に訂正する。同じ `seq` の再送には保持応答を返し、別キーでの再試行は新しい `seq` にする。キー不一致で `Done` を復元する動作は維持。`BgPeekTopCandidate` は読み取りのまま
-- 根拠は main `374b9e3` のコード（返信に 4 か所の行範囲付き permalink）。**実機での復旧は未検証。nick が 2 点の判断と訂正を設計へ反映した後、実装範囲を確定する。実装着手はまだ承認していない**
+- 根拠は main `374b9e3` のコード（返信に 4 か所の行範囲付き permalink）。**実機での復旧は未検証。9/24 に実装着手を承認（PR 2 本、rebase 先 `ff49573`）。9/25 に Draft PR #67 が出て形を確認中（上記）**
 - 同日、#66 の設計で `Reload` を廃止する方向にしたことを [別コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5772891346)で連絡した（nick の 4 節「条件を加えて残す」からの変更。予約 variant は宣言位置とフィールド構造を維持して `Error("unsupported")`。#56 の設計から `Reload` の条件追加を外してよいか、統合ブランチでの利用の有無、共通の要求・応答を先に決めて PR を分ける方針、#55 取り込み後の rebase を依頼）。**2026-09-23 08:27 UTC に nick が回答**: 05:17 の 2 点（Result 化は全経路を同じ PR で、`OwnerMismatch` と「ワーカー使用中」を分ける、`BgTakeCandidates` は採番）はすべて了解。`Reload` の条件追加は取り下げ、統合ブランチ（実機ビルド `a737893`）にも `RpcEngine::reload()` の呼び出し元は 0 件。共通の形は「要求に `expect { engine_gen, owner }` と #66 の `config_version` を別フィールドで持ち、拒否は `Rejected(Reason)` 1 つに（Reason は #56 で `GenMismatch` / `OwnerMismatch`、#66 で `ConfigStale` / `ConfigUnavailable` を足す）」の案。**2026-09-24 02:35 UTC に nick から 2 点の確認**: (1) 設計全体としてこれで実装に着手してよいか、(2) rebase 先は #65 が入ったので `7b3d832` 以降の main。着手可なら最初のコミットで共通の形を確定し Draft PR で先に見せる、とのこと。**2026-09-24 に着手を承認して返信**（[コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5808610745)）: 最初のコミットで共通の形を示して Draft PR、PR は 2 本に分ける（(a) 識別子・要求番号・`Unresolved`・回収と `floor`・`Restore`・`Rejected(Reason)`・`Shutdown` 系の応答・`handle_session`・版上げ、(b) 読み取り関数の Result 化と呼び出し箇所・`FlushPendingN` の応答拡張）。rebase 先は main `ff49573`。条件: `Reload` は #56 で触らない（#66 側）、`client.rs` の `handshake_hello` に `Hello` の項目を足す、`state.rs` の `finish_apply` の 4 区分を保つ、受入条件は 9/21 の 5 点と 9/22 の判断。マージと 0.11.9 の順序は Draft PR の時点で相談（着手とマージは別）。**次は nick の Draft PR（(a) の形）待ち。届いたら形を先に確認する**
 
 ### マージした PR と状態（2026-09-21）
