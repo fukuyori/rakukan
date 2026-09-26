@@ -42,8 +42,8 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T> {
 mod tests {
     use super::*;
     use crate::protocol::{
-        ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner, Reason, Request, Response,
-        TsfId, Unresolved,
+        ChangeKind, ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner,
+        Reason, Request, Response, TsfId, Unresolved,
     };
     use std::io::Cursor;
 
@@ -76,14 +76,18 @@ mod tests {
         let req = Request::ShutdownIfConfigDiffers {
             config_json: Some(r#"{"num_candidates":9}"#.into()),
             expected_host_id: HostId(7),
+            config_version: Some([3; 32]),
         };
         write_frame(&mut buf, &req).unwrap();
         let mut cur = Cursor::new(&buf);
         let got: Request = read_frame(&mut cur).unwrap();
         assert!(matches!(
             got,
-            Request::ShutdownIfConfigDiffers { config_json: Some(s), expected_host_id: HostId(7) }
-                if s == r#"{"num_candidates":9}"#
+            Request::ShutdownIfConfigDiffers {
+                config_json: Some(s),
+                expected_host_id: HostId(7),
+                config_version: Some(v),
+            } if s == r#"{"num_candidates":9}"# && v == [3; 32]
         ));
     }
 
@@ -119,7 +123,7 @@ mod tests {
         let expect = Expect { engine_gen, owner };
         let unresolved = Unresolved {
             seq: 15,
-            kind: crate::protocol::ChangeKind::InputChar,
+            kind: ChangeKind::InputChar,
             owner,
             engine_gen,
         };
@@ -141,9 +145,38 @@ mod tests {
             matches!(got, Request::Restore { owner: got_owner, seq: 15, .. } if got_owner == owner)
         );
 
+        let change = Request::Change {
+            seq: 16,
+            expect,
+            request: ChangeRequest::Backspace,
+            config_version: None,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &change).unwrap();
+        let got: Request = read_frame(&mut Cursor::new(&buf)).unwrap();
+        assert!(matches!(
+            got,
+            Request::Change {
+                seq: 16,
+                request: ChangeRequest::Backspace,
+                config_version: None,
+                ..
+            }
+        ));
+
         let responses = [
             Response::Rejected(Reason::OwnerMismatch),
-            Response::Restored { engine_gen },
+            Response::Restored {
+                engine_gen,
+                then: Some(ChangeOutcome::InputChar {
+                    preedit: "たa".into(),
+                    hiragana: "た".into(),
+                    bg_status: "idle".into(),
+                }),
+            },
+            Response::Changed {
+                outcome: ChangeOutcome::Candidates(vec!["多".into()]),
+            },
         ];
         for response in responses {
             let mut buf = Vec::new();
