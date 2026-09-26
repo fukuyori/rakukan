@@ -21,7 +21,7 @@ pub use client::{
     RpcEngine, ShutdownOutcome, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level,
 };
 pub use protocol::{
-    ChangeKind, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner, PIPE_BASE_NAME,
-    Reason, Request, RequestRecord, RequestSeq, Response, TsfId, Unresolved,
+    ChangeKind, ChangeOutcome, ChangeRequest, ConfigVersion, EngineGen, Expect, HostId,
+    InputCharKind, Owner, PIPE_BASE_NAME, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
 };
 pub use rakukan_engine_abi::{Candidate, CandidateSource, Segment, Segments};

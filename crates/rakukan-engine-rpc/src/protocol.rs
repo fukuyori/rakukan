@@ -129,16 +129,50 @@ pub enum Reason {
     ResultUnavailable,
 }
 
-/// ホストが保持する TSF ごとの直近記録の形。
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RequestRecord {
-    pub last_seq: Option<RequestSeq>,
-    pub last_response: Option<Response>,
-    pub floor: RequestSeq,
-    pub sessions: u32,
-    pub in_flight: u32,
-    pub last_used: u64,
+impl ChangeRequest {
+    /// 対応する `ChangeKind`。variant を足す時はここだけ直す。
+    pub fn kind(&self) -> ChangeKind {
+        match self {
+            Self::InputChar { .. } => ChangeKind::InputChar,
+            Self::PushChar(_) => ChangeKind::PushChar,
+            Self::PushRaw(_) => ChangeKind::PushRaw,
+            Self::PushFullwidthAlpha(_) => ChangeKind::PushFullwidthAlpha,
+            Self::Backspace => ChangeKind::Backspace,
+            Self::FlushPendingN => ChangeKind::FlushPendingN,
+            Self::BgStart { .. } => ChangeKind::BgStart,
+            Self::BgTakeCandidates { .. } => ChangeKind::BgTakeCandidates,
+            Self::BgReclaim => ChangeKind::BgReclaim,
+            Self::Commit { .. } => ChangeKind::Commit,
+            Self::CommitAsHiragana => ChangeKind::CommitAsHiragana,
+            Self::ResetPreedit => ChangeKind::ResetPreedit,
+            Self::ForcePreedit { .. } => ChangeKind::ForcePreedit,
+            Self::ResetAll => ChangeKind::ResetAll,
+            Self::Learn { .. } => ChangeKind::Learn,
+            Self::LearnForce { .. } => ChangeKind::LearnForce,
+        }
+    }
 }
+
+/// 変更要求を適用した結果。旧 variant の応答をそのまま写す。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeOutcome {
+    /// `Response::Unit` を返していた要求（`PushChar` / `Commit` / `ResetAll` など）。
+    Unit,
+    /// `Response::Bool` を返していた要求（`Backspace` / `FlushPendingN` / `BgStart`）。
+    Bool(bool),
+    /// `BgTakeCandidates` の候補列（旧 `Response::Strings`）。
+    Candidates(Vec<String>),
+    /// `InputChar` の結果（旧 `Response::InputCharResult`）。
+    InputChar {
+        preedit: String,
+        hiragana: String,
+        bg_status: String,
+    },
+}
+
+/// `config.toml` 本文の SHA-256（TSF 側 `ConfigSnapshot` の `sha256` と同じ 32 バイト）。
+/// `None` は設定本文が無い（既定値由来）ことを表す。照合は #66 で有効にする。
+pub type ConfigVersion = [u8; 32];
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -165,6 +199,8 @@ pub enum Request {
     /// 既存 DynEngine と config が異なる場合は作り直す。
     Create {
         config_json: Option<String>,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
     },
 
     /// 現在の DynEngine を drop し、新しい config_json で load_auto し直す。
@@ -352,6 +388,9 @@ pub enum Request {
     ///
     /// 応答: `Bool(true)` = config が異なる（またはホストが比較不能）。応答送信後に
     /// `Shutdown` と同じ経路でプロセス終了する。`Bool(false)` = 同一 config、継続。
+    /// `ShutdownSkipped` = `expected_host_id` が現在のホストと違う（ホストは既に
+    /// 入れ替わっている）ので比較せず継続。TSF は「同じ設定」と区別して、反映待ちを
+    /// 残したまま新しいホストへ `Create` し直せる。
     ///
     /// NOTE: postcard の enum discriminant は宣言順なので、この variant は
     /// **必ず末尾に追加**する（既存 variant のワイヤ表現を変えない）。旧ホストは
@@ -360,6 +399,8 @@ pub enum Request {
     ShutdownIfConfigDiffers {
         config_json: Option<String>,
         expected_host_id: HostId,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
     },
 
     // ─── Issue #56: 採番された変更要求（v6）───────────────
@@ -367,6 +408,8 @@ pub enum Request {
         seq: RequestSeq,
         expect: Expect,
         request: ChangeRequest,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
     },
 
     // ─── Issue #56: 復元（v6）─────────────────────────────
@@ -415,8 +458,14 @@ pub enum Response {
     ShutdownAccepted,
     /// 対象ホストは既に入れ替わっていたため、終了要求を適用しなかった。
     ShutdownSkipped,
-    /// 復元後の世代。編集状態の詳細は (b) で応答へ追加する。
+    /// 復元後の世代と、`Restore.then` を適用した結果（`then` が無ければ `None`）。
+    /// 編集状態の詳細は (b) で応答へ追加する。
     Restored {
         engine_gen: EngineGen,
+        then: Option<ChangeOutcome>,
+    },
+    /// `Change` を適用した結果。
+    Changed {
+        outcome: ChangeOutcome,
     },
 }

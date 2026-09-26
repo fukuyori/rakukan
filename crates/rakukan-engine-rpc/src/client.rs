@@ -389,6 +389,7 @@ impl RpcEngine {
         let result = guard.call_with_retry(Request::ShutdownIfConfigDiffers {
             config_json,
             expected_host_id: HostId::default(),
+            config_version: None,
         });
         match result {
             Ok(Response::Bool(true)) => {
@@ -888,7 +889,13 @@ impl<T: HostTransport> Connection<T> {
     }
 
     fn handshake_create(stream: &mut T::Stream, config_json: Option<String>) -> Result<()> {
-        write_frame(stream, &Request::Create { config_json })?;
+        write_frame(
+            stream,
+            &Request::Create {
+                config_json,
+                config_version: None,
+            },
+        )?;
         match read_frame::<_, Response>(stream)? {
             Response::Unit => Ok(()),
             Response::Error(e) => bail!("create error: {e}"),

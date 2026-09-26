@@ -23,7 +23,22 @@ use rakukan_engine_abi::{BgRunState, DynEngine, StallProbe};
 use crate::codec::{read_frame, write_frame};
 use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker, RecoveryReason};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{EngineGen, HostId, InputCharKind, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    EngineGen, HostId, InputCharKind, PROTOCOL_VERSION, Request, RequestSeq, Response,
+};
+
+/// ホストが保持する TSF ごとの直近記録（Issue #56）。線路には流さない。
+// TODO(#56a): 照合・記録を実装する時に HostShared へ持たせる。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct RequestRecord {
+    pub last_seq: Option<RequestSeq>,
+    pub last_response: Option<Response>,
+    pub floor: RequestSeq,
+    pub sessions: u32,
+    pub in_flight: u32,
+    pub last_used: u64,
+}
 
 /// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
 pub type SharedEngine = Arc<HostShared>;
@@ -381,7 +396,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
                 record_found: false,
             }
         }
-        Request::Create { config_json } => {
+        Request::Create { config_json, .. } => {
             let mut g = lock_engine(engine);
             if g.engine.is_some() && engine.config_snapshot() == config_json {
                 return Response::Unit;
@@ -414,6 +429,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
         Request::Shutdown { .. } => Response::ShutdownAccepted,
         // 変換中（engine ロック保持中）でも即答する必要があるので engine を取らない。
         Request::EngineHealth => Response::String(engine.health_now().as_str().to_string()),
+        // TODO(#56a): expected_host_id が現在のホストと違えば比較せず ShutdownSkipped を返す。
         Request::ShutdownIfConfigDiffers { config_json, .. } => {
             // 変換中でも応答できるよう engine ロックは取らない（Shutdown と同じ扱い）。
             // config だけを短時間ロックで比較する。
