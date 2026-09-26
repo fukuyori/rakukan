@@ -20,5 +20,8 @@ pub mod server;
 pub use client::{
     RpcEngine, ShutdownOutcome, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level,
 };
-pub use protocol::{InputCharKind, PIPE_BASE_NAME, Request, Response};
+pub use protocol::{
+    ChangeKind, ChangeOutcome, ChangeRequest, ConfigVersion, EngineGen, Expect, HostId,
+    InputCharKind, Owner, PIPE_BASE_NAME, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
+};
 pub use rakukan_engine_abi::{Candidate, CandidateSource, Segment, Segments};

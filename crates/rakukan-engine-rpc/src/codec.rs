@@ -41,7 +41,10 @@ pub fn read_frame<R: Read, T: DeserializeOwned>(r: &mut R) -> Result<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{Request, Response};
+    use crate::protocol::{
+        ChangeKind, ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner,
+        Reason, Request, Response, TsfId, Unresolved,
+    };
     use std::io::Cursor;
 
     #[test]
@@ -72,14 +75,19 @@ mod tests {
         let mut buf = Vec::new();
         let req = Request::ShutdownIfConfigDiffers {
             config_json: Some(r#"{"num_candidates":9}"#.into()),
+            expected_host_id: HostId(7),
+            config_version: Some([3; 32]),
         };
         write_frame(&mut buf, &req).unwrap();
         let mut cur = Cursor::new(&buf);
         let got: Request = read_frame(&mut cur).unwrap();
         assert!(matches!(
             got,
-            Request::ShutdownIfConfigDiffers { config_json: Some(s) }
-                if s == r#"{"num_candidates":9}"#
+            Request::ShutdownIfConfigDiffers {
+                config_json: Some(s),
+                expected_host_id: HostId(7),
+                config_version: Some(v),
+            } if s == r#"{"num_candidates":9}"# && v == [3; 32]
         ));
     }
 
@@ -90,10 +98,93 @@ mod tests {
     #[test]
     fn existing_variant_wire_format_is_stable() {
         let mut buf = Vec::new();
-        write_frame(&mut buf, &Request::Shutdown).unwrap();
-        // [len=4bytes LE][varint discriminant]
+        write_frame(
+            &mut buf,
+            &Request::Shutdown {
+                expected_host_id: HostId(0),
+            },
+        )
+        .unwrap();
+        // [len=4bytes LE][varint discriminant][u128 host id]
         let payload = &buf[4..];
-        assert_eq!(payload.len(), 1, "Shutdown must stay a 1-byte discriminant");
+        assert_eq!(payload[0], 50, "Shutdown discriminant must stay stable");
+    }
+
+    #[test]
+    fn roundtrip_issue56_protocol_shapes() {
+        let owner = Owner {
+            tsf_id: TsfId(11),
+            composition: 12,
+        };
+        let engine_gen = EngineGen {
+            host_id: HostId(13),
+            generation: 14,
+        };
+        let expect = Expect { engine_gen, owner };
+        let unresolved = Unresolved {
+            seq: 15,
+            kind: ChangeKind::InputChar,
+            owner,
+            engine_gen,
+        };
+        let req = Request::Restore {
+            owner,
+            seq: unresolved.seq,
+            reading: "た".into(),
+            pending_romaji: "t".into(),
+            then: Some(ChangeRequest::InputChar {
+                c: 'a' as u32,
+                kind: InputCharKind::Char,
+                bg_start_n_cands: Some(6),
+            }),
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &req).unwrap();
+        let got: Request = read_frame(&mut Cursor::new(&buf)).unwrap();
+        assert!(
+            matches!(got, Request::Restore { owner: got_owner, seq: 15, .. } if got_owner == owner)
+        );
+
+        let change = Request::Change {
+            seq: 16,
+            expect,
+            request: ChangeRequest::Backspace,
+            config_version: None,
+        };
+        let mut buf = Vec::new();
+        write_frame(&mut buf, &change).unwrap();
+        let got: Request = read_frame(&mut Cursor::new(&buf)).unwrap();
+        assert!(matches!(
+            got,
+            Request::Change {
+                seq: 16,
+                request: ChangeRequest::Backspace,
+                config_version: None,
+                ..
+            }
+        ));
+
+        let responses = [
+            Response::Rejected(Reason::OwnerMismatch),
+            Response::Restored {
+                engine_gen,
+                then: Some(ChangeOutcome::InputChar {
+                    preedit: "たa".into(),
+                    hiragana: "た".into(),
+                    bg_status: "idle".into(),
+                }),
+            },
+            Response::Changed {
+                outcome: ChangeOutcome::Candidates(vec!["多".into()]),
+            },
+        ];
+        for response in responses {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &response).unwrap();
+            let _: Response = read_frame(&mut Cursor::new(&buf)).unwrap();
+        }
+
+        assert_eq!(expect.engine_gen, unresolved.engine_gen);
     }
 
     fn discriminant(req: &Request) -> u8 {

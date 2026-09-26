@@ -17,7 +17,162 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v4: `MergeCandidatesForReading` を追加
 /// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
-pub const PROTOCOL_VERSION: u32 = 5;
+/// - v6: Issue #56 の host / engine / owner 識別子と変更要求・復元・終了応答の形を追加
+pub const PROTOCOL_VERSION: u32 = 6;
+
+/// ホストプロセスの起動インスタンス識別子。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct HostId(pub u128);
+
+/// TSF プロセスの起動インスタンス識別子。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct TsfId(pub u128);
+
+/// ホスト内のエンジン世代。ホストの入れ替わりと、同一ホスト内の再生成を区別する。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct EngineGen {
+    pub host_id: HostId,
+    pub generation: u64,
+}
+
+/// 共有エンジンの編集状態を所有する composition。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct Owner {
+    pub tsf_id: TsfId,
+    pub composition: u64,
+}
+
+/// TSF インスタンスごとに単調増加する変更要求番号。
+pub type RequestSeq = u64;
+
+/// composition に依存する要求が前提とする状態。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Expect {
+    pub engine_gen: EngineGen,
+    pub owner: Owner,
+}
+
+/// 変更要求の種類。未解決要求の追跡に payload を保持しない形で使う。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeKind {
+    InputChar,
+    PushChar,
+    PushRaw,
+    PushFullwidthAlpha,
+    Backspace,
+    FlushPendingN,
+    BgStart,
+    BgTakeCandidates,
+    BgReclaim,
+    Commit,
+    CommitAsHiragana,
+    ResetPreedit,
+    ForcePreedit,
+    ResetAll,
+    Learn,
+    LearnForce,
+}
+
+/// 応答を受け取れず、適用済みか判断できない変更要求。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Unresolved {
+    pub seq: RequestSeq,
+    pub kind: ChangeKind,
+    pub owner: Owner,
+    pub engine_gen: EngineGen,
+}
+
+/// `Restore` と同じエンジンロック内で続けて適用できる変更要求。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeRequest {
+    InputChar {
+        c: u32,
+        kind: InputCharKind,
+        bg_start_n_cands: Option<u32>,
+    },
+    PushChar(u32),
+    PushRaw(u32),
+    PushFullwidthAlpha(u32),
+    Backspace,
+    FlushPendingN,
+    BgStart {
+        n_cands: u32,
+    },
+    BgTakeCandidates {
+        key: String,
+    },
+    BgReclaim,
+    Commit {
+        text: String,
+    },
+    CommitAsHiragana,
+    ResetPreedit,
+    ForcePreedit {
+        text: String,
+    },
+    ResetAll,
+    Learn {
+        reading: String,
+        surface: String,
+    },
+    LearnForce {
+        reading: String,
+        surface: String,
+    },
+}
+
+/// 要求を適用しなかった理由。#66 の理由は同じ enum に後から追加する。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Reason {
+    GenMismatch,
+    OwnerMismatch,
+    ResultUnavailable,
+}
+
+impl ChangeRequest {
+    /// 対応する `ChangeKind`。variant を足す時はここだけ直す。
+    pub fn kind(&self) -> ChangeKind {
+        match self {
+            Self::InputChar { .. } => ChangeKind::InputChar,
+            Self::PushChar(_) => ChangeKind::PushChar,
+            Self::PushRaw(_) => ChangeKind::PushRaw,
+            Self::PushFullwidthAlpha(_) => ChangeKind::PushFullwidthAlpha,
+            Self::Backspace => ChangeKind::Backspace,
+            Self::FlushPendingN => ChangeKind::FlushPendingN,
+            Self::BgStart { .. } => ChangeKind::BgStart,
+            Self::BgTakeCandidates { .. } => ChangeKind::BgTakeCandidates,
+            Self::BgReclaim => ChangeKind::BgReclaim,
+            Self::Commit { .. } => ChangeKind::Commit,
+            Self::CommitAsHiragana => ChangeKind::CommitAsHiragana,
+            Self::ResetPreedit => ChangeKind::ResetPreedit,
+            Self::ForcePreedit { .. } => ChangeKind::ForcePreedit,
+            Self::ResetAll => ChangeKind::ResetAll,
+            Self::Learn { .. } => ChangeKind::Learn,
+            Self::LearnForce { .. } => ChangeKind::LearnForce,
+        }
+    }
+}
+
+/// 変更要求を適用した結果。旧 variant の応答をそのまま写す。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChangeOutcome {
+    /// `Response::Unit` を返していた要求（`PushChar` / `Commit` / `ResetAll` など）。
+    Unit,
+    /// `Response::Bool` を返していた要求（`Backspace` / `FlushPendingN` / `BgStart`）。
+    Bool(bool),
+    /// `BgTakeCandidates` の候補列（旧 `Response::Strings`）。
+    Candidates(Vec<String>),
+    /// `InputChar` の結果（旧 `Response::InputCharResult`）。
+    InputChar {
+        preedit: String,
+        hiragana: String,
+        bg_status: String,
+    },
+}
+
+/// `config.toml` 本文の SHA-256（TSF 側 `ConfigSnapshot` の `sha256` と同じ 32 バイト）。
+/// `None` は設定本文が無い（既定値由来）ことを表す。照合は #66 で有効にする。
+pub type ConfigVersion = [u8; 32];
 
 /// `InputChar` バッチ RPC で指定する入力モード。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -36,12 +191,16 @@ pub enum Request {
     /// 接続直後に必ず送る。ホスト側はバージョン不一致なら Error を返して切断する。
     Hello {
         protocol_version: u32,
+        tsf_id: TsfId,
+        highest_sent: RequestSeq,
     },
     /// エンジン側セッションの初期化要求。config_json は EngineConfig の JSON。
     /// 既に同じ config の DynEngine が存在する場合は何もしない。
     /// 既存 DynEngine と config が異なる場合は作り直す。
     Create {
         config_json: Option<String>,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
     },
 
     /// 現在の DynEngine を drop し、新しい config_json で load_auto し直す。
@@ -191,14 +350,16 @@ pub enum Request {
     ///
     /// `Reload` の代替経路: 旧 `Reload` は engine DLL を drop → 新規 load で
     /// 反映していたが、BG スレッドが DLL を参照している瞬間に unmap が走ると
-    /// AV を誘発する。`Shutdown` を受けたホストは `Response::Unit` を返して
+    /// AV を誘発する。`Shutdown` を受けたホストは `Response::ShutdownAccepted` を返して
     /// flush 後、`std::process::exit(0)` でプロセスごと終了する。OS が
     /// 全スレッドと DLL マッピングをまとめて回収するため race が原理的に起きない。
     ///
     /// クライアント側は応答受信後、既存接続を破棄する。次回 API 呼び出し時に
     /// `connect_or_spawn` で自動的にホストを再 spawn する経路が既にあるため、
     /// TSF 側コードはほぼ無変更で済む。
-    Shutdown,
+    Shutdown {
+        expected_host_id: HostId,
+    },
 
     // ─── 学習（追加） ─────────────────────────────────────────
     /// 辞書ガードなしで学習する（候補ウィンドウからの明示選択、案C）。
@@ -227,6 +388,9 @@ pub enum Request {
     ///
     /// 応答: `Bool(true)` = config が異なる（またはホストが比較不能）。応答送信後に
     /// `Shutdown` と同じ経路でプロセス終了する。`Bool(false)` = 同一 config、継続。
+    /// `ShutdownSkipped` = `expected_host_id` が現在のホストと違う（ホストは既に
+    /// 入れ替わっている）ので比較せず継続。TSF は「同じ設定」と区別して、反映待ちを
+    /// 残したまま新しいホストへ `Create` し直せる。
     ///
     /// NOTE: postcard の enum discriminant は宣言順なので、この variant は
     /// **必ず末尾に追加**する（既存 variant のワイヤ表現を変えない）。旧ホストは
@@ -234,6 +398,28 @@ pub enum Request {
     /// `Shutdown` にフォールバックするため互換性は保たれる。
     ShutdownIfConfigDiffers {
         config_json: Option<String>,
+        expected_host_id: HostId,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
+    },
+
+    // ─── Issue #56: 採番された変更要求（v6）───────────────
+    Change {
+        seq: RequestSeq,
+        expect: Expect,
+        request: ChangeRequest,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
+    },
+
+    // ─── Issue #56: 復元（v6）─────────────────────────────
+    /// 読みと未確定ローマ字を復元し、必要なら同じロック内で変更要求を適用する。
+    Restore {
+        owner: Owner,
+        seq: RequestSeq,
+        reading: String,
+        pending_romaji: String,
+        then: Option<ChangeRequest>,
     },
 }
 
@@ -241,6 +427,9 @@ pub enum Request {
 pub enum Response {
     Hello {
         protocol_version: u32,
+        host_id: HostId,
+        engine_gen: Option<EngineGen>,
+        record_found: bool,
     },
     Unit,
     Bool(bool),
@@ -262,5 +451,21 @@ pub enum Response {
         preedit: String,
         hiragana: String,
         bg_status: String,
+    },
+    /// 要求は適用されなかった。
+    Rejected(Reason),
+    /// 対象としていたホストが終了要求を受理した。
+    ShutdownAccepted,
+    /// 対象ホストは既に入れ替わっていたため、終了要求を適用しなかった。
+    ShutdownSkipped,
+    /// 復元後の世代と、`Restore.then` を適用した結果（`then` が無ければ `None`）。
+    /// 編集状態の詳細は (b) で応答へ追加する。
+    Restored {
+        engine_gen: EngineGen,
+        then: Option<ChangeOutcome>,
+    },
+    /// `Change` を適用した結果。
+    Changed {
+        outcome: ChangeOutcome,
     },
 }

@@ -23,7 +23,22 @@ use rakukan_engine_abi::{BgRunState, DynEngine, StallProbe};
 use crate::codec::{read_frame, write_frame};
 use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker, RecoveryReason};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
-use crate::protocol::{InputCharKind, PROTOCOL_VERSION, Request, Response};
+use crate::protocol::{
+    EngineGen, HostId, InputCharKind, PROTOCOL_VERSION, Request, RequestSeq, Response,
+};
+
+/// ホストが保持する TSF ごとの直近記録（Issue #56）。線路には流さない。
+// TODO(#56a): 照合・記録を実装する時に HostShared へ持たせる。
+#[allow(dead_code)]
+#[derive(Debug, Clone)]
+pub(crate) struct RequestRecord {
+    pub last_seq: Option<RequestSeq>,
+    pub last_response: Option<Response>,
+    pub floor: RequestSeq,
+    pub sessions: u32,
+    pub in_flight: u32,
+    pub last_used: u64,
+}
 
 /// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
 pub type SharedEngine = Arc<HostShared>;
@@ -250,7 +265,7 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
             }
         };
         // M1.6 T-HOST1: Shutdown は応答送信後にプロセス exit するため前取り判定。
-        let is_shutdown = matches!(req, Request::Shutdown);
+        let is_shutdown = matches!(req, Request::Shutdown { .. });
         // ShutdownIfConfigDiffers は「config が異なる」と判定したとき（Bool(true)
         // 応答）だけ Shutdown と同じ exit 経路に乗る。
         let is_conditional_shutdown = matches!(req, Request::ShutdownIfConfigDiffers { .. });
@@ -301,7 +316,7 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         Create { .. } => "Create",
         Reload { .. } => "Reload",
         Bye => "Bye",
-        Shutdown => "Shutdown",
+        Shutdown { .. } => "Shutdown",
         PushChar(_) => "PushChar",
         PushRaw(_) => "PushRaw",
         PushFullwidthAlpha(_) => "PushFullwidthAlpha",
@@ -357,13 +372,17 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         EngineHealth => "EngineHealth",
         InputChar { .. } => "InputChar",
         ShutdownIfConfigDiffers { .. } => "ShutdownIfConfigDiffers",
+        Change { .. } => "Change",
+        Restore { .. } => "Restore",
     }
 }
 
 fn dispatch(engine: &SharedEngine, req: Request) -> Response {
     // Hello / Create は handle し、残りは DynEngine メソッドに流す
     match req {
-        Request::Hello { protocol_version } => {
+        Request::Hello {
+            protocol_version, ..
+        } => {
             if protocol_version != PROTOCOL_VERSION {
                 return Response::Error(format!(
                     "protocol version mismatch: client={protocol_version} server={PROTOCOL_VERSION}"
@@ -371,9 +390,13 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             }
             Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
+                // TODO(#56a): expose the host's real startup id, engine generation, and record state.
+                host_id: HostId::default(),
+                engine_gen: Some(EngineGen::default()),
+                record_found: false,
             }
         }
-        Request::Create { config_json } => {
+        Request::Create { config_json, .. } => {
             let mut g = lock_engine(engine);
             if g.engine.is_some() && engine.config_snapshot() == config_json {
                 return Response::Unit;
@@ -398,10 +421,16 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             load_engine_into(engine, &mut g, config_json)
         }
         Request::Bye => Response::Unit,
-        Request::Shutdown => Response::Unit,
+        // TODO(#56a): 照合・記録・復元を実装するまでは、成功と誤認されないよう Error を返す。
+        Request::Change { .. } | Request::Restore { .. } => {
+            Response::Error("Change / Restore are not implemented yet (#56)".to_string())
+        }
+        // TODO(#56a): compare expected_host_id and return Accepted or Skipped accordingly.
+        Request::Shutdown { .. } => Response::ShutdownAccepted,
         // 変換中（engine ロック保持中）でも即答する必要があるので engine を取らない。
         Request::EngineHealth => Response::String(engine.health_now().as_str().to_string()),
-        Request::ShutdownIfConfigDiffers { config_json } => {
+        // TODO(#56a): expected_host_id が現在のホストと違えば比較せず ShutdownSkipped を返す。
+        Request::ShutdownIfConfigDiffers { config_json, .. } => {
             // 変換中でも応答できるよう engine ロックは取らない（Shutdown と同じ扱い）。
             // config だけを短時間ロックで比較する。
             let current = engine.config_snapshot();
@@ -679,9 +708,11 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         | Create { .. }
         | Reload { .. }
         | Bye
-        | Shutdown
+        | Shutdown { .. }
         | EngineHealth
-        | ShutdownIfConfigDiffers { .. } => Response::Unit, // handled upstream
+        | ShutdownIfConfigDiffers { .. }
+        | Change { .. }
+        | Restore { .. } => Response::Unit, // handled upstream
 
         PushChar(c) => {
             if let Some(ch) = char::from_u32(c) {
