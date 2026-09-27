@@ -137,13 +137,20 @@ mod tests {
                 kind: InputCharKind::Char,
                 bg_start_n_cands: Some(6),
             }),
+            config_version: Some([5; 32]),
         };
         let mut buf = Vec::new();
         write_frame(&mut buf, &req).unwrap();
         let got: Request = read_frame(&mut Cursor::new(&buf)).unwrap();
-        assert!(
-            matches!(got, Request::Restore { owner: got_owner, seq: 15, .. } if got_owner == owner)
-        );
+        assert!(matches!(
+            got,
+            Request::Restore {
+                owner: got_owner,
+                seq: 15,
+                config_version: Some(v),
+                ..
+            } if got_owner == owner && v == [5; 32]
+        ));
 
         let change = Request::Change {
             seq: 16,
