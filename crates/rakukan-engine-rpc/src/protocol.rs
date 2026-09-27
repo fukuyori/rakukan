@@ -420,6 +420,9 @@ pub enum Request {
         reading: String,
         pending_romaji: String,
         then: Option<ChangeRequest>,
+        /// #66 まで常に `None`。照合は復元と `then` の適用より前に行い、
+        /// 拒否時はどちらも適用しない。
+        config_version: Option<ConfigVersion>,
     },
 }
 
