@@ -22,7 +22,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    HostId, InputCharKind, PIPE_BASE_NAME, PROTOCOL_VERSION, Request, Response, TsfId,
+    ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner, PIPE_BASE_NAME,
+    PROTOCOL_VERSION, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
 };
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
@@ -131,6 +132,16 @@ fn rpc_stats_record(elapsed_us: u64) {
 static HOST_FAILURE_CLOCK: LazyLock<Instant> = LazyLock::new(Instant::now);
 static HOST_SPAWN_GUARD: LazyLock<Arc<Mutex<HostSpawnGuard>>> =
     LazyLock::new(|| Arc::new(Mutex::new(HostSpawnGuard::default())));
+/// TSF プロセスで 1 つの台帳（Issue #56）。`RpcEngine` は `engine_reload_impl` で
+/// 作り直されるので、識別子と採番を `RpcEngine` に持たせるとそこで 1 から振り直し
+/// になる。プロセスの static に置く。
+static REQUEST_LEDGER: LazyLock<Arc<RequestLedger>> =
+    LazyLock::new(|| Arc::new(RequestLedger::new(TsfId::random())));
+
+/// この TSF プロセスの起動インスタンス識別子（Issue #56）。
+pub fn tsf_id() -> TsfId {
+    REQUEST_LEDGER.tsf_id
+}
 
 pub struct RpcEngine {
     inner: Mutex<Connection<PipeTransport>>,
@@ -139,10 +150,176 @@ pub struct RpcEngine {
 /// `RpcEngine::shutdown` の結果。通信失敗は `Err` ではなく `NoResponse`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ShutdownOutcome {
-    /// ホストから `Unit` を受信した（終了要求の受理）。
+    /// ホストから `ShutdownAccepted` を受信した（終了要求の受理）。
     Acknowledged,
     /// 送ったが応答を受け取れなかった（相手が先に exit した等）。
     NoResponse,
+    /// 宛先のホストは既に入れ替わっていた（`ShutdownSkipped`）。今のホストは
+    /// 終了していないので、終了の受理とは区別する（Issue #56）。
+    Skipped,
+}
+
+/// `RpcEngine::shutdown_if_config_differs` の結果（通信失敗は `Err`）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConditionalShutdown {
+    /// ホストは同じ設定で動作中（`Bool(false)`）。接続・エンジンとも継続。
+    SameConfig,
+    /// 設定が違うので、ホストは応答後に終了する（`Bool(true)`）。既存接続は破棄済み。
+    Restarting,
+    /// 宛先のホストは既に入れ替わっていた（`ShutdownSkipped`）。今のホストの設定とは
+    /// 比べていないので、「同じ設定」とは区別する。`Err` にすると呼び出し元が無条件の
+    /// `shutdown()` へ切り替え、新しいホストを終了させてしまう。
+    Skipped,
+}
+
+/// `Change` の応答（Issue #56）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChangeReply {
+    Changed(ChangeOutcome),
+    /// 適用されなかった。
+    Rejected(Reason),
+}
+
+/// `Restore` の応答（Issue #56）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreReply {
+    Restored {
+        engine_gen: EngineGen,
+        then: Option<ChangeOutcome>,
+    },
+    /// 適用されなかった（番号の記録を失っていて答えられない、など）。
+    Rejected(Reason),
+}
+
+/// `Change` / `Restore` を送れなかった、または応答を得られなかった。
+#[derive(Debug)]
+pub enum ChangeError {
+    /// 結果不明の要求を抱えている間は、次の変更要求を送らない。
+    /// `restore` で解決するか、`abandon_unresolved` で断念してから進む。
+    Unresolved(Unresolved),
+    /// 通信に失敗した。送った要求は結果不明として台帳に残る。
+    Transport(anyhow::Error),
+    /// ホストが `Error` を返した、または想定外の応答（適用されていない）。
+    Host(String),
+}
+
+impl std::fmt::Display for ChangeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ChangeError::Unresolved(u) => write!(
+                f,
+                "unresolved request pending: seq={} kind={:?}",
+                u.seq, u.kind
+            ),
+            ChangeError::Transport(e) => write!(f, "transport failed: {e}"),
+            ChangeError::Host(e) => write!(f, "host error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for ChangeError {}
+
+/// 要求番号と、結果不明の要求（Issue #56）。
+///
+/// 1 件の変更要求は「送る前に確かめる → 採番して送る前に記録 → 再送は同じ番号・
+/// 同じ内容 → 応答を受け取ったら消す → 最終的に通信エラーなら残す」の順で扱う。
+/// 未解決がある間は次の変更要求を送らないので、ホストの記録は TSF インスタンスに
+/// つき直近 1 件で足りる。
+pub(crate) struct RequestLedger {
+    tsf_id: TsfId,
+    state: Mutex<LedgerState>,
+}
+
+#[derive(Debug, Default)]
+struct LedgerState {
+    /// 最後に採った番号（= `Hello.highest_sent`）。番号は 1 から。
+    last_seq: RequestSeq,
+    unresolved: Option<Unresolved>,
+}
+
+impl RequestLedger {
+    pub(crate) fn new(tsf_id: TsfId) -> Self {
+        Self {
+            tsf_id,
+            state: Mutex::new(LedgerState::default()),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, LedgerState> {
+        match self.state.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn highest_sent(&self) -> RequestSeq {
+        self.lock().last_seq
+    }
+
+    fn unresolved(&self) -> Option<Unresolved> {
+        self.lock().unresolved
+    }
+
+    /// 未解決が無ければ番号を採り、結果不明として記録してから返す。
+    fn begin_change(
+        &self,
+        request: &ChangeRequest,
+        expect: &Expect,
+    ) -> std::result::Result<RequestSeq, Unresolved> {
+        let mut g = self.lock();
+        if let Some(u) = g.unresolved {
+            return Err(u);
+        }
+        g.last_seq += 1;
+        let seq = g.last_seq;
+        g.unresolved = Some(Unresolved {
+            seq,
+            kind: request.kind(),
+            owner: expect.owner,
+            engine_gen: expect.engine_gen,
+        });
+        Ok(seq)
+    }
+
+    /// `Restore` の番号を採る。`Restore` は未解決を解決するための要求なので、
+    /// 未解決があっても送れる。`then` を載せるときは、送っている間はそれを
+    /// 結果不明として記録する。戻り値の 2 つ目は、それまでの未解決。
+    fn begin_restore(
+        &self,
+        owner: Owner,
+        engine_gen: EngineGen,
+        then: Option<&ChangeRequest>,
+    ) -> (RequestSeq, Option<Unresolved>) {
+        let mut g = self.lock();
+        g.last_seq += 1;
+        let seq = g.last_seq;
+        let prev = g.unresolved;
+        if let Some(req) = then {
+            g.unresolved = Some(Unresolved {
+                seq,
+                kind: req.kind(),
+                owner,
+                engine_gen,
+            });
+        }
+        (seq, prev)
+    }
+
+    /// 応答を受け取った（適用・拒否のどちらでも答えが出た）。
+    fn resolve(&self, seq: RequestSeq) {
+        let mut g = self.lock();
+        if g.unresolved.is_some_and(|u| u.seq == seq) {
+            g.unresolved = None;
+        }
+    }
+
+    fn set_unresolved(&self, unresolved: Option<Unresolved>) {
+        self.lock().unresolved = unresolved;
+    }
+
+    fn abandon(&self) -> Option<Unresolved> {
+        self.lock().unresolved.take()
+    }
 }
 
 /// 接続・spawn・時刻・待機の口。実装は Named Pipe と `CreateProcess`（`PipeTransport`）。
@@ -187,6 +364,20 @@ struct Connection<T: HostTransport> {
     config_json: Option<String>,
     /// spawn の抑止。本番はプロセスで 1 つ（`HOST_SPAWN_GUARD`）、テストは個別。
     guard: Arc<Mutex<HostSpawnGuard>>,
+    /// 要求番号と未解決要求。本番はプロセスで 1 つ（`REQUEST_LEDGER`）、テストは個別。
+    ledger: Arc<RequestLedger>,
+    /// 直近の `Hello` で得たホストの識別子（Issue #56）。`Shutdown` の宛先に使う。
+    host_id: Option<HostId>,
+    /// 直近に知ったエンジンの世代（`Hello` か `Restored`）。
+    engine_gen: Option<EngineGen>,
+}
+
+/// `Hello` の応答から取り出す値。
+#[derive(Debug, Clone, Copy)]
+struct HelloInfo {
+    host_id: HostId,
+    engine_gen: Option<EngineGen>,
+    record_found: bool,
 }
 
 #[derive(Debug, Default)]
@@ -301,7 +492,12 @@ struct AttemptFailure {
 impl RpcEngine {
     /// 接続だけ試行して生成する。config_json は Create リクエストで送られる。
     pub fn connect_or_spawn(config_json: Option<String>) -> Result<Self> {
-        let mut conn = Connection::new(PipeTransport, config_json, HOST_SPAWN_GUARD.clone());
+        let mut conn = Connection::new(
+            PipeTransport,
+            config_json,
+            HOST_SPAWN_GUARD.clone(),
+            REQUEST_LEDGER.clone(),
+        );
         conn.ensure_connected()?;
         Ok(Self {
             inner: Mutex::new(conn),
@@ -332,7 +528,9 @@ impl RpcEngine {
     /// 終了させて次回 API 呼び出しで自動 re-spawn させる。
     ///
     /// - `Request::Shutdown` を送って `Response::ShutdownAccepted` を受信
-    /// - 成否に関わらず内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
+    /// - 宛先は直近の `Hello` で得たホスト。送る前に確定し、再接続した後の再送でも
+    ///   差し替えない（新しいホストは `ShutdownSkipped` を返すので、再起動は 1 回で止まる）
+    /// - 受理・無応答なら内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
     /// - `config_json` は保持する（次回 `connect_or_spawn` 時に再送する）
     /// - サーバが応答を返す前に exit してしまい read が失敗するケースも想定し、
     ///   通信失敗は `Err` にせず `Ok(ShutdownOutcome::NoResponse)` で返す（exit が目的なので）。
@@ -342,74 +540,89 @@ impl RpcEngine {
             .inner
             .lock()
             .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
-        if let Some(cfg) = config_json {
-            guard.config_json = Some(cfg);
-        }
-        // TODO(#56a): use the host_id retained from the latest Hello response.
-        let result = guard.call_with_retry(Request::Shutdown {
-            expected_host_id: HostId::default(),
-        });
-        // 応答の有無に関わらず既存接続は捨てる（サーバが exit 中か直後）。
-        guard.stream = None;
-        match result {
-            Ok(Response::ShutdownAccepted) => {
-                tracing::info!("rpc: Shutdown acknowledged by host");
-                Ok(ShutdownOutcome::Acknowledged)
-            }
-            Ok(Response::Error(e)) => bail!("shutdown error: {e}"),
-            Ok(other) => bail!("unexpected shutdown response: {:?}", other),
-            Err(e) => {
-                // 応答を読む前に相手が exit した可能性が高い。警告にとどめ、エラーにはしない。
-                // ただし「終了応答を受けた」とは区別する。
-                tracing::warn!("rpc: shutdown call failed (likely host exited early): {e}");
-                Ok(ShutdownOutcome::NoResponse)
-            }
-        }
+        guard.shutdown(config_json)
     }
 
     /// ホストの現在 config と異なる場合だけ self-exit を依頼する（reload storm 対策）。
     ///
-    /// - `Ok(true)`  = config が異なり、ホストは exit する。既存接続は破棄済み。
+    /// - `Ok(Restarting)` = config が異なり、ホストは exit する。既存接続は破棄済み。
     ///   次回 API 呼び出しで新 config の Create 付きで再 spawn される。
-    /// - `Ok(false)` = ホストは既に同一 config で動作中。接続・エンジンとも継続。
+    /// - `Ok(SameConfig)` = ホストは既に同一 config で動作中。接続・エンジンとも継続。
+    /// - `Ok(Skipped)` = 宛先のホストは既に入れ替わっていた。比べていない。
     /// - `Err(_)`    = 比較不能（旧プロトコルのホストが variant をデコードできず
     ///   切断した、ホストが応答しない等）。呼び出し元は無条件 `shutdown()` に
     ///   フォールバックすること。
     ///
+    /// 宛先は `shutdown()` と同じく送る前に確定し、再送でも差し替えない。
     /// `config_json` は結果に依らず内部に保存する（次回 re-spawn 時の Create に使う）。
-    pub fn shutdown_if_config_differs(&self, config_json: Option<String>) -> Result<bool> {
+    pub fn shutdown_if_config_differs(
+        &self,
+        config_json: Option<String>,
+    ) -> Result<ConditionalShutdown> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
-        if let Some(cfg) = config_json.clone() {
-            guard.config_json = Some(cfg);
+        guard.shutdown_if_config_differs(config_json)
+    }
+
+    /// 採番した変更要求を送る（Issue #56）。
+    ///
+    /// 結果不明の要求を抱えていれば送らず `ChangeError::Unresolved` を返す。
+    /// 通信に失敗した場合（再接続・再送も含めて）は `ChangeError::Transport` を返し、
+    /// その要求は結果不明として残る。
+    pub fn change(
+        &self,
+        expect: Expect,
+        request: ChangeRequest,
+    ) -> std::result::Result<ChangeReply, ChangeError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ChangeError::Host("RpcEngine mutex poisoned".into()))?;
+        guard.send_change(expect, request)
+    }
+
+    /// 読みと未確定ローマ字を復元し、`owner` へ所有権を移す（Issue #56）。
+    ///
+    /// 結果不明の要求があっても送れる（それを解決するための要求）。`Restored` を
+    /// 受け取れば未解決は消え、以後の `change` はその `engine_gen` を期待値にする。
+    pub fn restore(
+        &self,
+        owner: Owner,
+        reading: String,
+        pending_romaji: String,
+        then: Option<ChangeRequest>,
+    ) -> std::result::Result<RestoreReply, ChangeError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ChangeError::Host("RpcEngine mutex poisoned".into()))?;
+        guard.send_restore(owner, reading, pending_romaji, then)
+    }
+
+    /// 結果不明の要求（プロセスで 1 件まで）。
+    pub fn unresolved(&self) -> Option<Unresolved> {
+        REQUEST_LEDGER.unresolved()
+    }
+
+    /// 結果不明の要求を断念する（送り直さない）。`Commit` / `Learn` / `LearnForce` /
+    /// `BgTakeCandidates` のように、復元では戻せない効果を持つ要求に使う。
+    pub fn abandon_unresolved(&self) -> Option<Unresolved> {
+        let abandoned = REQUEST_LEDGER.abandon();
+        if let Some(u) = abandoned {
+            tracing::info!(
+                "rpc: abandoned unresolved request seq={} kind={:?}",
+                u.seq,
+                u.kind
+            );
         }
-        // TODO(#56a): use the host_id retained from the latest Hello response.
-        let result = guard.call_with_retry(Request::ShutdownIfConfigDiffers {
-            config_json,
-            expected_host_id: HostId::default(),
-            config_version: None,
-        });
-        match result {
-            Ok(Response::Bool(true)) => {
-                // ホストは応答後に exit する。既存接続はもう使えない。
-                guard.stream = None;
-                tracing::info!("rpc: ShutdownIfConfigDiffers: host restarting (config differs)");
-                Ok(true)
-            }
-            Ok(Response::Bool(false)) => Ok(false),
-            Ok(Response::Error(e)) => bail!("shutdown_if_config_differs error: {e}"),
-            Ok(other) => bail!(
-                "unexpected shutdown_if_config_differs response: {:?}",
-                other
-            ),
-            Err(e) => {
-                // 旧ホスト（variant 未知でデコード失敗→切断）や half-dead ホスト。
-                guard.stream = None;
-                Err(e)
-            }
-        }
+        abandoned
+    }
+
+    /// 直近に知ったエンジンの世代（`Hello` か `Restored`）。`change` の期待値に使う。
+    pub fn engine_gen(&self) -> Option<EngineGen> {
+        self.inner.lock().ok().and_then(|g| g.engine_gen)
     }
 
     fn call(&self, req: Request) -> Result<Response> {
@@ -680,12 +893,201 @@ impl RpcEngine {
 }
 
 impl<T: HostTransport> Connection<T> {
-    fn new(transport: T, config_json: Option<String>, guard: Arc<Mutex<HostSpawnGuard>>) -> Self {
+    fn new(
+        transport: T,
+        config_json: Option<String>,
+        guard: Arc<Mutex<HostSpawnGuard>>,
+        ledger: Arc<RequestLedger>,
+    ) -> Self {
         Self {
             transport,
             stream: None,
             config_json,
             guard,
+            ledger,
+            host_id: None,
+            engine_gen: None,
+        }
+    }
+
+    /// 終了要求の宛先。接続が無ければ先に繋いで `Hello` の値を得る。
+    ///
+    /// ここで確定した値を要求に入れて送るので、`call_with_retry` の中で再接続して
+    /// 別のホストに繋がっても宛先は差し替わらない。
+    fn shutdown_target(&mut self) -> Result<HostId> {
+        self.ensure_connected()?;
+        self.host_id
+            .ok_or_else(|| anyhow!("host_id unknown after Hello"))
+    }
+
+    fn shutdown(&mut self, config_json: Option<String>) -> Result<ShutdownOutcome> {
+        if let Some(cfg) = config_json {
+            self.config_json = Some(cfg);
+        }
+        let result = self.shutdown_target().and_then(|expected_host_id| {
+            self.call_with_retry(Request::Shutdown { expected_host_id })
+        });
+        match result {
+            Ok(Response::ShutdownAccepted) => {
+                // サーバは応答後に exit する。既存接続はもう使えない。
+                self.stream = None;
+                tracing::info!("rpc: Shutdown acknowledged by host");
+                Ok(ShutdownOutcome::Acknowledged)
+            }
+            Ok(Response::ShutdownSkipped) => {
+                // 今繋がっているホストは宛先ではない（既に入れ替わっていた）。終了して
+                // いないので接続はそのまま使える。
+                tracing::info!("rpc: Shutdown skipped (target host already replaced)");
+                Ok(ShutdownOutcome::Skipped)
+            }
+            Ok(Response::Error(e)) => {
+                self.stream = None;
+                bail!("shutdown error: {e}")
+            }
+            Ok(other) => {
+                self.stream = None;
+                bail!("unexpected shutdown response: {:?}", other)
+            }
+            Err(e) => {
+                // 応答を読む前に相手が exit した可能性が高い。警告にとどめ、エラーにはしない。
+                // ただし「終了応答を受けた」とは区別する。
+                self.stream = None;
+                tracing::warn!("rpc: shutdown call failed (likely host exited early): {e}");
+                Ok(ShutdownOutcome::NoResponse)
+            }
+        }
+    }
+
+    fn shutdown_if_config_differs(
+        &mut self,
+        config_json: Option<String>,
+    ) -> Result<ConditionalShutdown> {
+        if let Some(cfg) = config_json.clone() {
+            self.config_json = Some(cfg);
+        }
+        let result = self.shutdown_target().and_then(|expected_host_id| {
+            self.call_with_retry(Request::ShutdownIfConfigDiffers {
+                config_json,
+                expected_host_id,
+                config_version: None,
+            })
+        });
+        match result {
+            Ok(Response::Bool(true)) => {
+                // ホストは応答後に exit する。既存接続はもう使えない。
+                self.stream = None;
+                tracing::info!("rpc: ShutdownIfConfigDiffers: host restarting (config differs)");
+                Ok(ConditionalShutdown::Restarting)
+            }
+            Ok(Response::Bool(false)) => Ok(ConditionalShutdown::SameConfig),
+            Ok(Response::ShutdownSkipped) => {
+                tracing::info!(
+                    "rpc: ShutdownIfConfigDiffers skipped (target host already replaced)"
+                );
+                Ok(ConditionalShutdown::Skipped)
+            }
+            Ok(Response::Error(e)) => bail!("shutdown_if_config_differs error: {e}"),
+            Ok(other) => bail!(
+                "unexpected shutdown_if_config_differs response: {:?}",
+                other
+            ),
+            Err(e) => {
+                // 旧ホスト（variant 未知でデコード失敗→切断）や half-dead ホスト。
+                self.stream = None;
+                Err(e)
+            }
+        }
+    }
+
+    fn send_change(
+        &mut self,
+        expect: Expect,
+        request: ChangeRequest,
+    ) -> std::result::Result<ChangeReply, ChangeError> {
+        if let Some(u) = self.ledger.unresolved() {
+            return Err(ChangeError::Unresolved(u));
+        }
+        // 採番の前に繋いでおく。`Hello.highest_sent` は送った番号までを申告する値で、
+        // まだ送っていない番号を含めると、新しい記録の `floor` がその要求を拒否する。
+        self.ensure_connected().map_err(ChangeError::Transport)?;
+        let seq = self
+            .ledger
+            .begin_change(&request, &expect)
+            .map_err(ChangeError::Unresolved)?;
+        // 再送（call_with_retry の 2 回目）も同じ番号・同じ内容で送る
+        let result = self.call_with_retry(Request::Change {
+            seq,
+            expect,
+            request,
+            config_version: None,
+        });
+        let resp = match result {
+            Ok(r) => r,
+            // 結果不明として残す
+            Err(e) => return Err(ChangeError::Transport(e)),
+        };
+        // 答えが出た（適用・拒否・エラーのどれでも）
+        self.ledger.resolve(seq);
+        match resp {
+            Response::Changed { outcome } => Ok(ChangeReply::Changed(outcome)),
+            Response::Rejected(reason) => {
+                tracing::debug!("rpc: Change seq={seq} rejected: {reason:?}");
+                Ok(ChangeReply::Rejected(reason))
+            }
+            Response::Error(e) => Err(ChangeError::Host(e)),
+            other => Err(ChangeError::Host(format!(
+                "unexpected change response: {other:?}"
+            ))),
+        }
+    }
+
+    fn send_restore(
+        &mut self,
+        owner: Owner,
+        reading: String,
+        pending_romaji: String,
+        then: Option<ChangeRequest>,
+    ) -> std::result::Result<RestoreReply, ChangeError> {
+        // 採番の前に繋いでおく（send_change と同じ理由）
+        self.ensure_connected().map_err(ChangeError::Transport)?;
+        let known_gen = self.engine_gen.unwrap_or_default();
+        let (seq, prev) = self.ledger.begin_restore(owner, known_gen, then.as_ref());
+        let result = self.call_with_retry(Request::Restore {
+            owner,
+            seq,
+            reading,
+            pending_romaji,
+            then,
+            config_version: None,
+        });
+        let resp = match result {
+            Ok(r) => r,
+            // `then` があればそれを結果不明として残す（無ければそれまでの未解決のまま）
+            Err(e) => return Err(ChangeError::Transport(e)),
+        };
+        match resp {
+            Response::Restored { engine_gen, then } => {
+                // 読みを丸ごと上書きしたので、それまでの未解決もここで解決する
+                self.ledger.set_unresolved(None);
+                self.engine_gen = Some(engine_gen);
+                Ok(RestoreReply::Restored { engine_gen, then })
+            }
+            // 適用されなかった: `then` も適用されていないので、それまでの未解決に戻す
+            Response::Rejected(reason) => {
+                self.ledger.set_unresolved(prev);
+                tracing::debug!("rpc: Restore seq={seq} rejected: {reason:?}");
+                Ok(RestoreReply::Rejected(reason))
+            }
+            Response::Error(e) => {
+                self.ledger.set_unresolved(prev);
+                Err(ChangeError::Host(e))
+            }
+            other => {
+                self.ledger.set_unresolved(prev);
+                Err(ChangeError::Host(format!(
+                    "unexpected restore response: {other:?}"
+                )))
+            }
         }
     }
 
@@ -846,13 +1248,21 @@ impl<T: HostTransport> Connection<T> {
             }
         };
 
-        // 3. Hello 交換
-        if let Err(error) = Self::handshake_hello(&mut stream) {
-            return Err(AttemptFailure {
-                stage: AttemptStage::Hello,
-                error,
-            });
-        }
+        // 3. Hello 交換。これまでに送った最大の番号を毎回申告する（ホストが記録を
+        // 失っていれば、それ以下の番号を新規として適用させないため）
+        let hello = match Self::handshake_hello(
+            &mut stream,
+            self.ledger.tsf_id,
+            self.ledger.highest_sent(),
+        ) {
+            Ok(h) => h,
+            Err(error) => {
+                return Err(AttemptFailure {
+                    stage: AttemptStage::Hello,
+                    error,
+                });
+            }
+        };
         // 4. Create（保存済み config_json を使う）
         if let Err(error) = Self::handshake_create(&mut stream, self.config_json.clone()) {
             return Err(AttemptFailure {
@@ -860,24 +1270,46 @@ impl<T: HostTransport> Connection<T> {
                 error,
             });
         }
+        if !hello.record_found
+            && let Some(u) = self.ledger.unresolved()
+        {
+            // 記録が無いので結果は分からないまま。未解決は消さない（復元か断念で解決する）
+            tracing::info!(
+                "rpc: host has no record for this TSF; request seq={} kind={:?} stays unresolved",
+                u.seq,
+                u.kind
+            );
+        }
+        self.host_id = Some(hello.host_id);
+        self.engine_gen = hello.engine_gen;
         self.stream = Some(stream);
         Ok(())
     }
 
-    fn handshake_hello(stream: &mut T::Stream) -> Result<()> {
+    fn handshake_hello(
+        stream: &mut T::Stream,
+        tsf_id: TsfId,
+        highest_sent: RequestSeq,
+    ) -> Result<HelloInfo> {
         write_frame(
             stream,
             &Request::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                // TODO(#56a): generate one tsf_id per process and report the real highest_sent.
-                tsf_id: TsfId::default(),
-                highest_sent: 0,
+                tsf_id,
+                highest_sent,
             },
         )?;
         match read_frame::<_, Response>(stream)? {
             Response::Hello {
-                protocol_version, ..
-            } if protocol_version == PROTOCOL_VERSION => Ok(()),
+                protocol_version,
+                host_id,
+                engine_gen,
+                record_found,
+            } if protocol_version == PROTOCOL_VERSION => Ok(HelloInfo {
+                host_id,
+                engine_gen,
+                record_found,
+            }),
             Response::Hello {
                 protocol_version, ..
             } => {
@@ -1151,7 +1583,7 @@ mod tests {
     /// 台本どおりの応答を返し、書き込まれた要求を記録するストリーム。
     struct FakeStream {
         incoming: Cursor<Vec<u8>>,
-        outgoing: Vec<u8>,
+        outgoing: Arc<Mutex<Vec<u8>>>,
     }
 
     impl Read for FakeStream {
@@ -1162,7 +1594,7 @@ mod tests {
 
     impl Write for FakeStream {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.outgoing.extend_from_slice(buf);
+            self.outgoing.lock().unwrap().extend_from_slice(buf);
             Ok(buf.len())
         }
         fn flush(&mut self) -> std::io::Result<()> {
@@ -1178,7 +1610,7 @@ mod tests {
         }
         FakeStream {
             incoming: Cursor::new(bytes),
-            outgoing: Vec::new(),
+            outgoing: Arc::default(),
         }
     }
 
@@ -1243,6 +1675,7 @@ mod tests {
             transport,
             None,
             Arc::new(Mutex::new(HostSpawnGuard::default())),
+            Arc::new(RequestLedger::new(TsfId(0x75F))),
         )
     }
 
@@ -1495,6 +1928,317 @@ mod tests {
                 INITIAL_CONNECT_MS,
                 CONNECT_WHILE_BLOCKED_MS
             ]
+        );
+    }
+
+    // ── Issue #56: 要求番号・未解決要求・終了の宛先 ────────────────────────
+
+    use crate::protocol::ChangeKind;
+
+    const HOST_A: HostId = HostId(0xA0);
+    const HOST_B: HostId = HostId(0xB0);
+
+    fn hello_from(host_id: HostId, record_found: bool) -> Response {
+        Response::Hello {
+            protocol_version: PROTOCOL_VERSION,
+            host_id,
+            engine_gen: None,
+            record_found,
+        }
+    }
+
+    /// 書き込まれた要求を後から読めるストリーム（接続を捨てた後も読める）。
+    fn logged_stream(responses: &[Response]) -> (FakeStream, Arc<Mutex<Vec<u8>>>) {
+        let s = stream_with(responses);
+        let log = s.outgoing.clone();
+        (s, log)
+    }
+
+    fn sent(log: &Arc<Mutex<Vec<u8>>>) -> Vec<Request> {
+        let bytes = log.lock().unwrap().clone();
+        let mut cur = Cursor::new(bytes);
+        let mut out = Vec::new();
+        while let Ok(req) = read_frame::<_, Request>(&mut cur) {
+            out.push(req);
+        }
+        out
+    }
+
+    fn owner1() -> Owner {
+        Owner {
+            tsf_id: TsfId(0x75F),
+            composition: 1,
+        }
+    }
+
+    fn gen1() -> EngineGen {
+        EngineGen {
+            host_id: HOST_A,
+            generation: 1,
+        }
+    }
+
+    fn expect1() -> Expect {
+        Expect {
+            engine_gen: gen1(),
+            owner: owner1(),
+        }
+    }
+
+    #[test]
+    fn change_is_numbered_and_resolved_by_any_reply() {
+        let (s, log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Changed {
+                outcome: ChangeOutcome::Bool(true),
+            },
+            Response::Rejected(Reason::OwnerMismatch),
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        let r = conn
+            .send_change(expect1(), ChangeRequest::Backspace)
+            .unwrap();
+        assert_eq!(r, ChangeReply::Changed(ChangeOutcome::Bool(true)));
+        assert_eq!(conn.ledger.unresolved(), None);
+        // 拒否も答えなので未解決は残らない
+        let r = conn
+            .send_change(expect1(), ChangeRequest::Backspace)
+            .unwrap();
+        assert_eq!(r, ChangeReply::Rejected(Reason::OwnerMismatch));
+        assert_eq!(conn.ledger.unresolved(), None);
+
+        let reqs = sent(&log);
+        assert!(matches!(
+            reqs[0],
+            Request::Hello {
+                tsf_id: TsfId(0x75F),
+                highest_sent: 0,
+                ..
+            }
+        ));
+        assert!(matches!(reqs[2], Request::Change { seq: 1, .. }));
+        assert!(matches!(reqs[3], Request::Change { seq: 2, .. }));
+    }
+
+    #[test]
+    fn lost_reply_is_resent_with_the_same_seq_and_stays_unresolved_on_failure() {
+        // 1 本目: 要求を書いた後に応答が来ない（パイプだけ切れた）
+        let (first, first_log) = logged_stream(&[hello_from(HOST_A, false), Response::Unit]);
+        // 2 本目: 再接続後も応答が来ない
+        let (second, second_log) = logged_stream(&[hello_from(HOST_A, true), Response::Unit]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(first), Ok(second)]),
+            ..Default::default()
+        });
+        let err = conn
+            .send_change(
+                expect1(),
+                ChangeRequest::Commit {
+                    text: "漢字".into(),
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, ChangeError::Transport(_)), "{err}");
+
+        // 再送は同じ番号・同じ内容。再接続の Hello は送った最大の番号を申告する
+        let first_reqs = sent(&first_log);
+        let second_reqs = sent(&second_log);
+        assert!(matches!(first_reqs[2], Request::Change { seq: 1, .. }));
+        assert!(matches!(
+            second_reqs[0],
+            Request::Hello {
+                highest_sent: 1,
+                ..
+            }
+        ));
+        match (&first_reqs[2], &second_reqs[2]) {
+            (
+                Request::Change {
+                    seq: a,
+                    request: ra,
+                    ..
+                },
+                Request::Change {
+                    seq: b,
+                    request: rb,
+                    ..
+                },
+            ) => {
+                assert_eq!(a, b);
+                assert_eq!(ra, rb);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+
+        // 結果不明のまま残り、次の変更要求は送らない
+        let u = conn.ledger.unresolved().expect("unresolved");
+        assert_eq!(u.seq, 1);
+        assert_eq!(u.kind, ChangeKind::Commit);
+        let err = conn
+            .send_change(expect1(), ChangeRequest::ResetPreedit)
+            .unwrap_err();
+        assert!(matches!(err, ChangeError::Unresolved(u) if u.seq == 1));
+        assert_eq!(
+            conn.ledger.highest_sent(),
+            1,
+            "送らなかった要求は採番しない"
+        );
+
+        // 断念すれば次へ進める
+        assert_eq!(conn.ledger.abandon().map(|u| u.seq), Some(1));
+        assert_eq!(conn.ledger.unresolved(), None);
+    }
+
+    #[test]
+    fn restore_resolves_the_pending_request_and_learns_the_generation() {
+        let (s, log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Rejected(Reason::ResultUnavailable),
+            Response::Restored {
+                engine_gen: gen1(),
+                then: Some(ChangeOutcome::InputChar {
+                    preedit: "たt".into(),
+                    hiragana: "た".into(),
+                    bg_status: "idle".into(),
+                }),
+            },
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        // 結果不明の打鍵を抱えている
+        let pending = Unresolved {
+            seq: 7,
+            kind: ChangeKind::InputChar,
+            owner: owner1(),
+            engine_gen: gen1(),
+        };
+        conn.ledger.set_unresolved(Some(pending));
+        conn.ledger.lock().last_seq = 7;
+        let input = ChangeRequest::InputChar {
+            c: 't' as u32,
+            kind: InputCharKind::Char,
+            bg_start_n_cands: None,
+        };
+
+        // 答えられないと拒否された復元は、何も適用されていないので未解決を元に戻す
+        let r = conn
+            .send_restore(owner1(), "た".into(), String::new(), Some(input.clone()))
+            .unwrap();
+        assert_eq!(r, RestoreReply::Rejected(Reason::ResultUnavailable));
+        assert_eq!(conn.ledger.unresolved(), Some(pending));
+
+        // 未解決があっても復元は送れる。受理されれば未解決は消え、世代を覚える
+        let r = conn
+            .send_restore(owner1(), "た".into(), String::new(), Some(input))
+            .unwrap();
+        assert!(
+            matches!(r, RestoreReply::Restored { engine_gen, then: Some(_) } if engine_gen == gen1())
+        );
+        assert_eq!(conn.ledger.unresolved(), None);
+        assert_eq!(conn.engine_gen, Some(gen1()));
+
+        let reqs = sent(&log);
+        assert!(matches!(reqs[2], Request::Restore { seq: 8, .. }));
+        assert!(matches!(reqs[3], Request::Restore { seq: 9, .. }));
+    }
+
+    #[test]
+    fn shutdown_target_is_fixed_before_sending_and_not_replaced_on_resend() {
+        // 1 本目（ホスト A）: Shutdown を書いた後に切れる
+        let (first, first_log) = logged_stream(&[hello_from(HOST_A, false), Response::Unit]);
+        // 2 本目（新しいホスト B）: 再送された Shutdown は A 宛てなので Skipped
+        let (second, second_log) = logged_stream(&[
+            hello_from(HOST_B, false),
+            Response::Unit,
+            Response::ShutdownSkipped,
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(first), Ok(second)]),
+            ..Default::default()
+        });
+        assert_eq!(conn.shutdown(None).unwrap(), ShutdownOutcome::Skipped);
+        assert!(matches!(
+            sent(&first_log)[2],
+            Request::Shutdown {
+                expected_host_id: HOST_A
+            }
+        ));
+        assert!(
+            matches!(
+                sent(&second_log)[2],
+                Request::Shutdown {
+                    expected_host_id: HOST_A
+                }
+            ),
+            "再接続で B の host_id に差し替えない"
+        );
+        assert_eq!(conn.host_id, Some(HOST_B));
+        assert!(conn.stream.is_some(), "B は終了していないので接続を残す");
+    }
+
+    #[test]
+    fn shutdown_outcomes_follow_the_reply() {
+        let run = |reply: Option<Response>| {
+            let mut script = vec![hello_from(HOST_A, false), Response::Unit];
+            script.extend(reply);
+            let mut conn = connection(FakeTransport {
+                // 応答が無い場合、再送先も応答しない
+                connects: VecDeque::from([Ok(stream_with(&script)), Ok(stream_with(&[]))]),
+                ..Default::default()
+            });
+            let out = conn.shutdown(None);
+            (out.map_err(|e| e.to_string()), conn.stream.is_some())
+        };
+        assert_eq!(
+            run(Some(Response::ShutdownAccepted)),
+            (Ok(ShutdownOutcome::Acknowledged), false)
+        );
+        assert_eq!(
+            run(Some(Response::ShutdownSkipped)),
+            (Ok(ShutdownOutcome::Skipped), true)
+        );
+        // 旧形式の Unit は受理とみなさない
+        assert!(run(Some(Response::Unit)).0.is_err());
+        assert_eq!(run(None).0, Ok(ShutdownOutcome::NoResponse));
+    }
+
+    #[test]
+    fn conditional_shutdown_distinguishes_skipped_from_same_config() {
+        let run = |reply: Response| {
+            let (s, log) = logged_stream(&[hello_from(HOST_A, false), Response::Unit, reply]);
+            let mut conn = connection(FakeTransport {
+                connects: VecDeque::from([Ok(s)]),
+                ..Default::default()
+            });
+            let out = conn.shutdown_if_config_differs(Some("{}".into())).unwrap();
+            assert!(matches!(
+                sent(&log)[2],
+                Request::ShutdownIfConfigDiffers {
+                    expected_host_id: HOST_A,
+                    config_version: None,
+                    ..
+                }
+            ));
+            (out, conn.stream.is_some())
+        };
+        assert_eq!(
+            run(Response::Bool(false)),
+            (ConditionalShutdown::SameConfig, true)
+        );
+        assert_eq!(
+            run(Response::Bool(true)),
+            (ConditionalShutdown::Restarting, false)
+        );
+        assert_eq!(
+            run(Response::ShutdownSkipped),
+            (ConditionalShutdown::Skipped, true)
         );
     }
 }

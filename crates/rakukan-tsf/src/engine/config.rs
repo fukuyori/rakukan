@@ -474,8 +474,11 @@ pub enum ApplyOutcome {
     SameConfig,
     /// `ShutdownIfConfigDiffers` が `Bool(true)`（再起動の受理。新設定での起動確認ではない）
     RestartAccepted,
-    /// `Shutdown` の `Unit` を受信した。`fallback` は比較に失敗して無条件終了へ回った場合
+    /// `Shutdown` の `ShutdownAccepted` を受信した。`fallback` は比較に失敗して無条件終了へ回った場合
     ShutdownAcknowledged { fallback: bool },
+    /// 宛先のホストは既に入れ替わっていた（`ShutdownSkipped`、Issue #56）。今のホストの
+    /// 設定とは比べていないので、反映待ちは保持する（新しいホストへの `Create` し直しは #65）
+    HostReplaced,
     /// 通信失敗・異常応答（`Ok(())` に潰した通信失敗を含む）。反映待ちは保持する
     CommFailure,
 }
@@ -727,7 +730,7 @@ impl ConfigManager {
             None => None,
         };
         let cleared = match outcome {
-            ApplyOutcome::CommFailure => false,
+            ApplyOutcome::CommFailure | ApplyOutcome::HostReplaced => false,
             ApplyOutcome::SameConfig
             | ApplyOutcome::RestartAccepted
             | ApplyOutcome::ShutdownAcknowledged { .. } => {
@@ -1698,6 +1701,15 @@ mod config_snapshot_tests {
         assert!(!mgr.finish_apply(&id, ApplyOutcome::CommFailure));
         assert!(mgr.has_pending_apply(), "通信失敗では反映待ちを保持する");
         assert!(mgr.in_flight.is_none(), "送信中の記録は消す");
+        // 宛先のホストが入れ替わっていた（ShutdownSkipped）場合も保持する
+        let (id, _) = mgr
+            .begin_apply(ApplyTrigger::SaveEvent, false)
+            .expect("pending");
+        assert!(!mgr.finish_apply(&id, ApplyOutcome::HostReplaced));
+        assert!(
+            mgr.has_pending_apply(),
+            "別ホストだった場合は反映待ちを保持する"
+        );
         // フォールバックの Shutdown で Unit を受信したら解除する
         let (id, _) = mgr
             .begin_apply(ApplyTrigger::SaveEvent, false)

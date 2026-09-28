@@ -464,7 +464,10 @@ pub fn engine_reload_force() {
 }
 
 trait ConfigShutdown {
-    fn conditional_shutdown(&self, config_json: Option<String>) -> anyhow::Result<bool>;
+    fn conditional_shutdown(
+        &self,
+        config_json: Option<String>,
+    ) -> anyhow::Result<rakukan_engine_rpc::ConditionalShutdown>;
     fn shutdown(
         &self,
         config_json: Option<String>,
@@ -472,7 +475,10 @@ trait ConfigShutdown {
 }
 
 impl ConfigShutdown for DynEngine {
-    fn conditional_shutdown(&self, config_json: Option<String>) -> anyhow::Result<bool> {
+    fn conditional_shutdown(
+        &self,
+        config_json: Option<String>,
+    ) -> anyhow::Result<rakukan_engine_rpc::ConditionalShutdown> {
         self.shutdown_if_config_differs(config_json)
     }
 
@@ -491,12 +497,15 @@ fn request_config_apply(
     force: bool,
 ) -> super::config::ApplyOutcome {
     use super::config::ApplyOutcome;
-    use rakukan_engine_rpc::ShutdownOutcome;
+    use rakukan_engine_rpc::{ConditionalShutdown, ShutdownOutcome};
 
     if !force {
         match engine.conditional_shutdown(Some(config_json.clone())) {
-            Ok(false) => return ApplyOutcome::SameConfig,
-            Ok(true) => return ApplyOutcome::RestartAccepted,
+            Ok(ConditionalShutdown::SameConfig) => return ApplyOutcome::SameConfig,
+            Ok(ConditionalShutdown::Restarting) => return ApplyOutcome::RestartAccepted,
+            // 宛先のホストは既に入れ替わっていた。無条件の Shutdown へ回ると新しい
+            // ホストを終了させるので回らない。反映待ちは残す（Issue #56 / #65）
+            Ok(ConditionalShutdown::Skipped) => return ApplyOutcome::HostReplaced,
             Err(e) => {
                 tracing::warn!(
                     "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
@@ -512,6 +521,10 @@ fn request_config_apply(
             tracing::warn!("engine_reload: host shutdown sent but no response");
             ApplyOutcome::CommFailure
         }
+        Ok(ShutdownOutcome::Skipped) => {
+            tracing::info!("engine_reload: target host already replaced; shutdown skipped");
+            ApplyOutcome::HostReplaced
+        }
         Err(e) => {
             tracing::warn!("engine_reload: host shutdown call returned error: {e}");
             ApplyOutcome::CommFailure
@@ -523,12 +536,12 @@ fn request_config_apply(
 mod config_apply_tests {
     use super::*;
     use crate::engine::config::{ApplyOutcome, ConfigManager, LoadOutcome};
-    use rakukan_engine_rpc::ShutdownOutcome;
+    use rakukan_engine_rpc::{ConditionalShutdown, ShutdownOutcome};
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::Duration;
 
     struct MockShutdown {
-        conditional: Result<bool, &'static str>,
+        conditional: Result<ConditionalShutdown, &'static str>,
         shutdown: Result<ShutdownOutcome, &'static str>,
         calls: Mutex<Vec<&'static str>>,
         entered: Option<mpsc::Sender<()>>,
@@ -537,7 +550,7 @@ mod config_apply_tests {
 
     impl MockShutdown {
         fn new(
-            conditional: Result<bool, &'static str>,
+            conditional: Result<ConditionalShutdown, &'static str>,
             shutdown: Result<ShutdownOutcome, &'static str>,
         ) -> Self {
             Self {
@@ -551,7 +564,7 @@ mod config_apply_tests {
     }
 
     impl ConfigShutdown for MockShutdown {
-        fn conditional_shutdown(&self, _: Option<String>) -> anyhow::Result<bool> {
+        fn conditional_shutdown(&self, _: Option<String>) -> anyhow::Result<ConditionalShutdown> {
             self.calls.lock().expect("calls").push("conditional");
             if let Some(resume) = self.resume.lock().expect("gate").take() {
                 self.entered
@@ -574,7 +587,10 @@ mod config_apply_tests {
 
     #[test]
     fn transport_outcomes_require_a_real_success_response() {
-        let same = MockShutdown::new(Ok(false), Err("must not call shutdown"));
+        let same = MockShutdown::new(
+            Ok(ConditionalShutdown::SameConfig),
+            Err("must not call shutdown"),
+        );
         assert_eq!(
             request_config_apply(&same, "A".into(), false),
             ApplyOutcome::SameConfig
@@ -604,6 +620,24 @@ mod config_apply_tests {
             ApplyOutcome::CommFailure
         );
         assert_eq!(*forced.calls.lock().unwrap(), ["shutdown"]);
+
+        // 宛先のホストが入れ替わっていた: 無条件の Shutdown へ回らず、反映待ちを残す
+        let skipped = MockShutdown::new(
+            Ok(ConditionalShutdown::Skipped),
+            Err("must not call shutdown"),
+        );
+        assert_eq!(
+            request_config_apply(&skipped, "A".into(), false),
+            ApplyOutcome::HostReplaced
+        );
+        assert_eq!(*skipped.calls.lock().unwrap(), ["conditional"]);
+
+        let forced_skipped =
+            MockShutdown::new(Err("must not compare"), Ok(ShutdownOutcome::Skipped));
+        assert_eq!(
+            request_config_apply(&forced_skipped, "A".into(), true),
+            ApplyOutcome::HostReplaced
+        );
     }
 
     #[test]
@@ -627,7 +661,7 @@ mod config_apply_tests {
         let (entered_tx, entered_rx) = mpsc::channel();
         let (resume_tx, resume_rx) = mpsc::channel();
         let sender = Arc::new(MockShutdown {
-            conditional: Ok(true),
+            conditional: Ok(ConditionalShutdown::Restarting),
             shutdown: Err("must not call shutdown"),
             calls: Mutex::new(Vec::new()),
             entered: Some(entered_tx),

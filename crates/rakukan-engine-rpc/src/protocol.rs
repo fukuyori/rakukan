@@ -28,6 +28,41 @@ pub struct HostId(pub u128);
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct TsfId(pub u128);
 
+impl HostId {
+    /// 起動ごとに新しく採る値。
+    pub fn random() -> Self {
+        Self(random_u128())
+    }
+}
+
+impl TsfId {
+    /// 起動ごとに新しく採る値。
+    pub fn random() -> Self {
+        Self(random_u128())
+    }
+}
+
+/// 起動インスタンス識別子に使う乱数。
+///
+/// `RandomState` は OS の乱数で種を採るので、プロセスの再起動で同じ値に
+/// ならない。時刻と PID も混ぜておく（PID 単独や起動ごとに同じ値から
+/// 始まる連番は、再起動の前後を区別できないため使わない）。
+fn random_u128() -> u128 {
+    use std::hash::{BuildHasher, Hasher};
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let half = |salt: u64| {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(nanos);
+        h.write_u32(std::process::id());
+        h.write_u64(salt);
+        h.finish()
+    };
+    (u128::from(half(1)) << 64) | u128::from(half(2))
+}
+
 /// ホスト内のエンジン世代。ホストの入れ替わりと、同一ホスト内の再生成を区別する。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct EngineGen {
