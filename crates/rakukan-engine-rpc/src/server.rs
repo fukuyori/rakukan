@@ -13,7 +13,8 @@
 //! セッション間の hiragana_buf 等の汚染は TSF 側が既に `ResetAll` を
 //! フォーカス変化で呼ぶ前提でカバーする。
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -24,26 +25,240 @@ use crate::codec::{read_frame, write_frame};
 use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker, RecoveryReason};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    EngineGen, HostId, InputCharKind, PROTOCOL_VERSION, Request, RequestSeq, Response,
+    ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner,
+    PROTOCOL_VERSION, Reason, Request, RequestSeq, Response, TsfId,
 };
 
 /// ホストが保持する TSF ごとの直近記録（Issue #56）。線路には流さない。
-// TODO(#56a): 照合・記録を実装する時に HostShared へ持たせる。
-#[allow(dead_code)]
+///
+/// 結果の記録（`last_seq` / `last_response` / `floor`）と接続管理
+/// （`sessions` / `in_flight` / `last_used`）を 1 件にまとめて持つ。`Hello` で
+/// 作られたばかりの記録は接続管理だけを持ち、`floor` 以下の番号には結果を答えない。
 #[derive(Debug, Clone)]
 pub(crate) struct RequestRecord {
+    /// 最後に判定した要求番号（適用・拒否のどちらでも記録する）。
     pub last_seq: Option<RequestSeq>,
+    /// `last_seq` の要求に返した応答。同じ番号の再送にはこれを返す。
     pub last_response: Option<Response>,
+    /// この番号以下の要求は、適用済みかを答えられないので拒否する。
+    /// 記録を作ったときの `Hello.highest_sent`。
     pub floor: RequestSeq,
+    /// この TSF インスタンスの生きている接続の数。
     pub sessions: u32,
+    /// 読み込んでから `dispatch` を抜けるまでの要求の数（切断後も数える）。
     pub in_flight: u32,
+    /// 最後に触れた時刻（記録表の中の論理時計）。回収の順序に使う。
     pub last_used: u64,
+}
+
+/// 記録表の上限。超えたら回収できる記録（接続も処理中の要求も無いもの）を
+/// 古い順に捨てる。回収できる記録が無ければ上限を超えて受け付ける。
+const RECORD_CAPACITY: usize = 256;
+
+/// 要求番号の判定結果。
+#[derive(Debug, Clone)]
+enum SeqCheck {
+    /// 前回と同じ番号。再適用せず、当時の応答を返す。
+    Replay(Response),
+    /// 記録より小さい番号、または `floor` 以下。適用済みかを答えられない。
+    Unavailable,
+    /// 新しい番号。
+    New,
+}
+
+/// TSF インスタンスごとの記録の表（Issue #56）。
+///
+/// ロックの順序は `state` → 記録表。記録表を保持したまま `state` を取らないこと。
+#[derive(Debug, Default)]
+pub(crate) struct RecordTable {
+    records: HashMap<TsfId, RequestRecord>,
+    clock: u64,
+    /// 上限を超えても回収できなかったことを警告済みか（超えている間は 1 回だけ出す）。
+    warned_over_capacity: bool,
+}
+
+impl RecordTable {
+    fn tick(&mut self) -> u64 {
+        self.clock += 1;
+        self.clock
+    }
+
+    /// `Hello` で接続を登録する。記録があれば `true`。
+    ///
+    /// 記録が無ければ（初回、または回収済み）、`floor = highest_sent` で新しく作る。
+    /// 登録・記録の有無の確認・回収は、このロックの中でまとめて行う。
+    fn hello(&mut self, tsf: TsfId, highest_sent: RequestSeq) -> bool {
+        let now = self.tick();
+        let found = match self.records.get_mut(&tsf) {
+            Some(r) => {
+                r.sessions += 1;
+                r.last_used = now;
+                true
+            }
+            None => {
+                self.records.insert(
+                    tsf,
+                    RequestRecord {
+                        last_seq: None,
+                        last_response: None,
+                        floor: highest_sent,
+                        sessions: 1,
+                        in_flight: 0,
+                        last_used: now,
+                    },
+                );
+                false
+            }
+        };
+        self.collect();
+        found
+    }
+
+    fn session_ended(&mut self, tsf: TsfId) {
+        if let Some(r) = self.records.get_mut(&tsf) {
+            r.sessions = r.sessions.saturating_sub(1);
+        }
+    }
+
+    fn begin_request(&mut self, tsf: TsfId) {
+        let now = self.tick();
+        if let Some(r) = self.records.get_mut(&tsf) {
+            r.in_flight += 1;
+            r.last_used = now;
+        }
+    }
+
+    fn end_request(&mut self, tsf: TsfId) {
+        if let Some(r) = self.records.get_mut(&tsf) {
+            r.in_flight = r.in_flight.saturating_sub(1);
+        }
+    }
+
+    /// 要求番号を記録と照らし合わせる。記録が無ければ（`Hello` を経ていない）
+    /// 答えられないものとして扱う。
+    fn check(&self, tsf: TsfId, seq: RequestSeq) -> SeqCheck {
+        let Some(r) = self.records.get(&tsf) else {
+            return SeqCheck::Unavailable;
+        };
+        if let Some(last) = r.last_seq {
+            if seq == last {
+                return match &r.last_response {
+                    Some(resp) => SeqCheck::Replay(resp.clone()),
+                    None => SeqCheck::Unavailable,
+                };
+            }
+            if seq < last {
+                return SeqCheck::Unavailable;
+            }
+        }
+        if seq <= r.floor {
+            return SeqCheck::Unavailable;
+        }
+        SeqCheck::New
+    }
+
+    /// 判定した要求の番号と応答を記録する。前の番号の記録はここで捨てる
+    /// （同じ TSF から次の番号が来た時点で、前の番号の再送はもう起こらない）。
+    fn store(&mut self, tsf: TsfId, seq: RequestSeq, resp: &Response) {
+        let now = self.tick();
+        if let Some(r) = self.records.get_mut(&tsf) {
+            r.last_seq = Some(seq);
+            r.last_response = Some(resp.clone());
+            r.last_used = now;
+        }
+    }
+
+    /// 上限を超えていれば、接続も処理中の要求も無い記録を古い順に捨てる。
+    fn collect(&mut self) {
+        if self.records.len() <= RECORD_CAPACITY {
+            self.warned_over_capacity = false;
+            return;
+        }
+        let mut idle: Vec<(u64, TsfId)> = self
+            .records
+            .iter()
+            .filter(|(_, r)| r.sessions == 0 && r.in_flight == 0)
+            .map(|(id, r)| (r.last_used, *id))
+            .collect();
+        idle.sort_unstable_by_key(|(used, _)| *used);
+        let excess = self.records.len() - RECORD_CAPACITY;
+        for (_, id) in idle.into_iter().take(excess) {
+            self.records.remove(&id);
+        }
+        if self.records.len() > RECORD_CAPACITY {
+            if !self.warned_over_capacity {
+                tracing::warn!(
+                    "rpc: request records over capacity ({} > {RECORD_CAPACITY}); all remaining records have live sessions or in-flight requests",
+                    self.records.len()
+                );
+                self.warned_over_capacity = true;
+            }
+        } else {
+            self.warned_over_capacity = false;
+        }
+    }
+}
+
+/// `Change` を適用してよいかの判定（Issue #56）。
+#[derive(Debug, Clone)]
+enum Gate {
+    /// 記録を変えずに、この応答を返す。
+    Respond(Response),
+    /// 適用せず拒否する。番号は判定済みとして記録する。
+    Reject(Reason),
+    /// 適用する。
+    Apply,
+}
+
+/// 判定の順序は「世代 → 要求番号 → 所有者」（9/18 の訂正どおり）。
+///
+/// - 世代が違えば記録に触れずに `GenMismatch`（この世代の記録ではないため）
+/// - 番号が前回と同じなら、所有者が今は違っていても当時の応答を返す
+///   （所有権の移動では適用済みの記録を捨てない）
+/// - 新しい番号で所有者が違えば `OwnerMismatch`。所有者がいない（エンジンを
+///   作ったばかり）場合も同じ。所有権は `Restore` でだけ移る
+fn gate_change(
+    current_gen: Option<EngineGen>,
+    current_owner: Option<Owner>,
+    expect: &Expect,
+    seq: SeqCheck,
+) -> Gate {
+    if current_gen != Some(expect.engine_gen) {
+        return Gate::Respond(Response::Rejected(Reason::GenMismatch));
+    }
+    match seq {
+        SeqCheck::Replay(resp) => Gate::Respond(resp),
+        SeqCheck::Unavailable => Gate::Respond(Response::Rejected(Reason::ResultUnavailable)),
+        SeqCheck::New if current_owner != Some(expect.owner) => Gate::Reject(Reason::OwnerMismatch),
+        SeqCheck::New => Gate::Apply,
+    }
+}
+
+/// 応答を返した後にホストを終了するか。要求ではなく応答から決める（Issue #56）。
+///
+/// `ShutdownAccepted` は `Shutdown` が自分宛てだったときだけ返る。`Bool(true)` は
+/// 他の要求でも返るので、`ShutdownIfConfigDiffers` の応答のときだけ終了とみなす。
+fn exits_after_response(is_conditional_shutdown: bool, resp: &Response) -> bool {
+    match resp {
+        Response::ShutdownAccepted => true,
+        Response::Bool(true) => is_conditional_shutdown,
+        _ => false,
+    }
 }
 
 /// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
 pub type SharedEngine = Arc<HostShared>;
 
 pub struct HostShared {
+    /// このホストプロセスの起動インスタンス識別子（Issue #56）。起動ごとに採り直す。
+    host_id: HostId,
+    /// このホストで作ったエンジンの数。世代の番号に使う。
+    engines_created: AtomicU64,
+    /// 現在のエンジンの世代の写し。`Hello` はエンジンのロックを取らずにこれを返す
+    /// （変換中でも応答できるように）。書き換えは `state` を保持したまま行う。
+    engine_gen_now: Mutex<Option<EngineGen>>,
+    /// TSF インスタンスごとの記録（Issue #56）。ロックの順序は `state` → `records`。
+    records: Mutex<RecordTable>,
     /// エンジン本体。変換中はこのロックが長時間（最大 GEN_TIMEOUT 秒）保持される。
     pub state: Mutex<SharedEngineState>,
     /// 現在の engine 生成に使った config JSON。
@@ -96,8 +311,14 @@ impl HostShared {
                 reason.as_str()
             );
         }
+        let host_id = HostId::random();
+        tracing::info!("engine host: host_id={:032x}", host_id.0);
         Self {
-            state: Mutex::new(SharedEngineState { engine: None }),
+            host_id,
+            engines_created: AtomicU64::new(0),
+            engine_gen_now: Mutex::new(None),
+            records: Mutex::new(RecordTable::default()),
+            state: Mutex::new(SharedEngineState::default()),
             config_json: Mutex::new(None),
             health: Mutex::new(HealthTracker::new(prior)),
             exit_after_response: AtomicBool::new(false),
@@ -216,6 +437,37 @@ impl HostShared {
             Err(p) => *p.into_inner() = cfg,
         }
     }
+
+    fn lock_records(&self) -> std::sync::MutexGuard<'_, RecordTable> {
+        match self.records.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn engine_gen_now(&self) -> Option<EngineGen> {
+        match self.engine_gen_now.lock() {
+            Ok(g) => *g,
+            Err(p) => *p.into_inner(),
+        }
+    }
+
+    /// エンジンを入れ替えた・外したときに呼ぶ。`slot` のロックを保持したまま呼ぶこと。
+    ///
+    /// 新しいエンジンは読みが空なので、所有者も BG 変換の記録も持たない。
+    fn replace_engine_gen(&self, slot: &mut SharedEngineState, has_engine: bool) {
+        let engine_gen = has_engine.then(|| EngineGen {
+            host_id: self.host_id,
+            generation: self.engines_created.fetch_add(1, Ordering::Relaxed) + 1,
+        });
+        slot.engine_gen = engine_gen;
+        slot.owner = None;
+        slot.bg_owner = None;
+        match self.engine_gen_now.lock() {
+            Ok(mut g) => *g = engine_gen,
+            Err(p) => *p.into_inner() = engine_gen,
+        }
+    }
 }
 
 impl Default for HostShared {
@@ -224,8 +476,48 @@ impl Default for HostShared {
     }
 }
 
+#[derive(Default)]
 pub struct SharedEngineState {
     pub engine: Option<DynEngine>,
+    /// 現在のエンジンの世代（Issue #56）。エンジンが無ければ `None`。
+    pub engine_gen: Option<EngineGen>,
+    /// 共有エンジンの編集状態を持っている composition。`Restore` でだけ移る。
+    pub owner: Option<Owner>,
+    /// 実行中・完了済みの BG 変換を開始した composition。`Change` で開始した
+    /// ときだけ記録し、`Restore` で消す。候補の取り出しはこの所有者にだけ許す
+    /// （キーの一致だけでは、別 composition の同じ読みの結果を拾いうるため）。
+    pub bg_owner: Option<Owner>,
+}
+
+/// 接続 1 本ぶんの状態。
+#[derive(Debug, Default)]
+struct Session {
+    /// `Hello` で登録した TSF インスタンス。
+    tsf: Option<TsfId>,
+}
+
+/// 要求 1 件を処理している間、記録の `in_flight` を数える（切断後も、
+/// `dispatch` を抜けるまでは記録を回収させない）。
+struct InFlight<'a> {
+    engine: &'a HostShared,
+    tsf: Option<TsfId>,
+}
+
+impl<'a> InFlight<'a> {
+    fn begin(engine: &'a HostShared, tsf: Option<TsfId>) -> Self {
+        if let Some(t) = tsf {
+            engine.lock_records().begin_request(t);
+        }
+        Self { engine, tsf }
+    }
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        if let Some(t) = self.tsf {
+            self.engine.lock_records().end_request(t);
+        }
+    }
 }
 
 /// Named Pipe サーバを起動し、クライアント接続を待ち受けるループを実行する。
@@ -254,8 +546,21 @@ pub fn serve(engine: SharedEngine) -> Result<()> {
     }
 }
 
-fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
+fn handle_session(stream: PipeStream, engine: SharedEngine) -> Result<()> {
     tracing::debug!("rpc session: started");
+    let mut session = Session::default();
+    let result = session_loop(stream, &engine, &mut session);
+    if let Some(tsf) = session.tsf {
+        engine.lock_records().session_ended(tsf);
+    }
+    result
+}
+
+fn session_loop(
+    mut stream: PipeStream,
+    engine: &SharedEngine,
+    session: &mut Session,
+) -> Result<()> {
     loop {
         let req: Request = match read_frame(&mut stream) {
             Ok(r) => r,
@@ -264,16 +569,17 @@ fn handle_session(mut stream: PipeStream, engine: SharedEngine) -> Result<()> {
                 return Ok(());
             }
         };
-        // M1.6 T-HOST1: Shutdown は応答送信後にプロセス exit するため前取り判定。
-        let is_shutdown = matches!(req, Request::Shutdown { .. });
         // ShutdownIfConfigDiffers は「config が異なる」と判定したとき（Bool(true)
-        // 応答）だけ Shutdown と同じ exit 経路に乗る。
+        // 応答）だけ Shutdown と同じ exit 経路に乗る。終了するかは応答から決める
+        // （Issue #56: 別のホスト宛ての Shutdown は ShutdownSkipped になり、終了しない）。
         let is_conditional_shutdown = matches!(req, Request::ShutdownIfConfigDiffers { .. });
         let label = request_label(&req);
         let started = std::time::Instant::now();
-        let resp = dispatch(&engine, req);
-        let is_shutdown =
-            is_shutdown || (is_conditional_shutdown && matches!(resp, Response::Bool(true)));
+        let resp = {
+            let _in_flight = InFlight::begin(engine, session.tsf);
+            dispatch(engine, session, req)
+        };
+        let is_shutdown = exits_after_response(is_conditional_shutdown, &resp);
         // 変換遅延の診断: 長くブロックした要求だけを INFO で残す。
         // BgWaitMs はクライアント指定のタイムアウトまで待つのが正常動作なので
         // 1 秒以上（= engine mutex 待ち等の異常）に絞ってノイズを避ける。
@@ -377,23 +683,38 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
     }
 }
 
-fn dispatch(engine: &SharedEngine, req: Request) -> Response {
+fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Response {
     // Hello / Create は handle し、残りは DynEngine メソッドに流す
     match req {
         Request::Hello {
-            protocol_version, ..
+            protocol_version,
+            tsf_id,
+            highest_sent,
         } => {
             if protocol_version != PROTOCOL_VERSION {
                 return Response::Error(format!(
                     "protocol version mismatch: client={protocol_version} server={PROTOCOL_VERSION}"
                 ));
             }
+            let record_found = {
+                let mut records = engine.lock_records();
+                if let Some(prev) = session.tsf.replace(tsf_id) {
+                    records.session_ended(prev);
+                }
+                records.hello(tsf_id, highest_sent)
+            };
+            if !record_found && highest_sent > 0 {
+                // 記録を回収された TSF が戻ってきた、または新しいホストへ繋ぎ直した。
+                tracing::info!(
+                    "rpc: Hello from tsf {:032x} without a record; floor={highest_sent}",
+                    tsf_id.0
+                );
+            }
             Response::Hello {
                 protocol_version: PROTOCOL_VERSION,
-                // TODO(#56a): expose the host's real startup id, engine generation, and record state.
-                host_id: HostId::default(),
-                engine_gen: Some(EngineGen::default()),
-                record_found: false,
+                host_id: engine.host_id,
+                engine_gen: engine.engine_gen_now(),
+                record_found,
             }
         }
         Request::Create { config_json, .. } => {
@@ -414,6 +735,7 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             let mut g = lock_engine(engine);
             tracing::info!("rpc: Reload requested, dropping current engine");
             g.engine = None;
+            engine.replace_engine_gen(&mut g, false);
             // エンジンを外す時点で監視も止める。ロードに失敗した場合に、
             // 古い DLL の `Running` を根拠に現在のホストを終了させないため
             // （成功すれば load_engine_into が新しい口を入れ直す）。
@@ -421,16 +743,49 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             load_engine_into(engine, &mut g, config_json)
         }
         Request::Bye => Response::Unit,
-        // TODO(#56a): 照合・記録・復元を実装するまでは、成功と誤認されないよう Error を返す。
-        Request::Change { .. } | Request::Restore { .. } => {
-            Response::Error("Change / Restore are not implemented yet (#56)".to_string())
+        Request::Change {
+            seq,
+            expect,
+            request,
+            config_version: _,
+        } => dispatch_change(engine, session, seq, expect, request),
+        Request::Restore {
+            owner,
+            seq,
+            reading,
+            pending_romaji,
+            then,
+            config_version: _,
+        } => dispatch_restore(engine, session, owner, seq, reading, pending_romaji, then),
+        // host_id はホストの不変フィールドなので、engine ロックを取らずに答えられる
+        // （変換中でも応答できる）。
+        Request::Shutdown { expected_host_id } => {
+            if expected_host_id == engine.host_id {
+                Response::ShutdownAccepted
+            } else {
+                tracing::info!(
+                    "rpc: Shutdown for another host ({:032x}); keeping this host",
+                    expected_host_id.0
+                );
+                Response::ShutdownSkipped
+            }
         }
-        // TODO(#56a): compare expected_host_id and return Accepted or Skipped accordingly.
-        Request::Shutdown { .. } => Response::ShutdownAccepted,
         // 変換中（engine ロック保持中）でも即答する必要があるので engine を取らない。
         Request::EngineHealth => Response::String(engine.health_now().as_str().to_string()),
-        // TODO(#56a): expected_host_id が現在のホストと違えば比較せず ShutdownSkipped を返す。
-        Request::ShutdownIfConfigDiffers { config_json, .. } => {
+        Request::ShutdownIfConfigDiffers {
+            config_json,
+            expected_host_id,
+            config_version: _,
+        } => {
+            // 宛先のホストは既に入れ替わっている。新しいホストの設定と比べると、
+            // 「同じ設定」と「別のホストだった」を区別できなくなるので比較しない。
+            if expected_host_id != engine.host_id {
+                tracing::info!(
+                    "rpc: ShutdownIfConfigDiffers for another host ({:032x}); keeping this host",
+                    expected_host_id.0
+                );
+                return Response::ShutdownSkipped;
+            }
             // 変換中でも応答できるよう engine ロックは取らない（Shutdown と同じ扱い）。
             // config だけを短時間ロックで比較する。
             let current = engine.config_snapshot();
@@ -457,6 +812,272 @@ fn dispatch(engine: &SharedEngine, req: Request) -> Response {
             apply_health_action(engine, eng);
             resp
         }
+    }
+}
+
+/// 要求の `owner.tsf_id` が、この接続の `Hello` で登録した TSF と一致するか。
+fn session_tsf(session: &Session, owner: &Owner) -> std::result::Result<TsfId, Response> {
+    match session.tsf {
+        Some(t) if t == owner.tsf_id => Ok(t),
+        Some(_) => Err(Response::Error(
+            "owner.tsf_id does not match the tsf_id sent in Hello".into(),
+        )),
+        None => Err(Response::Error("Hello has not been exchanged".into())),
+    }
+}
+
+/// 採番された変更要求（Issue #56）。
+///
+/// 判定と適用は 1 回のエンジンロックの中で行う。番号の判定は記録表も見るので、
+/// ロックの順序は `state` → 記録表。記録表は判定と記録の瞬間だけ取る（その間も
+/// `state` を保持しているので、同じ TSF の別の要求が割り込むことはない）。
+fn dispatch_change(
+    engine: &SharedEngine,
+    session: &Session,
+    seq: RequestSeq,
+    expect: Expect,
+    request: ChangeRequest,
+) -> Response {
+    let tsf = match session_tsf(session, &expect.owner) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let mut g = lock_engine(engine);
+    let state = &mut *g;
+    // エンジンが無ければ世代も無いので、ここで GenMismatch になる
+    let check = engine.lock_records().check(tsf, seq);
+    let resp = match gate_change(state.engine_gen, state.owner, &expect, check) {
+        Gate::Respond(resp) => return resp,
+        Gate::Reject(reason) => Response::Rejected(reason),
+        Gate::Apply => {
+            let Some(eng) = state.engine.as_mut() else {
+                return Response::Rejected(Reason::GenMismatch);
+            };
+            inject_ready(eng);
+            let outcome = apply_change(eng, Some((&mut state.bg_owner, expect.owner)), request);
+            apply_health_action(engine, eng);
+            Response::Changed { outcome }
+        }
+    };
+    engine.lock_records().store(tsf, seq, &resp);
+    resp
+}
+
+/// 読みと未確定ローマ字を復元し、所有権を移す（Issue #56）。
+///
+/// 1 回のエンジンロックの中で `reset_preedit`（`input_log` も消す）→
+/// `force_preedit` → `push_char` × k → `then` の適用を行う。世代は照合しない
+/// （世代を採り直すための要求なので）。番号の判定は `Change` と同じで、同じ番号の
+/// 再送には保持した応答を返す＝再送で編集状態が 2 回変わらない。
+///
+/// 復元の前に Done の変換器を回収し、BG 変換の記録を消す。別の所有者の変換が
+/// 実行中なら止めずに終わるのを待ち、その結果は誰にも取り出させない。
+fn dispatch_restore(
+    engine: &SharedEngine,
+    session: &Session,
+    owner: Owner,
+    seq: RequestSeq,
+    reading: String,
+    pending_romaji: String,
+    then: Option<ChangeRequest>,
+) -> Response {
+    let tsf = match session_tsf(session, &owner) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let mut g = lock_engine(engine);
+    let state = &mut *g;
+    let (Some(eng), Some(engine_gen)) = (state.engine.as_mut(), state.engine_gen) else {
+        return Response::Error("engine not created".into());
+    };
+    match engine.lock_records().check(tsf, seq) {
+        SeqCheck::Replay(resp) => return resp,
+        SeqCheck::Unavailable => return Response::Rejected(Reason::ResultUnavailable),
+        SeqCheck::New => {}
+    }
+    inject_ready(eng);
+    eng.reset_preedit();
+    eng.force_preedit(reading);
+    for c in pending_romaji.chars() {
+        eng.push_char(c);
+    }
+    eng.bg_reclaim();
+    state.bg_owner = None;
+    state.owner = Some(owner);
+    let then = then.map(|req| apply_change(eng, Some((&mut state.bg_owner, owner)), req));
+    apply_health_action(engine, eng);
+    let resp = Response::Restored { engine_gen, then };
+    engine.lock_records().store(tsf, seq, &resp);
+    resp
+}
+
+/// 変更要求を 1 件適用する。旧 variant と `Change` / `Restore.then` の共通部分。
+///
+/// `bg` は BG 変換の所有者の記録と要求元。`Some` のとき（`Change` / `Restore`）だけ、
+/// 開始に成功した変換の所有者を記録し、候補の取り出しを所有者に限る。旧 variant は
+/// 所有者を持たないので `None`（従来どおりキーの一致だけで取り出す）。
+fn apply_change(
+    eng: &mut DynEngine,
+    bg: Option<(&mut Option<Owner>, Owner)>,
+    request: ChangeRequest,
+) -> ChangeOutcome {
+    let started = |ok: bool, bg: Option<(&mut Option<Owner>, Owner)>| {
+        if ok && let Some((slot, owner)) = bg {
+            *slot = Some(owner);
+        }
+    };
+    match request {
+        ChangeRequest::InputChar {
+            c,
+            kind,
+            bg_start_n_cands,
+        } => {
+            if let Some(ch) = char::from_u32(c) {
+                match kind {
+                    InputCharKind::Char => eng.push_char(ch),
+                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(ch),
+                    InputCharKind::Raw => eng.push_raw(ch),
+                }
+            }
+            let preedit = eng.preedit_display();
+            let hiragana = eng.hiragana_text();
+            let bg_status = eng.bg_status().to_string();
+            if let Some(n) = bg_start_n_cands
+                && !hiragana.is_empty()
+            {
+                let ok = eng.bg_start(n as usize);
+                started(ok, bg);
+            }
+            ChangeOutcome::InputChar {
+                preedit,
+                hiragana,
+                bg_status,
+            }
+        }
+        ChangeRequest::PushChar(c) => {
+            if let Some(ch) = char::from_u32(c) {
+                eng.push_char(ch);
+            }
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::PushRaw(c) => {
+            if let Some(ch) = char::from_u32(c) {
+                eng.push_raw(ch);
+            }
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::PushFullwidthAlpha(c) => {
+            if let Some(ch) = char::from_u32(c) {
+                eng.push_fullwidth_alpha(ch);
+            }
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::Backspace => ChangeOutcome::Bool(eng.backspace()),
+        ChangeRequest::FlushPendingN => ChangeOutcome::Bool(eng.flush_pending_n()),
+        ChangeRequest::BgStart { n_cands } => {
+            let ok = eng.bg_start(n_cands as usize);
+            started(ok, bg);
+            ChangeOutcome::Bool(ok)
+        }
+        ChangeRequest::BgTakeCandidates { key } => {
+            // 別の所有者・復元前の変換の結果は取り出さない（状態も進めない）
+            if let Some((slot, owner)) = bg
+                && *slot != Some(owner)
+            {
+                return ChangeOutcome::Candidates(vec![]);
+            }
+            ChangeOutcome::Candidates(eng.bg_take_candidates(&key).unwrap_or_default())
+        }
+        ChangeRequest::BgReclaim => {
+            eng.bg_reclaim();
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::Commit { text } => {
+            eng.commit(&text);
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::CommitAsHiragana => {
+            eng.commit_as_hiragana();
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::ResetPreedit => {
+            eng.reset_preedit();
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::ForcePreedit { text } => {
+            eng.force_preedit(text);
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::ResetAll => {
+            eng.reset_all();
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::Learn { reading, surface } => {
+            warn_if_dict_missing(eng, "Learn", &reading);
+            eng.learn(&reading, &surface);
+            ChangeOutcome::Unit
+        }
+        ChangeRequest::LearnForce { reading, surface } => {
+            warn_if_dict_missing(eng, "LearnForce", &reading);
+            eng.learn_force(&reading, &surface);
+            ChangeOutcome::Unit
+        }
+    }
+}
+
+/// 旧 variant の変更要求を `ChangeRequest` へ写す。変更要求でなければ `None`。
+fn legacy_change(req: &Request) -> Option<ChangeRequest> {
+    use Request::*;
+    Some(match req {
+        InputChar {
+            c,
+            kind,
+            bg_start_n_cands,
+        } => ChangeRequest::InputChar {
+            c: *c,
+            kind: *kind,
+            bg_start_n_cands: *bg_start_n_cands,
+        },
+        PushChar(c) => ChangeRequest::PushChar(*c),
+        PushRaw(c) => ChangeRequest::PushRaw(*c),
+        PushFullwidthAlpha(c) => ChangeRequest::PushFullwidthAlpha(*c),
+        Backspace => ChangeRequest::Backspace,
+        FlushPendingN => ChangeRequest::FlushPendingN,
+        BgStart { n_cands } => ChangeRequest::BgStart { n_cands: *n_cands },
+        BgTakeCandidates { key } => ChangeRequest::BgTakeCandidates { key: key.clone() },
+        BgReclaim => ChangeRequest::BgReclaim,
+        Commit { text } => ChangeRequest::Commit { text: text.clone() },
+        CommitAsHiragana => ChangeRequest::CommitAsHiragana,
+        ResetPreedit => ChangeRequest::ResetPreedit,
+        ForcePreedit { text } => ChangeRequest::ForcePreedit { text: text.clone() },
+        ResetAll => ChangeRequest::ResetAll,
+        Learn { reading, surface } => ChangeRequest::Learn {
+            reading: reading.clone(),
+            surface: surface.clone(),
+        },
+        LearnForce { reading, surface } => ChangeRequest::LearnForce {
+            reading: reading.clone(),
+            surface: surface.clone(),
+        },
+        _ => return None,
+    })
+}
+
+/// 旧 variant の応答の形へ戻す。
+fn legacy_response(outcome: ChangeOutcome) -> Response {
+    match outcome {
+        ChangeOutcome::Unit => Response::Unit,
+        ChangeOutcome::Bool(b) => Response::Bool(b),
+        ChangeOutcome::Candidates(v) => Response::Strings(v),
+        ChangeOutcome::InputChar {
+            preedit,
+            hiragana,
+            bg_status,
+        } => Response::InputCharResult {
+            preedit,
+            hiragana,
+            bg_status,
+        },
     }
 }
 
@@ -492,6 +1113,7 @@ fn load_engine_into(
             }
             host.set_stall_probe(eng.stall_probe());
             slot.engine = Some(eng);
+            host.replace_engine_gen(slot, true);
             host.set_config(config_json);
             Response::Unit
         }
@@ -687,20 +1309,29 @@ fn on_stall_confirmed(shared: &SharedEngine, run_id: u64, elapsed_ms: u128) {
     }
 }
 
-fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
-    use Request::*;
-
-    // 辞書・モデルはバックグラウンドでロードされ、poll でエンジンへ注入される
-    // （DLL の BG スレッドはエンジンを直接触れない）。この poll を TSF 側の
-    // ラッチ任せにすると、ホストが入れ替わったとき（クラッシュ・外部終了・
-    // 再 spawn）にラッチが立ったままで二度と poll されず、`dict_store=None`
-    // のまま固定される。要求を処理する前に host 側で必ず注入を試みる。
-    // 注入済みなら `is_*_ready()` の判定だけで終わるので RPC も往復しない。
+/// 辞書・モデルはバックグラウンドでロードされ、poll でエンジンへ注入される
+/// （DLL の BG スレッドはエンジンを直接触れない）。この poll を TSF 側の
+/// ラッチ任せにすると、ホストが入れ替わったとき（クラッシュ・外部終了・
+/// 再 spawn）にラッチが立ったままで二度と poll されず、`dict_store=None`
+/// のまま固定される。要求を処理する前に host 側で必ず注入を試みる。
+/// 注入済みなら `is_*_ready()` の判定だけで終わるので RPC も往復しない。
+fn inject_ready(eng: &mut DynEngine) {
     if !eng.is_dict_ready() {
         eng.poll_dict_ready();
     }
     if !eng.is_kanji_ready() {
         eng.poll_model_ready();
+    }
+}
+
+fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
+    use Request::*;
+
+    inject_ready(eng);
+
+    // 旧 variant の変更要求。照合も記録もしない（`Change` へ移行するまでの経路）。
+    if let Some(change) = legacy_change(&req) {
+        return legacy_response(apply_change(eng, None, change));
     }
 
     match req {
@@ -714,26 +1345,23 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         | Change { .. }
         | Restore { .. } => Response::Unit, // handled upstream
 
-        PushChar(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_char(ch);
-            }
-            Response::Unit
-        }
-        PushRaw(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_raw(ch);
-            }
-            Response::Unit
-        }
-        PushFullwidthAlpha(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_fullwidth_alpha(ch);
-            }
-            Response::Unit
-        }
-        Backspace => Response::Bool(eng.backspace()),
-        FlushPendingN => Response::Bool(eng.flush_pending_n()),
+        // legacy_change で処理済み
+        PushChar(_)
+        | PushRaw(_)
+        | PushFullwidthAlpha(_)
+        | Backspace
+        | FlushPendingN
+        | BgStart { .. }
+        | BgTakeCandidates { .. }
+        | BgReclaim
+        | Commit { .. }
+        | CommitAsHiragana
+        | ResetPreedit
+        | ForcePreedit { .. }
+        | ResetAll
+        | Learn { .. }
+        | LearnForce { .. }
+        | InputChar { .. } => Response::Error("unreachable: legacy change".into()),
 
         PreeditDisplay => Response::String(eng.preedit_display()),
         PreeditIsEmpty => Response::Bool(eng.preedit_is_empty()),
@@ -742,44 +1370,14 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         HiraganaFromRomajiLog => Response::String(eng.hiragana_from_romaji_log()),
         CommittedText => Response::String(eng.committed_text()),
 
-        BgStart { n_cands } => Response::Bool(eng.bg_start(n_cands as usize)),
         BgStatus => Response::String(eng.bg_status().to_string()),
-        BgTakeCandidates { key } => match eng.bg_take_candidates(&key) {
-            Some(v) => Response::Strings(v),
-            None => Response::Strings(vec![]),
-        },
         BgPeekTopCandidate { key } => match eng.bg_peek_top_candidate(&key) {
             Some(s) => Response::String(s),
             None => Response::String(String::new()),
         },
         #[allow(deprecated)]
         _ReservedBgTakeSegmentedCandidates { .. } => Response::Error("removed".into()),
-        BgReclaim => {
-            eng.bg_reclaim();
-            Response::Unit
-        }
         BgWaitMs { timeout_ms } => Response::Bool(eng.bg_wait_ms(timeout_ms)),
-
-        Commit { text } => {
-            eng.commit(&text);
-            Response::Unit
-        }
-        CommitAsHiragana => {
-            eng.commit_as_hiragana();
-            Response::Unit
-        }
-        ResetPreedit => {
-            eng.reset_preedit();
-            Response::Unit
-        }
-        ForcePreedit { text } => {
-            eng.force_preedit(text);
-            Response::Unit
-        }
-        ResetAll => {
-            eng.reset_all();
-            Response::Unit
-        }
 
         ConvertSync => Response::Strings(eng.convert_sync()),
         #[allow(deprecated)]
@@ -820,16 +1418,6 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         MainGpu => Response::I32(eng.main_gpu()),
         AvailableModelsJson => Response::String(eng.available_models_json()),
 
-        Learn { reading, surface } => {
-            warn_if_dict_missing(eng, "Learn", &reading);
-            eng.learn(&reading, &surface);
-            Response::Unit
-        }
-        LearnForce { reading, surface } => {
-            warn_if_dict_missing(eng, "LearnForce", &reading);
-            eng.learn_force(&reading, &surface);
-            Response::Unit
-        }
         MergeCandidatesForReading {
             reading,
             llm_cands,
@@ -839,33 +1427,6 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         }
         LastError => Response::String(eng.last_error()),
         DictStatus => Response::String(eng.dict_status()),
-
-        InputChar {
-            c,
-            kind,
-            bg_start_n_cands,
-        } => {
-            if let Some(ch) = char::from_u32(c) {
-                match kind {
-                    InputCharKind::Char => eng.push_char(ch),
-                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(ch),
-                    InputCharKind::Raw => eng.push_raw(ch),
-                }
-            }
-            let preedit = eng.preedit_display();
-            let hiragana = eng.hiragana_text();
-            let bg_status = eng.bg_status().to_string();
-            if let Some(n) = bg_start_n_cands
-                && !hiragana.is_empty()
-            {
-                eng.bg_start(n as usize);
-            }
-            Response::InputCharResult {
-                preedit,
-                hiragana,
-                bg_status,
-            }
-        }
     }
 }
 
@@ -958,5 +1519,312 @@ mod stall_tests {
         shared.clear_stall_probe();
         assert!(shared.stall_probe().is_none());
         assert!(shared.with_current_probe(next_generation, || ()).is_none());
+    }
+}
+
+#[cfg(test)]
+mod record_tests {
+    use super::*;
+
+    const A: TsfId = TsfId(0xA);
+    const B: TsfId = TsfId(0xB);
+
+    fn gen_(n: u64) -> EngineGen {
+        EngineGen {
+            host_id: HostId(7),
+            generation: n,
+        }
+    }
+
+    fn owner(tsf: TsfId, composition: u64) -> Owner {
+        Owner {
+            tsf_id: tsf,
+            composition,
+        }
+    }
+
+    fn expect(n: u64, o: Owner) -> Expect {
+        Expect {
+            engine_gen: gen_(n),
+            owner: o,
+        }
+    }
+
+    fn is_replay_of(check: SeqCheck, want: &Response) -> bool {
+        match check {
+            SeqCheck::Replay(r) => format!("{r:?}") == format!("{want:?}"),
+            _ => false,
+        }
+    }
+
+    #[test]
+    fn same_seq_replays_and_smaller_or_floor_is_unavailable() {
+        let mut t = RecordTable::default();
+        assert!(!t.hello(A, 0), "初回は記録なし");
+        assert!(matches!(t.check(A, 1), SeqCheck::New));
+        let resp = Response::Changed {
+            outcome: ChangeOutcome::Bool(true),
+        };
+        t.store(A, 1, &resp);
+        // 同じ番号の再送には当時の応答を返す（再適用しない）
+        assert!(is_replay_of(t.check(A, 1), &resp));
+        assert!(matches!(t.check(A, 2), SeqCheck::New));
+        t.store(A, 2, &Response::Rejected(Reason::OwnerMismatch));
+        // 記録より小さい番号は答えられない
+        assert!(matches!(t.check(A, 1), SeqCheck::Unavailable));
+        // Hello を経ていない TSF の要求も答えられない
+        assert!(matches!(t.check(B, 1), SeqCheck::Unavailable));
+    }
+
+    #[test]
+    fn record_created_by_hello_rejects_up_to_highest_sent() {
+        // 回収後・新しいホストで、クライアントが送った最大の番号を申告する
+        let mut t = RecordTable::default();
+        assert!(!t.hello(A, 5));
+        for seq in 1..=5 {
+            assert!(
+                matches!(t.check(A, seq), SeqCheck::Unavailable),
+                "floor 以下の {seq} を新規として適用しない"
+            );
+        }
+        assert!(matches!(t.check(A, 6), SeqCheck::New));
+        // 同じホストへの再接続では記録をそのまま使う
+        t.session_ended(A);
+        assert!(t.hello(A, 6));
+    }
+
+    #[test]
+    fn collect_skips_live_sessions_and_in_flight_requests() {
+        let mut t = RecordTable::default();
+        // 上限ちょうどまで埋め、全部の接続を閉じる
+        for i in 0..RECORD_CAPACITY as u128 {
+            t.hello(TsfId(1000 + i), 0);
+            t.session_ended(TsfId(1000 + i));
+        }
+        // 最も古い記録は、切断後も要求を処理中（ロック待ちなど）
+        t.begin_request(TsfId(1000));
+        t.records.get_mut(&TsfId(1000)).unwrap().last_used = 0;
+        t.hello(A, 0);
+        assert_eq!(t.records.len(), RECORD_CAPACITY);
+        assert!(t.records.contains_key(&TsfId(1000)), "処理中は回収しない");
+        assert!(
+            !t.records.contains_key(&TsfId(1001)),
+            "次に古いものを捨てる"
+        );
+        assert!(t.records.contains_key(&A));
+
+        t.end_request(TsfId(1000));
+        assert_eq!(t.records[&TsfId(1000)].in_flight, 0);
+        t.hello(B, 0);
+        assert!(
+            !t.records.contains_key(&TsfId(1000)),
+            "処理が終われば回収できる"
+        );
+    }
+
+    #[test]
+    fn over_capacity_without_collectable_records_still_accepts() {
+        let mut t = RecordTable::default();
+        for i in 0..=RECORD_CAPACITY as u128 {
+            t.hello(TsfId(i), 0); // 全部接続したまま
+        }
+        assert_eq!(t.records.len(), RECORD_CAPACITY + 1);
+        assert!(t.warned_over_capacity);
+    }
+
+    #[test]
+    fn gate_order_is_generation_then_seq_then_owner() {
+        let a1 = owner(A, 1);
+        let a2 = owner(A, 2);
+
+        // 世代違いは番号・所有者より先に拒否し、記録しない
+        let g = gate_change(Some(gen_(2)), Some(a1), &expect(1, a1), SeqCheck::New);
+        assert!(matches!(
+            g,
+            Gate::Respond(Response::Rejected(Reason::GenMismatch))
+        ));
+        // エンジンが無い（世代が無い）場合も世代違い
+        let g = gate_change(None, None, &expect(1, a1), SeqCheck::New);
+        assert!(matches!(
+            g,
+            Gate::Respond(Response::Rejected(Reason::GenMismatch))
+        ));
+
+        // 同じ番号の再送は、所有者が移った後でも当時の応答を返す
+        let applied = Response::Changed {
+            outcome: ChangeOutcome::Unit,
+        };
+        let g = gate_change(
+            Some(gen_(1)),
+            Some(a2),
+            &expect(1, a1),
+            SeqCheck::Replay(applied),
+        );
+        assert!(matches!(
+            g,
+            Gate::Respond(Response::Changed {
+                outcome: ChangeOutcome::Unit
+            })
+        ));
+        // 答えられない番号は所有者を見ずに拒否（記録しない）
+        let g = gate_change(
+            Some(gen_(1)),
+            Some(a1),
+            &expect(1, a1),
+            SeqCheck::Unavailable,
+        );
+        assert!(matches!(
+            g,
+            Gate::Respond(Response::Rejected(Reason::ResultUnavailable))
+        ));
+
+        // 新しい番号: 所有者が違えば拒否（番号は判定済みとして記録する）
+        let g = gate_change(Some(gen_(1)), Some(a2), &expect(1, a1), SeqCheck::New);
+        assert!(matches!(g, Gate::Reject(Reason::OwnerMismatch)));
+        // 所有者がいない（作ったばかりのエンジン）場合も、Restore で取るまでは拒否
+        let g = gate_change(Some(gen_(1)), None, &expect(1, a1), SeqCheck::New);
+        assert!(matches!(g, Gate::Reject(Reason::OwnerMismatch)));
+        // 全部一致すれば適用
+        let g = gate_change(Some(gen_(1)), Some(a1), &expect(1, a1), SeqCheck::New);
+        assert!(matches!(g, Gate::Apply));
+    }
+
+    #[test]
+    fn exit_is_decided_from_the_response() {
+        assert!(exits_after_response(false, &Response::ShutdownAccepted));
+        assert!(!exits_after_response(false, &Response::ShutdownSkipped));
+        assert!(!exits_after_response(true, &Response::ShutdownSkipped));
+        assert!(exits_after_response(true, &Response::Bool(true)));
+        assert!(!exits_after_response(true, &Response::Bool(false)));
+        // 他の要求の Bool(true)（Backspace など）では終了しない
+        assert!(!exits_after_response(false, &Response::Bool(true)));
+    }
+
+    #[test]
+    fn shutdown_checks_host_id_without_the_engine_lock() {
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        let mut session = Session::default();
+        // 変換中を模してエンジンのロックを保持したままでも答えられる
+        let _held = shared.state.lock().unwrap();
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::Shutdown {
+                expected_host_id: shared.host_id,
+            },
+        );
+        assert!(matches!(resp, Response::ShutdownAccepted));
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::Shutdown {
+                expected_host_id: HostId(shared.host_id.0 ^ 1),
+            },
+        );
+        assert!(matches!(resp, Response::ShutdownSkipped));
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::ShutdownIfConfigDiffers {
+                config_json: Some("{}".into()),
+                expected_host_id: HostId(shared.host_id.0 ^ 1),
+                config_version: None,
+            },
+        );
+        assert!(
+            matches!(resp, Response::ShutdownSkipped),
+            "別ホスト宛ては設定を比べない"
+        );
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::ShutdownIfConfigDiffers {
+                config_json: Some("{}".into()),
+                expected_host_id: shared.host_id,
+                config_version: None,
+            },
+        );
+        assert!(matches!(resp, Response::Bool(true)));
+    }
+
+    #[test]
+    fn hello_reports_host_id_and_record_state_and_counts_sessions() {
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        let hello = |session: &mut Session, highest_sent| {
+            dispatch(
+                &shared,
+                session,
+                Request::Hello {
+                    protocol_version: PROTOCOL_VERSION,
+                    tsf_id: A,
+                    highest_sent,
+                },
+            )
+        };
+        let mut session = Session::default();
+        match hello(&mut session, 3) {
+            Response::Hello {
+                host_id,
+                engine_gen,
+                record_found,
+                ..
+            } => {
+                assert_eq!(host_id, shared.host_id);
+                assert_eq!(engine_gen, None, "エンジンを作る前");
+                assert!(!record_found);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        assert_eq!(session.tsf, Some(A));
+        assert_eq!(shared.lock_records().records[&A].floor, 3);
+
+        // 2 本目の接続
+        let mut second = Session::default();
+        assert!(matches!(
+            hello(&mut second, 3),
+            Response::Hello {
+                record_found: true,
+                ..
+            }
+        ));
+        assert_eq!(shared.lock_records().records[&A].sessions, 2);
+
+        // 要求の処理中は in_flight を数え、抜けたら戻す
+        {
+            let _f = InFlight::begin(&shared, session.tsf);
+            assert_eq!(shared.lock_records().records[&A].in_flight, 1);
+        }
+        assert_eq!(shared.lock_records().records[&A].in_flight, 0);
+
+        // Hello を経ていない接続や、別の TSF を名乗る Change は受け付けない
+        let change = |tsf| Request::Change {
+            seq: 4,
+            expect: expect(1, owner(tsf, 1)),
+            request: ChangeRequest::Backspace,
+            config_version: None,
+        };
+        let resp = dispatch(&shared, &mut Session::default(), change(A));
+        assert!(matches!(resp, Response::Error(_)));
+        let resp = dispatch(&shared, &mut session, change(B));
+        assert!(matches!(resp, Response::Error(_)));
+        // エンジンが無ければ世代違い（記録しない）
+        let resp = dispatch(&shared, &mut session, change(A));
+        assert!(matches!(resp, Response::Rejected(Reason::GenMismatch)));
+        assert_eq!(shared.lock_records().records[&A].last_seq, None);
+        // 復元もエンジンが無ければ適用しない
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::Restore {
+                owner: owner(A, 1),
+                seq: 4,
+                reading: "た".into(),
+                pending_romaji: "t".into(),
+                then: None,
+                config_version: None,
+            },
+        );
+        assert!(matches!(resp, Response::Error(_)));
+        assert_eq!(shared.lock_records().records[&A].last_seq, None);
     }
 }
