@@ -112,10 +112,12 @@
 
 **PR と重ならない独立した 3 件（#60 / #61 / #62）を 2026-09-19 に起票・実装し、実機確認まで終えてクローズした。** 経緯は [September_Late_Plan.md](September_Late_Plan.md) 9 節の「2026-09-19 PR と重ならない 3 件を起票・実装」と「2026-09-19 #60 / #61 / #62 の実機確認」。
 
-### #56 の最新状況（2026-09-25 更新）
+### #56 の最新状況（2026-09-30 更新）
 
 - **2026-09-25 03:18 UTC、nick が Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット、要求・応答の形だけ、v6、`rakukan-engine-rpc` のみ +275/-24、main `4399279` 上、CI 成功）を提出**。同日 07:15 UTC に[返信を投稿](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616)。5 点への回答（`Change` に包む形で進める・変更系の旧 variant は `_Reserved…` にしてホストは `Error`・型の幅はそのまま・`RequestRecord` は `server.rs` へ・`config_version` は別フィールドで今回足す・v6 は次版で (a)+(b) が入ってから 1 回リリース）と、型を確定する段階で決める追加 3 点（A: `Restored { engine_gen, then: Option<ChangeOutcome> }` と `Change` の応答を同じ型に、B: `ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`（9/22 §4 の `Bool(false)` とこちらの #66 受入条件の食い違いを明示し、こちらの判断で揃えた）、C: `config_version: Option<[u8; 32]>` を `Create` / `ShutdownIfConfigDiffers` / `Change` に `None` 固定で今回足す。`None` は #66 で「一致するハッシュ」として受理しない）。**A〜C の反映で形を確定、その後 (a) の残り**。TSF 側の `ShutdownSkipped` の扱いは #65 の再接続組込みでこちらが行う。**古いホストの残存**: 配布インストーラー（`rakukan_installer.iss`、`CloseApplications=no`）はホストを停止しないので、版上げを含むリリースの前に扱いを決める（インストーラー側で停止か、版不一致の `Hello` を受けた TSF が旧ホストの終了を試みるか）。記録は計画書 9 節「2026-09-25 #56 Draft PR #67 の形の確認と返信」
-- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（`b3a0f9a` でコミット・プッシュ済み）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) に組み込み、実装はインストーラー再設計時に行う。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
+- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（`b3a0f9a` でコミット・プッシュ済み）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) に組み込んだ。当時は実装をインストーラー再設計時に行うとしていたが、2026-09-30 に下記の先行実装へ変更した。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
+- **2026-09-30、PR #67 の (a) を `d94f34c8` まで rebase merge**。要求の所有者・番号・再送記録、`Restore`、`ShutdownSkipped` と TSF の最小対応までが main に入った。(b) は最新 main を土台とする別 PR とし、実装前に通常の `running` / `OwnerMismatch` / 旧所有者のワーカー使用中を区別する応答型と TSF 遷移を提示してもらう。#65 の再接続組込みは (a) で着手条件を満たしたため、(b) と並行してリリース前までにこちらで行う
+- **旧ホスト停止の時期を変更**。#56 (a)+(b) のマージ後、v6 のリリース前に、現行の `rakukan_installer.iss` へ更新対象の旧ホストの検出・停止・終了確認・停止失敗時の中断を先行実装する。全面的な配置変更、経路一本化、署名・アンインストールを含むインストーラー再設計は、引き続き #33 で行う
 
 #### 2026-09-22 時点の経緯
 
