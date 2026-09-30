@@ -870,8 +870,14 @@ fn dispatch_change(
 /// （世代を採り直すための要求なので）。番号の判定は `Change` と同じで、同じ番号の
 /// 再送には保持した応答を返す＝再送で編集状態が 2 回変わらない。
 ///
-/// 復元の前に Done の変換器を回収し、BG 変換の記録を消す。別の所有者の変換が
-/// 実行中なら止めずに終わるのを待ち、その結果は誰にも取り出させない。
+/// 保存済みの応答は、エンジンの有無より先に確かめる。応答だけが失われた後に
+/// エンジンが外れても、同じ番号の再送には保存した応答を返す。
+///
+/// 復元の前に Done の変換器を回収し（`bg_reclaim` は待たない）、BG 変換の所有者の
+/// 記録を消す。別の所有者の変換が実行中なら、中断も待機もせずそのまま走らせ、
+/// 所有者の記録だけを消す。その結果は `Change` 経由では誰にも取り出させない。
+/// ただし旧 variant の `BgTakeCandidates` は所有者を見ずキーの一致だけで取り出す
+/// ので、そちらからは取り出せる（旧所有者のワーカー使用中の扱いは (b) で決める）。
 fn dispatch_restore(
     engine: &SharedEngine,
     session: &Session,
@@ -886,15 +892,15 @@ fn dispatch_restore(
         Err(resp) => return resp,
     };
     let mut g = lock_engine(engine);
-    let state = &mut *g;
-    let (Some(eng), Some(engine_gen)) = (state.engine.as_mut(), state.engine_gen) else {
-        return Response::Error("engine not created".into());
-    };
     match engine.lock_records().check(tsf, seq) {
         SeqCheck::Replay(resp) => return resp,
         SeqCheck::Unavailable => return Response::Rejected(Reason::ResultUnavailable),
         SeqCheck::New => {}
     }
+    let state = &mut *g;
+    let (Some(eng), Some(engine_gen)) = (state.engine.as_mut(), state.engine_gen) else {
+        return Response::Error("engine not created".into());
+    };
     inject_ready(eng);
     eng.reset_preedit();
     eng.force_preedit(reading);
@@ -1687,6 +1693,60 @@ mod record_tests {
         // 全部一致すれば適用
         let g = gate_change(Some(gen_(1)), Some(a1), &expect(1, a1), SeqCheck::New);
         assert!(matches!(g, Gate::Apply));
+    }
+
+    #[test]
+    fn stored_restore_reply_is_replayed_without_an_engine() {
+        // Restore が適用・記録された後、応答だけが失われ、エンジンも外れた状態
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        let session = Session { tsf: Some(A) };
+        let restored = Response::Restored {
+            engine_gen: gen_(1),
+            then: None,
+        };
+        {
+            let mut records = shared.lock_records();
+            records.hello(A, 0);
+            records.store(A, 1, &restored);
+        }
+        assert!(lock_engine(&shared).engine.is_none());
+
+        // 同じ番号の再送には、エンジンの有無より先に保存した応答を返す
+        let resp = dispatch_restore(
+            &shared,
+            &session,
+            owner(A, 1),
+            1,
+            "た".into(),
+            String::new(),
+            None,
+        );
+        assert_eq!(format!("{resp:?}"), format!("{restored:?}"));
+        // 記録より小さい番号は答えられない
+        let resp = dispatch_restore(
+            &shared,
+            &session,
+            owner(A, 1),
+            0,
+            "た".into(),
+            String::new(),
+            None,
+        );
+        assert!(matches!(
+            resp,
+            Response::Rejected(Reason::ResultUnavailable)
+        ));
+        // 新しい番号だけがエンジンを要求する
+        let resp = dispatch_restore(
+            &shared,
+            &session,
+            owner(A, 1),
+            2,
+            "た".into(),
+            String::new(),
+            None,
+        );
+        assert!(matches!(resp, Response::Error(_)), "{resp:?}");
     }
 
     #[test]
