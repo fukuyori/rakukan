@@ -1,9 +1,51 @@
 # Rakukan 引き継ぎ資料
 
-更新日: 2026-09-22 作業終了時（#65 のコミット・プッシュ確認、実機結果、次回の開始手順を反映。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
+更新日: 2026-09-30（PR #67 (a) のマージ、(b) の受入条件、#65 と旧ホスト停止の分担を反映。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
 
 この文書は「次のセッションが何を知っていれば作業を続けられるか」だけを書く。
 設計の全体は [DESIGN.md](DESIGN.md)、現在の作業計画と判断の経緯は [September_Late_Plan.md](September_Late_Plan.md)、9 月前半の作業記録は [September_Revised_Plan.md](September_Revised_Plan.md) にある。
+
+## 0. 2026-09-30 #56 (a) マージ後の引き継ぎ・次回の開始点
+
+この節を現在の開始点とする。下に残る「現在」「次回」の記述は各日時点の履歴であり、この節と食い違う場合は再実行しない。
+
+### 現在の状態
+
+- ローカルと GitHub の `main` は `ffac230`（`docs: record v6 release prerequisites`）で一致し、作業ツリーはこの節の編集前までクリーン。最新リリースは 0.11.9、`VERSION` も 0.11.9。新しいリリース、タグ、パッケージは作成していない
+- PR [#67](https://github.com/fukuyori/rakukan/pull/67) の (a) は 2026-09-30 に rebase merge 済み。コード側の先端は `d94f34c8`。RPC protocol は v6 になり、所有者・要求番号・保持応答、`Change` / `Restore`、`Unresolved`、`ShutdownSkipped` と TSF の最小対応まで main に入った。TSF の通常送信はまだ旧 variant のままで、利用者向けの #56 は未完成
+- `d94f34c8` の main CI と文書コミット `ffac230` の CI は、Windows Build & Test / Format Check とも成功
+- 開いている PR は無い。nick には [PR #67 の最終コメント](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5904167672) で、最新 main を土台に (b) を別 PR とし、実装前に BG ワーカー使用中の応答型と TSF 遷移を提示するよう依頼済み
+
+### nick が担当する #56 (b)
+
+実装前に、次を区別する具体的な応答型と TSF 側の遷移を、このスレッドか #56 に提示してもらう。
+
+- 現在の所有者自身の通常の `running`
+- `OwnerMismatch`
+- 旧所有者の変換ワーカーがまだ使用中である状態
+
+(b) は次を同じ PR で扱う。
+
+- `ChangeOutcome` への編集状態の追加と、composition ごとの復元元の保持
+- composition 依存の読み取りの `Result` 化。失敗を `unwrap_or_default()` などで空値へ戻さず、TSF の遷移まで区別する
+- 新しい composition の最初の変更要求を `Restore { ..., then }` で送り、`Restored` の世代を後続の `Change.expect.engine_gen` に使う
+- TSF の変更系送信を `Change` へ移行する
+- `BgTakeCandidates` を `Change` として採番し、応答を再送用に保持する
+- 旧変更系 variant を、宣言位置とフィールド構造を保った `_Reserved` にする
+
+### こちらが担当する残作業とリリース条件
+
+- **#65 の再接続組込み**: (a) の `ShutdownSkipped` / `HostReplaced` で着手条件を満たした。(b) と並行して、現在公開されている設定の組から新しいホストへ `Create` し直し、通信失敗では反映待ちを消さない処理をリリース前までに実装する
+- **旧ホスト停止の先行実装**: (a)+(b) のマージ後、v6 のリリース前に、現行の `rakukan_installer.iss` へ更新対象の旧ホストの検出・停止・終了確認・置換前の再確認・停止失敗時の中断を入れる。同名というだけで別の場所のプロセスを停止しない。配置変更、経路一本化、署名・アンインストールを含む全面的な再設計は #33 に残す
+- **リリースしない条件**: (b)、#65 の再接続組込み、旧ホスト停止が揃うまでは v6 をリリースしない。揃った後に、実 DLL を通した `apply_change` / `Restore`、ホスト交換中の composition 復元、旧ホストを動かしたままの更新、インストール・更新・アンインストールを実機で確認してから 1 回だけリリースする
+
+### 次の順序
+
+1. nick から (b) の応答型と TSF 遷移案が届いたら、9/22〜9/30 の合意と照合して回答する
+2. (b) の設計・実装と並行して、こちらで #65 の再接続組込みを進める
+3. (b) をレビューしてマージする
+4. 現行 `rakukan_installer.iss` へ旧ホスト停止を先行実装する
+5. 上記の統合試験・実機試験を行い、合格後にリリース判断をする
 
 ## 2026-09-24 #65 故障試験の進捗
 
