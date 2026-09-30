@@ -570,7 +570,8 @@ impl RpcEngine {
     ///
     /// 結果不明の要求を抱えていれば送らず `ChangeError::Unresolved` を返す。
     /// 通信に失敗した場合（再接続・再送も含めて）は `ChangeError::Transport` を返し、
-    /// その要求は結果不明として残る。
+    /// その要求は結果不明として残る。`Rejected(ResultUnavailable)` を受け取った場合も
+    /// 同じく結果不明として残る。
     pub fn change(
         &self,
         expect: Expect,
@@ -587,6 +588,8 @@ impl RpcEngine {
     ///
     /// 結果不明の要求があっても送れる（それを解決するための要求）。`Restored` を
     /// 受け取れば未解決は消え、以後の `change` はその `engine_gen` を期待値にする。
+    /// `Rejected(ResultUnavailable)` の場合は、`then` があればそれを、無ければそれまでの
+    /// 未解決を結果不明として残す。
     pub fn restore(
         &self,
         owner: Owner,
@@ -621,6 +624,10 @@ impl RpcEngine {
     }
 
     /// 直近に知ったエンジンの世代（`Hello` か `Restored`）。`change` の期待値に使う。
+    ///
+    /// `Hello` 由来の値は、その後の `Create` より前の世代であることがある。新しい
+    /// composition の最初の `change` の期待値には使わず、最初の `restore` が返した
+    /// 世代を使う。
     pub fn engine_gen(&self) -> Option<EngineGen> {
         self.inner.lock().ok().and_then(|g| g.engine_gen)
     }
@@ -1026,8 +1033,11 @@ impl<T: HostTransport> Connection<T> {
             // 結果不明として残す
             Err(e) => return Err(ChangeError::Transport(e)),
         };
-        // 答えが出た（適用・拒否・エラーのどれでも）
-        self.ledger.resolve(seq);
+        // 答えが出た（適用・拒否・エラーのどれでも）。ただし `ResultUnavailable` は
+        // 適用されたかをホストも判断できないという答えなので、結果不明のまま残す
+        if !matches!(resp, Response::Rejected(Reason::ResultUnavailable)) {
+            self.ledger.resolve(seq);
+        }
         match resp {
             Response::Changed { outcome } => Ok(ChangeReply::Changed(outcome)),
             Response::Rejected(reason) => {
@@ -1072,9 +1082,13 @@ impl<T: HostTransport> Connection<T> {
                 self.engine_gen = Some(engine_gen);
                 Ok(RestoreReply::Restored { engine_gen, then })
             }
-            // 適用されなかった: `then` も適用されていないので、それまでの未解決に戻す
+            // 適用されなかった: `then` も適用されていないので、それまでの未解決に戻す。
+            // `ResultUnavailable` だけは復元と `then` が適用済みの可能性があるので戻さない
+            // （`then` があればそれが、無ければそれまでの未解決が結果不明のまま残る）
             Response::Rejected(reason) => {
-                self.ledger.set_unresolved(prev);
+                if reason != Reason::ResultUnavailable {
+                    self.ledger.set_unresolved(prev);
+                }
                 tracing::debug!("rpc: Restore seq={seq} rejected: {reason:?}");
                 Ok(RestoreReply::Rejected(reason))
             }
@@ -2127,12 +2141,17 @@ mod tests {
             bg_start_n_cands: None,
         };
 
-        // 答えられないと拒否された復元は、何も適用されていないので未解決を元に戻す
+        // 答えられないと拒否された復元は、復元と `then` が適用済みかもしれないので
+        // 元の未解決には戻さず、`then` を結果不明として残す
         let r = conn
             .send_restore(owner1(), "た".into(), String::new(), Some(input.clone()))
             .unwrap();
         assert_eq!(r, RestoreReply::Rejected(Reason::ResultUnavailable));
-        assert_eq!(conn.ledger.unresolved(), Some(pending));
+        let u = conn.ledger.unresolved().expect("then stays unresolved");
+        assert_eq!(
+            (u.seq, u.kind, u.owner),
+            (8, ChangeKind::InputChar, owner1())
+        );
 
         // 未解決があっても復元は送れる。受理されれば未解決は消え、世代を覚える
         let r = conn
@@ -2147,6 +2166,74 @@ mod tests {
         let reqs = sent(&log);
         assert!(matches!(reqs[2], Request::Restore { seq: 8, .. }));
         assert!(matches!(reqs[3], Request::Restore { seq: 9, .. }));
+    }
+
+    #[test]
+    fn result_unavailable_keeps_the_change_unresolved() {
+        let (s, _log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Rejected(Reason::ResultUnavailable),
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        let r = conn
+            .send_change(expect1(), ChangeRequest::Backspace)
+            .unwrap();
+        assert_eq!(r, ChangeReply::Rejected(Reason::ResultUnavailable));
+        let u = conn.ledger.unresolved().expect("unresolved");
+        assert_eq!((u.seq, u.kind), (1, ChangeKind::Backspace));
+
+        // 次の変更要求は送らない
+        let err = conn
+            .send_change(expect1(), ChangeRequest::ResetPreedit)
+            .unwrap_err();
+        assert!(matches!(err, ChangeError::Unresolved(u) if u.seq == 1));
+        assert_eq!(conn.ledger.highest_sent(), 1);
+    }
+
+    #[test]
+    fn restore_rejections_without_then() {
+        let (s, _log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Rejected(Reason::ResultUnavailable),
+            Response::Rejected(Reason::OwnerMismatch),
+            Response::Error("engine not created".into()),
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        let pending = Unresolved {
+            seq: 7,
+            kind: ChangeKind::InputChar,
+            owner: owner1(),
+            engine_gen: gen1(),
+        };
+        conn.ledger.set_unresolved(Some(pending));
+        conn.ledger.lock().last_seq = 7;
+
+        // `then` が無ければ、`ResultUnavailable` でもそれまでの未解決がそのまま残る
+        let r = conn
+            .send_restore(owner1(), "た".into(), String::new(), None)
+            .unwrap();
+        assert_eq!(r, RestoreReply::Rejected(Reason::ResultUnavailable));
+        assert_eq!(conn.ledger.unresolved(), Some(pending));
+
+        // それ以外の拒否と Error でも元の未解決へ戻る
+        let r = conn
+            .send_restore(owner1(), "た".into(), String::new(), None)
+            .unwrap();
+        assert_eq!(r, RestoreReply::Rejected(Reason::OwnerMismatch));
+        assert_eq!(conn.ledger.unresolved(), Some(pending));
+        let err = conn
+            .send_restore(owner1(), "た".into(), String::new(), None)
+            .unwrap_err();
+        assert!(matches!(err, ChangeError::Host(_)), "{err}");
+        assert_eq!(conn.ledger.unresolved(), Some(pending));
     }
 
     #[test]
