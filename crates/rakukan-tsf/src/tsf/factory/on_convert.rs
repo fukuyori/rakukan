@@ -180,7 +180,7 @@ fn engine_convert_sync_multi_fallback(
     reason: &'static str,
     convert_start: Instant,
     convert_last: &mut Instant,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     let start = Instant::now();
     tracing::info!(
         "sync_fallback_probe event=start reason={} reading_len={} llm_limit={} dict_limit={}",
@@ -189,7 +189,7 @@ fn engine_convert_sync_multi_fallback(
         llm_limit,
         dict_limit
     );
-    let candidates = engine_convert_sync_multi(engine, llm_limit, dict_limit, reading, preedit);
+    let candidates = engine_convert_sync_multi(engine, llm_limit, dict_limit, reading, preedit)?;
     convert_mark(reason, convert_start, convert_last);
     tracing::info!(
         "sync_fallback_probe event=finish reason={} elapsed_us={} candidates={}",
@@ -197,7 +197,7 @@ fn engine_convert_sync_multi_fallback(
         start.elapsed().as_micros(),
         candidates.len()
     );
-    candidates
+    Ok(candidates)
 }
 
 /// マージ結果が「読みをそのまま返しただけ」で変換候補を含まないかを判定する。
@@ -222,16 +222,16 @@ fn immediate_dict_candidates(
     engine: &mut crate::engine::state::DynEngine,
     preedit: &str,
     dict_limit: usize,
-) -> Option<Vec<String>> {
-    let reading = engine.hiragana_text();
+) -> Result<Option<Vec<String>>> {
+    let reading = engine.hiragana_text()?;
     let candidates = engine.merge_candidates_for_reading(&reading, vec![], dict_limit);
     let has_conversion = candidates
         .iter()
         .any(|candidate| candidate != preedit && candidate != &reading);
     if has_conversion {
-        Some(candidates)
+        Ok(Some(candidates))
     } else {
-        None
+        Ok(None)
     }
 }
 
@@ -291,17 +291,17 @@ fn restore_reading_from_selecting(
     prefix: &str,
     original: &str,
     remainder: &str,
-) -> String {
-    let current = engine.preedit_display();
+) -> Result<String> {
+    let current = engine.preedit_display()?;
     let intact = prefix.is_empty()
-        && engine.hiragana_text() == original
+        && engine.hiragana_text()? == original
         && crate::engine::state::pending_suffix_display(&current, original) == remainder;
     if intact {
-        return current;
+        return Ok(current);
     }
     let full = format!("{prefix}{original}{remainder}");
     engine.force_preedit(full.clone());
-    full
+    Ok(full)
 }
 
 impl super::TextServiceFactory_Impl {
@@ -321,8 +321,8 @@ impl super::TextServiceFactory_Impl {
         // Convert 1 回の RPC 回数・合計時間を Drop で記録する（Step 13-2）
         let _rpc_probe = ConvertRpcProbe::start();
         update_caret_rect(ctx.clone(), tid);
-        engine.flush_pending_n();
-        let preedit_empty = engine.preedit_is_empty();
+        engine.flush_pending_n()?;
+        let preedit_empty = engine.preedit_is_empty()?;
         if let Ok(sess) = session_get() {
             tracing::debug!(
                 "on_convert: preedit_empty={} is_selecting={} state={:?}",
@@ -463,11 +463,14 @@ impl super::TextServiceFactory_Impl {
                     Some("⏳ 変換中..."),
                 );
 
-                if engine.bg_status() != "done" {
-                    engine.bg_start(n_cands);
+                if engine.bg_status()? != rakukan_engine_rpc::BgView::Done {
+                    engine.bg_start(n_cands)?.started();
                 }
-                let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
-                if !completed {
+                let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS)?;
+                if !matches!(
+                    completed,
+                    rakukan_engine_rpc::BgView::Done | rakukan_engine_rpc::BgView::Failed
+                ) {
                     // 短時間で終わらない → WM_TIMER fallback（Waiting の remainder は保持済み）
                     drop(guard);
                     candidate_window::start_waiting_timer();
@@ -475,7 +478,7 @@ impl super::TextServiceFactory_Impl {
                 }
 
                 // inline 完走 → 取得してマージ
-                let llm_cands = engine.bg_take_candidates(&target).unwrap_or_default();
+                let llm_cands = engine.bg_take_candidates(&target)?.unwrap_or_default();
                 let candidates =
                     engine.merge_candidates_for_reading(&target, llm_cands, DICT_LIMIT);
                 let candidates = if candidates.is_empty() {
@@ -523,11 +526,11 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
-        let preedit = engine.preedit_display();
+        let preedit = engine.preedit_display()?;
         // Step 10-5: 辞書・LLM は reading（`hiragana_text()`）で引き、末尾の未確定ローマ字
         // （「たt」の `t`）は接尾辞として候補の後ろに残す。確定文字列には含め、学習キー
         // （Selecting の original_preedit）には含めない。
-        let conv_reading = engine.hiragana_text().to_string();
+        let conv_reading = engine.hiragana_text()?.to_string();
         let pending_suffix = crate::engine::state::pending_suffix_display(&preedit, &conv_reading);
 
         // すでに選択モード中 → 1候補ずつ進む
@@ -556,26 +559,26 @@ impl super::TextServiceFactory_Impl {
 
                     // 非ブロッキングでLLM完了を確認（最大500ms待機）
                     const WAIT_MS: u64 = 500;
-                    let bg_before = engine.bg_status();
+                    let bg_before = engine.bg_status()?;
                     tracing::debug!(
                         "on_convert[llm_pending]: key={:?} bg={} → wait_ms({})",
                         original_preedit,
                         bg_before,
                         WAIT_MS
                     );
-                    if engine.bg_status() == "running" {
-                        engine.bg_wait_ms(WAIT_MS);
+                    if engine.bg_status()? == rakukan_engine_rpc::BgView::Running {
+                        engine.bg_wait_ms(WAIT_MS)?;
                     }
                     let _ = crate::engine::state::poll_model_ready_cached(engine);
 
-                    let bg_done = engine.bg_status() == "done";
+                    let bg_done = engine.bg_status()? == rakukan_engine_rpc::BgView::Done;
                     tracing::debug!("on_convert[llm_pending]: after wait bg_done={}", bg_done);
                     const DICT_LIMIT: usize = 40;
 
                     if bg_done {
                         // LLM完了 → 候補をマージして表示
                         // hiragana_text() でキャッシュの実際のキーを確認してから呼ぶ
-                        let hira_key = engine.hiragana_text();
+                        let hira_key = engine.hiragana_text()?;
                         tracing::debug!(
                             "on_convert[llm_pending]: calling bg_take_candidates op={:?}({}) hira={:?}({})",
                             original_preedit,
@@ -593,7 +596,7 @@ impl super::TextServiceFactory_Impl {
                             );
                             hira_key
                         };
-                        match engine.bg_take_candidates(&take_key) {
+                        match engine.bg_take_candidates(&take_key)? {
                             Some(llm_cands) => {
                                 tracing::debug!(
                                     "on_convert[llm_pending]: bg_take_candidates → Some({} cands)",
@@ -665,7 +668,7 @@ impl super::TextServiceFactory_Impl {
                                 // bg_reclaim で converter を強制回収 → 即 bg_start で再変換起動
                                 // (bg_reclaim だけして bg_start しないと converter が engine に戻ったまま
                                 //  次の変換が永遠に起動されない)
-                                let bg_now = engine.bg_status();
+                                let bg_now = engine.bg_status()?;
                                 tracing::warn!(
                                     "on_convert[llm_pending]: take_key={:?}({}) returned None, bg={}. reclaim+restart.",
                                     take_key,
@@ -675,17 +678,17 @@ impl super::TextServiceFactory_Impl {
                                 engine.bg_reclaim();
                                 // bg_start で正しいキーで即再変換 → その場で待機 → 1回のSpace押しで候補取得
                                 let llm_limit2 = crate::engine::state::get_num_candidates();
-                                if engine.bg_start(llm_limit2) {
+                                if engine.bg_start(llm_limit2)?.started() {
                                     tracing::debug!(
                                         "on_convert[llm_pending]: bg_start restarted for key={:?}, waiting inline",
                                         take_key
                                     );
                                     // ここで最大 1500ms 待つ（ユーザーは1回のSpaceで候補を得られる）
                                     const RESTART_WAIT_MS: u64 = 1500;
-                                    engine.bg_wait_ms(RESTART_WAIT_MS);
+                                    engine.bg_wait_ms(RESTART_WAIT_MS)?;
                                     tracing::debug!(
                                         "on_convert[llm_pending]: inline wait done, bg={}",
-                                        engine.bg_status()
+                                        engine.bg_status()?
                                     );
                                 } else {
                                     tracing::error!(
@@ -693,7 +696,7 @@ impl super::TextServiceFactory_Impl {
                                         engine.is_kanji_ready()
                                     );
                                 }
-                                if let Some(llm_cands) = engine.bg_take_candidates(&take_key) {
+                                if let Some(llm_cands) = engine.bg_take_candidates(&take_key)? {
                                     tracing::debug!(
                                         "on_convert[llm_pending]: reclaim+retry → Some({} cands)",
                                         llm_cands.len()
@@ -763,12 +766,12 @@ impl super::TextServiceFactory_Impl {
                                 } else {
                                     tracing::error!(
                                         "on_convert[llm_pending]: retry also failed, bg={}",
-                                        engine.bg_status()
+                                        engine.bg_status()?
                                     );
                                 }
                             }
                         }
-                    } else if engine.bg_status() == "running" {
+                    } else if engine.bg_status()? == rakukan_engine_rpc::BgView::Running {
                         // まだ変換中 → 現在の候補ウィンドウをそのまま維持
                         if let Ok(sess2) = session_get() {
                             let page_cands = sess2.page_candidates().to_vec();
@@ -793,13 +796,13 @@ impl super::TextServiceFactory_Impl {
                         // llm_pending を降ろして辞書候補での候補送りに切り替える。
                         // 推論が失敗して即 idle に戻る壊れ方（GPU デバイス消失）で
                         // 必ず踏む（PR #41 の取り込み。復帰は別 Issue）。
-                        let bg_now = engine.bg_status();
+                        let bg_now = engine.bg_status()?;
                         tracing::warn!(
                             "on_convert[llm_pending]: bg={} with llm_pending set — giving up on LLM, \
                              falling back to dict candidates",
                             bg_now
                         );
-                        let failure_status = if bg_now == "error" {
+                        let failure_status = if bg_now == rakukan_engine_rpc::BgView::Failed {
                             engine.bg_reclaim();
                             Some(candidate_window::bg_error_status_for(engine))
                         } else {
@@ -808,7 +811,8 @@ impl super::TextServiceFactory_Impl {
                         // LLM 待ちの間に出していたのが読みそのものだけ（候補 1 件）の
                         // 場合は、候補送りする先が無く生かなのまま詰む。辞書候補が
                         // 引けるなら差し替えて、その先頭を選んだ状態で見せる。
-                        let dict_fallback = immediate_dict_candidates(engine, &preedit, DICT_LIMIT);
+                        let dict_fallback =
+                            immediate_dict_candidates(engine, &preedit, DICT_LIMIT)?;
                         drop(guard);
                         let mut replaced = false;
                         if let Ok(mut sess2) = session_get() {
@@ -875,8 +879,8 @@ impl super::TextServiceFactory_Impl {
             engine.bg_reclaim();
             if !engine.is_kanji_ready() {
                 // Running 中 → 完了を待ってから回収（最大 500ms）
-                if engine.bg_status() == "running" {
-                    engine.bg_wait_ms(500);
+                if engine.bg_status()? == rakukan_engine_rpc::BgView::Running {
+                    engine.bg_wait_ms(500)?;
                 }
                 engine.bg_reclaim();
             }
@@ -893,7 +897,7 @@ impl super::TextServiceFactory_Impl {
                     AFFIX_DICT_LIMIT,
                     &target,
                     &target,
-                );
+                )?;
                 let first = candidates
                     .first()
                     .cloned()
@@ -950,7 +954,7 @@ impl super::TextServiceFactory_Impl {
                     BLOCK_DICT_LIMIT,
                     &reading,
                     &reading,
-                );
+                )?;
                 blocks.push(ConversionBlock {
                     reading,
                     trailing_punct,
@@ -1005,9 +1009,9 @@ impl super::TextServiceFactory_Impl {
         tracing::debug!(
             "on_convert[new]: preedit={:?} hira={:?} kanji_ready={} bg={}",
             preedit,
-            engine.hiragana_text(),
+            engine.hiragana_text()?,
             kanji_ready,
-            engine.bg_status()
+            engine.bg_status()?
         );
         if !kanji_ready {
             let err = engine.last_error();
@@ -1023,18 +1027,62 @@ impl super::TextServiceFactory_Impl {
         // ready 判定（読み込み完了の注入を含む）の後で bg_start する。注入で ready に
         // 変わった直後に起動しないと、llm_pending のまま bg=idle で「⏳ 変換中...」が
         // 残る（host 再起動直後の Space、2026-09-12 実機で確認）。
-        if kanji_ready && engine.bg_status() == "idle" {
+        if kanji_ready && engine.bg_status()? == rakukan_engine_rpc::BgView::Idle {
             tracing::debug!("on_convert: model ready → bg_start");
-            engine.bg_start(llm_limit);
+            engine.bg_start(llm_limit)?.started();
             convert_mark("bg_start", convert_start, &mut convert_last);
         }
 
-        let bg_status = engine.bg_status();
-        if !kanji_ready && bg_status == "idle" {
+        let bg_status = engine.bg_status()?;
+        let model_not_ready = match bg_status {
+            rakukan_engine_rpc::BgView::Idle => !kanji_ready,
+            rakukan_engine_rpc::BgView::Running => false,
+            rakukan_engine_rpc::BgView::WorkerBusy => {
+                // 旧所有者の変換器を、キー処理の中では待たない。
+                let caret = caret_rect_get();
+                let candidates = immediate_dict_candidates(engine, &preedit, DICT_LIMIT)?
+                    .unwrap_or_else(|| vec![conv_reading.clone()]);
+                let snapshot = activate_selecting_snapshot_with_source(
+                    candidates,
+                    conv_reading.clone(),
+                    caret.left,
+                    caret.bottom,
+                    false,
+                    CandidateViewSource::Dict,
+                    pending_suffix.clone(),
+                )?;
+                drop(guard);
+                candidate_window::show_with_status(
+                    &snapshot.page_candidates,
+                    snapshot.page_selected,
+                    &snapshot.page_info,
+                    caret.left,
+                    caret.bottom,
+                    Some(candidate_window::MODEL_LOADING_STATUS),
+                );
+                candidate_window::start_model_wait_for(
+                    conv_reading,
+                    caret.left,
+                    caret.bottom,
+                    candidate_window::WaitReason::WorkerBusy,
+                );
+                update_composition_candidate_parts(
+                    ctx,
+                    tid,
+                    sink,
+                    String::new(),
+                    snapshot.first,
+                    pending_suffix,
+                )?;
+                return Ok(true);
+            }
+            rakukan_engine_rpc::BgView::Done | rakukan_engine_rpc::BgView::Failed => false,
+        };
+        if model_not_ready {
             phase3_path = "model_not_ready";
             phase3_candidate_source = "preedit_model_not_ready";
             let caret = caret_rect_get();
-            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT) {
+            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT)? {
                 phase3_candidate_source = "dict_model_not_ready";
                 let snapshot = activate_selecting_snapshot_with_source(
                     candidates.clone(),
@@ -1163,7 +1211,9 @@ impl super::TextServiceFactory_Impl {
             )?;
             return Ok(true);
         }
-        let bg_running = !kanji_ready || bg_status == "running" || bg_status == "idle";
+        let bg_running = !kanji_ready
+            || bg_status == rakukan_engine_rpc::BgView::Running
+            || bg_status == rakukan_engine_rpc::BgView::Idle;
         tracing::debug!(
             "on_convert[new]: bg_running={} bg={}",
             bg_running,
@@ -1181,7 +1231,7 @@ impl super::TextServiceFactory_Impl {
         if bg_running && kanji_ready {
             phase3_path = "bg_running_wait";
             let caret = caret_rect_get();
-            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT) {
+            if let Some(candidates) = immediate_dict_candidates(engine, &preedit, DICT_LIMIT)? {
                 phase3_candidate_source = "dict_before_bg_wait";
                 let snapshot = activate_selecting_snapshot_with_source(
                     candidates.clone(),
@@ -1334,10 +1384,13 @@ impl super::TextServiceFactory_Impl {
             tracing::debug!(
                 "on_convert[new]: kanji_ready=false bg=running → wait for prev bg to finish"
             );
-            let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+            let completed = engine.bg_wait_ms(LLM_WAIT_INLINE_MS)?;
             convert_mark("prev_bg_wait_inline", convert_start, &mut convert_last);
             tracing::debug!("on_convert[new]: prev bg wait completed={completed}");
-            if !completed {
+            if !matches!(
+                completed,
+                rakukan_engine_rpc::BgView::Done | rakukan_engine_rpc::BgView::Failed
+            ) {
                 // 前の bg が inline 時間で終わらない → WM_TIMER に任せる
                 // （詰まりの監視はホストが行う。Issue #57）
                 tracing::info!(
@@ -1358,12 +1411,15 @@ impl super::TextServiceFactory_Impl {
             let kanji_ready2 = engine.is_kanji_ready();
             tracing::debug!("on_convert[new]: after reclaim kanji_ready={kanji_ready2}");
             if kanji_ready2 {
-                engine.bg_start(llm_limit);
+                engine.bg_start(llm_limit)?.started();
                 convert_mark("new_bg_start_after_prev", convert_start, &mut convert_last);
-                let completed2 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+                let completed2 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS)?;
                 convert_mark("new_bg_wait_inline", convert_start, &mut convert_last);
                 tracing::debug!("on_convert[new]: new bg wait completed={completed2}");
-                if !completed2 {
+                if !matches!(
+                    completed2,
+                    rakukan_engine_rpc::BgView::Done | rakukan_engine_rpc::BgView::Failed
+                ) {
                     tracing::info!(
                         "convert_timing result=new_bg_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
                         phase3_path,
@@ -1396,8 +1452,8 @@ impl super::TextServiceFactory_Impl {
         // bg 完了（または idle/stopped）→ 候補を取得して表示
         // bg_start のキーは hiragana_buf。preedit は preedit_display()（pending_romaji含む）で
         // 不一致になる場合があるため、hiragana_text() を優先キーとして使う。
-        let bg_status2 = engine.bg_status();
-        let hiragana_key2 = engine.hiragana_text().to_string();
+        let bg_status2 = engine.bg_status()?;
+        let hiragana_key2 = engine.hiragana_text()?.to_string();
         // kanji_ready は最新の状態に更新（前 bg の reclaim 後に変化している場合がある）
         let kanji_ready_now = engine.is_kanji_ready();
         tracing::debug!(
@@ -1411,13 +1467,13 @@ impl super::TextServiceFactory_Impl {
         // weak merge 判定、sync fallback まで同じ reading を使う（Issue #9: preedit で
         // 辞書を引くとユーザー辞書・学習履歴が落ちる）。取れなかった場合は現在の
         // hiragana_buf を reading とする。
-        let bg_cands_hira = engine.bg_take_candidates(&hiragana_key2);
+        let bg_cands_hira = engine.bg_take_candidates(&hiragana_key2)?;
         let (bg_cands, mut matched_reading) = if bg_cands_hira.is_some() {
             phase3_bg_take = "hit_hiragana";
             (bg_cands_hira, hiragana_key2.clone())
         } else if preedit != hiragana_key2 {
             tracing::debug!("Convert: hira key miss, retry preedit={:?}", preedit);
-            let bg_cands_preedit = engine.bg_take_candidates(&preedit);
+            let bg_cands_preedit = engine.bg_take_candidates(&preedit)?;
             if bg_cands_preedit.is_some() {
                 phase3_bg_take = "hit_preedit";
                 (bg_cands_preedit, preedit.clone())
@@ -1446,12 +1502,15 @@ impl super::TextServiceFactory_Impl {
             engine.bg_reclaim();
             convert_mark("retry_bg_reclaim", convert_start, &mut convert_last);
             if engine.is_kanji_ready() {
-                engine.bg_start(llm_limit);
+                engine.bg_start(llm_limit)?.started();
                 convert_mark("retry_bg_start", convert_start, &mut convert_last);
-                let completed3 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS);
+                let completed3 = engine.bg_wait_ms(LLM_WAIT_INLINE_MS)?;
                 convert_mark("retry_bg_wait_inline", convert_start, &mut convert_last);
                 tracing::debug!("Convert: retry bg_wait completed={completed3}");
-                if !completed3 {
+                if !matches!(
+                    completed3,
+                    rakukan_engine_rpc::BgView::Done | rakukan_engine_rpc::BgView::Failed
+                ) {
                     tracing::info!(
                         "convert_timing result=retry_timer_fallback path={} bg_take={} retry={} sync_fallback={} total_us={}",
                         phase3_path,
@@ -1464,22 +1523,15 @@ impl super::TextServiceFactory_Impl {
                     candidate_window::start_waiting_timer();
                     return Ok(true);
                 }
-                let hira3 = engine.hiragana_text().to_string();
+                let hira3 = engine.hiragana_text()?.to_string();
                 matched_reading = hira3.clone();
-                let retry_cands = engine
-                    .bg_take_candidates(&hira3)
-                    .or_else(|| {
-                        if preedit != hira3 {
-                            let cands = engine.bg_take_candidates(&preedit);
-                            if cands.is_some() {
-                                matched_reading = preedit.clone();
-                            }
-                            cands
-                        } else {
-                            None
-                        }
-                    })
-                    .inspect(|c| tracing::debug!("Convert: retry got {} cands", c.len()));
+                let mut retry_cands = engine.bg_take_candidates(&hira3)?;
+                if retry_cands.is_none() && preedit != hira3 {
+                    retry_cands = engine.bg_take_candidates(&preedit)?;
+                    if retry_cands.is_some() {
+                        matched_reading = preedit.clone();
+                    }
+                }
                 if retry_cands.is_some() {
                     phase3_bg_take = "hit_after_retry";
                 } else {
@@ -1531,7 +1583,7 @@ impl super::TextServiceFactory_Impl {
                                 "sync_after_weak_merge",
                                 convert_start,
                                 &mut convert_last,
-                            ),
+                            )?,
                             false,
                         )
                     } else {
@@ -1554,7 +1606,7 @@ impl super::TextServiceFactory_Impl {
                         "sync_no_bg",
                         convert_start,
                         &mut convert_last,
-                    );
+                    )?;
                     if dict_cands.is_empty() {
                         (vec![conv_reading.clone()], false)
                     } else {
@@ -1683,11 +1735,12 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 let (preview, unconverged) = catch_up_live_preview(engine, &reading, preview);
-                if preview != reading
-                    && !unconverged
-                    && crate::engine::state::is_auto_learn_enabled()
-                {
-                    engine.learn(&reading, &preview);
+                match crate::engine::state::learn_live_action(&reading, &preview, unconverged) {
+                    crate::engine::state::LearnAction::Learn => engine.learn(&reading, &preview),
+                    crate::engine::state::LearnAction::LearnForce => {
+                        engine.learn_force(&reading, &preview)
+                    }
+                    crate::engine::state::LearnAction::Skip => {}
                 }
                 engine.commit(&preview);
                 engine.reset_preedit();
@@ -1727,7 +1780,7 @@ impl super::TextServiceFactory_Impl {
                     engine.push_raw(c);
                 }
                 let _ = crate::engine::state::start_live_bg_if_ready(engine, &unselected);
-                let preedit = engine.preedit_display();
+                let preedit = engine.preedit_display()?;
                 {
                     let mut sess = session_get()?;
                     sess.set_preedit(unselected.clone());
@@ -1829,7 +1882,7 @@ impl super::TextServiceFactory_Impl {
                     }
                     let _ =
                         crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
-                    let preedit = engine.preedit_display();
+                    let preedit = engine.preedit_display()?;
                     {
                         let mut sess = session_get()?;
                         sess.set_preedit(remainder_reading.clone());
@@ -1849,13 +1902,24 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
         }
-        engine.flush_pending_n();
+        let converged = engine.flush_pending_n().is_ok();
         // WYSIWYG: ここに来るのは preview が一度も画面に出ていない (LiveConv で
         // ない) 場合。確定してよいのは表示中の preedit のみ。bg 変換の完了を
         // 待って未表示の候補を commit すると「表示=ひらがな、確定=変換済み」の
         // 不一致になるため行わない。armed フラグは消費だけしておく。
         let _ = crate::tsf::live_session::suppress_commit_take();
-        let preedit = engine.preedit_display();
+        let preedit = match engine.preedit_display() {
+            Ok(text) if converged => text,
+            result => {
+                tracing::warn!(
+                    "learning_decision action=Skip reason=unconverged_commit read={result:?}"
+                );
+                match crate::engine::rpc_composition::local_edit() {
+                    Some(edit) => format!("{}{}", edit.reading, edit.pending_romaji),
+                    None => return Ok(false),
+                }
+            }
+        };
         if preedit.is_empty() {
             return Ok(false);
         }
@@ -1910,13 +1974,13 @@ impl super::TextServiceFactory_Impl {
                     Some(e) => e,
                     None => return Ok(true),
                 };
-                let consumed = engine2.backspace();
+                let consumed = engine2.backspace()?;
                 if consumed {
                     engine2.bg_reclaim();
-                    let preedit = engine2.preedit_display();
+                    let preedit = engine2.preedit_display()?;
                     // 直前の set_preedit(reading) は削除前の読みなので、削除後の
                     // 読みに追随させる（空なら Idle へ）。
-                    let hira = engine2.hiragana_text();
+                    let hira = engine2.hiragana_text()?;
                     if let Ok(mut sess2) = session_get() {
                         sess2.sync_preedit_reading(&hira);
                     }
@@ -1964,7 +2028,7 @@ impl super::TextServiceFactory_Impl {
                 let prefix = sess.selecting_prefix_clone();
                 let remainder = sess.selecting_remainder_clone();
                 let restored =
-                    restore_reading_from_selecting(engine, &prefix, &original, &remainder);
+                    restore_reading_from_selecting(engine, &prefix, &original, &remainder)?;
                 sess.set_preedit(restored.clone());
                 drop(sess);
                 candidate_window::hide();
@@ -1978,14 +2042,14 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
             }
         }
-        let consumed = engine.backspace();
+        let consumed = engine.backspace()?;
         if consumed {
             engine.bg_reclaim();
-            let preedit = engine.preedit_display();
+            let preedit = engine.preedit_display()?;
             // Cancel 後の Preedit 状態は Backspace で読みが縮んでも text が
             // 古いまま残る（実ログ: Preedit("いまわのきわ") のまま hira="いまは"）。
             // 削除後の読みに追随させ、空になったら Idle へ戻す。
-            let hira = engine.hiragana_text();
+            let hira = engine.hiragana_text()?;
             if let Ok(mut sess) = session_get() {
                 sess.sync_preedit_reading(&hira);
             }
@@ -2068,7 +2132,7 @@ impl super::TextServiceFactory_Impl {
                 let remainder = sess.selecting_remainder_clone();
                 engine.bg_reclaim();
                 let restored =
-                    restore_reading_from_selecting(engine, &prefix, &original, &remainder);
+                    restore_reading_from_selecting(engine, &prefix, &original, &remainder)?;
                 tracing::debug!(
                     "on_cancel[Selecting]: prefix={:?} original={:?} remainder={:?} → {:?}",
                     prefix,
@@ -2085,7 +2149,7 @@ impl super::TextServiceFactory_Impl {
             }
             if sess.is_waiting() {
                 let pre = sess.preedit_text().unwrap_or("").to_string();
-                let bg = engine.bg_status();
+                let bg = engine.bg_status()?;
                 tracing::debug!("on_cancel[Waiting]: pre={:?} bg={}", pre, bg);
                 if pre.is_empty() {
                     // text が空の場合は Idle にしてプリエディットをクリア
@@ -2110,16 +2174,16 @@ impl super::TextServiceFactory_Impl {
         }
         // 未変換状態 → ESC → プリエディット全消去
         {
-            let bg = engine.bg_status();
-            let hira = engine.hiragana_text().to_string();
+            let bg = engine.bg_status()?;
+            let hira = engine.hiragana_text()?.to_string();
             tracing::debug!(
                 "on_cancel[fallthrough]: preedit_empty={} bg={} hira={:?}",
-                engine.preedit_is_empty(),
+                engine.preedit_is_empty()?,
                 bg,
                 hira
             );
         }
-        if engine.preedit_is_empty() {
+        if engine.preedit_is_empty()? {
             return Ok(false);
         }
         engine.bg_reclaim();
@@ -2165,62 +2229,52 @@ fn catch_up_live_preview(
     reading: &str,
     preview: String,
 ) -> (String, bool) {
-    let top = match engine.bg_peek_top_candidate(reading) {
-        Some(top) => top,
-        None => {
-            // bg が running でない ＝ 現在の読みは一度も変換に渡されていない。打鍵が
-            // 速いと on_live_timer が FIRED しないまま Enter が来るため（2026-09-01:
-            // 1.2 秒間 preview が更新されず「これ、漫画ではコマを分けてひょうげんして
-            // いるけど」が確定した）、ここで自分から bg を起動して待つ。
-            let restarted = if engine.bg_status() == "running" {
-                false
-            } else {
-                let Some(n_cands) = crate::engine::state::live_bg_start_n_cands(reading) else {
-                    tracing::info!("[Live] commit catch-up: bg not startable for {:?}", reading);
-                    return (preview, true);
+    let result = (|| -> Result<(String, bool)> {
+        let top = match engine.bg_peek_top_candidate(reading)? {
+            Some(top) => top,
+            None => {
+                let restarted = match engine.bg_status()? {
+                    rakukan_engine_rpc::BgView::Running => false,
+                    rakukan_engine_rpc::BgView::WorkerBusy => return Ok((preview.clone(), true)),
+                    _ => {
+                        let Some(n) = crate::engine::state::live_bg_start_n_cands(reading) else {
+                            return Ok((preview.clone(), true));
+                        };
+                        match engine.bg_start(n)? {
+                            rakukan_engine_rpc::BgStartOutcome::Started => true,
+                            _ => return Ok((preview.clone(), true)),
+                        }
+                    }
                 };
-                if !engine.bg_start(n_cands) {
-                    tracing::info!(
-                        "[Live] commit catch-up: bg_start refused for {:?} (status={})",
-                        reading,
-                        engine.bg_status()
-                    );
-                    return (preview, true);
-                }
-                tracing::info!("[Live] commit catch-up: started bg for {:?}", reading);
-                true
-            };
-            // 起動し直した場合は先頭から変換するので待ち上限を伸ばす。
-            let budget = if restarted {
-                LIVE_COMMIT_RESTART_CATCHUP_MS
-            } else {
-                LIVE_COMMIT_CATCHUP_MS
-            };
-            let completed = engine.bg_wait_ms(budget);
-            let Some(top) = engine.bg_peek_top_candidate(reading) else {
-                tracing::info!(
-                    "[Live] commit catch-up: no result for {:?} (completed={} budget={}ms)",
-                    reading,
-                    completed,
-                    budget
-                );
-                return (preview, true);
-            };
-            top
-        }
-    };
-    let merged = engine
-        .merge_candidates_for_reading(reading, vec![top], 40)
-        .into_iter()
-        .find(|c| !c.is_empty());
-    match merged {
-        Some(merged) => {
-            if merged != preview {
-                tracing::info!("[Live] commit catch-up: {:?} → {:?}", preview, merged);
+                let budget = if restarted {
+                    LIVE_COMMIT_RESTART_CATCHUP_MS
+                } else {
+                    LIVE_COMMIT_CATCHUP_MS
+                };
+                engine.bg_wait_ms(budget)?;
+                let Some(top) = engine.bg_peek_top_candidate(reading)? else {
+                    return Ok((preview.clone(), true));
+                };
+                top
             }
-            (merged, false)
+        };
+        let merged = engine
+            .merge_candidates_for_reading(reading, vec![top], 40)
+            .into_iter()
+            .find(|c| !c.is_empty());
+        Ok(match merged {
+            Some(merged) => (merged, false),
+            None => (preview.clone(), true),
+        })
+    })();
+    match result {
+        Ok(result) => result,
+        Err(error) => {
+            tracing::warn!(
+                "learning_decision action=Skip reason=unconverged_rpc_failure error={error}"
+            );
+            (preview, true)
         }
-        None => (preview, true),
     }
 }
 

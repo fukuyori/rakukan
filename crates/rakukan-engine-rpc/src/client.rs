@@ -22,8 +22,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner, PIPE_BASE_NAME,
-    PROTOCOL_VERSION, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
+    BgView, ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, Owner, PIPE_BASE_NAME,
+    PROTOCOL_VERSION, ReadRequest, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
 };
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
@@ -192,6 +192,28 @@ pub enum RestoreReply {
 }
 
 /// `Change` / `Restore` を送れなかった、または応答を得られなかった。
+#[derive(Debug)]
+pub enum ReadError {
+    Transport(anyhow::Error),
+    Rejected(Reason),
+    Host(String),
+    NoComposition,
+}
+impl ReadError {
+    pub fn ownership_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Rejected(Reason::GenMismatch | Reason::OwnerMismatch)
+        )
+    }
+}
+impl std::fmt::Display for ReadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+impl std::error::Error for ReadError {}
+
 #[derive(Debug)]
 pub enum ChangeError {
     /// 結果不明の要求を抱えている間は、次の変更要求を送らない。
@@ -674,103 +696,54 @@ impl RpcEngine {
 
     // ── DynEngine 互換 API ──────────────────────────────────────────────
 
-    pub fn push_char(&self, c: char) {
-        let _ = self.call_unit(Request::PushChar(c as u32));
-    }
-    pub fn push_raw(&self, c: char) {
-        let _ = self.call_unit(Request::PushRaw(c as u32));
-    }
-    pub fn push_fullwidth_alpha(&self, c: char) {
-        let _ = self.call_unit(Request::PushFullwidthAlpha(c as u32));
-    }
-    pub fn backspace(&self) -> bool {
-        self.call_bool(Request::Backspace).unwrap_or(false)
-    }
-    pub fn flush_pending_n(&self) -> bool {
-        self.call_bool(Request::FlushPendingN).unwrap_or(false)
-    }
-
-    pub fn preedit_display(&self) -> String {
-        self.call_string(Request::PreeditDisplay)
-            .unwrap_or_default()
-    }
-    pub fn preedit_is_empty(&self) -> bool {
-        self.call_bool(Request::PreeditIsEmpty).unwrap_or(true)
-    }
-    pub fn hiragana_text(&self) -> String {
-        self.call_string(Request::HiraganaText).unwrap_or_default()
-    }
-    pub fn romaji_log_str(&self) -> String {
-        self.call_string(Request::RomajiLogStr).unwrap_or_default()
-    }
-    pub fn hiragana_from_romaji_log(&self) -> String {
-        self.call_string(Request::HiraganaFromRomajiLog)
-            .unwrap_or_default()
-    }
-    pub fn committed_text(&self) -> String {
-        self.call_string(Request::CommittedText).unwrap_or_default()
-    }
-
-    pub fn bg_start(&self, n_cands: usize) -> bool {
-        self.call_bool(Request::BgStart {
-            n_cands: n_cands as u32,
-        })
-        .unwrap_or(false)
-    }
-    /// `DynEngine::bg_status` との互換のため `&'static str` を返す。
-    /// エンジンが返しうる状態は有限なので既知値に正規化し、それ以外は "unknown"。
-    pub fn bg_status(&self) -> &'static str {
-        let s = self.call_string(Request::BgStatus).unwrap_or_default();
-        match s.as_str() {
-            "idle" => "idle",
-            "running" => "running",
-            "done" => "done",
-            "pending" => "pending",
-            "error" => "error",
-            _ => "unknown",
+    /// composition 依存の読み取り。失敗を空値に戻さない。
+    pub fn read(
+        &self,
+        expect: Expect,
+        request: ReadRequest,
+    ) -> std::result::Result<Response, ReadError> {
+        match self
+            .call(Request::Read { expect, request })
+            .map_err(ReadError::Transport)?
+        {
+            Response::Rejected(reason) => Err(ReadError::Rejected(reason)),
+            Response::Error(e) => Err(ReadError::Host(e)),
+            response => Ok(response),
         }
     }
-    pub fn bg_take_candidates(&self, key: &str) -> Option<Vec<String>> {
-        match self.call_strings(Request::BgTakeCandidates { key: key.into() }) {
-            Ok(v) if !v.is_empty() => Some(v),
-            _ => None,
+    pub fn read_string(
+        &self,
+        expect: Expect,
+        request: ReadRequest,
+    ) -> std::result::Result<String, ReadError> {
+        match self.read(expect, request)? {
+            Response::String(s) => Ok(s),
+            other => Err(ReadError::Host(format!(
+                "unexpected read response: {other:?}"
+            ))),
         }
     }
-    /// M2 §5.2: ライブ変換 preview 用、トップ候補だけを peek (cache 状態を進めない)。
-    /// サーバ側 `bg_peek_top_candidate` が空文字列を返した場合は None に正規化する。
-    pub fn bg_peek_top_candidate(&self, key: &str) -> Option<String> {
-        match self.call_string(Request::BgPeekTopCandidate { key: key.into() }) {
-            Ok(s) if !s.is_empty() => Some(s),
-            _ => None,
+    pub fn bg_status(&self, expect: Expect) -> std::result::Result<BgView, ReadError> {
+        match self.read(expect, ReadRequest::BgStatus)? {
+            Response::Bg(bg) => Ok(bg),
+            other => Err(ReadError::Host(format!(
+                "unexpected BG response: {other:?}"
+            ))),
         }
     }
-    pub fn bg_reclaim(&self) {
-        let _ = self.call_unit(Request::BgReclaim);
-    }
-    pub fn bg_wait_ms(&self, timeout_ms: u64) -> bool {
-        self.call_bool(Request::BgWaitMs { timeout_ms })
-            .unwrap_or(false)
-    }
-
-    pub fn commit(&self, text: &str) {
-        let _ = self.call_unit(Request::Commit { text: text.into() });
-    }
-    pub fn commit_as_hiragana(&self) {
-        let _ = self.call_unit(Request::CommitAsHiragana);
-    }
-    pub fn reset_preedit(&self) {
-        let _ = self.call_unit(Request::ResetPreedit);
-    }
-    pub fn force_preedit(&self, text: String) {
-        let _ = self.call_unit(Request::ForcePreedit { text });
-    }
-    pub fn reset_all(&self) {
-        let _ = self.call_unit(Request::ResetAll);
+    pub fn bg_peek_top_candidate(
+        &self,
+        expect: Expect,
+        key: &str,
+    ) -> std::result::Result<Option<String>, ReadError> {
+        match self.read(expect, ReadRequest::BgPeekTopCandidate { key: key.into() })? {
+            Response::OptionalString(s) => Ok(s),
+            other => Err(ReadError::Host(format!(
+                "unexpected peek response: {other:?}"
+            ))),
+        }
     }
 
-    pub fn convert_sync(&self) -> Vec<String> {
-        self.call_strings(Request::ConvertSync).unwrap_or_default()
-    }
     /// 辞書・学習履歴を `reading` で引いて LLM 候補とマージする。
     ///
     /// 旧 `merge_candidates()`（ホスト内部の hiragana_buf を参照）は Issue #9 で削除した。
@@ -828,60 +801,6 @@ impl RpcEngine {
             .unwrap_or_else(|_| "[]".into())
     }
 
-    /// 1 キーストロークを 1 RPC round-trip で処理するバッチ API。
-    ///
-    /// 以下を一括実行し、結果をまとめて返す:
-    /// - `push_char` / `push_fullwidth_alpha` / `push_raw`（`kind` 次第）
-    /// - `preedit_display()`
-    /// - `hiragana_text()`
-    /// - `bg_status()`（`&'static str` 化した正規化後の値）
-    /// - `bg_start_n_cands` が `Some` かつ hiragana が非空なら `bg_start(n)`
-    ///
-    /// 返り値: `(preedit, hiragana, bg_status)`
-    pub fn input_char(
-        &self,
-        c: char,
-        kind: InputCharKind,
-        bg_start_n_cands: Option<usize>,
-    ) -> (String, String, &'static str) {
-        let req = Request::InputChar {
-            c: c as u32,
-            kind,
-            bg_start_n_cands: bg_start_n_cands.map(|n| n as u32),
-        };
-        match self.call(req) {
-            Ok(Response::InputCharResult {
-                preedit,
-                hiragana,
-                bg_status,
-            }) => {
-                let bg = match bg_status.as_str() {
-                    "idle" => "idle",
-                    "running" => "running",
-                    "done" => "done",
-                    "pending" => "pending",
-                    "error" => "error",
-                    _ => "unknown",
-                };
-                (preedit, hiragana, bg)
-            }
-            _ => (String::new(), String::new(), "unknown"),
-        }
-    }
-
-    pub fn learn(&self, reading: &str, surface: &str) {
-        let _ = self.call_unit(Request::Learn {
-            reading: reading.into(),
-            surface: surface.into(),
-        });
-    }
-
-    pub fn learn_force(&self, reading: &str, surface: &str) {
-        let _ = self.call_unit(Request::LearnForce {
-            reading: reading.into(),
-            surface: surface.into(),
-        });
-    }
     pub fn last_error(&self) -> String {
         self.call_string(Request::LastError).unwrap_or_default()
     }
@@ -1479,6 +1398,7 @@ fn spawn_detached(_exe: &PathBuf) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::protocol::InputCharKind;
 
     #[test]
     fn rpc_slow_threshold_skips_expected_slow_requests() {
@@ -2005,7 +1925,10 @@ mod tests {
             hello_from(HOST_A, false),
             Response::Unit,
             Response::Changed {
-                outcome: ChangeOutcome::Bool(true),
+                outcome: ChangeOutcome::Bool {
+                    value: true,
+                    edit: Default::default(),
+                },
             },
             Response::Rejected(Reason::OwnerMismatch),
         ]);
@@ -2016,7 +1939,13 @@ mod tests {
         let r = conn
             .send_change(expect1(), ChangeRequest::Backspace)
             .unwrap();
-        assert_eq!(r, ChangeReply::Changed(ChangeOutcome::Bool(true)));
+        assert_eq!(
+            r,
+            ChangeReply::Changed(ChangeOutcome::Bool {
+                value: true,
+                edit: Default::default()
+            })
+        );
         assert_eq!(conn.ledger.unresolved(), None);
         // 拒否も答えなので未解決は残らない
         let r = conn
@@ -2118,7 +2047,8 @@ mod tests {
                 then: Some(ChangeOutcome::InputChar {
                     preedit: "たt".into(),
                     hiragana: "た".into(),
-                    bg_status: "idle".into(),
+                    bg: crate::protocol::BgView::Idle,
+                    edit: Default::default(),
                 }),
             },
         ]);

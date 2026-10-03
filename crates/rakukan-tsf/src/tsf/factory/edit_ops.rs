@@ -46,8 +46,8 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        engine.flush_pending_n();
-        let p = engine.preedit_display();
+        engine.flush_pending_n()?;
+        let p = engine.preedit_display()?;
         if p.is_empty() {
             return Ok(false);
         }
@@ -64,7 +64,7 @@ impl super::TextServiceFactory_Impl {
         });
         let source = if !has_kana {
             // ラテン文字のみ → romaji_log からひらがなを復元
-            let hira = engine.hiragana_from_romaji_log();
+            let hira = engine.hiragana_from_romaji_log()?;
             if hira.is_empty() { p.clone() } else { hira }
         } else {
             p.clone()
@@ -107,8 +107,8 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        engine.flush_pending_n();
-        let p = engine.preedit_display();
+        engine.flush_pending_n()?;
+        let p = engine.preedit_display()?;
         if p.is_empty() {
             return Ok(false);
         }
@@ -126,12 +126,12 @@ impl super::TextServiceFactory_Impl {
         });
         let t = if has_kana {
             // かな → romaji_log_str でローマ字を復元して変換
-            let hira = engine.hiragana_from_romaji_log();
+            let hira = engine.hiragana_from_romaji_log()?;
             let pending_suffix = p
                 .strip_prefix(&hira)
                 .map(str::to_string)
                 .unwrap_or_default();
-            let romaji = format!("{}{}", engine.romaji_log_str(), pending_suffix);
+            let romaji = format!("{}{}", engine.romaji_log_str()?, pending_suffix);
             if full {
                 text_util::romaji_to_fullwidth_latin(&romaji)
             } else {
@@ -173,7 +173,7 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        let p = engine.preedit_display();
+        let p = engine.preedit_display()?;
         if p.is_empty() {
             return Ok(false);
         }
@@ -196,7 +196,8 @@ impl super::TextServiceFactory_Impl {
     ) -> Result<bool> {
         let has_pre = guard
             .as_ref()
-            .map(|e| !e.preedit_is_empty())
+            .map(|e| e.preedit_is_empty().map(|empty| !empty))
+            .transpose()?
             .unwrap_or(false);
         drop(guard);
         let mut sess = session_get()?;
@@ -260,7 +261,8 @@ impl super::TextServiceFactory_Impl {
     ) -> Result<bool> {
         let has_pre = guard
             .as_ref()
-            .map(|e| !e.preedit_is_empty())
+            .map(|e| e.preedit_is_empty().map(|empty| !empty))
+            .transpose()?
             .unwrap_or(false);
         drop(guard);
         let mut sess = session_get()?;
@@ -317,7 +319,7 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        let has_pre = !engine.preedit_is_empty();
+        let has_pre = !engine.preedit_is_empty()?;
         let mut sess = session_get()?;
         if !sess.is_candidate_list_active() {
             return Ok(has_pre);
@@ -359,7 +361,7 @@ impl super::TextServiceFactory_Impl {
                 engine.push_raw(c);
             }
             let _ = crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
-            let preedit = engine.preedit_display();
+            let preedit = engine.preedit_display()?;
             {
                 let mut sess = session_get()?;
                 sess.set_preedit(remainder_reading.clone());
@@ -427,7 +429,10 @@ impl super::TextServiceFactory_Impl {
             text.filter(|t| !t.is_empty())
         };
         let from_session = commit_text.is_some();
-        let preedit = commit_text.unwrap_or_else(|| engine.preedit_display());
+        let preedit = match commit_text {
+            Some(text) => text,
+            None => engine.preedit_display()?,
+        };
         if preedit.is_empty() {
             return Ok(());
         }
@@ -507,7 +512,7 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
 
-        let reading_before = engine.hiragana_text().to_string();
+        let reading_before = engine.hiragana_text()?.to_string();
         let symbol = numeric_separator_after_digit(&reading_before, c)
             .filter(|_| crate::engine::state::is_digit_separator_auto_enabled())
             .unwrap_or(c);
@@ -518,9 +523,9 @@ impl super::TextServiceFactory_Impl {
         candidate_window::stop_waiting_timer();
 
         let mut sess = session_get()?;
-        if engine.preedit_is_empty() {
+        if engine.preedit_is_empty()? {
             engine.push_raw(symbol);
-            let display = engine.preedit_display();
+            let display = engine.preedit_display()?;
             sess.set_preedit(display.clone());
             drop(sess);
             drop(guard);
@@ -537,7 +542,7 @@ impl super::TextServiceFactory_Impl {
             engine.push_raw(symbol);
             // engine は未確定ローマ字を閉じてから記号を足す（Step 10-2）ので、読みは
             // `reading + symbol` ではなく engine から取り直す（`on_input_raw` と同じ）。
-            let new_reading = engine.hiragana_text().to_string();
+            let new_reading = engine.hiragana_text()?.to_string();
             let (display, display_shown) = super::on_input::live_continuation_display(
                 &preview_for,
                 &preview,
@@ -617,7 +622,7 @@ impl super::TextServiceFactory_Impl {
         }
 
         engine.push_raw(symbol);
-        let display = engine.preedit_display();
+        let display = engine.preedit_display()?;
         sess.set_preedit(display.clone());
         drop(sess);
         drop(guard);
@@ -651,7 +656,7 @@ impl super::TextServiceFactory_Impl {
         forward: bool,
     ) -> Result<bool> {
         let has_pre = match guard.as_ref() {
-            Some(e) => !e.preedit_is_empty(),
+            Some(e) => !e.preedit_is_empty()?,
             None => return Ok(false),
         };
         drop(guard);
@@ -751,7 +756,7 @@ impl super::TextServiceFactory_Impl {
 
         // Preedit → RangeSelect（末尾から 1 文字除いて選択）
         if matches!(&*sess, SessionState::Preedit { .. }) {
-            let reading = engine.hiragana_text().to_string();
+            let reading = engine.hiragana_text()?.to_string();
             let char_count = reading.chars().count();
             if char_count > 1 {
                 sess.set_range_select(reading, char_count - 1, String::new());
@@ -765,8 +770,8 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
-        tracing::debug!("  → no matching state, eat={}", !engine.preedit_is_empty());
-        Ok(!engine.preedit_is_empty())
+        tracing::debug!("  → no matching state, eat={}", !engine.preedit_is_empty()?);
+        Ok(!engine.preedit_is_empty()?)
     }
 
     /// Right: BlockSelecting ではフォーカスを次のブロックへ移す。
@@ -802,7 +807,7 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
         let has_preedit =
-            !engine.preedit_is_empty() || crate::engine::state::session_is_selecting_fast();
+            !engine.preedit_is_empty()? || crate::engine::state::session_is_selecting_fast();
         if !has_preedit {
             return Ok(false);
         }
@@ -894,7 +899,7 @@ impl super::TextServiceFactory_Impl {
 
         // Preedit → RangeSelect（先頭 1 文字を選択して開始）
         if matches!(&*sess, SessionState::Preedit { .. }) {
-            let reading = engine.hiragana_text().to_string();
+            let reading = engine.hiragana_text()?.to_string();
             if !reading.is_empty() {
                 sess.set_range_select(reading, 1, String::new());
                 let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
@@ -907,6 +912,6 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
-        Ok(!engine.preedit_is_empty())
+        Ok(!engine.preedit_is_empty()?)
     }
 }

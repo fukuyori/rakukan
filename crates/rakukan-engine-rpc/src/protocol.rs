@@ -18,6 +18,7 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
 /// - v6: Issue #56 の host / engine / owner 識別子と変更要求・復元・終了応答の形を追加
+///   （(b) で BG 系の応答型と編集状態の同梱、照合付きの読み取り `Read` を追加。v6 は未リリースなので版は上げない）
 pub const PROTOCOL_VERSION: u32 = 6;
 
 /// ホストプロセスの起動インスタンス識別子。
@@ -188,21 +189,99 @@ impl ChangeRequest {
     }
 }
 
-/// 変更要求を適用した結果。旧 variant の応答をそのまま写す。
+/// 変更が成功した直後の読みと未確定ローマ字。TSF が復元元として保持する。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EditState {
+    pub reading: String,
+    pub pending_romaji: String,
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BgView {
+    Idle,
+    /// 自分の変換が開始待ちまたは実行中。
+    Running,
+    Done,
+    Failed,
+    /// 変換器が旧所有者の側に残っている（開始待ち・実行中・未回収の完了）。変換の実行中とは限らない。
+    WorkerBusy,
+}
+impl std::fmt::Display for BgView {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{self:?}")
+    }
+}
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BgStartOutcome {
+    Started,
+    /// 同じ読みの自分の変換が開始待ち・実行中。開始を抑止しただけで、既存の結果を使う意味は持たない。
+    AlreadyRunning,
+    /// 別の読みの自分の変換が開始待ち・実行中。エンジンは何も変えない。
+    RunningOther,
+    WorkerBusy,
+    NotReady,
+    NoReading,
+}
+impl BgStartOutcome {
+    pub fn started(self) -> bool {
+        matches!(self, Self::Started)
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum BgTakeOutcome {
+    /// 要求元の結果を取り出した（候補が空のこともある）。
+    Taken(Vec<String>),
+    NotReady,
+    /// BG の結果が要求元のものではない。状態は進めない。
+    NotYours,
+}
+/// 変更要求を適用した結果。どの結果も、適用後の編集状態（復元元）を運ぶ。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChangeOutcome {
-    /// `Response::Unit` を返していた要求（`PushChar` / `Commit` / `ResetAll` など）。
-    Unit,
-    /// `Response::Bool` を返していた要求（`Backspace` / `FlushPendingN` / `BgStart`）。
-    Bool(bool),
-    /// `BgTakeCandidates` の候補列（旧 `Response::Strings`）。
-    Candidates(Vec<String>),
-    /// `InputChar` の結果（旧 `Response::InputCharResult`）。
+    Unit {
+        edit: EditState,
+    },
+    Bool {
+        value: bool,
+        edit: EditState,
+    },
+    BgStart {
+        outcome: BgStartOutcome,
+        edit: EditState,
+    },
+    BgTake {
+        outcome: BgTakeOutcome,
+        edit: EditState,
+    },
     InputChar {
         preedit: String,
         hiragana: String,
-        bg_status: String,
+        bg: BgView,
+        edit: EditState,
     },
+}
+impl ChangeOutcome {
+    pub fn edit(&self) -> &EditState {
+        match self {
+            Self::Unit { edit }
+            | Self::Bool { edit, .. }
+            | Self::BgStart { edit, .. }
+            | Self::BgTake { edit, .. }
+            | Self::InputChar { edit, .. } => edit,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ReadRequest {
+    PreeditDisplay,
+    PreeditIsEmpty,
+    HiraganaText,
+    RomajiLogStr,
+    HiraganaFromRomajiLog,
+    CommittedText,
+    BgStatus,
+    BgPeekTopCandidate { key: String },
+    BgWaitMs { timeout_ms: u64 },
+    ConvertSync,
 }
 
 /// `config.toml` 本文の SHA-256（TSF 側 `ConfigSnapshot` の `sha256` と同じ 32 バイト）。
@@ -246,54 +325,54 @@ pub enum Request {
     },
 
     // ─── 文字入力 ─────────────────────────────────────────
-    PushChar(u32),
-    PushRaw(u32),
-    PushFullwidthAlpha(u32),
-    Backspace,
-    FlushPendingN,
+    _ReservedPushChar(u32),
+    _ReservedPushRaw(u32),
+    _ReservedPushFullwidthAlpha(u32),
+    _ReservedBackspace,
+    _ReservedFlushPendingN,
 
     // ─── プリエディット状態 ────────────────────────────────
-    PreeditDisplay,
-    PreeditIsEmpty,
-    HiraganaText,
-    RomajiLogStr,
-    HiraganaFromRomajiLog,
-    CommittedText,
+    _ReservedPreeditDisplay,
+    _ReservedPreeditIsEmpty,
+    _ReservedHiraganaText,
+    _ReservedRomajiLogStr,
+    _ReservedHiraganaFromRomajiLog,
+    _ReservedCommittedText,
 
     // ─── BG 変換 ──────────────────────────────────────────
-    BgStart {
+    _ReservedBgStart {
         n_cands: u32,
     },
-    BgStatus,
-    BgTakeCandidates {
+    _ReservedBgStatus,
+    _ReservedBgTakeCandidates {
         key: String,
     },
     /// M2 §5.2: ライブ変換 preview 用、トップ候補だけを peek (cache 状態を進めない)。
-    BgPeekTopCandidate {
+    _ReservedBgPeekTopCandidate {
         key: String,
     },
     #[deprecated = "removed in ABI v7; do not use"]
     _ReservedBgTakeSegmentedCandidates {
         key: String,
     },
-    BgReclaim,
-    BgWaitMs {
+    _ReservedBgReclaim,
+    _ReservedBgWaitMs {
         timeout_ms: u64,
     },
 
     // ─── 確定・リセット ───────────────────────────────────
-    Commit {
+    _ReservedCommit {
         text: String,
     },
-    CommitAsHiragana,
-    ResetPreedit,
-    ForcePreedit {
+    _ReservedCommitAsHiragana,
+    _ReservedResetPreedit,
+    _ReservedForcePreedit {
         text: String,
     },
-    ResetAll,
+    _ReservedResetAll,
 
     // ─── 同期変換 ─────────────────────────────────────────
-    ConvertSync,
+    _ReservedConvertSync,
     #[deprecated = "removed in ABI v7; do not use"]
     _ReservedConvertSyncSegmented,
     /// 旧 `MergeCandidates`。エンジン内部の hiragana_buf を参照するため、複数アプリで
@@ -329,7 +408,7 @@ pub enum Request {
     AvailableModelsJson,
 
     // ─── 学習 ─────────────────────────────────────────────
-    Learn {
+    _ReservedLearn {
         reading: String,
         surface: String,
     },
@@ -374,7 +453,7 @@ pub enum Request {
     /// 3. `hiragana_text()` を取得
     /// 4. `bg_status()` を取得
     /// 5. `bg_start_n_cands` が `Some` かつ hiragana が非空なら `bg_start(n)`
-    InputChar {
+    _ReservedInputChar {
         c: u32,
         kind: InputCharKind,
         bg_start_n_cands: Option<u32>,
@@ -398,7 +477,7 @@ pub enum Request {
 
     // ─── 学習（追加） ─────────────────────────────────────────
     /// 辞書ガードなしで学習する（候補ウィンドウからの明示選択、案C）。
-    LearnForce {
+    _ReservedLearnForce {
         reading: String,
         surface: String,
     },
@@ -459,6 +538,10 @@ pub enum Request {
         /// 拒否時はどちらも適用しない。
         config_version: Option<ConfigVersion>,
     },
+    Read {
+        expect: Expect,
+        request: ReadRequest,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -506,4 +589,6 @@ pub enum Response {
     Changed {
         outcome: ChangeOutcome,
     },
+    Bg(BgView),
+    OptionalString(Option<String>),
 }

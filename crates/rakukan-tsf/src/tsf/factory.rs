@@ -612,6 +612,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             inner.openclose_comp = None;
         }
         let _ = composition_set(None);
+        crate::engine::rpc_composition::close();
         if let Ok(mut g) = engine_get()
             && let Some(e) = g.as_mut()
         {
@@ -640,6 +641,7 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         _: Option<&ITfComposition>,
     ) -> windows::core::Result<()> {
         let _ = composition_set(None);
+        crate::engine::rpc_composition::close();
         // 候補ウィンドウと選択状態をクリア
         candidate_window::hide();
         candidate_window::stop_live_timer(); // LiveConv タイマーも停止
@@ -710,7 +712,12 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
 
         let has_preedit = engine_try_get_or_create()
             .ok()
-            .and_then(|g| g.as_ref().map(|e| !e.preedit_is_empty()))
+            .and_then(|g| {
+                g.as_ref().map(|e| match e.preedit_is_empty() {
+                    Ok(empty) => !empty,
+                    Err(_) => crate::engine::state::composition_clone().is_ok_and(|c| c.is_some()),
+                })
+            })
             .unwrap_or(false);
 
         // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
@@ -970,7 +977,7 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
         let engine = guard
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("engine_commit_hiragana: engine is None"))?;
-        let p = engine.preedit_display();
+        let p = engine.preedit_display()?;
         if !p.is_empty() {
             engine.bg_reclaim();
             engine.commit(&p);
@@ -1001,18 +1008,18 @@ fn engine_convert_sync_multi(
     dict_limit: usize,
     reading: &str,
     preedit: &str,
-) -> Vec<String> {
+) -> Result<Vec<String>> {
     // LLM候補を取得（llm_limit 件）
-    let llm_cands: Vec<String> = engine.convert_sync();
+    let llm_cands: Vec<String> = engine.convert_sync()?;
     let _ = llm_limit; // DynEngine::convert_sync は num_candidates を内部設定から読む
 
     // 辞書候補とマージ（dict_limit 件まで）。reading を明示的に渡す（Issue #9）。
     let merged = engine.merge_candidates_for_reading(reading, llm_cands, dict_limit);
     tracing::debug!("merge_candidates(reading={:?}) → {:?}", reading, merged);
     if merged.is_empty() {
-        vec![preedit.to_string()]
+        Ok(vec![preedit.to_string()])
     } else {
-        merged
+        Ok(merged)
     }
 }
 

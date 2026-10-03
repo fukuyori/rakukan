@@ -25,10 +25,48 @@ impl super::TextServiceFactory_Impl {
         sink: ITfCompositionSink,
     ) -> Result<bool> {
         let mut guard = engine_try_get_or_create()?;
+        // 所有権を復元してよいのは、フォーカス中の生存している文脈へのキー入力だけ。
+        let focused_dm = (|| {
+            use windows::core::Interface;
+            let tm = self.inner.try_borrow().ok()?.thread_mgr.clone()?;
+            let focused = unsafe { tm.GetFocus() }.ok()?;
+            let current = unsafe { ctx.GetDocumentMgr() }.ok()?;
+            if focused.as_raw() != current.as_raw() {
+                return None;
+            }
+            let dm = crate::engine::dm_registry::lookup(current.as_raw() as usize)?;
+            crate::engine::dm_registry::is_live(dm).then_some(dm)
+        })();
+        let focused_context = focused_dm.is_some();
+        if let Some(dm) = focused_dm {
+            candidate_window::bind_input_focus(dm, super::foreground_root_hwnd());
+        }
+        let _input_scope = crate::engine::rpc_composition::InputScope::enter(focused_context);
+        // アプリ側の確定は、復元も状態の確認も通さない。
+        if matches!(action, UserAction::CommitRaw) {
+            return self.on_commit_raw(ctx, tid, sink, guard);
+        }
         let engine = match guard.as_mut() {
             Some(e) => e,
             None => return Ok(false),
         };
+        if focused_context && engine.recover_on_input()? {
+            candidate_window::stop_waiting_timer();
+            candidate_window::stop_live_timer();
+            candidate_window::clear_model_wait();
+            if let Some(edit) = crate::engine::rpc_composition::local_edit() {
+                let display = format!("{}{}", edit.reading, edit.pending_romaji);
+                if let Ok(mut session) = session_get() {
+                    session.set_preedit(display.clone());
+                }
+                // 復元直後の Space は Preedit へ戻すだけ。変換は次の Space に任せる。
+                if matches!(action, UserAction::Convert) {
+                    drop(guard);
+                    update_composition(ctx, tid, sink, display)?;
+                    return Ok(true);
+                }
+            }
+        }
 
         // ── 診断: 全アクションの入口でセッション状態とBG状態をログ ──
         {
@@ -82,7 +120,7 @@ impl super::TextServiceFactory_Impl {
                 "lock_err".to_string()
             };
             tracing::debug!(
-                "handle_action: {:?} state={} bg={} hira={:?}",
+                "handle_action: {:?} state={} bg={:?} hira={:?}",
                 action_name(&action),
                 state_name,
                 bg,
@@ -113,7 +151,7 @@ impl super::TextServiceFactory_Impl {
                 // stale 判定
                 let current_gen = conv_gen_snapshot();
                 let current_nonce = session_nonce_snapshot();
-                let current_reading = engine.hiragana_text().to_string();
+                let current_reading = engine.hiragana_text()?.to_string();
                 let stale_gen = entry.gen_when_requested != current_gen;
                 let stale_reading = entry.reading != current_reading;
                 let stale_nonce = entry.session_nonce_at_request != current_nonce;
@@ -145,8 +183,8 @@ impl super::TextServiceFactory_Impl {
                         // preedit = hiragana + pending_romaji 構成なので、
                         // BG 変換結果 `preview` に pending を付けて表示する
                         // ことで「ta」→「た」→「t」押下時の "t" が消えないようにする。
-                        let reading = engine.hiragana_text().to_string();
-                        let preedit_full = engine.preedit_display();
+                        let reading = engine.hiragana_text()?.to_string();
+                        let preedit_full = engine.preedit_display()?;
                         let pending = text_util::suffix_after_prefix_or_empty(
                             &preedit_full,
                             &reading,
@@ -195,7 +233,7 @@ impl super::TextServiceFactory_Impl {
                     ..
                 } = *sess
                 {
-                    if llm_pending && engine.bg_status() == "done" {
+                    if llm_pending && engine.bg_status()? == rakukan_engine_rpc::BgView::Done {
                         Some(original_preedit.clone())
                     } else {
                         None
@@ -208,7 +246,7 @@ impl super::TextServiceFactory_Impl {
                         "poll: bg=done llm_pending=true key={:?}, calling bg_take_candidates",
                         preedit_key
                     );
-                    match engine.bg_take_candidates(&preedit_key) {
+                    match engine.bg_take_candidates(&preedit_key)? {
                         Some(llm_cands) => {
                             tracing::debug!(
                                 "poll: bg_take_candidates → Some({} cands)",
@@ -279,7 +317,7 @@ impl super::TextServiceFactory_Impl {
                             // llm_pending はそのままにしておく（次のキー/Space で再試行できる）
                             tracing::warn!(
                                 "poll: bg_take_candidates → None (key mismatch or lock busy), bg={}",
-                                engine.bg_status()
+                                engine.bg_status()?
                             );
                         }
                     }
@@ -297,13 +335,13 @@ impl super::TextServiceFactory_Impl {
                 && let Some((wait_preedit, pos_x, pos_y)) =
                     sess.waiting_info().map(|(t, x, y)| (t.to_string(), x, y))
             {
-                let bg_now = engine.bg_status();
+                let bg_now = engine.bg_status()?;
                 tracing::debug!(
                     "waiting-poll: wait_preedit={:?} bg={}",
                     wait_preedit,
                     bg_now
                 );
-                if bg_now == "done" {
+                if bg_now == rakukan_engine_rpc::BgView::Done {
                     tracing::debug!(
                         "waiting-poll: calling bg_take_candidates({:?})",
                         wait_preedit
@@ -311,8 +349,8 @@ impl super::TextServiceFactory_Impl {
                     // bg のキーは hiragana_buf。wait_preedit は preedit_display()（未確定
                     // ローマ字を含む。例「たt」）なので、不一致なら hiragana_text() で再試行し、
                     // 取れたキーを読みにする（Step 10-5。candidate_window の on_waiting_timer と同じ）。
-                    let hira_key = engine.hiragana_text().to_string();
-                    let taken = match engine.bg_take_candidates(&wait_preedit) {
+                    let hira_key = engine.hiragana_text()?.to_string();
+                    let taken = match engine.bg_take_candidates(&wait_preedit)? {
                         Some(c) => Some((wait_preedit.clone(), c)),
                         None if hira_key != wait_preedit => {
                             tracing::debug!(
@@ -320,7 +358,7 @@ impl super::TextServiceFactory_Impl {
                                 hira_key
                             );
                             engine
-                                .bg_take_candidates(&hira_key)
+                                .bg_take_candidates(&hira_key)?
                                 .map(|c| (hira_key.clone(), c))
                         }
                         None => None,
@@ -391,7 +429,7 @@ impl super::TextServiceFactory_Impl {
                             // Waiting 状態を維持して次のキー/Space で再試行
                             tracing::warn!(
                                 "waiting-poll: bg_take_candidates → None (key mismatch?), bg={}",
-                                engine.bg_status()
+                                engine.bg_status()?
                             );
                         }
                     }
