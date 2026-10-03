@@ -20,9 +20,19 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 10;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 11;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
+
+/// 変換キャッシュの中の変換器の位置。`same_reading` は、pending があれば pending のキーで判定する。
+/// 順位は Queued > Running > Done > Empty。Queued は、旧要求の変換が実行中で次の要求が待っている場合を含む。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgSlot {
+    Empty,
+    Queued { same_reading: bool },
+    Running { same_reading: bool },
+    Done { same_reading: bool, failed: bool },
+}
 
 #[derive(Debug, Clone, Copy, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 pub enum CandidateSource {
@@ -209,6 +219,11 @@ struct EngineVTable {
     committed_text: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
 
     // BG 変換
+    pending_romaji: unsafe extern "C" fn(*mut c_void) -> *mut c_char,
+    bg_take_checked: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    bg_peek_checked: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
+    bg_slot: unsafe extern "C" fn(*mut c_void) -> u8,
+    bg_reclaim_blocking: unsafe extern "C" fn(*mut c_void) -> bool,
     bg_start: unsafe extern "C" fn(*mut c_void, u32) -> bool,
     bg_status: unsafe extern "C" fn(*mut c_void) -> *const c_char,
     bg_take_candidates: unsafe extern "C" fn(*mut c_void, *const c_char) -> *mut c_char,
@@ -315,6 +330,11 @@ impl EngineVTable {
             romaji_log_str: load_sym!(lib, b"engine_romaji_log_str\0"),
             hiragana_from_romaji_log: load_sym!(lib, b"engine_hiragana_from_romaji_log\0"),
             committed_text: load_sym!(lib, b"engine_committed_text\0"),
+            pending_romaji: load_sym!(lib, b"engine_pending_romaji\0"),
+            bg_take_checked: load_sym!(lib, b"engine_bg_take_checked\0"),
+            bg_peek_checked: load_sym!(lib, b"engine_bg_peek_checked\0"),
+            bg_slot: load_sym!(lib, b"engine_bg_slot\0"),
+            bg_reclaim_blocking: load_sym!(lib, b"engine_bg_reclaim_blocking\0"),
             bg_start: load_sym!(lib, b"engine_bg_start\0"),
             bg_status: load_sym!(lib, b"engine_bg_status\0"),
             bg_take_candidates: load_sym!(lib, b"engine_bg_take_candidates\0"),
@@ -568,6 +588,53 @@ impl DynEngine {
     // ── BG 変換 ─────────────────────────────────────────────────────────────
 
     /// BG 変換を起動する。true = 起動した
+    pub fn pending_romaji(&self) -> String {
+        unsafe {
+            self.take_cstr((self.vtable.pending_romaji)(self.handle))
+                .unwrap_or_default()
+        }
+    }
+
+    pub fn bg_take_checked(&mut self, key: &str) -> Result<Option<Vec<String>>> {
+        let key = Self::to_cstring(key);
+        let json =
+            unsafe { self.take_cstr((self.vtable.bg_take_checked)(self.handle, key.as_ptr())) }
+                .context("missing BG take response")?;
+        let result: std::result::Result<Option<Vec<String>>, String> = serde_json::from_str(&json)?;
+        result.map_err(anyhow::Error::msg)
+    }
+    pub fn bg_peek_checked(&self, key: &str) -> Result<Option<String>> {
+        let key = Self::to_cstring(key);
+        let json =
+            unsafe { self.take_cstr((self.vtable.bg_peek_checked)(self.handle, key.as_ptr())) }
+                .context("missing BG peek response")?;
+        let result: std::result::Result<Option<String>, String> = serde_json::from_str(&json)?;
+        result.map_err(anyhow::Error::msg)
+    }
+    pub fn bg_slot(&self) -> Result<BgSlot> {
+        Ok(match unsafe { (self.vtable.bg_slot)(self.handle) } {
+            1 => BgSlot::Empty,
+            v @ 2..=3 => BgSlot::Queued {
+                same_reading: v == 3,
+            },
+            v @ 4..=5 => BgSlot::Running {
+                same_reading: v == 5,
+            },
+            v @ 6..=9 => BgSlot::Done {
+                same_reading: v % 2 == 1,
+                failed: v >= 8,
+            },
+            _ => bail!("conversion cache poisoned"),
+        })
+    }
+    pub fn bg_reclaim_blocking(&mut self) -> Result<()> {
+        if unsafe { (self.vtable.bg_reclaim_blocking)(self.handle) } {
+            Ok(())
+        } else {
+            bail!("conversion cache poisoned")
+        }
+    }
+
     pub fn bg_start(&mut self, n_cands: usize) -> bool {
         unsafe { (self.vtable.bg_start)(self.handle, n_cands as u32) }
     }

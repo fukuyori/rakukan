@@ -13,7 +13,7 @@
 //!
 //! # LLM 完了ポーリング（`WM_TIMER` ベース）
 //! Waiting 状態（⏳ 変換中）に遷移した際に `start_waiting_timer()` を呼ぶことで、
-//! 80ms ごとに `bg_status == "done"` をポーリングする `WM_TIMER` を起動する。
+//! 80ms ごとに `bg_status == rakukan_engine_rpc::BgView::Done` をポーリングする `WM_TIMER` を起動する。
 //! LLM 変換完了を検知したら候補ウィンドウを自動更新し、タイマーを停止する。
 //!
 //! TSF の `RequestEditSession` は TSF スレッドのキー入力コンテキスト外から呼べないため、
@@ -193,6 +193,13 @@ pub fn current_dm_hwnd() -> (Option<DmRef>, usize) {
     let dm = TL_CURRENT_DM.try_with(|c| c.get()).unwrap_or(None);
     let hwnd = TL_CURRENT_HWND.try_with(|c| c.get()).unwrap_or(0);
     (dm, hwnd)
+}
+
+/// フォーカス通知は遅れて届くので、キー入力がそれより先に来ることがある。
+/// `GetFocus` と文脈の両方に一致し、台帳に登録済みで生存している DM だけを記録する。
+pub(crate) fn bind_input_focus(dm: DmRef, hwnd: usize) {
+    TL_CURRENT_DM.with(|current| current.set(Some(dm)));
+    TL_CURRENT_HWND.with(|current| current.set(hwnd));
 }
 
 /// OnSetFocus から遅延処理キューへ積むフォーカス変化イベント。
@@ -1125,7 +1132,14 @@ const MODEL_WAIT_LIMIT_MS: u64 = 10_000;
 const WAITING_LIMIT_MS: u64 = 10_000;
 
 /// モデル読み込み完了を待って変換をやり直すための記録（Step 13-1）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WaitReason {
+    ModelLoading,
+    WorkerBusy,
+}
+
 struct ModelWait {
+    reason: WaitReason,
     /// 待ち始めた時点の読み。`bg_start` のキー（engine 内部の hiragana_buf）と
     /// 一致しなくなっていたら、別の入力に移ったとみなして破棄する。
     reading: String,
@@ -1151,7 +1165,7 @@ const WAITING_POLL_MS: u32 = 80; // 80ms ごとにポーリング
 // 呼べなければ（E_FAIL / deadlock）Phase 1B (Queue方式) へ進む。
 //
 // 起動条件: on_input が呼ばれるたびにデバウンス時刻をリセットし、タイマーを起動する。
-// 発火条件: LIVE_DEBOUNCE_MS 経過後に bg_status=="done" を確認し、
+// 発火条件: LIVE_DEBOUNCE_MS 経過後に bg_status==rakukan_engine_rpc::BgView::Done を確認し、
 //           RequestEditSession でプレビューを composition に書き込む。
 
 const LIVE_TIMER_ID: usize = 0x1235;
@@ -1310,7 +1324,7 @@ fn bg_error_fallback_selecting(site: &str) {
 }
 
 /// WM_TIMER コールバック（TSFスレッド上で呼ばれる）。
-/// bg_status == "done" になったら候補を取り出して表示する。
+/// bg_status == rakukan_engine_rpc::BgView::Done になったら候補を取り出して表示する。
 /// モデル読み込み完了を待って変換をやり直す（Step 13-1、Issue #39）。
 ///
 /// `on_convert` の `model_not_ready` 経路から呼ぶ。候補表（辞書候補か読み）は
@@ -1320,8 +1334,12 @@ fn bg_error_fallback_selecting(site: &str) {
 /// 待機タイマーの tick で `is_kanji_ready()` を確認し、ready になった時点で
 /// 1 回だけ `bg_start` する。上限（`MODEL_WAIT_LIMIT_MS`）を超えたら打ち切る。
 pub fn start_model_wait(reading: String, pos_x: i32, pos_y: i32) {
+    start_model_wait_for(reading, pos_x, pos_y, WaitReason::ModelLoading);
+}
+pub fn start_model_wait_for(reading: String, pos_x: i32, pos_y: i32, reason: WaitReason) {
     TL_MODEL_WAIT.with(|c| {
         *c.borrow_mut() = Some(ModelWait {
+            reason,
             reading,
             started: std::time::Instant::now(),
             pos_x,
@@ -1345,12 +1363,13 @@ pub fn clear_model_wait() {
 /// （呼び出し側は以降の分岐へ進まない）。
 fn tick_model_wait() -> bool {
     use crate::engine::state::{SessionState, engine_get, session_get};
-
-    let Some((reading, elapsed_ms, pos_x, pos_y)) = TL_MODEL_WAIT.with(|c| {
+    use rakukan_engine_rpc::{BgStartOutcome, BgView};
+    let Some((reading, elapsed, reason, pos_x, pos_y)) = TL_MODEL_WAIT.with(|c| {
         c.borrow().as_ref().map(|w| {
             (
                 w.reading.clone(),
                 w.started.elapsed().as_millis() as u64,
+                w.reason,
                 w.pos_x,
                 w.pos_y,
             )
@@ -1358,94 +1377,21 @@ fn tick_model_wait() -> bool {
     }) else {
         return false;
     };
-
-    // Selecting を抜けていたら（確定・Esc など）待つ意味がない
-    let still_selecting = session_get()
-        .map(|s| matches!(&*s, SessionState::Selecting { .. }))
-        .unwrap_or(false);
-    if !still_selecting {
+    if !session_get().is_ok_and(|s| matches!(&*s, SessionState::Selecting { .. })) {
         clear_model_wait();
         stop_waiting_timer();
         return true;
     }
-
-    let ready = {
-        match engine_get() {
-            Ok(mut g) => match g.as_mut() {
-                Some(e) => {
-                    let _ = crate::engine::state::poll_model_ready_cached(e);
-                    e.is_kanji_ready()
-                }
-                None => false,
-            },
-            Err(_) => false,
-        }
-    };
-
-    if ready {
-        // ready になった → 同じ読みのままなら変換を開始し直す。以降は
-        // llm_pending の分岐（このタイマーの先頭）が完了を拾う。
-        let started = {
-            match engine_get() {
-                Ok(mut g) => match g.as_mut() {
-                    Some(e) => {
-                        let hira = e.hiragana_text().to_string();
-                        if hira != reading {
-                            tracing::info!(
-                                "model_wait: reading changed ({reading:?} → {hira:?}), giving up"
-                            );
-                            false
-                        } else if e.bg_status() != "idle" {
-                            tracing::debug!("model_wait: bg busy ({}), waiting", e.bg_status());
-                            return true;
-                        } else {
-                            let limit = crate::engine::state::get_num_candidates();
-                            let ok = e.bg_start(limit);
-                            tracing::info!(
-                                "model_wait: model ready after {elapsed_ms} ms → bg_start={ok}"
-                            );
-                            ok
-                        }
-                    }
-                    None => false,
-                },
-                Err(_) => false,
-            }
-        };
-        clear_model_wait();
-        if started {
-            if let Ok(mut sess) = session_get()
-                && let SessionState::Selecting {
-                    ref mut llm_pending,
-                    ..
-                } = *sess
-            {
-                *llm_pending = true;
-            }
-        } else {
-            stop_waiting_timer();
-        }
-        return true;
-    }
-
-    if elapsed_ms >= MODEL_WAIT_LIMIT_MS {
-        tracing::warn!("model_wait: model not ready after {elapsed_ms} ms, giving up");
+    // 上限は RPC より先に確かめる（読み取り失敗や WorkerBusy が続く場合も抜けられるように）。
+    if elapsed >= MODEL_WAIT_LIMIT_MS {
+        tracing::warn!("model_wait: deadline reached reason={reason:?}");
         clear_model_wait();
         stop_waiting_timer();
-        // 待機を打ち切ったことが分かる文言に差し替える。候補表はそのままなので
-        // 辞書候補での確定は続けられる。
-        let view = session_get().ok().map(|s| {
-            (
-                s.page_candidates().to_vec(),
-                s.page_selected(),
-                s.page_info().to_string(),
-            )
-        });
-        if let Some((cands, selected, info)) = view {
+        if let Ok(sess) = session_get() {
             show_with_status(
-                &cands,
-                selected,
-                &info,
+                &sess.page_candidates().to_vec(),
+                sess.page_selected(),
+                &sess.page_info(),
                 pos_x,
                 pos_y,
                 Some(MODEL_WAIT_SLOW_STATUS),
@@ -1453,18 +1399,64 @@ fn tick_model_wait() -> bool {
         }
         return true;
     }
-
+    let result = (|| -> anyhow::Result<bool> {
+        let mut g = engine_get()?;
+        let e = g
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("engine unavailable"))?;
+        let bg = e.bg_status()?;
+        match bg {
+            BgView::WorkerBusy | BgView::Running => return Ok(false),
+            BgView::Done | BgView::Failed => return Ok(false),
+            BgView::Idle => {}
+        }
+        if e.hiragana_text()? != reading {
+            clear_model_wait();
+            stop_waiting_timer();
+            return Ok(false);
+        }
+        let _ = crate::engine::state::poll_model_ready_cached(e);
+        match e.bg_start(crate::engine::state::get_num_candidates())? {
+            BgStartOutcome::Started | BgStartOutcome::AlreadyRunning => Ok(true),
+            BgStartOutcome::WorkerBusy
+            | BgStartOutcome::RunningOther
+            | BgStartOutcome::NotReady => Ok(false),
+            BgStartOutcome::NoReading => {
+                clear_model_wait();
+                stop_waiting_timer();
+                Ok(false)
+            }
+        }
+    })();
+    match result {
+        Ok(true) => {
+            clear_model_wait();
+            if let Ok(mut s) = session_get()
+                && let SessionState::Selecting { llm_pending, .. } = &mut *s
+            {
+                *llm_pending = true;
+            }
+        }
+        Ok(false) => {}
+        Err(error) => tracing::warn!("model_wait: state unknown; keeping candidates: {error}"),
+    }
     true
 }
 
 pub fn on_waiting_timer() {
+    if let Err(error) = waiting_tick() {
+        tracing::warn!("waiting timer: state unknown; keeping display: {error}");
+    }
+}
+
+fn waiting_tick() -> anyhow::Result<()> {
     use crate::engine::state::engine_get;
     use crate::engine::state::{CandidateViewSource, SessionState, session_get};
 
     // モデル読み込み待ち（Step 13-1）。llm_pending は false なので下の分岐では
     // 拾えず、Waiting でもないため先頭で処理する。
     if tick_model_wait() {
-        return;
+        return Ok(());
     }
 
     // Selecting { llm_pending=true } は、Space 1回目で候補表を即表示した後の
@@ -1494,38 +1486,55 @@ pub fn on_waiting_timer() {
     };
 
     if let Some((preedit_key, pos_x, pos_y)) = selecting_info {
-        let bg_status = match engine_get() {
-            Ok(g) => g.as_ref().map(|e| e.bg_status()).unwrap_or("idle"),
-            Err(_) => "idle",
-        };
-        if bg_status == "error" {
+        if TL_WAITING_SINCE.with(|clock| {
+            clock
+                .get()
+                .is_some_and(|since| since.elapsed().as_millis() as u64 >= WAITING_LIMIT_MS)
+        }) {
+            clear_llm_pending();
+            stop_waiting_timer();
+            return Ok(());
+        }
+        let bg_status = engine_get()?
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine unavailable"))?
+            .bg_status()?;
+        if bg_status == rakukan_engine_rpc::BgView::Failed {
             // 推論が落ちた。候補は永久に来ないので、待機表示のまま固まらせず
             // 辞書候補で確定できる状態に戻す。
             bg_error_fallback_selecting("on_waiting_timer(selecting)");
-            return;
+            return Ok(());
         }
-        if bg_status != "done" {
-            return;
+        if bg_status != rakukan_engine_rpc::BgView::Done {
+            return Ok(());
         }
 
         const DICT_LIMIT: usize = 40;
-        let result = (|| -> Option<Vec<String>> {
-            let mut guard = engine_get().ok()?;
-            let engine = guard.as_mut()?;
-            let hira_key = engine.hiragana_text();
+        let result = (|| -> anyhow::Result<Option<Vec<String>>> {
+            let mut guard = engine_get()?;
+            let engine = guard
+                .as_mut()
+                .ok_or_else(|| anyhow::anyhow!("engine unavailable"))?;
+            let hira_key = engine.hiragana_text()?;
             // 候補を取得できたキーを覚えておく。preedit_key は pending_romaji を
             // 含む（例「たt」）ことがあり、その場合フォールバックした hira_key
             // （例「た」）が実際の読み。マージも同じキーで引く必要がある。
-            let (matched_key, llm_cands) = match engine.bg_take_candidates(&preedit_key) {
+            let (matched_key, llm_cands) = match engine.bg_take_candidates(&preedit_key)? {
                 Some(c) => (preedit_key.clone(), c),
                 None if hira_key != preedit_key => {
                     tracing::debug!(
                         "on_waiting_timer(selecting): key mismatch, retry hira={:?}",
                         hira_key
                     );
-                    (hira_key.clone(), engine.bg_take_candidates(&hira_key)?)
+                    (
+                        hira_key.clone(),
+                        match engine.bg_take_candidates(&hira_key)? {
+                            Some(c) => c,
+                            None => return Ok(None),
+                        },
+                    )
                 }
-                None => return None,
+                None => return Ok(None),
             };
             // 読みを明示的に渡す。merge_candidates() はエンジン内部の
             // hiragana_buf を見るため、この経路ではユーザー辞書・学習履歴が
@@ -1533,11 +1542,11 @@ pub fn on_waiting_timer() {
             // MergeCandidatesForReading への移行漏れ）。
             let merged = engine.merge_candidates_for_reading(&matched_key, llm_cands, DICT_LIMIT);
             if merged.is_empty() {
-                None
+                Ok(None)
             } else {
-                Some(merged)
+                Ok(Some(merged))
             }
-        })();
+        })()?;
 
         let Some(merged) = result else {
             tracing::warn!(
@@ -1547,7 +1556,7 @@ pub fn on_waiting_timer() {
             // 進めなくなる（on_convert が「変換中」と見なして待ち続ける）。
             clear_llm_pending();
             stop_waiting_timer();
-            return;
+            return Ok(());
         };
 
         let page_info_str;
@@ -1558,11 +1567,11 @@ pub fn on_waiting_timer() {
         {
             let mut sess = match session_get() {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(_) => return Ok(()),
             };
             if !matches!(&*sess, SessionState::Selecting { .. }) {
                 stop_waiting_timer();
-                return;
+                return Ok(());
             }
             sess.replace_selecting_candidates(merged, CandidateViewSource::Bg);
             if let SessionState::Selecting { llm_pending, .. } = &mut *sess {
@@ -1607,7 +1616,7 @@ pub fn on_waiting_timer() {
             page_cands.len(),
             preedit_key
         );
-        return;
+        return Ok(());
     }
 
     // セッションが Waiting 状態かチェック
@@ -1642,28 +1651,30 @@ pub fn on_waiting_timer() {
         None => {
             // Waiting ではなくなっていたらタイマー停止
             stop_waiting_timer();
-            return;
+            return Ok(());
         }
     };
 
-    // engine の bg_status を確認
-    let bg_status = {
-        match engine_get() {
-            Ok(g) => g.as_ref().map(|e| e.bg_status()).unwrap_or("idle"),
-            Err(_) => "idle",
-        }
-    };
-
-    // 待ち過ぎの打ち切り（Step 13-1）。待機タイマーは periodic なので、変換が
-    // 完了しないままだと 80ms ごとのポーリングが止まらない。上限を超えたら
-    // 推論失敗と同じ経路で辞書候補へ落とす。
     let waited_too_long = TL_WAITING_SINCE.with(|c| {
         c.get()
             .map(|t| t.elapsed().as_millis() as u64 >= WAITING_LIMIT_MS)
             .unwrap_or(false)
     });
 
-    if bg_status == "error" || waited_too_long {
+    // engine の bg_status を確認
+    let bg_status = if waited_too_long {
+        rakukan_engine_rpc::BgView::Failed
+    } else {
+        engine_get()?
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("engine unavailable"))?
+            .bg_status()?
+    };
+
+    // 待ち過ぎの打ち切り（Step 13-1）。待機タイマーは periodic なので、変換が
+    // 完了しないままだと 80ms ごとのポーリングが止まらない。上限を超えたら
+    // 推論失敗と同じ経路で辞書候補へ落とす。
+    if bg_status == rakukan_engine_rpc::BgView::Failed || waited_too_long {
         // 推論が落ちた（または待ち過ぎた）。待ち続けても完了しないのでタイマーを
         // 止め、辞書候補で Selecting に移す。Waiting のまま抜けると
         // 「⏳ 変換中...」が残り、タイマーも止まっているので表示を更新する経路が
@@ -1676,23 +1687,17 @@ pub fn on_waiting_timer() {
             tracing::warn!("on_waiting_timer: inference failed — falling back to dict candidates");
         }
         const DICT_LIMIT_ERR: usize = 40;
-        let (reading, dict) = match engine_get() {
-            Ok(mut g) => g.as_mut().map(|engine| {
-                engine.bg_reclaim();
-                // 読みは hiragana_text（wait_preedit は未確定ローマ字を含みうる。Step 10-5）
-                let hira = engine.hiragana_text().to_string();
-                let reading = if !hira.is_empty() && wait_preedit.starts_with(&hira) {
-                    hira
-                } else {
-                    wait_preedit.clone()
-                };
-                let dict =
-                    engine.merge_candidates_for_reading(&reading, Vec::new(), DICT_LIMIT_ERR);
-                (reading, dict)
+        let reading = crate::engine::rpc_composition::local_edit()
+            .map(|edit| edit.reading)
+            .filter(|r| !r.is_empty())
+            .unwrap_or_else(|| wait_preedit.clone());
+        let dict = match engine_get() {
+            Ok(g) => g.as_ref().map(|engine| {
+                engine.merge_candidates_for_reading(&reading, Vec::new(), DICT_LIMIT_ERR)
             }),
             Err(_) => None,
         }
-        .unwrap_or_else(|| (wait_preedit.clone(), Vec::new()));
+        .unwrap_or_default();
         stop_waiting_timer();
 
         let cands = if dict.is_empty() {
@@ -1705,7 +1710,7 @@ pub fn on_waiting_timer() {
         let (page_cands, page_info_str) = {
             let mut sess = match session_get() {
                 Ok(s) => s,
-                Err(_) => return,
+                Err(_) => return Ok(()),
             };
             sess.activate_selecting_with_affixes(
                 cands,
@@ -1731,11 +1736,11 @@ pub fn on_waiting_timer() {
             pos_y,
             Some(bg_error_status_now()),
         );
-        return;
+        return Ok(());
     }
 
-    if bg_status != "done" {
-        return; // まだ実行中 → 次の WM_TIMER を待つ
+    if bg_status != rakukan_engine_rpc::BgView::Done {
+        return Ok(()); // まだ実行中 → 次の WM_TIMER を待つ
     }
 
     // bg=done → 候補を取り出して表示
@@ -1744,22 +1749,24 @@ pub fn on_waiting_timer() {
     const DICT_LIMIT: usize = 40;
     let _llm_limit = crate::engine::state::get_num_candidates();
 
-    let result = (|| -> Option<(Vec<String>, String, String)> {
-        let mut guard = engine_get().ok()?;
-        let engine = guard.as_mut()?;
+    let result = (|| -> anyhow::Result<Option<(Vec<String>, String, String)>> {
+        let mut guard = engine_get()?;
+        let engine = guard
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("engine unavailable"))?;
 
         // bg_start は hiragana_buf をキーとして使う。
         // wait_preedit は preedit_display()（pending_romaji 含む）なので不一致の場合がある。
         // hiragana_text() でフォールバックして両方試す。
-        let hira_key = engine.hiragana_text();
+        let hira_key = engine.hiragana_text()?;
         // 取得できたキーを覚えておく。マージも同じキーで引かないと、
         // フォールバックが効いた時にユーザー辞書・学習履歴が引けない。
-        let taken = match engine.bg_take_candidates(&wait_preedit) {
+        let taken = match engine.bg_take_candidates(&wait_preedit)? {
             Some(c) => Some((wait_preedit.clone(), c)),
             None if hira_key != wait_preedit => {
                 tracing::debug!("on_waiting_timer: key mismatch, retry hira={:?}", hira_key);
                 engine
-                    .bg_take_candidates(&hira_key)
+                    .bg_take_candidates(&hira_key)?
                     .map(|c| (hira_key.clone(), c))
             }
             None => None,
@@ -1776,14 +1783,14 @@ pub fn on_waiting_timer() {
                 );
                 engine.bg_reclaim();
                 let llm_limit2 = crate::engine::state::get_num_candidates();
-                if engine.bg_start(llm_limit2) {
+                if engine.bg_start(llm_limit2)?.started() {
                     tracing::debug!("on_waiting_timer: bg_start restarted → re-arm timer");
                     // タイマーを再起動して次のポーリングで取得
                     start_waiting_timer();
                 } else {
                     tracing::error!("on_waiting_timer: bg_start failed");
                 }
-                return None;
+                return Ok(None);
             }
         };
 
@@ -1791,20 +1798,20 @@ pub fn on_waiting_timer() {
         // ユーザー辞書・学習履歴が反映されない）。キーは実際に候補が取れた方。
         let merged = engine.merge_candidates_for_reading(&matched_key, llm_cands, DICT_LIMIT);
         if merged.is_empty() {
-            return None;
+            return Ok(None);
         }
         let first = merged
             .first()
             .cloned()
             .unwrap_or_else(|| wait_preedit.clone());
-        Some((merged, first, matched_key))
-    })();
+        Ok(Some((merged, first, matched_key)))
+    })()?;
 
     let (merged, _first, matched_key) = match result {
         Some(v) => v,
         None => {
             tracing::warn!("on_waiting_timer: bg_take_candidates returned None or empty");
-            return;
+            return Ok(());
         }
     };
 
@@ -1818,7 +1825,7 @@ pub fn on_waiting_timer() {
     {
         let mut sess = match session_get() {
             Ok(s) => s,
-            Err(_) => return,
+            Err(_) => return Ok(()),
         };
         sess.activate_selecting_with_affixes(
             merged,
@@ -1845,6 +1852,7 @@ pub fn on_waiting_timer() {
         page_cands.len(),
         wait_preedit
     );
+    Ok(())
 }
 
 // ─── [Live] ライブ変換実装 ─────────────────────────────────────────────────────────
@@ -2027,7 +2035,7 @@ fn pass_debounce() -> Option<u64> {
 /// engine からの probe 結果。
 struct LiveProbe {
     reading: String,
-    bg_status: &'static str,
+    bg_status: rakukan_engine_rpc::BgView,
 }
 
 /// engine の hiragana / bg_status を取得する。
@@ -2040,23 +2048,17 @@ struct LiveProbe {
 fn probe_engine(elapsed: u64) -> Option<LiveProbe> {
     use crate::engine::state::engine_try_get;
     let probe = match engine_try_get() {
-        Ok(g) => g.as_ref().map(|e| {
-            let h = e.hiragana_text().to_string();
-            let bg = e.bg_status();
-            (h, bg)
+        Ok(g) => g.as_ref().and_then(|e| {
+            let h = e.hiragana_text().ok()?.to_string();
+            let bg = e.bg_status().ok()?;
+            Some((h, bg))
         }),
         Err(_) => {
             tracing::trace!("[Live] on_live_timer: engine busy, retry next tick");
             return None;
         }
     };
-    let (hiragana, bg_status_str) = match probe {
-        Some(v) => v,
-        None => {
-            stop_live_timer();
-            return None;
-        }
-    };
+    let (hiragana, bg_status_str) = probe?;
     let has_preedit = !hiragana.is_empty();
     let ready = crate::engine::state::is_live_conversion_reading_ready(&hiragana);
     tracing::info!(
@@ -2104,60 +2106,82 @@ fn is_dict_like_preview_candidate(candidates: &[String], reading: &str, preview:
 /// - bg=done: そのまま続行
 /// - bg=idle: kanji_ready を確認して `bg_start`、いずれにせよこの tick は終了
 /// - bg=running: 単に待つ（タイマーは継続）
+const LIVE_WORKER_BUSY_LIMIT_MS: u64 = 10_000;
+thread_local! { static TL_WORKER_BUSY_SINCE: Cell<Option<std::time::Instant>> = const { Cell::new(None) }; }
+pub(crate) fn reset_worker_busy_clock() {
+    TL_WORKER_BUSY_SINCE.with(|clock| clock.set(None));
+}
+fn worker_busy_deadline(
+    since: Option<std::time::Instant>,
+    bg: rakukan_engine_rpc::BgView,
+    now: std::time::Instant,
+) -> (Option<std::time::Instant>, bool) {
+    if bg != rakukan_engine_rpc::BgView::WorkerBusy {
+        return (None, false);
+    }
+    let since = since.unwrap_or(now);
+    (
+        Some(since),
+        now.saturating_duration_since(since).as_millis() as u64 >= LIVE_WORKER_BUSY_LIMIT_MS,
+    )
+}
+fn worker_busy_expired(bg: rakukan_engine_rpc::BgView) -> bool {
+    TL_WORKER_BUSY_SINCE.with(|clock| {
+        let (since, expired) = worker_busy_deadline(clock.get(), bg, std::time::Instant::now());
+        clock.set(since);
+        expired
+    })
+}
+
 fn ensure_bg_running(probe: &LiveProbe) -> bool {
     use crate::engine::state::engine_try_get;
-    if probe.bg_status == "done" {
-        return true;
+    use rakukan_engine_rpc::{BgStartOutcome, BgView};
+    if worker_busy_expired(probe.bg_status) {
+        tracing::warn!("live WorkerBusy deadline reached; keeping dictionary preview");
+        stop_live_timer();
+        return false;
     }
-    if probe.bg_status == "idle" {
-        // bg=idle かつ preedit あり → ライブタイマーから bg_start を自己起動。
-        // poll_*_ready() を呼ばないと is_kanji_ready() が false のままになる。
-        let started = match engine_try_get() {
-            Ok(mut g) => g
-                .as_mut()
-                .map(|e| {
-                    let _ = crate::engine::state::poll_dict_ready_cached(e);
-                    let _ = crate::engine::state::poll_model_ready_cached(e);
-                    let kanji_ready = e.is_kanji_ready();
-                    let dict_ready = e.is_dict_ready();
-                    tracing::info!(
-                        "[Live] on_live_timer: kanji_ready={} dict_ready={}",
-                        kanji_ready,
-                        dict_ready
-                    );
-                    if has_immediate_live_preview_candidate(e, &probe.reading) {
-                        tracing::info!("[Live] on_live_timer: immediate dict preview available");
-                        return true;
-                    }
-                    if !kanji_ready {
-                        // モデル未ロード → タイマーを止めてロック競合を防ぐ。
-                        // モデルロード完了後、次の on_input で live_input_notify が再起動する。
-                        return false;
-                    }
-                    let _ = crate::engine::state::start_live_bg_if_ready(e, &probe.reading);
-                    false
-                })
-                .unwrap_or(false),
-            Err(_) => false,
-        };
-        tracing::info!("[Live] on_live_timer: bg=idle → ready={}", started);
-        if !started {
-            stop_live_timer(); // kanji_ready=false の間はタイマーを止める
+    match probe.bg_status {
+        BgView::Done => true,
+        BgView::Running | BgView::WorkerBusy | BgView::Failed => {
+            if !crate::tsf::live_session::swap_fired_once(true) {
+                tracing::debug!("live worker pending: {}", probe.bg_status);
+            }
+            // 既存の辞書由来の preview をそのまま使う。旧所有者の変換器では開始しない。
+            engine_try_get().is_ok_and(|g| {
+                g.as_ref()
+                    .is_some_and(|e| has_immediate_live_preview_candidate(e, &probe.reading))
+            })
         }
-    } else {
-        if let Ok(g) = engine_try_get()
-            && let Some(e) = g.as_ref()
-            && has_immediate_live_preview_candidate(e, &probe.reading)
-        {
-            tracing::info!("[Live] on_live_timer: immediate dict preview while bg=running");
-            return true;
-        }
-        // bg=running: まだ変換中
-        if !crate::tsf::live_session::swap_fired_once(true) {
-            tracing::info!("[Live] on_live_timer: waiting bg={}", probe.bg_status);
+        BgView::Idle => {
+            let Ok(mut g) = engine_try_get() else {
+                return false;
+            };
+            let Some(e) = g.as_mut() else {
+                return false;
+            };
+            let _ = crate::engine::state::poll_dict_ready_cached(e);
+            let _ = crate::engine::state::poll_model_ready_cached(e);
+            if has_immediate_live_preview_candidate(e, &probe.reading) {
+                return true;
+            }
+            let Some(n) = crate::engine::state::live_bg_start_n_cands(&probe.reading) else {
+                stop_live_timer();
+                return false;
+            };
+            match e.bg_start(n) {
+                Ok(BgStartOutcome::NotReady | BgStartOutcome::NoReading) => stop_live_timer(),
+                Ok(
+                    BgStartOutcome::Started
+                    | BgStartOutcome::AlreadyRunning
+                    | BgStartOutcome::RunningOther
+                    | BgStartOutcome::WorkerBusy,
+                ) => {}
+                Err(error) => tracing::warn!("live start: state unknown; retry next tick: {error}"),
+            }
+            false
         }
     }
-    false
 }
 
 /// preview 取得結果。
@@ -2185,11 +2209,11 @@ fn fetch_preview() -> Option<LivePreview> {
             return None;
         };
         let eng = g.as_mut()?;
-        let reading = eng.hiragana_text().to_string();
+        let reading = eng.hiragana_text().ok()?.to_string();
         if reading.is_empty() {
             return None;
         }
-        let preedit_full = eng.preedit_display();
+        let preedit_full = eng.preedit_display().ok()?;
         let pending = crate::engine::text_util::suffix_after_prefix_or_empty(
             &preedit_full,
             &reading,
@@ -2197,9 +2221,25 @@ fn fetch_preview() -> Option<LivePreview> {
         )
         .to_string();
         let dict_like_candidates = eng.merge_candidates_for_reading(&reading, vec![], 40);
-        let bg_status = eng.bg_status();
+        let bg_status = eng.bg_status().ok()?;
         let mut used_bg_candidate = false;
-        let preview = if let Some(top) = eng.bg_peek_top_candidate(&reading) {
+        let top = eng.bg_peek_top_candidate(&reading).ok()?;
+        let restarted = if top.is_none()
+            && bg_status == rakukan_engine_rpc::BgView::Done
+            && !eng.bg_reading_is_current(&reading)
+        {
+            match eng.bg_start(crate::engine::state::get_num_candidates()) {
+                Ok(rakukan_engine_rpc::BgStartOutcome::Started) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    tracing::warn!("live restart failed: {error}");
+                    return None;
+                }
+            }
+        } else {
+            false
+        };
+        let preview = if let Some(top) = top {
             used_bg_candidate = true;
             eng.merge_candidates_for_reading(&reading, vec![top], 40)
                 .into_iter()
@@ -2225,7 +2265,13 @@ fn fetch_preview() -> Option<LivePreview> {
             preview,
             previous,
             keep_short_preview,
-            !used_bg_candidate && bg_status == "running",
+            !used_bg_candidate
+                && (restarted
+                    || matches!(
+                        bg_status,
+                        rakukan_engine_rpc::BgView::Running
+                            | rakukan_engine_rpc::BgView::WorkerBusy
+                    )),
         )
     };
 
@@ -2494,6 +2540,14 @@ pub fn on_live_timer() {
         return;
     };
     let Some(probe) = probe_engine(elapsed) else {
+        // 読み取りに失敗しても時計は保つ。張り直した後に読めれば、その値で判定する。
+        if TL_WORKER_BUSY_SINCE.with(|clock| {
+            clock.get().is_some_and(|since| {
+                since.elapsed().as_millis() as u64 >= LIVE_WORKER_BUSY_LIMIT_MS
+            })
+        }) {
+            stop_live_timer();
+        }
         return;
     };
     if !ensure_bg_running(&probe) {
@@ -2658,5 +2712,38 @@ mod tests {
             ),
             "砉"
         );
+    }
+}
+
+#[cfg(test)]
+mod worker_busy_tests {
+    use super::*;
+    use rakukan_engine_rpc::BgView;
+    #[test]
+    fn busy_clock_survives_rearming_and_resets_on_other_observed_values() {
+        let start = std::time::Instant::now();
+        let (clock, expired) = worker_busy_deadline(None, BgView::WorkerBusy, start);
+        assert!(!expired);
+        let (clock, expired) = worker_busy_deadline(
+            clock,
+            BgView::WorkerBusy,
+            start + std::time::Duration::from_millis(9999),
+        );
+        assert!(!expired);
+        assert_eq!(clock, Some(start));
+        assert!(
+            worker_busy_deadline(
+                clock,
+                BgView::WorkerBusy,
+                start + std::time::Duration::from_millis(10000)
+            )
+            .1
+        );
+        for bg in [BgView::Idle, BgView::Running, BgView::Done, BgView::Failed] {
+            assert_eq!(
+                worker_busy_deadline(clock, bg, start + std::time::Duration::from_secs(20)),
+                (None, false)
+            );
+        }
     }
 }

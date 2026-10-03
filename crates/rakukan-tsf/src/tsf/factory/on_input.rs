@@ -121,7 +121,7 @@ impl super::TextServiceFactory_Impl {
                 if raw {
                     engine.push_raw(pc);
                 } else {
-                    let _ = engine.input_char(pc, pk, None);
+                    let _ = engine.input_char(pc, pk, None)?;
                 }
             }
         }
@@ -145,7 +145,7 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                let (preedit, new_reading, _bg) = engine.input_char(c, kind, None);
+                let (preedit, new_reading, _bg) = engine.input_char(c, kind, None)?;
                 let pending = text_util::suffix_after_prefix_or_empty(
                     &preedit,
                     &new_reading,
@@ -221,7 +221,7 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                let (preedit2, new_reading2, _) = engine2.input_char(c, kind, None);
+                let (preedit2, new_reading2, _) = engine2.input_char(c, kind, None)?;
                 if let Ok(mut sess2) = session_get() {
                     sess2.set_preedit(new_reading2.clone());
                 }
@@ -288,7 +288,7 @@ impl super::TextServiceFactory_Impl {
                 };
                 // 打鍵時の prefetch はライブプレビュー用なので、読みが十分長い場合だけ
                 // 後段で live_conv_beam_size を使って起動する。
-                let (preedit, hiragana, _bg) = engine2.input_char(c, kind, None);
+                let (preedit, hiragana, _bg) = engine2.input_char(c, kind, None)?;
                 let _ = crate::engine::state::start_live_bg_if_ready(engine2, &hiragana);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
@@ -317,7 +317,7 @@ impl super::TextServiceFactory_Impl {
         } else {
             crate::engine::state::InputCharKind::Char
         };
-        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, None);
+        let (preedit, hiragana, bg_status) = engine.input_char(c, kind, None)?;
         diag::event(DiagEvent::InputChar {
             ch: c,
             preedit_after: preedit.clone(),
@@ -381,7 +381,7 @@ impl super::TextServiceFactory_Impl {
                 if raw {
                     engine.push_raw(pc);
                 } else {
-                    let _ = engine.input_char(pc, pk, None);
+                    let _ = engine.input_char(pc, pk, None)?;
                 }
             }
         }
@@ -399,7 +399,7 @@ impl super::TextServiceFactory_Impl {
                 crate::tsf::live_session::queue_preview_clear();
 
                 engine.push_raw(c);
-                let new_reading = engine.hiragana_text().to_string();
+                let new_reading = engine.hiragana_text()?.to_string();
                 let (display, display_shown) =
                     live_continuation_display(&preview_for, &preview, &reading, &new_reading, "");
                 let next_preview_for = if display == new_reading {
@@ -468,10 +468,10 @@ impl super::TextServiceFactory_Impl {
                     None => return Ok(true),
                 };
                 engine2.push_raw(c);
-                let preedit = engine2.preedit_display();
+                let preedit = engine2.preedit_display()?;
                 // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
                 // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
-                let reading = engine2.hiragana_text();
+                let reading = engine2.hiragana_text()?;
                 let _ = crate::engine::state::start_live_bg_if_ready(engine2, &reading);
                 drop(guard2);
                 commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
@@ -479,11 +479,11 @@ impl super::TextServiceFactory_Impl {
             }
         }
         engine.push_raw(c);
-        let preedit = engine.preedit_display();
+        let preedit = engine.preedit_display()?;
         // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
         // Space 押下時は on_convert 内で bg_reclaim + bg_start(num_candidates) により
         // fresh に変換し直すため、ここの prefetch 結果は Space には流用されない。
-        let reading = engine.hiragana_text();
+        let reading = engine.hiragana_text()?;
         // Cancel 後に残る Preedit 状態のテキストを実際の読みに追随させる
         if let Ok(mut sess) = session_get() {
             sess.sync_preedit_reading(&reading);
@@ -507,7 +507,7 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        let preedit = engine.preedit_display();
+        let preedit = engine.preedit_display()?;
         if !preedit.is_empty() {
             engine.commit(&preedit.clone());
             engine.reset_preedit();

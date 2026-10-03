@@ -17,7 +17,58 @@ use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
-pub const ENGINE_ABI_VERSION: u32 = 10;
+pub const ENGINE_ABI_VERSION: u32 = 11;
+
+/// ABI 11: 0=エラー（poison）、1=Empty、2/3=Queued、4/5=Running、6..9=Done。
+/// 偶奇が `same_reading`、Done の 8 以上が `failed`。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_slot(handle: *mut c_void) -> u8 {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    use crate::conv_cache::BgSlot;
+    match crate::conv_cache::bg_slot(&engine.current_preedit().hiragana) {
+        Err(_) => 0,
+        Ok(BgSlot::Empty) => 1,
+        Ok(BgSlot::Queued { same_reading }) => 2 + u8::from(same_reading),
+        Ok(BgSlot::Running { same_reading }) => 4 + u8::from(same_reading),
+        Ok(BgSlot::Done {
+            same_reading,
+            failed,
+        }) => 6 + u8::from(same_reading) + 2 * u8::from(failed),
+    }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_reclaim_blocking(handle: *mut c_void) -> bool {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    match crate::conv_cache::reclaim_done_blocking() {
+        Ok(Some(conv)) => {
+            engine.set_kanji_converter(conv);
+            true
+        }
+        Ok(None) => true,
+        Err(_) => false,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_pending_romaji(handle: *mut c_void) -> *mut c_char {
+    let engine = unsafe { &*(handle as *const RakunEngine) };
+    CString::new(engine.current_preedit().pending_romaji)
+        .unwrap_or_default()
+        .into_raw()
+}
+
+/// ABI 11: 取り出し・peek の結果を JSON の `Result<Option<_>, String>` で返す（poison を区別する）。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_take_checked(handle: *mut c_void, key: *const c_char) -> *mut c_char {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    let result = engine.bg_take_candidates_checked(unsafe { from_cstr(key) });
+    unsafe { to_cstr(serde_json::to_string(&result).expect("BG result is serializable")) }
+}
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_bg_peek_checked(_handle: *mut c_void, key: *const c_char) -> *mut c_char {
+    let result = crate::conv_cache::peek_top_candidate_checked(unsafe { from_cstr(key) });
+    unsafe { to_cstr(serde_json::to_string(&result).expect("BG result is serializable")) }
+}
 
 static LOG_INIT: OnceLock<()> = OnceLock::new();
 
@@ -875,5 +926,21 @@ mod build_info_tests {
             BG_RUN_NOT_RUNNING
         );
         assert_eq!(engine_bg_confirm_stalled(0, 0), BG_STALL_NOT_STALLED);
+    }
+}
+
+#[cfg(test)]
+mod abi11_tests {
+    use super::*;
+    #[test]
+    fn every_backend_exports_abi11_and_exact_pending_romaji() {
+        // この export に feature の条件は無く、cpu / vulkan / cuda で共通。
+        assert_eq!(engine_abi_version(), 11);
+        let mut engine = RakunEngine::new(EngineConfig::default());
+        engine.push_char('t');
+        let handle = &mut engine as *mut RakunEngine as *mut c_void;
+        let ptr = engine_pending_romaji(handle);
+        assert_eq!(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(), "t");
+        engine_free_string(ptr);
     }
 }

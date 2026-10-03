@@ -1353,7 +1353,15 @@ impl RakunEngine {
     /// ユーザー辞書ヒットは LLM 結果より優先するため先頭にマージする。
     /// ライブ変換 preview (先頭候補表示) でユーザー辞書が勝つ必要があるため。
     pub fn bg_take_candidates(&mut self, key: &str) -> Option<Vec<String>> {
-        let (conv, cands) = conv_cache::take_ready(key)?;
+        self.bg_take_candidates_checked(key).ok().flatten()
+    }
+    pub fn bg_take_candidates_checked(
+        &mut self,
+        key: &str,
+    ) -> Result<Option<Vec<String>>, &'static str> {
+        let Some((conv, cands)) = conv_cache::take_ready_checked(key)? else {
+            return Ok(None);
+        };
         self.kanji = Some(conv);
         let user_cands: Vec<String> = self
             .dict_store
@@ -1361,7 +1369,7 @@ impl RakunEngine {
             .map(|d| d.lookup_user(key))
             .unwrap_or_default();
         if user_cands.is_empty() {
-            return Some(cands);
+            return Ok(Some(cands));
         }
         let mut merged = user_cands;
         for c in cands {
@@ -1369,7 +1377,7 @@ impl RakunEngine {
                 merged.push(c);
             }
         }
-        Some(merged)
+        Ok(Some(merged))
     }
 
     /// Done 状態の converter を engine に戻す（commit/cancel 時に呼ぶ）

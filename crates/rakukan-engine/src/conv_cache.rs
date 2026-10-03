@@ -57,6 +57,72 @@ use crate::{DictStore, DigitCandidateKind, default_digit_candidates_order};
 
 // ─── リクエスト ────────────────────────────────────────────────────────────────
 
+/// 変換キャッシュの中の変換器の位置。`same_reading` は、pending があれば pending のキーで判定する。
+/// 順位は Queued > Running > Done > Empty。Queued は「ワーカーがまだ拾っていない」場合に加え、
+/// 旧要求の変換が実行中で、次の要求が pending で待っている場合を含む。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BgSlot {
+    Empty,
+    Queued { same_reading: bool },
+    Running { same_reading: bool },
+    Done { same_reading: bool, failed: bool },
+}
+/// pending と state を 1 回の blocking lock で読む。poison は値に倒さずエラーで返す。
+pub fn bg_slot(reading: &str) -> Result<BgSlot, &'static str> {
+    bg_slot_from(&CACHE.inner, reading)
+}
+fn bg_slot_from(mutex: &Mutex<Inner>, reading: &str) -> Result<BgSlot, &'static str> {
+    let inner = mutex.lock().map_err(|_| "conversion cache poisoned")?;
+    Ok(classify_slot(
+        inner
+            .pending
+            .as_ref()
+            .map(|request| request.hiragana.as_str()),
+        match &inner.state {
+            State::Idle => SlotState::Empty,
+            State::Running { key, .. } => SlotState::Running(key),
+            State::Done { key, failed, .. } => SlotState::Done(key, *failed),
+        },
+        reading,
+    ))
+}
+enum SlotState<'a> {
+    Empty,
+    Running(&'a str),
+    Done(&'a str, bool),
+}
+fn classify_slot(pending: Option<&str>, state: SlotState<'_>, reading: &str) -> BgSlot {
+    if let Some(key) = pending {
+        return BgSlot::Queued {
+            same_reading: key == reading,
+        };
+    }
+    match state {
+        SlotState::Empty => BgSlot::Empty,
+        SlotState::Running(key) => BgSlot::Running {
+            same_reading: key == reading,
+        },
+        SlotState::Done(key, failed) => BgSlot::Done {
+            same_reading: key == reading,
+            failed,
+        },
+    }
+}
+/// Done の変換器を blocking lock で回収する。`BgStart` がロック競合で Done を取り損ねないため。
+pub fn reclaim_done_blocking() -> Result<Option<KanaKanjiConverter>, &'static str> {
+    reclaim_done_from(&CACHE.inner)
+}
+fn reclaim_done_from(mutex: &Mutex<Inner>) -> Result<Option<KanaKanjiConverter>, &'static str> {
+    let mut inner = mutex.lock().map_err(|_| "conversion cache poisoned")?;
+    if !matches!(inner.state, State::Done { .. }) {
+        return Ok(None);
+    }
+    let State::Done { converter, .. } = std::mem::replace(&mut inner.state, State::Idle) else {
+        unreachable!()
+    };
+    Ok(Some(converter))
+}
+
 /// ワーカーへの変換リクエスト（single-slot 上書き式キュー）
 struct Request {
     /// TSF 側の打鍵そのままの読みと照合するキャッシュキー。
@@ -334,16 +400,22 @@ pub fn start(
 /// pending を積んで worker が Done を上書きする (`reclaim_nonblocking` 経由で
 /// engine 側で converter を取り戻す経路もある)。
 pub fn peek_top_candidate(key: &str) -> Option<String> {
+    peek_top_candidate_checked(key).ok().flatten()
+}
+pub fn peek_top_candidate_checked(key: &str) -> Result<Option<String>, &'static str> {
     let cache = &**CACHE;
-    let inner = cache.inner.lock().ok()?;
+    let inner = cache
+        .inner
+        .lock()
+        .map_err(|_| "conversion cache poisoned")?;
     if let State::Done {
         key: k, candidates, ..
     } = &inner.state
         && k == key
     {
-        return candidates.first().cloned();
+        return Ok(candidates.first().cloned());
     }
-    None
+    Ok(None)
 }
 
 /// バックグラウンド変換結果を取り出す。
@@ -356,11 +428,19 @@ pub fn peek_top_candidate(key: &str) -> Option<String> {
 /// `blocking lock` を使用。`try_lock()` だとワーカーが Done を書いている瞬間に
 /// "locked" を返し Done を見落とすため。
 pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
+    take_ready_checked(key).ok().flatten()
+}
+pub fn take_ready_checked(
+    key: &str,
+) -> Result<Option<(KanaKanjiConverter, Vec<String>)>, &'static str> {
     let cache = &**CACHE;
-    let mut inner = cache.inner.lock().ok()?;
+    let mut inner = cache
+        .inner
+        .lock()
+        .map_err(|_| "conversion cache poisoned")?;
 
     let State::Done { .. } = &inner.state else {
-        return None;
+        return Ok(None);
     };
     let State::Done {
         key: k,
@@ -399,10 +479,10 @@ pub fn take_ready(key: &str) -> Option<(KanaKanjiConverter, Vec<String>)> {
             candidates,
             failed,
         };
-        return None;
+        return Ok(None);
     }
     tracing::trace!("conv-cache: take_ready MATCH key={:?}", key);
-    Some((converter, candidates))
+    Ok(Some((converter, candidates)))
 }
 
 /// Done 状態の converter だけを回収して Idle に戻す（候補は捨てる）。
@@ -648,5 +728,79 @@ mod tests {
         assert!(!has_converter());
         assert_eq!(run_state(), RunState::NotRunning { last_run_id: 0 });
         assert_eq!(confirm_stalled(0, Duration::ZERO), Some(false));
+    }
+}
+
+#[cfg(test)]
+mod slot_tests {
+    use super::*;
+    #[test]
+    fn pending_key_wins_over_old_running_and_done() {
+        assert_eq!(
+            classify_slot(Some("new"), SlotState::Running("old"), "new"),
+            BgSlot::Queued { same_reading: true }
+        );
+        assert_eq!(
+            classify_slot(Some("new"), SlotState::Done("old", true), "old"),
+            BgSlot::Queued {
+                same_reading: false
+            }
+        );
+        assert_eq!(
+            classify_slot(None, SlotState::Running("old"), "old"),
+            BgSlot::Running { same_reading: true }
+        );
+        assert_eq!(
+            classify_slot(None, SlotState::Done("new", true), "new"),
+            BgSlot::Done {
+                same_reading: true,
+                failed: true
+            }
+        );
+        assert_eq!(classify_slot(None, SlotState::Empty, ""), BgSlot::Empty);
+    }
+}
+
+#[cfg(test)]
+mod slot_lock_tests {
+    use super::*;
+    fn empty() -> Inner {
+        Inner {
+            state: State::Idle,
+            pending: None,
+            last_run_id: 0,
+        }
+    }
+    #[test]
+    fn poisoned_slot_and_blocking_reclaim_return_failure() {
+        let mutex = Mutex::new(empty());
+        let _ = std::panic::catch_unwind(|| {
+            let _guard = mutex.lock().unwrap();
+            panic!("poison local cache");
+        });
+        assert!(bg_slot_from(&mutex, "").is_err());
+        assert!(reclaim_done_from(&mutex).is_err());
+    }
+    #[test]
+    fn reclaim_waits_for_contention_instead_of_missing_the_lock() {
+        let mutex = Arc::new(Mutex::new(empty()));
+        let guard = mutex.lock().unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let worker_mutex = mutex.clone();
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            done_tx
+                .send(reclaim_done_from(&worker_mutex).map(|result| result.is_none()))
+                .unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(guard);
+        assert_eq!(
+            done_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            Ok(true)
+        );
+        worker.join().unwrap();
     }
 }
