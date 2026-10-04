@@ -12,8 +12,8 @@ use super::ime_mode::ImeMode;
 // 通信するクライアント。TSF プロセス内に `rakukan_engine_*.dll` はロードされない。
 use super::config::ApplyTrigger;
 use super::dm_registry::{self, DmRef};
+pub use super::rpc_composition::DynEngine;
 pub use rakukan_engine_rpc::InputCharKind;
-pub use rakukan_engine_rpc::RpcEngine as DynEngine;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering as AO};
 use std::sync::{LazyLock, Mutex, MutexGuard};
@@ -813,7 +813,7 @@ pub fn start_reload_watcher() {
 /// `RpcEngine::connect_or_spawn` が `CreateProcessW` で detached 起動する。
 fn create_engine() -> anyhow::Result<DynEngine> {
     let cfg = build_engine_config_json();
-    let engine = rakukan_engine_rpc::RpcEngine::connect_or_spawn(Some(cfg))
+    let engine = DynEngine::connect_or_spawn(Some(cfg))
         .map_err(|e| anyhow::anyhow!("engine RPC connect failed: {e}"))?;
     tracing::info!(
         "engine connected via RPC: backend={}",
@@ -904,8 +904,14 @@ pub fn start_live_bg_if_ready(engine: &DynEngine, reading: &str) -> bool {
     let Some(n) = live_bg_start_n_cands(reading) else {
         return false;
     };
-    if engine.bg_start(n) {
-        return true;
+    match engine.bg_start(n) {
+        Ok(rakukan_engine_rpc::BgStartOutcome::Started) => return true,
+        Ok(_) => {}
+        Err(error) => {
+            // 編集の変更は成功している。BG の状態が不明の間は、その表示を保つ。
+            tracing::warn!("live prefetch failed; preserving the acknowledged input: {error}");
+            return false;
+        }
     }
     engine
         .merge_candidates_for_reading(reading, vec![], 40)
@@ -955,6 +961,17 @@ pub enum LearnAction {
     Learn,
     /// `engine.learn_force()`（辞書ガードなし。LLM 候補と、読みそのものの明示選択）
     LearnForce,
+}
+/// 確定時の追いつきに失敗した（未収束）場合は、学習を見送る。
+pub fn learn_live_action(reading: &str, preview: &str, unconverged: bool) -> LearnAction {
+    if unconverged {
+        tracing::info!("learning_decision action=Skip reason=unconverged_live_preview");
+        LearnAction::Skip
+    } else if is_auto_learn_enabled() && preview != reading {
+        LearnAction::Learn
+    } else {
+        LearnAction::Skip
+    }
 }
 
 /// 学習判定の中央ヘルパ。`auto_learn` 設定 / `text == reading` / `source` 判定を一括し、
@@ -2703,6 +2720,7 @@ pub fn doc_mode_deactivate() {
 /// 台帳に無い ptr は死んだ slot として記録される（Issue #50。以後その ptr に届く
 /// 通知は死んだ世代に解決される）。
 pub fn dispose_dm_resources(dm_ptr: usize) {
+    super::rpc_composition::dispose(dm_ptr);
     let (dm, expired) = dm_registry::expire(dm_ptr);
     if expired {
         doc_mode_remove(dm);
@@ -3407,5 +3425,16 @@ mod tests {
 
         assert_eq!(state.current_candidate(), Some("更新1"));
         assert_eq!(state.page_selected(), 0);
+    }
+}
+
+#[cfg(test)]
+mod live_learning_failure_tests {
+    #[test]
+    fn unconverged_catchup_always_uses_existing_skip_action() {
+        assert_eq!(
+            super::learn_live_action("reading", "preview", true),
+            super::LearnAction::Skip
+        );
     }
 }

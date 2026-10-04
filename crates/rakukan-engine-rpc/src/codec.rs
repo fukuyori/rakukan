@@ -50,11 +50,11 @@ mod tests {
     #[test]
     fn roundtrip_request() {
         let mut buf = Vec::new();
-        let req = Request::PushChar('あ' as u32);
+        let req = Request::_ReservedPushChar('あ' as u32);
         write_frame(&mut buf, &req).unwrap();
         let mut cur = Cursor::new(&buf);
         let got: Request = read_frame(&mut cur).unwrap();
-        assert!(matches!(got, Request::PushChar(x) if x == 'あ' as u32));
+        assert!(matches!(got, Request::_ReservedPushChar(x) if x == 'あ' as u32));
     }
 
     #[test]
@@ -178,11 +178,15 @@ mod tests {
                 then: Some(ChangeOutcome::InputChar {
                     preedit: "たa".into(),
                     hiragana: "た".into(),
-                    bg_status: "idle".into(),
+                    bg: crate::protocol::BgView::Idle,
+                    edit: Default::default(),
                 }),
             },
             Response::Changed {
-                outcome: ChangeOutcome::Candidates(vec!["多".into()]),
+                outcome: ChangeOutcome::BgTake {
+                    outcome: crate::protocol::BgTakeOutcome::Taken(vec!["多".into()]),
+                    edit: Default::default(),
+                },
             },
         ];
         for response in responses {
@@ -211,6 +215,6 @@ mod tests {
             limit: 0,
         });
         // ConvertSync, _ReservedConvertSyncSegmented, _ReservedMergeCandidates の並び
-        assert_eq!(reserved, discriminant(&Request::ConvertSync) + 2);
+        assert_eq!(reserved, discriminant(&Request::_ReservedConvertSync) + 2);
     }
 }

@@ -10,3 +10,5 @@ pub(super) mod text_util;
 pub(super) mod user_action;
 
 // conv_cache は rakukan-engine DLL 内部に移動（DLL 境界を越えないため）
+
+pub(super) mod rpc_composition;

@@ -13,6 +13,8 @@
 //! セッション間の hiragana_buf 等の汚染は TSF 側が既に `ResetAll` を
 //! フォーカス変化で呼ぶ前提でカバーする。
 
+use crate::protocol::{BgStartOutcome, BgTakeOutcome, BgView, EditState, ReadRequest};
+use rakukan_engine_abi::BgSlot;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -623,31 +625,31 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         Reload { .. } => "Reload",
         Bye => "Bye",
         Shutdown { .. } => "Shutdown",
-        PushChar(_) => "PushChar",
-        PushRaw(_) => "PushRaw",
-        PushFullwidthAlpha(_) => "PushFullwidthAlpha",
-        Backspace => "Backspace",
-        FlushPendingN => "FlushPendingN",
-        PreeditDisplay => "PreeditDisplay",
-        PreeditIsEmpty => "PreeditIsEmpty",
-        HiraganaText => "HiraganaText",
-        RomajiLogStr => "RomajiLogStr",
-        HiraganaFromRomajiLog => "HiraganaFromRomajiLog",
-        CommittedText => "CommittedText",
-        BgStart { .. } => "BgStart",
-        BgStatus => "BgStatus",
-        BgTakeCandidates { .. } => "BgTakeCandidates",
-        BgPeekTopCandidate { .. } => "BgPeekTopCandidate",
+        _ReservedPushChar(_) => "PushChar",
+        _ReservedPushRaw(_) => "PushRaw",
+        _ReservedPushFullwidthAlpha(_) => "PushFullwidthAlpha",
+        _ReservedBackspace => "Backspace",
+        _ReservedFlushPendingN => "FlushPendingN",
+        _ReservedPreeditDisplay => "PreeditDisplay",
+        _ReservedPreeditIsEmpty => "PreeditIsEmpty",
+        _ReservedHiraganaText => "HiraganaText",
+        _ReservedRomajiLogStr => "RomajiLogStr",
+        _ReservedHiraganaFromRomajiLog => "HiraganaFromRomajiLog",
+        _ReservedCommittedText => "CommittedText",
+        _ReservedBgStart { .. } => "BgStart",
+        _ReservedBgStatus => "BgStatus",
+        _ReservedBgTakeCandidates { .. } => "BgTakeCandidates",
+        _ReservedBgPeekTopCandidate { .. } => "BgPeekTopCandidate",
         #[allow(deprecated)]
         _ReservedBgTakeSegmentedCandidates { .. } => "_Reserved",
-        BgReclaim => "BgReclaim",
-        BgWaitMs { .. } => "BgWaitMs",
-        Commit { .. } => "Commit",
-        CommitAsHiragana => "CommitAsHiragana",
-        ResetPreedit => "ResetPreedit",
-        ForcePreedit { .. } => "ForcePreedit",
-        ResetAll => "ResetAll",
-        ConvertSync => "ConvertSync",
+        _ReservedBgReclaim => "BgReclaim",
+        _ReservedBgWaitMs { .. } => "BgWaitMs",
+        _ReservedCommit { .. } => "Commit",
+        _ReservedCommitAsHiragana => "CommitAsHiragana",
+        _ReservedResetPreedit => "ResetPreedit",
+        _ReservedForcePreedit { .. } => "ForcePreedit",
+        _ReservedResetAll => "ResetAll",
+        _ReservedConvertSync => "ConvertSync",
         #[allow(deprecated)]
         _ReservedConvertSyncSegmented => "_Reserved",
         #[allow(deprecated)]
@@ -670,16 +672,17 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         NGpuLayers => "NGpuLayers",
         MainGpu => "MainGpu",
         AvailableModelsJson => "AvailableModelsJson",
-        Learn { .. } => "Learn",
-        LearnForce { .. } => "LearnForce",
+        _ReservedLearn { .. } => "Learn",
+        _ReservedLearnForce { .. } => "LearnForce",
         MergeCandidatesForReading { .. } => "MergeCandidatesForReading",
         LastError => "LastError",
         DictStatus => "DictStatus",
         EngineHealth => "EngineHealth",
-        InputChar { .. } => "InputChar",
+        _ReservedInputChar { .. } => "InputChar",
         ShutdownIfConfigDiffers { .. } => "ShutdownIfConfigDiffers",
         Change { .. } => "Change",
         Restore { .. } => "Restore",
+        Read { .. } => "Read",
     }
 }
 
@@ -757,6 +760,7 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
             then,
             config_version: _,
         } => dispatch_restore(engine, session, owner, seq, reading, pending_romaji, then),
+        Request::Read { expect, request } => dispatch_read(engine, session, expect, request),
         // host_id はホストの不変フィールドなので、engine ロックを取らずに答えられる
         // （変換中でも応答できる）。
         Request::Shutdown { expected_host_id } => {
@@ -816,6 +820,8 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
 }
 
 /// 要求の `owner.tsf_id` が、この接続の `Hello` で登録した TSF と一致するか。
+// 拒否の応答をそのまま Err で返す（Box に包まない）。
+#[allow(clippy::result_large_err)]
 fn session_tsf(session: &Session, owner: &Owner) -> std::result::Result<TsfId, Response> {
     match session.tsf {
         Some(t) if t == owner.tsf_id => Ok(t),
@@ -845,22 +851,52 @@ fn dispatch_change(
     let mut g = lock_engine(engine);
     let state = &mut *g;
     // エンジンが無ければ世代も無いので、ここで GenMismatch になる
-    let check = engine.lock_records().check(tsf, seq);
-    let resp = match gate_change(state.engine_gen, state.owner, &expect, check) {
-        Gate::Respond(resp) => return resp,
-        Gate::Reject(reason) => Response::Rejected(reason),
-        Gate::Apply => {
+    apply_recorded_change(
+        &engine.records,
+        tsf,
+        seq,
+        state.engine_gen,
+        state.owner,
+        &expect,
+        || {
             let Some(eng) = state.engine.as_mut() else {
                 return Response::Rejected(Reason::GenMismatch);
             };
             inject_ready(eng);
-            let outcome = apply_change(eng, Some((&mut state.bg_owner, expect.owner)), request);
+            let outcome = apply_change(eng, &mut state.bg_owner, expect.owner, request);
             apply_health_action(engine, eng);
-            Response::Changed { outcome }
-        }
+            match outcome {
+                Ok(outcome) => Response::Changed { outcome },
+                Err(error) => Response::Error(error),
+            }
+        },
+    )
+}
+
+/// 照合・保持応答の再送・適用を 1 か所にまとめる。テストも dispatch と同じ経路を通す。
+fn apply_recorded_change(
+    records: &Mutex<RecordTable>,
+    tsf: TsfId,
+    seq: RequestSeq,
+    generation: Option<EngineGen>,
+    owner: Option<Owner>,
+    expect: &Expect,
+    apply: impl FnOnce() -> Response,
+) -> Response {
+    let check = records
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .check(tsf, seq);
+    let response = match gate_change(generation, owner, expect, check) {
+        Gate::Respond(response) => return response,
+        Gate::Reject(reason) => Response::Rejected(reason),
+        Gate::Apply => apply(),
     };
-    engine.lock_records().store(tsf, seq, &resp);
-    resp
+    records
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .store(tsf, seq, &response);
+    response
 }
 
 /// 読みと未確定ローマ字を復元し、所有権を移す（Issue #56）。
@@ -876,8 +912,6 @@ fn dispatch_change(
 /// 復元の前に Done の変換器を回収し（`bg_reclaim` は待たない）、BG 変換の所有者の
 /// 記録を消す。別の所有者の変換が実行中なら、中断も待機もせずそのまま走らせ、
 /// 所有者の記録だけを消す。その結果は `Change` 経由では誰にも取り出させない。
-/// ただし旧 variant の `BgTakeCandidates` は所有者を見ずキーの一致だけで取り出す
-/// ので、そちらからは取り出せる（旧所有者のワーカー使用中の扱いは (b) で決める）。
 fn dispatch_restore(
     engine: &SharedEngine,
     session: &Session,
@@ -902,6 +936,9 @@ fn dispatch_restore(
         return Response::Error("engine not created".into());
     };
     inject_ready(eng);
+    if let Err(error) = eng.bg_slot() {
+        return Response::Error(error.to_string());
+    }
     eng.reset_preedit();
     eng.force_preedit(reading);
     for c in pending_romaji.chars() {
@@ -910,29 +947,99 @@ fn dispatch_restore(
     eng.bg_reclaim();
     state.bg_owner = None;
     state.owner = Some(owner);
-    let then = then.map(|req| apply_change(eng, Some((&mut state.bg_owner, owner)), req));
+    let then = then
+        .map(|req| apply_change(eng, &mut state.bg_owner, owner, req))
+        .transpose();
     apply_health_action(engine, eng);
-    let resp = Response::Restored { engine_gen, then };
+    let resp = match then {
+        Ok(then) => Response::Restored { engine_gen, then },
+        Err(error) => Response::Error(error),
+    };
     engine.lock_records().store(tsf, seq, &resp);
     resp
 }
 
-/// 変更要求を 1 件適用する。旧 variant と `Change` / `Restore.then` の共通部分。
-///
-/// `bg` は BG 変換の所有者の記録と要求元。`Some` のとき（`Change` / `Restore`）だけ、
-/// 開始に成功した変換の所有者を記録し、候補の取り出しを所有者に限る。旧 variant は
-/// 所有者を持たないので `None`（従来どおりキーの一致だけで取り出す）。
+/// 変更を適用した後の読みと未確定ローマ字を写し取る。
+fn edit_state(eng: &DynEngine) -> EditState {
+    EditState {
+        reading: eng.hiragana_text(),
+        pending_romaji: eng.pending_romaji(),
+    }
+}
+/// `(bg_owner, BgSlot)` からの純粋な判定。`Restore` は bg_owner を消すので、
+/// 同じ所有者が復元し直した後は、自分の実行中の変換も `WorkerBusy` になる（意図した挙動）。
+fn bg_view(bg_owner: Option<Owner>, owner: Owner, slot: BgSlot) -> BgView {
+    match slot {
+        BgSlot::Empty => BgView::Idle,
+        _ if bg_owner != Some(owner) => BgView::WorkerBusy,
+        BgSlot::Queued { .. } | BgSlot::Running { .. } => BgView::Running,
+        BgSlot::Done { failed: true, .. } => BgView::Failed,
+        BgSlot::Done { failed: false, .. } => BgView::Done,
+    }
+}
+fn classify_start(
+    bg_owner: Option<Owner>,
+    owner: Owner,
+    slot: BgSlot,
+    no_reading: bool,
+    ready: bool,
+) -> BgStartOutcome {
+    if no_reading {
+        return BgStartOutcome::NoReading;
+    }
+    if slot != BgSlot::Empty && bg_owner != Some(owner) {
+        return BgStartOutcome::WorkerBusy;
+    }
+    match slot {
+        BgSlot::Queued { same_reading } | BgSlot::Running { same_reading } => {
+            if same_reading {
+                BgStartOutcome::AlreadyRunning
+            } else {
+                BgStartOutcome::RunningOther
+            }
+        }
+        BgSlot::Done { .. } => BgStartOutcome::Started,
+        BgSlot::Empty if ready => BgStartOutcome::Started,
+        BgSlot::Empty => BgStartOutcome::NotReady,
+    }
+}
+fn reclaim_unowned(eng: &mut impl BgReader, bg_owner: Option<Owner>) -> Result<(), String> {
+    if bg_owner.is_none() && matches!(eng.slot()?, BgSlot::Done { .. }) {
+        eng.reclaim();
+    }
+    Ok(())
+}
+fn start_bg(
+    eng: &mut impl BgStarter,
+    bg_owner: &mut Option<Owner>,
+    owner: Owner,
+    n: u32,
+) -> Result<BgStartOutcome, String> {
+    reclaim_unowned(eng, *bg_owner)?;
+    let slot = eng.slot()?;
+    let outcome = classify_start(*bg_owner, owner, slot, eng.no_reading(), eng.kanji_ready());
+    if outcome != BgStartOutcome::Started {
+        return Ok(outcome);
+    }
+    if matches!(slot, BgSlot::Done { .. }) {
+        eng.reclaim_blocking()?;
+    }
+    if eng.start(n as usize) {
+        *bg_owner = Some(owner);
+        Ok(BgStartOutcome::Started)
+    } else {
+        Ok(BgStartOutcome::NotReady)
+    }
+}
 fn apply_change(
     eng: &mut DynEngine,
-    bg: Option<(&mut Option<Owner>, Owner)>,
+    bg_owner: &mut Option<Owner>,
+    owner: Owner,
     request: ChangeRequest,
-) -> ChangeOutcome {
-    let started = |ok: bool, bg: Option<(&mut Option<Owner>, Owner)>| {
-        if ok && let Some((slot, owner)) = bg {
-            *slot = Some(owner);
-        }
-    };
-    match request {
+) -> Result<ChangeOutcome, String> {
+    reclaim_unowned(eng, *bg_owner)?;
+    eng.bg_slot().map_err(|e| e.to_string())?;
+    Ok(match request {
         ChangeRequest::InputChar {
             c,
             kind,
@@ -941,149 +1048,205 @@ fn apply_change(
             if let Some(ch) = char::from_u32(c) {
                 match kind {
                     InputCharKind::Char => eng.push_char(ch),
-                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(ch),
                     InputCharKind::Raw => eng.push_raw(ch),
+                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(ch),
                 }
             }
-            let preedit = eng.preedit_display();
-            let hiragana = eng.hiragana_text();
-            let bg_status = eng.bg_status().to_string();
-            if let Some(n) = bg_start_n_cands
-                && !hiragana.is_empty()
-            {
-                let ok = eng.bg_start(n as usize);
-                started(ok, bg);
+            if let Some(n) = bg_start_n_cands {
+                start_bg(eng, bg_owner, owner, n)?;
             }
             ChangeOutcome::InputChar {
-                preedit,
-                hiragana,
-                bg_status,
+                preedit: eng.preedit_display(),
+                hiragana: eng.hiragana_text(),
+                bg: bg_view(*bg_owner, owner, eng.bg_slot().map_err(|e| e.to_string())?),
+                edit: edit_state(eng),
             }
         }
-        ChangeRequest::PushChar(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_char(ch);
+        ChangeRequest::Backspace => {
+            let value = eng.backspace();
+            ChangeOutcome::Bool {
+                value,
+                edit: edit_state(eng),
             }
-            ChangeOutcome::Unit
         }
-        ChangeRequest::PushRaw(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_raw(ch);
+        ChangeRequest::FlushPendingN => {
+            let value = eng.flush_pending_n();
+            ChangeOutcome::Bool {
+                value,
+                edit: edit_state(eng),
             }
-            ChangeOutcome::Unit
         }
-        ChangeRequest::PushFullwidthAlpha(c) => {
-            if let Some(ch) = char::from_u32(c) {
-                eng.push_fullwidth_alpha(ch);
-            }
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::Backspace => ChangeOutcome::Bool(eng.backspace()),
-        ChangeRequest::FlushPendingN => ChangeOutcome::Bool(eng.flush_pending_n()),
         ChangeRequest::BgStart { n_cands } => {
-            let ok = eng.bg_start(n_cands as usize);
-            started(ok, bg);
-            ChangeOutcome::Bool(ok)
+            let outcome = start_bg(eng, bg_owner, owner, n_cands)?;
+            ChangeOutcome::BgStart {
+                outcome,
+                edit: edit_state(eng),
+            }
         }
         ChangeRequest::BgTakeCandidates { key } => {
-            // 別の所有者・復元前の変換の結果は取り出さない（状態も進めない）
-            if let Some((slot, owner)) = bg
-                && *slot != Some(owner)
-            {
-                return ChangeOutcome::Candidates(vec![]);
+            let outcome = if *bg_owner != Some(owner) {
+                BgTakeOutcome::NotYours
+            } else {
+                match eng.bg_take_checked(&key).map_err(|e| e.to_string())? {
+                    Some(c) => BgTakeOutcome::Taken(c),
+                    None => BgTakeOutcome::NotReady,
+                }
+            };
+            ChangeOutcome::BgTake {
+                outcome,
+                edit: edit_state(eng),
             }
-            ChangeOutcome::Candidates(eng.bg_take_candidates(&key).unwrap_or_default())
         }
-        ChangeRequest::BgReclaim => {
-            eng.bg_reclaim();
-            ChangeOutcome::Unit
+        other => {
+            match other {
+                ChangeRequest::PushChar(c) => {
+                    if let Some(c) = char::from_u32(c) {
+                        eng.push_char(c);
+                    }
+                }
+                ChangeRequest::PushRaw(c) => {
+                    if let Some(c) = char::from_u32(c) {
+                        eng.push_raw(c);
+                    }
+                }
+                ChangeRequest::PushFullwidthAlpha(c) => {
+                    if let Some(c) = char::from_u32(c) {
+                        eng.push_fullwidth_alpha(c);
+                    }
+                }
+                ChangeRequest::BgReclaim => eng.bg_reclaim(),
+                ChangeRequest::Commit { text } => eng.commit(&text),
+                ChangeRequest::CommitAsHiragana => eng.commit_as_hiragana(),
+                ChangeRequest::ResetPreedit => eng.reset_preedit(),
+                ChangeRequest::ForcePreedit { text } => eng.force_preedit(text),
+                ChangeRequest::ResetAll => eng.reset_all(),
+                ChangeRequest::Learn { reading, surface } => {
+                    warn_if_dict_missing(eng, "Learn", &reading);
+                    eng.learn(&reading, &surface);
+                }
+                ChangeRequest::LearnForce { reading, surface } => {
+                    warn_if_dict_missing(eng, "LearnForce", &reading);
+                    eng.learn_force(&reading, &surface);
+                }
+                _ => unreachable!(),
+            }
+            ChangeOutcome::Unit {
+                edit: edit_state(eng),
+            }
         }
-        ChangeRequest::Commit { text } => {
-            eng.commit(&text);
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::CommitAsHiragana => {
-            eng.commit_as_hiragana();
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::ResetPreedit => {
-            eng.reset_preedit();
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::ForcePreedit { text } => {
-            eng.force_preedit(text);
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::ResetAll => {
-            eng.reset_all();
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::Learn { reading, surface } => {
-            warn_if_dict_missing(eng, "Learn", &reading);
-            eng.learn(&reading, &surface);
-            ChangeOutcome::Unit
-        }
-        ChangeRequest::LearnForce { reading, surface } => {
-            warn_if_dict_missing(eng, "LearnForce", &reading);
-            eng.learn_force(&reading, &surface);
-            ChangeOutcome::Unit
-        }
-    }
-}
-
-/// 旧 variant の変更要求を `ChangeRequest` へ写す。変更要求でなければ `None`。
-fn legacy_change(req: &Request) -> Option<ChangeRequest> {
-    use Request::*;
-    Some(match req {
-        InputChar {
-            c,
-            kind,
-            bg_start_n_cands,
-        } => ChangeRequest::InputChar {
-            c: *c,
-            kind: *kind,
-            bg_start_n_cands: *bg_start_n_cands,
-        },
-        PushChar(c) => ChangeRequest::PushChar(*c),
-        PushRaw(c) => ChangeRequest::PushRaw(*c),
-        PushFullwidthAlpha(c) => ChangeRequest::PushFullwidthAlpha(*c),
-        Backspace => ChangeRequest::Backspace,
-        FlushPendingN => ChangeRequest::FlushPendingN,
-        BgStart { n_cands } => ChangeRequest::BgStart { n_cands: *n_cands },
-        BgTakeCandidates { key } => ChangeRequest::BgTakeCandidates { key: key.clone() },
-        BgReclaim => ChangeRequest::BgReclaim,
-        Commit { text } => ChangeRequest::Commit { text: text.clone() },
-        CommitAsHiragana => ChangeRequest::CommitAsHiragana,
-        ResetPreedit => ChangeRequest::ResetPreedit,
-        ForcePreedit { text } => ChangeRequest::ForcePreedit { text: text.clone() },
-        ResetAll => ChangeRequest::ResetAll,
-        Learn { reading, surface } => ChangeRequest::Learn {
-            reading: reading.clone(),
-            surface: surface.clone(),
-        },
-        LearnForce { reading, surface } => ChangeRequest::LearnForce {
-            reading: reading.clone(),
-            surface: surface.clone(),
-        },
-        _ => return None,
     })
 }
+trait BgReader {
+    fn slot(&self) -> Result<BgSlot, String>;
+    fn reclaim(&mut self);
+}
+impl BgReader for DynEngine {
+    fn slot(&self) -> Result<BgSlot, String> {
+        self.bg_slot().map_err(|e| e.to_string())
+    }
+    fn reclaim(&mut self) {
+        self.bg_reclaim();
+    }
+}
+/// `start_bg` がエンジンに求める操作。テストで poison の経路を通すために切り出している。
+trait BgStarter: BgReader {
+    fn reclaim_blocking(&mut self) -> Result<(), String>;
+    fn no_reading(&self) -> bool;
+    fn kanji_ready(&self) -> bool;
+    fn start(&mut self, n: usize) -> bool;
+}
+impl BgStarter for DynEngine {
+    fn reclaim_blocking(&mut self) -> Result<(), String> {
+        self.bg_reclaim_blocking().map_err(|e| e.to_string())
+    }
+    fn no_reading(&self) -> bool {
+        self.hiragana_text().is_empty()
+    }
+    fn kanji_ready(&self) -> bool {
+        self.is_kanji_ready()
+    }
+    fn start(&mut self, n: usize) -> bool {
+        self.bg_start(n)
+    }
+}
+// 拒否・エラーの応答をそのまま Err で返す（Box に包まない）。
+#[allow(clippy::result_large_err)]
+fn checked_read_slot(
+    generation: Option<EngineGen>,
+    owner: Option<Owner>,
+    expect: Expect,
+    bg_owner: Option<Owner>,
+    bg: &mut impl BgReader,
+) -> Result<BgSlot, Response> {
+    if generation != Some(expect.engine_gen) {
+        return Err(Response::Rejected(Reason::GenMismatch));
+    }
+    if owner != Some(expect.owner) {
+        return Err(Response::Rejected(Reason::OwnerMismatch));
+    }
+    let slot = bg.slot().map_err(Response::Error)?;
+    if bg_owner.is_none() && matches!(slot, BgSlot::Done { .. }) {
+        bg.reclaim();
+        return bg.slot().map_err(Response::Error);
+    }
+    Ok(slot)
+}
 
-/// 旧 variant の応答の形へ戻す。
-fn legacy_response(outcome: ChangeOutcome) -> Response {
-    match outcome {
-        ChangeOutcome::Unit => Response::Unit,
-        ChangeOutcome::Bool(b) => Response::Bool(b),
-        ChangeOutcome::Candidates(v) => Response::Strings(v),
-        ChangeOutcome::InputChar {
-            preedit,
-            hiragana,
-            bg_status,
-        } => Response::InputCharResult {
-            preedit,
-            hiragana,
-            bg_status,
-        },
+fn dispatch_read(
+    engine: &SharedEngine,
+    session: &Session,
+    expect: Expect,
+    request: ReadRequest,
+) -> Response {
+    if let Err(resp) = session_tsf(session, &expect.owner) {
+        return resp;
+    }
+    let mut g = lock_engine(engine);
+    if g.engine_gen != Some(expect.engine_gen) {
+        return Response::Rejected(Reason::GenMismatch);
+    }
+    if g.owner != Some(expect.owner) {
+        return Response::Rejected(Reason::OwnerMismatch);
+    }
+    let generation = g.engine_gen;
+    let current_owner = g.owner;
+    let bg_owner = g.bg_owner;
+    let Some(eng) = g.engine.as_mut() else {
+        return Response::Rejected(Reason::GenMismatch);
+    };
+    inject_ready(eng);
+    let slot = match checked_read_slot(generation, current_owner, expect, bg_owner, eng) {
+        Ok(slot) => slot,
+        Err(response) => return response,
+    };
+    use ReadRequest::*;
+    match request {
+        PreeditDisplay => Response::String(eng.preedit_display()),
+        PreeditIsEmpty => Response::Bool(eng.preedit_is_empty()),
+        HiraganaText => Response::String(eng.hiragana_text()),
+        RomajiLogStr => Response::String(eng.romaji_log_str()),
+        HiraganaFromRomajiLog => Response::String(eng.hiragana_from_romaji_log()),
+        CommittedText => Response::String(eng.committed_text()),
+        BgStatus => Response::Bg(bg_view(bg_owner, expect.owner, slot)),
+        BgPeekTopCandidate { key } => {
+            if bg_owner != Some(expect.owner) {
+                return Response::OptionalString(None);
+            }
+            match eng.bg_peek_checked(&key) {
+                Ok(candidate) => Response::OptionalString(candidate),
+                Err(error) => Response::Error(error.to_string()),
+            }
+        }
+        BgWaitMs { timeout_ms } => {
+            if bg_view(bg_owner, expect.owner, slot) == BgView::Running {
+                eng.bg_wait_ms(timeout_ms);
+            }
+            match eng.bg_slot() {
+                Ok(slot) => Response::Bg(bg_view(bg_owner, expect.owner, slot)),
+                Err(e) => Response::Error(e.to_string()),
+            }
+        }
+        ConvertSync => Response::Strings(eng.convert_sync()),
     }
 }
 
@@ -1335,11 +1498,6 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
 
     inject_ready(eng);
 
-    // 旧 variant の変更要求。照合も記録もしない（`Change` へ移行するまでの経路）。
-    if let Some(change) = legacy_change(&req) {
-        return legacy_response(apply_change(eng, None, change));
-    }
-
     match req {
         Hello { .. }
         | Create { .. }
@@ -1349,43 +1507,39 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         | EngineHealth
         | ShutdownIfConfigDiffers { .. }
         | Change { .. }
-        | Restore { .. } => Response::Unit, // handled upstream
+        | Restore { .. }
+        | Read { .. } => Response::Unit, // handled upstream
 
-        // legacy_change で処理済み
-        PushChar(_)
-        | PushRaw(_)
-        | PushFullwidthAlpha(_)
-        | Backspace
-        | FlushPendingN
-        | BgStart { .. }
-        | BgTakeCandidates { .. }
-        | BgReclaim
-        | Commit { .. }
-        | CommitAsHiragana
-        | ResetPreedit
-        | ForcePreedit { .. }
-        | ResetAll
-        | Learn { .. }
-        | LearnForce { .. }
-        | InputChar { .. } => Response::Error("unreachable: legacy change".into()),
+        _ReservedPushChar(_)
+        | _ReservedPushRaw(_)
+        | _ReservedPushFullwidthAlpha(_)
+        | _ReservedBackspace
+        | _ReservedFlushPendingN
+        | _ReservedBgStart { .. }
+        | _ReservedBgTakeCandidates { .. }
+        | _ReservedBgReclaim
+        | _ReservedCommit { .. }
+        | _ReservedCommitAsHiragana
+        | _ReservedResetPreedit
+        | _ReservedForcePreedit { .. }
+        | _ReservedResetAll
+        | _ReservedLearn { .. }
+        | _ReservedLearnForce { .. }
+        | _ReservedInputChar { .. }
+        | _ReservedPreeditDisplay
+        | _ReservedPreeditIsEmpty
+        | _ReservedHiraganaText
+        | _ReservedRomajiLogStr
+        | _ReservedHiraganaFromRomajiLog
+        | _ReservedCommittedText
+        | _ReservedBgStatus
+        | _ReservedBgPeekTopCandidate { .. }
+        | _ReservedBgWaitMs { .. }
+        | _ReservedConvertSync => Response::Error("unsupported".into()),
 
-        PreeditDisplay => Response::String(eng.preedit_display()),
-        PreeditIsEmpty => Response::Bool(eng.preedit_is_empty()),
-        HiraganaText => Response::String(eng.hiragana_text()),
-        RomajiLogStr => Response::String(eng.romaji_log_str()),
-        HiraganaFromRomajiLog => Response::String(eng.hiragana_from_romaji_log()),
-        CommittedText => Response::String(eng.committed_text()),
-
-        BgStatus => Response::String(eng.bg_status().to_string()),
-        BgPeekTopCandidate { key } => match eng.bg_peek_top_candidate(&key) {
-            Some(s) => Response::String(s),
-            None => Response::String(String::new()),
-        },
         #[allow(deprecated)]
         _ReservedBgTakeSegmentedCandidates { .. } => Response::Error("removed".into()),
-        BgWaitMs { timeout_ms } => Response::Bool(eng.bg_wait_ms(timeout_ms)),
 
-        ConvertSync => Response::Strings(eng.convert_sync()),
         #[allow(deprecated)]
         _ReservedConvertSyncSegmented => Response::Error("removed".into()),
         #[allow(deprecated)]
@@ -1569,7 +1723,10 @@ mod record_tests {
         assert!(!t.hello(A, 0), "初回は記録なし");
         assert!(matches!(t.check(A, 1), SeqCheck::New));
         let resp = Response::Changed {
-            outcome: ChangeOutcome::Bool(true),
+            outcome: ChangeOutcome::Bool {
+                value: true,
+                edit: Default::default(),
+            },
         };
         t.store(A, 1, &resp);
         // 同じ番号の再送には当時の応答を返す（再適用しない）
@@ -1658,7 +1815,9 @@ mod record_tests {
 
         // 同じ番号の再送は、所有者が移った後でも当時の応答を返す
         let applied = Response::Changed {
-            outcome: ChangeOutcome::Unit,
+            outcome: ChangeOutcome::Unit {
+                edit: Default::default(),
+            },
         };
         let g = gate_change(
             Some(gen_(1)),
@@ -1669,7 +1828,7 @@ mod record_tests {
         assert!(matches!(
             g,
             Gate::Respond(Response::Changed {
-                outcome: ChangeOutcome::Unit
+                outcome: ChangeOutcome::Unit { .. }
             })
         ));
         // 答えられない番号は所有者を見ずに拒否（記録しない）
@@ -1886,5 +2045,258 @@ mod record_tests {
         );
         assert!(matches!(resp, Response::Error(_)));
         assert_eq!(shared.lock_records().records[&A].last_seq, None);
+    }
+}
+
+#[cfg(test)]
+mod bg_protocol_tests {
+    use super::*;
+    fn owner(n: u64) -> Owner {
+        Owner {
+            tsf_id: TsfId(123),
+            composition: n,
+        }
+    }
+    fn generation() -> EngineGen {
+        EngineGen {
+            host_id: HostId(4),
+            generation: 1,
+        }
+    }
+    fn expect() -> Expect {
+        Expect {
+            engine_gen: generation(),
+            owner: owner(1),
+        }
+    }
+    struct FakeBg {
+        slot: BgSlot,
+        reclaim_count: usize,
+        contended: bool,
+        poisoned: bool,
+        blocking_poisoned: bool,
+        starts: usize,
+    }
+    impl BgStarter for FakeBg {
+        fn reclaim_blocking(&mut self) -> Result<(), String> {
+            if self.blocking_poisoned {
+                return Err("poison".into());
+            }
+            self.slot = BgSlot::Empty;
+            Ok(())
+        }
+        fn no_reading(&self) -> bool {
+            false
+        }
+        fn kanji_ready(&self) -> bool {
+            true
+        }
+        fn start(&mut self, _n: usize) -> bool {
+            self.starts += 1;
+            true
+        }
+    }
+    impl BgReader for FakeBg {
+        fn slot(&self) -> Result<BgSlot, String> {
+            if self.poisoned {
+                Err("poison".into())
+            } else {
+                Ok(self.slot)
+            }
+        }
+        fn reclaim(&mut self) {
+            self.reclaim_count += 1;
+            if !self.contended {
+                self.slot = BgSlot::Empty;
+            }
+        }
+    }
+    fn done() -> FakeBg {
+        FakeBg {
+            slot: BgSlot::Done {
+                same_reading: true,
+                failed: false,
+            },
+            reclaim_count: 0,
+            contended: false,
+            poisoned: false,
+            blocking_poisoned: false,
+            starts: 0,
+        }
+    }
+    #[test]
+    fn rejected_reads_do_not_reclaim() {
+        let mut bg = done();
+        assert!(matches!(
+            checked_read_slot(None, Some(owner(1)), expect(), None, &mut bg),
+            Err(Response::Rejected(Reason::GenMismatch))
+        ));
+        assert!(matches!(
+            checked_read_slot(Some(generation()), Some(owner(2)), expect(), None, &mut bg),
+            Err(Response::Rejected(Reason::OwnerMismatch))
+        ));
+        assert_eq!(bg.reclaim_count, 0);
+        assert!(matches!(bg.slot, BgSlot::Done { .. }));
+    }
+    #[test]
+    fn reads_preserve_own_done_and_reclaim_orphan_once_without_touching_replay() {
+        let mut own = done();
+        checked_read_slot(
+            Some(generation()),
+            Some(owner(1)),
+            expect(),
+            Some(owner(1)),
+            &mut own,
+        )
+        .unwrap();
+        assert_eq!(own.reclaim_count, 0);
+        assert_eq!(bg_view(Some(owner(1)), owner(1), own.slot), BgView::Done);
+        let mut orphan = done();
+        for _ in 0..2 {
+            assert_eq!(
+                checked_read_slot(
+                    Some(generation()),
+                    Some(owner(1)),
+                    expect(),
+                    None,
+                    &mut orphan
+                )
+                .unwrap(),
+                BgSlot::Empty
+            );
+        }
+        assert_eq!(orphan.reclaim_count, 1);
+    }
+    #[test]
+    fn queued_running_and_missed_orphan_done_are_worker_busy() {
+        for slot in [
+            BgSlot::Queued { same_reading: true },
+            BgSlot::Running { same_reading: true },
+            BgSlot::Done {
+                same_reading: true,
+                failed: true,
+            },
+        ] {
+            assert_eq!(bg_view(None, owner(1), slot), BgView::WorkerBusy);
+            assert_eq!(
+                classify_start(None, owner(1), slot, false, false),
+                BgStartOutcome::WorkerBusy
+            );
+        }
+        let mut bg = done();
+        bg.contended = true;
+        let slot =
+            checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg).unwrap();
+        assert_eq!(bg_view(None, owner(1), slot), BgView::WorkerBusy);
+    }
+    #[test]
+    fn start_classifies_same_other_empty_and_own_done() {
+        for slot in [
+            BgSlot::Queued { same_reading: true },
+            BgSlot::Running { same_reading: true },
+        ] {
+            assert_eq!(
+                classify_start(Some(owner(1)), owner(1), slot, false, false),
+                BgStartOutcome::AlreadyRunning
+            );
+        }
+        for slot in [
+            BgSlot::Queued {
+                same_reading: false,
+            },
+            BgSlot::Running {
+                same_reading: false,
+            },
+        ] {
+            assert_eq!(
+                classify_start(Some(owner(1)), owner(1), slot, false, false),
+                BgStartOutcome::RunningOther
+            );
+        }
+        assert_eq!(
+            classify_start(Some(owner(1)), owner(1), done().slot, false, false),
+            BgStartOutcome::Started
+        );
+        assert_eq!(
+            classify_start(None, owner(1), BgSlot::Empty, false, false),
+            BgStartOutcome::NotReady
+        );
+        assert_eq!(
+            classify_start(None, owner(1), BgSlot::Empty, true, true),
+            BgStartOutcome::NoReading
+        );
+    }
+    #[test]
+    fn poison_is_error_not_idle_or_rejection() {
+        let mut bg = done();
+        bg.poisoned = true;
+        assert!(matches!(
+            checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg),
+            Err(Response::Error(_))
+        ));
+    }
+    #[test]
+    fn bg_start_poison_is_error_and_does_not_start() {
+        // 状態を読む段階の poison
+        let mut bg = done();
+        bg.poisoned = true;
+        let mut bg_owner = Some(owner(1));
+        assert!(start_bg(&mut bg, &mut bg_owner, owner(1), 5).is_err());
+        assert_eq!(bg.starts, 0);
+        // 自分の Done を blocking で回収する段階の poison
+        let mut bg = done();
+        bg.blocking_poisoned = true;
+        let mut bg_owner = Some(owner(1));
+        assert!(start_bg(&mut bg, &mut bg_owner, owner(1), 5).is_err());
+        assert_eq!(bg.starts, 0);
+        assert!(matches!(bg.slot, BgSlot::Done { .. }));
+        // poison が無ければ、自分の Done を回収して開始する
+        let mut bg = done();
+        let mut bg_owner = Some(owner(1));
+        assert_eq!(
+            start_bg(&mut bg, &mut bg_owner, owner(1), 5),
+            Ok(BgStartOutcome::Started)
+        );
+        assert_eq!(bg.starts, 1);
+    }
+    #[test]
+    fn bg_take_replay_uses_retained_outcome_without_taking_twice() {
+        for candidates in [vec!["candidate".to_string()], vec![]] {
+            let records = Mutex::new(RecordTable::default());
+            records.lock().unwrap().hello(owner(1).tsf_id, 0);
+            let mut bg = done();
+            let mut takes = 0;
+            for _ in 0..2 {
+                let response = apply_recorded_change(
+                    &records,
+                    owner(1).tsf_id,
+                    1,
+                    Some(generation()),
+                    Some(owner(1)),
+                    &expect(),
+                    || {
+                        takes += 1;
+                        bg.slot = BgSlot::Empty;
+                        Response::Changed {
+                            outcome: ChangeOutcome::BgTake {
+                                outcome: BgTakeOutcome::Taken(candidates.clone()),
+                                edit: EditState::default(),
+                            },
+                        }
+                    },
+                );
+                assert!(
+                    matches!(response, Response::Changed { outcome: ChangeOutcome::BgTake { outcome: BgTakeOutcome::Taken(ref c), .. } } if *c == candidates)
+                );
+                assert_eq!(bg.slot, BgSlot::Empty);
+            }
+            assert_eq!(takes, 1);
+            // 読み取りは、保持している Change の応答を置き換えない。
+            checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg).unwrap();
+            assert!(matches!(
+                records.lock().unwrap().check(owner(1).tsf_id, 1),
+                SeqCheck::Replay(_)
+            ));
+        }
     }
 }
