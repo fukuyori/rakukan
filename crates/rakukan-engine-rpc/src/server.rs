@@ -1003,39 +1003,28 @@ fn classify_start(
         BgSlot::Empty => BgStartOutcome::NotReady,
     }
 }
-fn reclaim_unowned(eng: &mut DynEngine, bg_owner: Option<Owner>) -> Result<(), String> {
-    if bg_owner.is_none()
-        && matches!(
-            eng.bg_slot().map_err(|e| e.to_string())?,
-            BgSlot::Done { .. }
-        )
-    {
-        eng.bg_reclaim();
+fn reclaim_unowned(eng: &mut impl BgReader, bg_owner: Option<Owner>) -> Result<(), String> {
+    if bg_owner.is_none() && matches!(eng.slot()?, BgSlot::Done { .. }) {
+        eng.reclaim();
     }
     Ok(())
 }
 fn start_bg(
-    eng: &mut DynEngine,
+    eng: &mut impl BgStarter,
     bg_owner: &mut Option<Owner>,
     owner: Owner,
     n: u32,
 ) -> Result<BgStartOutcome, String> {
     reclaim_unowned(eng, *bg_owner)?;
-    let slot = eng.bg_slot().map_err(|e| e.to_string())?;
-    let outcome = classify_start(
-        *bg_owner,
-        owner,
-        slot,
-        eng.hiragana_text().is_empty(),
-        eng.is_kanji_ready(),
-    );
+    let slot = eng.slot()?;
+    let outcome = classify_start(*bg_owner, owner, slot, eng.no_reading(), eng.kanji_ready());
     if outcome != BgStartOutcome::Started {
         return Ok(outcome);
     }
     if matches!(slot, BgSlot::Done { .. }) {
-        eng.bg_reclaim_blocking().map_err(|e| e.to_string())?;
+        eng.reclaim_blocking()?;
     }
-    if eng.bg_start(n as usize) {
+    if eng.start(n as usize) {
         *bg_owner = Some(owner);
         Ok(BgStartOutcome::Started)
     } else {
@@ -1157,6 +1146,27 @@ impl BgReader for DynEngine {
     }
     fn reclaim(&mut self) {
         self.bg_reclaim();
+    }
+}
+/// `start_bg` がエンジンに求める操作。テストで poison の経路を通すために切り出している。
+trait BgStarter: BgReader {
+    fn reclaim_blocking(&mut self) -> Result<(), String>;
+    fn no_reading(&self) -> bool;
+    fn kanji_ready(&self) -> bool;
+    fn start(&mut self, n: usize) -> bool;
+}
+impl BgStarter for DynEngine {
+    fn reclaim_blocking(&mut self) -> Result<(), String> {
+        self.bg_reclaim_blocking().map_err(|e| e.to_string())
+    }
+    fn no_reading(&self) -> bool {
+        self.hiragana_text().is_empty()
+    }
+    fn kanji_ready(&self) -> bool {
+        self.is_kanji_ready()
+    }
+    fn start(&mut self, n: usize) -> bool {
+        self.bg_start(n)
     }
 }
 // 拒否・エラーの応答をそのまま Err で返す（Box に包まない）。
@@ -2064,6 +2074,27 @@ mod bg_protocol_tests {
         reclaim_count: usize,
         contended: bool,
         poisoned: bool,
+        blocking_poisoned: bool,
+        starts: usize,
+    }
+    impl BgStarter for FakeBg {
+        fn reclaim_blocking(&mut self) -> Result<(), String> {
+            if self.blocking_poisoned {
+                return Err("poison".into());
+            }
+            self.slot = BgSlot::Empty;
+            Ok(())
+        }
+        fn no_reading(&self) -> bool {
+            false
+        }
+        fn kanji_ready(&self) -> bool {
+            true
+        }
+        fn start(&mut self, _n: usize) -> bool {
+            self.starts += 1;
+            true
+        }
     }
     impl BgReader for FakeBg {
         fn slot(&self) -> Result<BgSlot, String> {
@@ -2089,6 +2120,8 @@ mod bg_protocol_tests {
             reclaim_count: 0,
             contended: false,
             poisoned: false,
+            blocking_poisoned: false,
+            starts: 0,
         }
     }
     #[test]
@@ -2201,6 +2234,30 @@ mod bg_protocol_tests {
             checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg),
             Err(Response::Error(_))
         ));
+    }
+    #[test]
+    fn bg_start_poison_is_error_and_does_not_start() {
+        // 状態を読む段階の poison
+        let mut bg = done();
+        bg.poisoned = true;
+        let mut bg_owner = Some(owner(1));
+        assert!(start_bg(&mut bg, &mut bg_owner, owner(1), 5).is_err());
+        assert_eq!(bg.starts, 0);
+        // 自分の Done を blocking で回収する段階の poison
+        let mut bg = done();
+        bg.blocking_poisoned = true;
+        let mut bg_owner = Some(owner(1));
+        assert!(start_bg(&mut bg, &mut bg_owner, owner(1), 5).is_err());
+        assert_eq!(bg.starts, 0);
+        assert!(matches!(bg.slot, BgSlot::Done { .. }));
+        // poison が無ければ、自分の Done を回収して開始する
+        let mut bg = done();
+        let mut bg_owner = Some(owner(1));
+        assert_eq!(
+            start_bg(&mut bg, &mut bg_owner, owner(1), 5),
+            Ok(BgStartOutcome::Started)
+        );
+        assert_eq!(bg.starts, 1);
     }
     #[test]
     fn bg_take_replay_uses_retained_outcome_without_taking_twice() {
