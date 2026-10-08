@@ -234,7 +234,7 @@
 | [#59](https://github.com/fukuyori/rakukan/pull/59) | #57（詰まりの監視をホストへ移す） | `fb656e1` / `cce2f17` | **マージ済み**（rebase）。確認事項 4 件への対応 `e94fe83` を差分・周辺コード・テスト実走で確認し、[返信](https://github.com/fukuyori/rakukan/pull/59#issuecomment-5755508624)。前回指摘 4（`last_status` の経路）は `observe("done")` が `prior_attempts` を 0 に戻すため成立せず、撤回した。実機の詰まり検出は未確認 |
 
 - 両 PR が `conv_cache.rs` と `docs/DESIGN.md` に触れていたが、`git merge-tree` と GitHub の判定とも競合なし。**マージ後の main `cce2f17` の CI は Build & Test / Format Check とも成功**
-- **`5bad674`（#58 だけを入れた時点）の main の CI は失敗していた**。`kanji::backend::tests::test_default_model_beam_conversion` が HuggingFace キャッシュのロック取得に失敗（`Download(LockAcquisition(...jinen-v1-small.gguf/blobs/....lock))`）。270 件成功・1 件失敗。**原因は未特定**。同じテストは `cce2f17` で成功している（[run](https://github.com/fukuyori/rakukan/actions/runs/35562159411)）。※推測: 同じモデルを読む 2 テスト（`backend.rs:875` / `:892`）が並列にダウンロードして競合した。main の失敗履歴は 9/1 以降 10 件あり、同じ原因かは未確認
+- **`5bad674`（#58 だけを入れた時点）の main の CI は失敗していた**。`kanji::backend::tests::test_default_model_beam_conversion` が HuggingFace キャッシュのロック取得に失敗（`Download(LockAcquisition(...jinen-v1-small.gguf/blobs/....lock))`）。270 件成功・1 件失敗。**原因は未特定**。同じテストは `cce2f17` で成功している（[run](https://github.com/fukuyori/rakukan/actions/runs/35562159411)）。※推測: 同じモデルを読む 2 テスト（`backend.rs:875` / `:892`）が並列にダウンロードして競合した。main の失敗履歴は 9/1 以降 10 件あり、同じ原因かは未確認（→ 2026-10-08 に原因を特定し `e348bc9` で修正。5 章を参照）
 - 過去の PR（#48 / #52）に合わせて rebase マージにした（線形履歴。コミット単位を維持し、SHA は変更）
 
 詳細と根拠は [September_Late_Plan.md](September_Late_Plan.md) 9 節の 2026-09-18〜2026-09-21 の各小節。
@@ -366,7 +366,7 @@ Issue への投稿・レビューは、いずれも本文をレモンが確認�
 
 ## 5. 既知の問題（Issue 化していないもの）
 
-- **CI の `test_default_model_beam_conversion` が HuggingFace キャッシュのロック取得で落ちることがある**（`5bad674` の main で 1 回。次の run では通った）。※推測: 同じモデルを読む 2 テストの並列ダウンロード。main の失敗履歴 10 件が同じ原因かは未確認
+- **（2026-10-08 修正済み）CI の実モデルのテストが HuggingFace キャッシュのロック取得で落ちていた**。10/8 の `c02c345` / `69461f7` の CI で `test_default_model_conversion` / `test_default_model_beam_conversion` が交互に 1 件ずつ失敗（`Download(LockAcquisition(...jinen-v1-small.gguf/blobs/....lock))`）。**原因**: 2 つのテストが同じ `jinen-v1-small-q5` を並列にダウンロードし、hf-hub 0.4.3 の `lock_file`（`src/api/sync.rs`。ロック取得を 1 秒おきに 5 回再試行して諦める）を超えて待った側が失敗する。CI は `~/.cache/huggingface` をキャッシュしないので毎回ダウンロードが走る（手元はキャッシュ済みで起きない）。失敗は 2 回ともテスト開始の約 5.5 秒後で、待ちの上限と一致した。**修正**: `e348bc9` で、テスト専用の `SMALL_MODEL_LOCK` を持ってモデルを読み込むようにした（`crates/rakukan-engine/src/kanji/backend.rs`、本番コードは変更なし）。同じコミットの CI は成功（2 つのテストは約 3.5 秒・5 秒で順に成功）。CI での確認は 1 回分。9/1 以降の過去の失敗 10 件が同じ原因かは確かめていない
 - 入力先ごとのモード記憶で、手動変更の即時保存（`doc_mode_remember_current`）は `trace!`、`DOC_MODE_STORE.try_lock()` の失敗は無言で抜けるため、この 2 経路はログから確認できない
 - ブラウザで「入力項目が変わると英数に変わる」という症状は、調査を途中で打ち切った（`default=` のイベント 42 件を見た段階で、原因は未特定）
 
