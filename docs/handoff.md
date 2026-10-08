@@ -1,13 +1,68 @@
 # Rakukan 引き継ぎ資料
 
-更新日: 2026-09-30（PR #67 (a) のマージ、(b) の受入条件、#65 と旧ホスト停止の分担を反映。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
+更新日: 2026-10-08（PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序を反映。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
 
 この文書は「次のセッションが何を知っていれば作業を続けられるか」だけを書く。
 設計の全体は [DESIGN.md](DESIGN.md)、現在の作業計画と判断の経緯は [September_Late_Plan.md](September_Late_Plan.md)、9 月前半の作業記録は [September_Revised_Plan.md](September_Revised_Plan.md) にある。
 
-## 0. 2026-09-30 #56 (a) マージ後の引き継ぎ・次回の開始点
+## 0. 2026-10-08 PR #68 (b) レビュー中の引き継ぎ・次回の開始点
 
 この節を現在の開始点とする。下に残る「現在」「次回」の記述は各日時点の履歴であり、この節と食い違う場合は再実行しない。
+
+### 現在の状態
+
+- ローカルと GitHub の `main` は `b77d7df`（`docs: update handoff after issue 56 part a`）で一致（2026-10-08 に `git ls-remote` で確認）。最新リリースは 0.11.9（同日に `gh release list` で確認）。新しいリリース、タグ、パッケージは作成していない
+- 開いている PR は [#68](https://github.com/fukuyori/rakukan/pull/68)（nick、#56 (b)、`feat/rpc-change-migration-56b`）だけ（10/8 に `gh pr list` で確認）。2026-10-03 に提出（`gh` の `createdAt`）、コミットは `1dceaac`（10/3）/ `f2fc9bb`（10/4）で、`b77d7df` を基点とする。GitHub の判定は `MERGEABLE`（10/8 確認）。engine ABI 10 → 11、RPC protocol は v6 のまま（v6 は未リリースなので版は上げない。開発ビルドを入れ替えるときは engine / host / tsf をそろえる）
+- **nick の実装の更新待ち**。10/8 の 2 件目のコメントで、確認事項（下記）に該当しなければ、残りの合意事項で実装を進めるよう伝えた
+- 10/1〜10/3 の PR #67 上でのやり取り（(b) の応答型、受入条件 A〜E、`WorkerBusy` の待機表示）は、この handoff では未整理。A〜E と本文の対応は PR #68 の本文にある
+
+### PR #68 のレビュー経過
+
+| 日付 | 投稿 | 内容 |
+|---|---|---|
+| 10/4 | nick | PR #67 の 10/3 の依頼（C の補足 3 点）を本文に追記。`BgStart` の poison のテストを追加（`f2fc9bb`） |
+| 10/5 | こちら | [レビュー](https://github.com/fukuyori/rakukan/pull/68#issuecomment-5987071786)（同日に poison の節を 2 か所訂正）。A〜E と C の補足は実装どおりと確認。修正 1 点（poison で変更系・`Restore` が通らない）、確認 2 点（打鍵ごとの RPC 追加、変更の失敗の握りつぶし）、細かい点、テストの検証力 |
+| 10/6 | nick | 方針: poison でも入力を続ける形に直す（`BgView::Unreadable` 追加など）、入口の読み取りを 1 回にまとめる、`push_raw` / `force_preedit` だけ `Result` 化、細かい点・テストはすべて対応 |
+| 10/6 | こちら | 了承のうえ、poison 関連で 4 点を追加要求（入口の読み取り、`Restore.then`、`bg_start_n_cands` 付き `InputChar`、`Unreadable` の影響） |
+| 10/7 | nick | 4 点への回答 |
+| 10/8 | こちら | [返信](https://github.com/fukuyori/rakukan/pull/68#issuecomment-6050262438): BG と無関係な読み取りも poison で失敗する件、`Unreadable` の範囲（A 推奨）、WorkerBusy の時計、`Restored.then` の形 |
+| 10/8 | こちら | [訂正](https://github.com/fukuyori/rakukan/pull/68#issuecomment-6050441046): **配布ビルドは `panic = "abort"` なので poison は起きない**。10/6 の 1〜4 と 10/8 の返信の要求を取り下げ、poison は `f2fc9bb` のまま `Response::Error` でよいとした。代わりに理由をコメント 1 か所と PR 本文に書くよう依頼 |
+
+**10/8 時点で残っている依頼**:
+
+10/6 に了承済みの、poison と無関係なもの:
+
+- 入口の所有権の確認と診断ログ用の `bg_status` を 1 回の読み取りにまとめる
+- `push_raw` / `force_preedit` を `Result` 化して失敗時はキー処理を中断。`commit` / `reset_*` / `learn*` / `bg_reclaim` は警告ログのまま
+- 最初の変更が失敗したときは `save` しない／`input_log` を既知の制限として本文に書く／残っているコメント 4 か所を直す／composition が無いときの `bg_reclaim()` は送らない
+- テスト: E のテストで `apply_change` の `NotYours` / `Taken` を通す／「3 variant 共通」の書き分け／`codec.rs` で末尾の `Request::Read` / `Response::Bg` / `Response::OptionalString` の順序を固定
+
+10/8 の訂正コメントで、取り下げの代わりに足したもの:
+
+- poison を `Error` のままにする理由のコメントと PR 本文への記載。既存の poison のテストは残す
+- nick への確認: 標準タスク以外のビルド（`-Profile debug`、直接の `cargo build`）の常用や、`CARGO_PROFILE_RELEASE_PANIC`・`RUSTFLAGS` などによる release の `panic` の上書きがあれば、poison の扱いを決め直す
+
+**poison 前提の訂正の根拠**: `Cargo.toml:64` の `[profile.release]` が `panic = "abort"`、`cargo make build-engine` / `build-tsf` は `-Profile release`（`Makefile.toml:32`, `37`）。巻き戻しが無いので mutex は poison せず、engine DLL の panic は engine-host ごと終了する。標準の設定では、poison が起きうるのは `cargo test` や `-Profile debug` のビルドだけ。`conv_cache` の `catch_unwind`（`conv-worker PANIC`）も release では効かない（PR の範囲外として未扱い）。手元の環境に release の `panic` を上書きする設定は無かった。配布物が実際にどの設定でビルドされたかはリポジトリからは確かめられない。**poison の自己再起動を別 Issue にする案は、この訂正により起票しない**
+
+**レビューの進め方**: 10/8 の 2 件の下書きは、Codex CLI（`codex exec -s read-only`、PR 先端の worktree をスクラッチパッドに作って読ませる）にもレビューさせ、指摘をコードで確かめてから反映した。Codex は投稿・変更をしない指示で使う
+
+### こちらが担当する残作業とリリース条件
+
+- **#65 の再接続組込み**: 未着手（ブランチ・stash も無い）。ホスト入れ替わり時に反映待ちを残す処理（`ShutdownSkipped` → `HostReplaced`、`crates/rakukan-tsf/src/engine/state.rs:504-527`）は main にある。残りは、自動の再接続（`call_with_retry` → `try_connect_once`）で保存済みの `self.config_json`（`crates/rakukan-engine-rpc/src/client.rs:1281`）ではなく、公開済みの設定の組から作り直した JSON で `Create` すること（設計は `docs/September_Late_Plan.md` の 2079〜2083 行）。**PR #68 が `client.rs` を大きく変えるので、組込みは #68 のマージ後**に行う。それまでにできるのは、設定の組を返す生成関数とロック順序のテストまで（`client.rs` には触れない）。統合後に #55 の計数・再試行テストを再検証する。`engine_reload` 後の新規 `connect_or_spawn` に渡す設定は未確認
+- **旧ホスト停止の先行実装**と**リリースしない条件**は、下の 9/30 の節のとおり（変更なし）
+
+### 次の順序
+
+1. nick の (b) の更新を待つ。届いたら上の「残っている依頼」と照合してレビューする
+2. 待つ間に、#65 の再接続組込みの準備（`client.rs` に触れない範囲）を進める
+3. (b) をマージする
+4. #65 の再接続組込みを `client.rs` に入れ、#55 のテストを再検証する
+5. 現行 `rakukan_installer.iss` へ旧ホスト停止を先行実装する
+6. 統合試験・実機試験（9/30 の節の「リリースしない条件」の項目）を行い、合格後に v6 のリリース判断をする
+
+## 0. 2026-09-30 #56 (a) マージ後の引き継ぎ（履歴）
+
+2026-10-08 時点の開始点は上の節。この節は 9/30 時点の記録。
 
 ### 現在の状態
 
