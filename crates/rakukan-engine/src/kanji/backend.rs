@@ -866,13 +866,22 @@ mod tests {
         assert_eq!(out, vec!["良".to_string()]);
     }
 
+    /// `jinen-v1-small-q5` を読む実モデルのテストを直列にする。
+    /// 並列だと、キャッシュの無い環境（CI）で 2 つが同時にダウンロードを始め、
+    /// hf-hub のロック待ち（1 秒 × 5 回）を超えた側が `LockAcquisition` で失敗する。
+    static SMALL_MODEL_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn load_small_model() -> Backend {
+        let _guard = SMALL_MODEL_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        Backend::from_variant_id("jinen-v1-small-q5").expect("Failed to load default model")
+    }
+
     #[test]
     fn test_default_model_beam_conversion() {
         // beam 経路（generate_beam_search_impl）の実モデル検証。
         // 1 コンテキスト × batched decode 書き換え（F5）の回帰確認と、
         // EOS 未到達 beam 棄却（F3）後も通常の読みで候補が返ることの確認。
-        let backend =
-            Backend::from_variant_id("jinen-v1-small-q5").expect("Failed to load default model");
+        let backend = load_small_model();
         let converter = KanaKanjiConverter::new(backend).expect("Failed to create converter");
 
         let result = converter.convert("へんかんけっかをかくにんする", "", 9);
@@ -886,10 +895,8 @@ mod tests {
     }
 
     #[test]
-
     fn test_default_model_conversion() {
-        let backend =
-            Backend::from_variant_id("jinen-v1-small-q5").expect("Failed to load default model");
+        let backend = load_small_model();
         let converter = KanaKanjiConverter::new(backend).expect("Failed to create converter");
 
         let result = converter.convert("かんじ", "", 1);
