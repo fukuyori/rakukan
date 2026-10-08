@@ -795,7 +795,11 @@ static CONFIG_MANAGER: LazyLock<Mutex<ConfigManager>> =
     LazyLock::new(|| Mutex::new(ConfigManager::new()));
 
 fn lock_manager() -> std::sync::MutexGuard<'static, ConfigManager> {
-    match CONFIG_MANAGER.lock() {
+    lock_or_recover(&CONFIG_MANAGER)
+}
+
+fn lock_or_recover(manager: &Mutex<ConfigManager>) -> std::sync::MutexGuard<'_, ConfigManager> {
+    match manager.lock() {
         Ok(g) => g,
         Err(p) => {
             tracing::warn!("config manager poisoned, recovering");
@@ -834,12 +838,21 @@ pub fn config_save_default() -> Result<()> {
 /// 設定状態のロックで一括公開。**読めなければ直前の組を保つ**（Issue #61）。
 /// この処理からエンジンへの RPC は呼ばない。
 pub fn reload_config(reason: &'static str) -> LoadOutcome {
-    let _load = match LOAD_LOCK.lock() {
+    reload_in(&LOAD_LOCK, &CONFIG_MANAGER, reason)
+}
+
+/// `reload_config` の本体。ロックを引数で受け、テストでは個別のロックを渡す。
+fn reload_in(
+    load: &Mutex<()>,
+    manager: &Mutex<ConfigManager>,
+    reason: &'static str,
+) -> LoadOutcome {
+    let _load = match load.lock() {
         Ok(g) => g,
         Err(p) => p.into_inner(),
     };
     let (path, prev, revision) = {
-        let mgr = lock_manager();
+        let mgr = lock_or_recover(manager);
         (mgr.path.clone(), mgr.current.clone(), mgr.next_revision)
     };
     match read_and_build(&path, &prev, revision) {
@@ -847,11 +860,11 @@ pub fn reload_config(reason: &'static str) -> LoadOutcome {
             // 変更なしの読込は定期確認で 30 秒ごとに起きるので trace に留める
             // （debug 運用でプロセス数に比例してログが増えるのを避ける）
             tracing::trace!("config unchanged ({reason})");
-            lock_manager().note_success();
+            lock_or_recover(manager).note_success();
             LoadOutcome::Unchanged
         }
         Ok(Some(snapshot)) => {
-            let mut mgr = lock_manager();
+            let mut mgr = lock_or_recover(manager);
             // 読込専用ロックの下なので、prev から進んだ組は無い
             mgr.note_success();
             mgr.publish(snapshot);
@@ -859,10 +872,40 @@ pub fn reload_config(reason: &'static str) -> LoadOutcome {
         }
         Err(e) => {
             // 同じ失敗の間は WARN を繰り返さない（定期確認・候補表示・通知で再読込は続く）
-            lock_manager().note_failure(&e, reason);
+            lock_or_recover(manager).note_failure(&e, reason);
             LoadOutcome::Failed
         }
     }
+}
+
+/// ホストへの再接続で `Create` に使う設定の組（Issue #65 の再接続組込み）。
+///
+/// 共通の読込処理を 1 回通してから、公開済みの組を返す。読めなければ直前の組のまま
+/// （Issue #61）。読み直しの後、組を読むまでの間に別の経路が公開した（より新しい）組が
+/// あれば、それを返す。呼び出し側は、1 回の接続試行ではこの組を固定して使う。
+///
+/// 読み直しで新しい組が公開されると、`publish` により反映待ち（`pending_apply`）が
+/// 立ちうる。この関数は反映待ちを解除しない。再接続の `Create` の成功を反映待ちの
+/// 解除と結び付けるかは、組込みのときに決める。
+///
+/// ロックの順序は「エンジン／接続のロック → 読込専用ロック → 設定状態のロック」。
+/// ここでは読込専用ロックと設定状態のロックだけを取り、`RAKUKAN_ENGINE` や RPC の
+/// 接続のロックは取らない。RPC も呼ばない。そのため、再接続の途中（それらのロックを
+/// 保持した状態）から呼んでよい。
+///
+/// 呼び出し元への組込み（`rakukan-engine-rpc` の再接続）は、PR #68（#56 (b)）の
+/// マージ後に行う。それまでは呼び出し元が無い。
+#[allow(dead_code)]
+pub fn snapshot_for_reconnect() -> Arc<ConfigSnapshot> {
+    snapshot_for_reconnect_in(&LOAD_LOCK, &CONFIG_MANAGER)
+}
+
+fn snapshot_for_reconnect_in(
+    load: &Mutex<()>,
+    manager: &Mutex<ConfigManager>,
+) -> Arc<ConfigSnapshot> {
+    let _ = reload_in(load, manager, "reconnect");
+    lock_or_recover(manager).current.clone()
 }
 
 /// config.toml を読み直す。**読めなければ直前の設定を保つ**（Issue #61）。
@@ -1794,6 +1837,97 @@ mod config_snapshot_tests {
             snap.engine_json
         );
         assert!(snap.engine_json.contains(r#""num_candidates":7"#));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod reconnect_snapshot_tests {
+    //! 再接続用の設定の組（Issue #65 の再接続組込みの準備）
+    use super::config_load_failure_tests::{BROKEN, FIXED, VALID, temp_dir, write_config};
+    use super::{ConfigManager, snapshot_for_reconnect_in};
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    fn locks_with(body: &str) -> (Mutex<()>, Mutex<ConfigManager>, std::path::PathBuf) {
+        let dir = temp_dir("reconnect");
+        let path = dir.join("config.toml");
+        write_config(&path, body);
+        (
+            Mutex::new(()),
+            Mutex::new(ConfigManager::from_path(path)),
+            dir,
+        )
+    }
+
+    #[test]
+    fn rereads_the_file_before_returning() {
+        let (load, manager, dir) = locks_with(VALID);
+        write_config(&dir.join("config.toml"), FIXED);
+        let snap = snapshot_for_reconnect_in(&load, &manager);
+        assert_eq!(snap.revision, 2, "接続の前に読み直して新しい組を返す");
+        assert!(snap.engine_json.contains(r#""num_candidates":4"#));
+        assert_eq!(
+            manager.lock().unwrap().snapshot().revision,
+            2,
+            "読み直した組は公開される"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unchanged_file_returns_the_same_snapshot() {
+        let (load, manager, dir) = locks_with(VALID);
+        let before = manager.lock().unwrap().snapshot();
+        let snap = snapshot_for_reconnect_in(&load, &manager);
+        assert!(
+            std::sync::Arc::ptr_eq(&before, &snap),
+            "本文が同じなら組を作り直さない"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn broken_or_missing_file_keeps_the_previous_snapshot() {
+        let (load, manager, dir) = locks_with(VALID);
+        let path = dir.join("config.toml");
+        write_config(&path, FIXED);
+        let good = snapshot_for_reconnect_in(&load, &manager);
+        // 壊れた本文
+        write_config(&path, BROKEN);
+        let snap = snapshot_for_reconnect_in(&load, &manager);
+        assert_eq!(snap.revision, good.revision, "壊れた本文で組を入れ替えない");
+        assert_eq!(
+            snap.source, good.source,
+            "新しいハッシュと以前の設定を組み合わせない"
+        );
+        assert_eq!(snap.engine_json, good.engine_json);
+        // 欠落
+        std::fs::remove_file(&path).expect("remove");
+        let snap = snapshot_for_reconnect_in(&load, &manager);
+        assert_eq!(snap.revision, good.revision, "欠落でも直前の組を保つ");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 再接続の途中（`RAKUKAN_ENGINE` を保持した状態）から呼んでも待たないこと。
+    /// 確かめられるのは「この関数が `RAKUKAN_ENGINE` を取りに行かない」ことまでで、
+    /// RPC の接続のロックとの順序は、組込み後に別に確かめる。
+    /// グローバルの `RAKUKAN_ENGINE` を最大 5 秒保持するので、同じロックを取るテストを
+    /// 足すときは並列実行での待ち合いに注意する（現在そのようなテストは無い）。
+    #[test]
+    fn does_not_wait_for_the_engine_lock() {
+        let (load, manager, dir) = locks_with(VALID);
+        let engine = crate::engine::state::RAKUKAN_ENGINE
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let snap = snapshot_for_reconnect_in(&load, &manager);
+            let _ = tx.send(snap.revision);
+        });
+        let got = rx.recv_timeout(Duration::from_secs(5));
+        drop(engine);
+        assert_eq!(got.ok(), Some(1), "RAKUKAN_ENGINE を保持していても返る");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

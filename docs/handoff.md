@@ -48,13 +48,13 @@
 
 ### こちらが担当する残作業とリリース条件
 
-- **#65 の再接続組込み**: 未着手（ブランチ・stash も無い）。ホスト入れ替わり時に反映待ちを残す処理（`ShutdownSkipped` → `HostReplaced`、`crates/rakukan-tsf/src/engine/state.rs:504-527`）は main にある。残りは、自動の再接続（`call_with_retry` → `try_connect_once`）で保存済みの `self.config_json`（`crates/rakukan-engine-rpc/src/client.rs:1281`）ではなく、公開済みの設定の組から作り直した JSON で `Create` すること（設計は `docs/September_Late_Plan.md` の 2079〜2083 行）。**PR #68 が `client.rs` を大きく変えるので、組込みは #68 のマージ後**に行う。それまでにできるのは、設定の組を返す生成関数とロック順序のテストまで（`client.rs` には触れない）。統合後に #55 の計数・再試行テストを再検証する。`engine_reload` 後の新規 `connect_or_spawn` に渡す設定は未確認
+- **#65 の再接続組込み**: 未着手（ブランチ・stash も無い）。ホスト入れ替わり時に反映待ちを残す処理（`ShutdownSkipped` → `HostReplaced`、`crates/rakukan-tsf/src/engine/state.rs:504-527`）は main にある。残りは、自動の再接続（`call_with_retry` → `try_connect_once`）で保存済みの `self.config_json`（`crates/rakukan-engine-rpc/src/client.rs:1281`）ではなく、公開済みの設定の組から作り直した JSON で `Create` すること（設計は `docs/September_Late_Plan.md` の 2079〜2083 行）。**PR #68 が `client.rs` を大きく変えるので、組込みは #68 のマージ後**に行う。**準備は 10/8 に main へ入れた**: `config::snapshot_for_reconnect()`（`crates/rakukan-tsf/src/engine/config.rs`。共通の読込処理を 1 回通してから公開済みの組を返す。読めなければ直前の組）と、テスト 4 件（`reconnect_snapshot_tests`）。テストのため `reload_config` の本体を、ロックを引数で受ける `reload_in` に移した（挙動は同じ）。呼び出し元はまだ無く、`#[allow(dead_code)]` を付けている。Codex CLI のレビュー済み。**組込みのときに決める・確かめること**: (1) `allow(dead_code)` を外す、(2) 読み直しで新しい組が公開されると反映待ちが立ちうる。再接続の `Create` 成功を反映待ちの解除と結び付けるか（計画書 2074 行の「`Create` 成功を別に記録」も未実装）、(3) `RAKUKAN_ENGINE` と `RpcEngine` の内部 Mutex を持ったまま同期でファイルを読むので、キー処理が待たされうる（数 KB の読込だが上限はコードから言えない）、(4) RPC の接続のロックとの順序のテスト（今のテストは `RAKUKAN_ENGINE` を取りに行かないことまで）。統合後に #55 の計数・再試行テストを再検証する。新しいハンドルを作る `create_engine` は、公開済みの組の JSON を読み直さずに渡している（`state.rs:814-830`）。生成関数へ切り替えるかは組込みと合わせて決める
 - **旧ホスト停止の先行実装**と**リリースしない条件**は、下の 9/30 の節のとおり（変更なし）
 
 ### 次の順序
 
 1. nick の (b) の更新を待つ。届いたら上の「残っている依頼」と照合してレビューする
-2. 待つ間に、#65 の再接続組込みの準備（`client.rs` に触れない範囲）を進める
+2. ~~待つ間に、#65 の再接続組込みの準備（`client.rs` に触れない範囲）を進める~~ 10/8 に完了（上記）
 3. (b) をマージする
 4. #65 の再接続組込みを `client.rs` に入れ、#55 のテストを再検証する
 5. 現行 `rakukan_installer.iss` へ旧ホスト停止を先行実装する
