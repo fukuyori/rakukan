@@ -2104,10 +2104,14 @@ mod bg_protocol_tests {
         blocking_poisoned: bool,
         starts: usize,
         candidates: Vec<String>,
+        /// `take_checked` が呼ばれた回数（空振りを含む）
+        take_calls: usize,
+        /// 取り出しに成功した回数
         takes: usize,
     }
     impl BgTaker for FakeBg {
         fn take_checked(&mut self, _key: &str) -> Result<Option<Vec<String>>, String> {
+            self.take_calls += 1;
             if !matches!(self.slot, BgSlot::Done { .. }) {
                 return Ok(None);
             }
@@ -2162,6 +2166,7 @@ mod bg_protocol_tests {
             blocking_poisoned: false,
             starts: 0,
             candidates: vec![],
+            take_calls: 0,
             takes: 0,
         }
     }
@@ -2332,6 +2337,8 @@ mod bg_protocol_tests {
                 assert_eq!(bg.slot, BgSlot::Empty);
             }
             assert_eq!(bg.takes, 1);
+            // 再送では適用用のクロージャを呼ばない＝空振りの取り出しも起きない。
+            assert_eq!(bg.take_calls, 1);
             // 読み取りは、保持している Change の応答を置き換えない。
             checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg).unwrap();
             assert!(matches!(
@@ -2350,6 +2357,7 @@ mod bg_protocol_tests {
                 Ok(BgTakeOutcome::NotYours)
             );
         }
+        assert_eq!(bg.take_calls, 0, "所有者でなければ取り出しを呼ばない");
         assert_eq!(bg.takes, 0);
         assert!(matches!(bg.slot, BgSlot::Done { .. }));
         // 自分の変換が完了前: NotReady
@@ -2358,6 +2366,7 @@ mod bg_protocol_tests {
             take_bg(&mut bg, Some(owner(1)), owner(1), "key"),
             Ok(BgTakeOutcome::NotReady)
         );
+        assert_eq!(bg.take_calls, 1);
         assert_eq!(bg.takes, 0);
     }
 }
