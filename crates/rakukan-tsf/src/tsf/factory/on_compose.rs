@@ -305,6 +305,15 @@ pub(super) fn commit_then_start_composition(
             next_preedit,
             comp.is_some()
         );
+        // 途中で `?` により抜けた手順を、内容付きでログに残す（Issue #69）。
+        // セッションの結果（phrSession）だけでは、どの手順で失敗したか分からない。
+        let warn_step = |e: &windows::core::Error| {
+            tracing::warn!(
+                "commit_then_start: {e} commit={:?} next={:?}",
+                commit_text,
+                next_preedit
+            );
+        };
 
         // ── Step1: 既存 composition を確定テキストで終了 ──
         // 文節分割後に候補表示している場合、composition のテキストは
@@ -319,7 +328,15 @@ pub(super) fn commit_then_start_composition(
         if let Some(comp) = comp {
             // composition テキストを commit_text だけに縮める
             if let Ok(range) = comp.GetRange() {
-                let _ = range.SetText(ec, 0, &commit_w);
+                if let Err(e) = range.SetText(ec, 0, &commit_w) {
+                    // 縮められないまま EndComposition へ進むと、確定部分に残りまで
+                    // 含まれ、新しい composition の残りと二重に見えるおそれがある（Issue #69）。
+                    tracing::warn!(
+                        "commit_then_start: SetText to the committed part failed commit={:?} next={:?}: {e}",
+                        commit_text,
+                        next_preedit
+                    );
+                }
                 // 確定テキストの末尾位置を保存
                 if let Ok(end_range) = range.Clone() {
                     let _ = end_range.Collapse(ec, TF_ANCHOR_END);
@@ -329,13 +346,17 @@ pub(super) fn commit_then_start_composition(
                 tracing::warn!("commit_then_start: comp.GetRange() failed");
             }
             comp.EndComposition(ec)
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))?;
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))
+                .inspect_err(warn_step)?;
         } else if !commit_text.is_empty() {
-            let insert_point =
-                get_insert_range_or_end(&ctx, ec, "commit_then_start direct commit")?;
-            insert_point.SetText(ec, 0, &commit_w).map_err(|e| {
-                windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}"))
-            })?;
+            let insert_point = get_insert_range_or_end(&ctx, ec, "commit_then_start direct commit")
+                .inspect_err(warn_step)?;
+            insert_point
+                .SetText(ec, 0, &commit_w)
+                .map_err(|e| {
+                    windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}"))
+                })
+                .inspect_err(warn_step)?;
             if let Ok(end_range) = insert_point.Clone() {
                 let _ = end_range.Collapse(ec, TF_ANCHOR_END);
                 insert_after_commit = Some(end_range);
@@ -354,17 +375,23 @@ pub(super) fn commit_then_start_composition(
             p
         } else {
             tracing::warn!("commit_then_start: insert_after_commit=None, falling back to GetEnd");
-            get_document_end_range(&ctx, ec, "commit_then_start new composition")?
+            get_document_end_range(&ctx, ec, "commit_then_start new composition")
+                .inspect_err(warn_step)?
         };
-        let cc: ITfContextComposition = ctx.cast().map_err(|e| {
-            windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}"))
-        })?;
+        let cc: ITfContextComposition = ctx
+            .cast()
+            .map_err(|e| {
+                windows::core::Error::new(E_FAIL, format!("cast ITfContextComposition: {e}"))
+            })
+            .inspect_err(warn_step)?;
         let new_comp = cc
             .StartComposition(ec, &insert_point, &sink)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("StartComposition: {e}")))?;
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("StartComposition: {e}")))
+            .inspect_err(warn_step)?;
         let new_range = new_comp
             .GetRange()
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))?;
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))
+            .inspect_err(warn_step)?;
         let dm_ptr = ctx
             .GetDocumentMgr()
             .ok()
@@ -375,7 +402,8 @@ pub(super) fn commit_then_start_composition(
         let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
         new_range
             .SetText(ec, 0, &preedit_w)
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText new: {e}")))?;
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText new: {e}")))
+            .inspect_err(warn_step)?;
 
         // 新 composition にもアンダーライン属性をセット
         set_display_attr_prop(&ctx, ec, &new_range, display_attr::atom_input());
@@ -413,10 +441,18 @@ pub(super) fn commit_then_start_composition(
 
         Ok(())
     });
+    // end_composition と同じく、edit session の結果（phrSession）まで確認して
+    // 失敗をログに残す（Issue #69）。戻り値と後続の処理は変えない。
     unsafe {
-        let _ = ctx_req
-            .RequestEditSession(tid, &session, TF_ES_READWRITE)
-            .map_err(|e| anyhow::anyhow!("RequestEditSession commit_then_start: {e}"));
+        match ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) {
+            Ok(hr) if hr.is_err() => {
+                tracing::warn!("commit_then_start: edit session failed hr={hr:?}");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("commit_then_start: RequestEditSession failed: {e}");
+            }
+        }
     }
     Ok(())
 }
