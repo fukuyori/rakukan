@@ -191,7 +191,8 @@ pub enum RestoreReply {
     Rejected(Reason),
 }
 
-/// `Change` / `Restore` を送れなかった、または応答を得られなかった。
+/// 読み取り（`Read`）が値を返せなかった理由。通信の失敗・照合での拒否・ホスト側の失敗・
+/// 手元に composition が無い場合を区別する。
 #[derive(Debug)]
 pub enum ReadError {
     Transport(anyhow::Error),

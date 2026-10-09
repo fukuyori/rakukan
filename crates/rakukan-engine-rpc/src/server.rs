@@ -1031,6 +1031,31 @@ fn start_bg(
         Ok(BgStartOutcome::NotReady)
     }
 }
+/// `BgTakeCandidates` の本体。所有者でなければ、変換器には触れずに `NotYours` を返す。
+fn take_bg(
+    eng: &mut impl BgTaker,
+    bg_owner: Option<Owner>,
+    owner: Owner,
+    key: &str,
+) -> Result<BgTakeOutcome, String> {
+    if bg_owner != Some(owner) {
+        return Ok(BgTakeOutcome::NotYours);
+    }
+    Ok(match eng.take_checked(key)? {
+        Some(c) => BgTakeOutcome::Taken(c),
+        None => BgTakeOutcome::NotReady,
+    })
+}
+/// 変更を 1 つ適用する。
+///
+/// 冒頭の回収と `bg_slot()` は、変換キャッシュの mutex が poison していると失敗し、
+/// BG と無関係な変更も `Response::Error` になる（`dispatch_restore` と、読み取りの
+/// `checked_read_slot` も同じ）。標準のタスク（`cargo make build-engine` /
+/// `build-tsf`）でビルドした配布物は `panic = "abort"` なので、poison は起きない。
+/// 起きうるのは、巻き戻しのあるビルド（`cargo test`、`-Profile debug`）だけで、
+/// その場合は `Error` を返し、入力の継続は保証しない。poison のとき
+/// `conv_cache::status()` は `"idle"` を返すので、`apply_health_action` は
+/// ホストの終了を要求しない。
 fn apply_change(
     eng: &mut DynEngine,
     bg_owner: &mut Option<Owner>,
@@ -1084,14 +1109,7 @@ fn apply_change(
             }
         }
         ChangeRequest::BgTakeCandidates { key } => {
-            let outcome = if *bg_owner != Some(owner) {
-                BgTakeOutcome::NotYours
-            } else {
-                match eng.bg_take_checked(&key).map_err(|e| e.to_string())? {
-                    Some(c) => BgTakeOutcome::Taken(c),
-                    None => BgTakeOutcome::NotReady,
-                }
-            };
+            let outcome = take_bg(eng, *bg_owner, owner, &key)?;
             ChangeOutcome::BgTake {
                 outcome,
                 edit: edit_state(eng),
@@ -1167,6 +1185,15 @@ impl BgStarter for DynEngine {
     }
     fn start(&mut self, n: usize) -> bool {
         self.bg_start(n)
+    }
+}
+/// `take_bg` がエンジンに求める操作。テストで `apply_change` と同じ分岐を通すために切り出している。
+trait BgTaker {
+    fn take_checked(&mut self, key: &str) -> Result<Option<Vec<String>>, String>;
+}
+impl BgTaker for DynEngine {
+    fn take_checked(&mut self, key: &str) -> Result<Option<Vec<String>>, String> {
+        self.bg_take_checked(key).map_err(|e| e.to_string())
     }
 }
 // 拒否・エラーの応答をそのまま Err で返す（Box に包まない）。
@@ -2076,6 +2103,18 @@ mod bg_protocol_tests {
         poisoned: bool,
         blocking_poisoned: bool,
         starts: usize,
+        candidates: Vec<String>,
+        takes: usize,
+    }
+    impl BgTaker for FakeBg {
+        fn take_checked(&mut self, _key: &str) -> Result<Option<Vec<String>>, String> {
+            if !matches!(self.slot, BgSlot::Done { .. }) {
+                return Ok(None);
+            }
+            self.takes += 1;
+            self.slot = BgSlot::Empty;
+            Ok(Some(self.candidates.clone()))
+        }
     }
     impl BgStarter for FakeBg {
         fn reclaim_blocking(&mut self) -> Result<(), String> {
@@ -2122,6 +2161,8 @@ mod bg_protocol_tests {
             poisoned: false,
             blocking_poisoned: false,
             starts: 0,
+            candidates: vec![],
+            takes: 0,
         }
     }
     #[test]
@@ -2265,7 +2306,7 @@ mod bg_protocol_tests {
             let records = Mutex::new(RecordTable::default());
             records.lock().unwrap().hello(owner(1).tsf_id, 0);
             let mut bg = done();
-            let mut takes = 0;
+            bg.candidates = candidates.clone();
             for _ in 0..2 {
                 let response = apply_recorded_change(
                     &records,
@@ -2274,15 +2315,15 @@ mod bg_protocol_tests {
                     Some(generation()),
                     Some(owner(1)),
                     &expect(),
-                    || {
-                        takes += 1;
-                        bg.slot = BgSlot::Empty;
-                        Response::Changed {
+                    // `apply_change` の `BgTakeCandidates` と同じ `take_bg` を通す。
+                    || match take_bg(&mut bg, Some(owner(1)), owner(1), "key") {
+                        Ok(outcome) => Response::Changed {
                             outcome: ChangeOutcome::BgTake {
-                                outcome: BgTakeOutcome::Taken(candidates.clone()),
+                                outcome,
                                 edit: EditState::default(),
                             },
-                        }
+                        },
+                        Err(error) => Response::Error(error),
                     },
                 );
                 assert!(
@@ -2290,7 +2331,7 @@ mod bg_protocol_tests {
                 );
                 assert_eq!(bg.slot, BgSlot::Empty);
             }
-            assert_eq!(takes, 1);
+            assert_eq!(bg.takes, 1);
             // 読み取りは、保持している Change の応答を置き換えない。
             checked_read_slot(Some(generation()), Some(owner(1)), expect(), None, &mut bg).unwrap();
             assert!(matches!(
@@ -2298,5 +2339,25 @@ mod bg_protocol_tests {
                 SeqCheck::Replay(_)
             ));
         }
+    }
+    #[test]
+    fn bg_take_touches_the_converter_only_for_its_owner() {
+        // 所有者なし・別の所有者: 変換器に触れず NotYours
+        let mut bg = done();
+        for bg_owner in [None, Some(owner(2))] {
+            assert_eq!(
+                take_bg(&mut bg, bg_owner, owner(1), "key"),
+                Ok(BgTakeOutcome::NotYours)
+            );
+        }
+        assert_eq!(bg.takes, 0);
+        assert!(matches!(bg.slot, BgSlot::Done { .. }));
+        // 自分の変換が完了前: NotReady
+        bg.slot = BgSlot::Running { same_reading: true };
+        assert_eq!(
+            take_bg(&mut bg, Some(owner(1)), owner(1), "key"),
+            Ok(BgTakeOutcome::NotReady)
+        );
+        assert_eq!(bg.takes, 0);
     }
 }

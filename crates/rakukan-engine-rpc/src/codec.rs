@@ -204,6 +204,53 @@ mod tests {
         buf[4]
     }
 
+    fn response_discriminant(resp: &Response) -> u8 {
+        let mut buf = Vec::new();
+        write_frame(&mut buf, resp).unwrap();
+        buf[4]
+    }
+
+    /// (b) で末尾に足した variant の番号を固定する。途中へ variant を足したり、並びを
+    /// 変えたりすると、ここが落ちる。
+    #[test]
+    fn appended_variants_keep_their_slots() {
+        let expect = Expect {
+            engine_gen: EngineGen {
+                host_id: HostId(1),
+                generation: 1,
+            },
+            owner: Owner {
+                tsf_id: TsfId(1),
+                composition: 1,
+            },
+        };
+        let change = discriminant(&Request::Change {
+            seq: 1,
+            expect,
+            request: ChangeRequest::Backspace,
+            config_version: None,
+        });
+        let read = discriminant(&Request::Read {
+            expect,
+            request: crate::protocol::ReadRequest::BgStatus,
+        });
+        // Change, Restore, Read の並び
+        assert_eq!(read, change + 2);
+        assert_eq!(read, 56);
+
+        let changed = response_discriminant(&Response::Changed {
+            outcome: ChangeOutcome::Unit {
+                edit: Default::default(),
+            },
+        });
+        let bg = response_discriminant(&Response::Bg(crate::protocol::BgView::Idle));
+        let optional = response_discriminant(&Response::OptionalString(None));
+        // Changed, Bg, OptionalString の並び
+        assert_eq!(bg, changed + 1);
+        assert_eq!(optional, changed + 2);
+        assert_eq!(optional, 18);
+    }
+
     /// 廃止した `MergeCandidates` は `_ReservedMergeCandidates` としてスロットを残す。
     /// 削除してしまうと後続 variant（`MergeCandidatesForReading` 等）の discriminant が
     /// ずれて、古い host / 新しい TSF の組み合わせで別の要求として解釈される。

@@ -580,7 +580,7 @@ pub enum Response {
     /// 対象ホストは既に入れ替わっていたため、終了要求を適用しなかった。
     ShutdownSkipped,
     /// 復元後の世代と、`Restore.then` を適用した結果（`then` が無ければ `None`）。
-    /// 編集状態の詳細は (b) で応答へ追加する。
+    /// 適用後の編集状態は、`ChangeOutcome` の `edit` に載る。
     Restored {
         engine_gen: EngineGen,
         then: Option<ChangeOutcome>,

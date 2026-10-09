@@ -50,7 +50,13 @@ impl super::TextServiceFactory_Impl {
             Some(e) => e,
             None => return Ok(false),
         };
-        if focused_context && engine.recover_on_input()? {
+        // 入口の読み取りは 1 回。所有権の確認で得た BG 状態を、下の診断ログでも使う。
+        let entry = if focused_context {
+            Some(engine.recover_on_input()?)
+        } else {
+            None
+        };
+        if entry.as_ref().is_some_and(|entry| entry.restored) {
             candidate_window::stop_waiting_timer();
             candidate_window::stop_live_timer();
             candidate_window::clear_model_wait();
@@ -70,7 +76,10 @@ impl super::TextServiceFactory_Impl {
 
         // ── 診断: 全アクションの入口でセッション状態とBG状態をログ ──
         {
-            let bg = engine.bg_status();
+            let bg = match entry.and_then(|entry| entry.bg) {
+                Some(bg) => Ok(bg),
+                None => engine.bg_status(),
+            };
             let state_name = if let Ok(s) = session_get() {
                 match &*s {
                     SessionState::Idle => "Idle".to_string(),
