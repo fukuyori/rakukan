@@ -828,18 +828,26 @@ fn create_engine() -> anyhow::Result<DynEngine> {
 /// 読み直した組（`config::snapshot_for_reconnect`）から取る。保存済みの文字列で
 /// `Create` すると、ホストが入れ替わったときに古い設定へ戻るため。
 ///
-/// `RpcEngine` の内部のロックと `RAKUKAN_ENGINE` を保持したまま呼ばれる。
-/// `snapshot_for_reconnect` が取るのは読込専用ロックと設定状態のロックだけで、
-/// 逆向き（設定のロックを持ったままエンジンのロックや RPC）を取る箇所は無い
-/// （`config::begin_apply` / `finish_apply` は設定のロックを放してから RPC を呼ぶ）。
+/// 自動の再接続では `RpcEngine` の内部のロックと、呼び出し元によっては
+/// `RAKUKAN_ENGINE` を保持したまま呼ばれる（初回の生成では `RpcEngine` はまだ無い）。
+/// `snapshot_for_reconnect` が取るのは、読込専用ロックと設定状態のロックのほかは、
+/// 公開時のログのレベル（`set_host_log_level`）やログの出力の Mutex だけで、どれも
+/// エンジンのロックや RPC へは戻らない。逆向き（設定のロックを持ったままエンジンの
+/// ロックや RPC）を取る箇所も無い（`config::begin_apply` / `finish_apply` は設定の
+/// ロックを放してから RPC を呼ぶ）。いずれもコードを読んでの確認。
 ///
 /// `Create` の成功では反映待ち（`pending_apply`）を解除しない。反映待ちは
-/// 次の契機の `ShutdownIfConfigDiffers` の応答で解除する。
+/// 次の契機の `ShutdownIfConfigDiffers` / `Shutdown` の応答で解除する。成功した組は
+/// `label` として RPC クライアントの接続ログ（`Hello/Create ok config=(…)`）に残る。
 fn engine_config_source() -> rakukan_engine_rpc::ConfigSource {
     std::sync::Arc::new(|| {
         let snapshot = super::config::snapshot_for_reconnect();
-        tracing::debug!("engine config for Create: {}", snapshot.apply_id());
-        Some(snapshot.engine_json.clone())
+        let label = snapshot.apply_id().to_string();
+        tracing::debug!("engine config for Create: {label}");
+        rakukan_engine_rpc::CreateConfig {
+            json: Some(snapshot.engine_json.clone()),
+            label,
+        }
     })
 }
 

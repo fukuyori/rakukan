@@ -377,13 +377,22 @@ impl HostTransport for PipeTransport {
     }
 }
 
-/// 接続試行のたびに `Create` で送る EngineConfig JSON を返す関数（Issue #65）。
+/// `ConfigSource` が返す、1 回の接続試行で `Create` に使う設定。
+pub struct CreateConfig {
+    /// `Create` で送る EngineConfig JSON（`None` なら既定値）。
+    pub json: Option<String>,
+    /// ログに残す、この設定の組の識別子（TSF では `rev=… sha256=…`）。
+    /// `Create` が成功したときの記録に使う。
+    pub label: String,
+}
+
+/// 接続試行のたびに `Create` で送る設定を返す関数（Issue #65）。
 ///
 /// TSF は、`config.toml` を読み直した設定の組から JSON を作って返す。接続試行 1 回に
-/// つき 1 回だけ呼び、その試行ではその値を固定して使う。`RpcEngine` の内部のロック
-/// （と、呼び出し元が持つエンジンのロック）を保持したまま呼ぶので、この関数の中で
-/// それらのロックを取ったり、RPC を呼んだりしてはいけない。
-pub type ConfigSource = Arc<dyn Fn() -> Option<String> + Send + Sync>;
+/// つき 1 回だけ呼び、その試行ではその値を固定して使う。自動の再接続では `RpcEngine` の
+/// 内部のロック（と、呼び出し元が持つエンジンのロック）を保持したまま呼ぶので、この
+/// 関数の中でそれらのロックを取ったり、RPC を呼んだりしてはいけない。
+pub type ConfigSource = Arc<dyn Fn() -> CreateConfig + Send + Sync>;
 
 struct Connection<T: HostTransport> {
     transport: T,
@@ -396,6 +405,8 @@ struct Connection<T: HostTransport> {
     config_json: Option<String>,
     /// あれば、接続試行のたびにここから `Create` の JSON を取る（Issue #65）。
     config_source: Option<ConfigSource>,
+    /// 直近に `Create` が成功した設定の組の識別子（`config_source` があるときだけ）。
+    created_with: Option<String>,
     /// spawn の抑止。本番はプロセスで 1 つ（`HOST_SPAWN_GUARD`）、テストは個別。
     guard: Arc<Mutex<HostSpawnGuard>>,
     /// 要求番号と未解決要求。本番はプロセスで 1 つ（`REQUEST_LEDGER`）、テストは個別。
@@ -494,6 +505,8 @@ struct AttemptContext {
     spawn: Option<std::result::Result<(), String>>,
     /// spawn してから接続できるまでの時間（接続できた場合）。
     spawn_to_connect_ms: Option<u64>,
+    /// この試行の `Create` に使う設定の組の識別子（`config_source` があるときだけ）。
+    config_label: Option<String>,
 }
 
 /// 接続試行が失敗した段階。
@@ -558,7 +571,8 @@ impl RpcEngine {
     /// TSF の `engine_reload()` から呼ばれる。
     ///
     /// 接続 (PipeStream) は使い回したまま、`Request::Reload` を送るだけ。
-    /// 成功後は以降の再接続でも新しい config_json が使われるよう内部に保存する。
+    /// 成功後は以降の再接続でも新しい config_json が使われるよう内部に保存する
+    /// （`connect_or_spawn_with_source` で作った場合、再接続の `Create` は設定の関数から取る）。
     pub fn reload(&self, config_json: Option<String>) -> Result<()> {
         let mut guard = self
             .inner
@@ -581,7 +595,8 @@ impl RpcEngine {
     /// - 宛先は直近の `Hello` で得たホスト。送る前に確定し、再接続した後の再送でも
     ///   差し替えない（新しいホストは `ShutdownSkipped` を返すので、再起動は 1 回で止まる）
     /// - 受理・無応答なら内部 `PipeStream` を破棄（サーバが exit したので以降は無効）
-    /// - `config_json` は保持する（次回 `connect_or_spawn` 時に再送する）
+    /// - `config_json` は保持する（次回の接続の `Create` で再送する。設定の関数
+    ///   （`connect_or_spawn_with_source`）がある場合は使わず、関数から取る）
     /// - サーバが応答を返す前に exit してしまい read が失敗するケースも想定し、
     ///   通信失敗は `Err` にせず `Ok(ShutdownOutcome::NoResponse)` で返す（exit が目的なので）。
     ///   呼び出し側は、設定の反映待ちを解除する根拠に `Acknowledged` だけを使う（Issue #65）
@@ -604,7 +619,8 @@ impl RpcEngine {
     ///   フォールバックすること。
     ///
     /// 宛先は `shutdown()` と同じく送る前に確定し、再送でも差し替えない。
-    /// `config_json` は結果に依らず内部に保存する（次回 re-spawn 時の Create に使う）。
+    /// `config_json` は結果に依らず内部に保存する（次回 re-spawn 時の Create に使う。
+    /// 設定の関数がある場合は使わず、関数から取る）。
     pub fn shutdown_if_config_differs(
         &self,
         config_json: Option<String>,
@@ -858,6 +874,7 @@ impl<T: HostTransport> Connection<T> {
             stream: None,
             config_json,
             config_source: None,
+            created_with: None,
             guard,
             ledger,
             host_id: None,
@@ -1137,13 +1154,17 @@ impl<T: HostTransport> Connection<T> {
     fn try_connect_once(&mut self) -> Result<()> {
         // この試行の `Create` に使う JSON。パイプを開く前に 1 回だけ取り、試行の間は
         // 固定する（Issue #65）。
-        let config_json = match &self.config_source {
-            Some(source) => source(),
-            None => self.config_json.clone(),
+        let (config_json, config_label) = match &self.config_source {
+            Some(source) => {
+                let config = source();
+                (config.json, Some(config.label))
+            }
+            None => (self.config_json.clone(), None),
         };
         let now_ms = self.transport.now_ms();
         let mut ctx = AttemptContext {
             blocked: self.with_guard(|g| g.is_blocked(now_ms)),
+            config_label,
             ..AttemptContext::default()
         };
         let result = self.run_attempt(&mut ctx, config_json);
@@ -1330,8 +1351,11 @@ impl<T: HostTransport> Connection<T> {
                     g.reset();
                     state
                 });
+                // 送った組で `Create` が成功したことを、反映待ちとは別に記録する（Issue #65）
+                self.created_with = ctx.config_label.clone();
                 tracing::info!(
-                    "host connected: Hello/Create ok spawn={spawn_label} spawn_to_connect_ms={:?} while_blocked={}",
+                    "host connected: Hello/Create ok config=({}) spawn={spawn_label} spawn_to_connect_ms={:?} while_blocked={}",
+                    self.created_with.as_deref().unwrap_or("stored"),
                     ctx.spawn_to_connect_ms,
                     ctx.blocked
                 );
@@ -1672,9 +1696,45 @@ mod tests {
         let counter = calls.clone();
         let source: ConfigSource = Arc::new(move || {
             let n = counter.fetch_add(1, Ordering::SeqCst) + 1;
-            Some(format!("cfg{n}"))
+            CreateConfig {
+                json: Some(format!("cfg{n}")),
+                label: format!("rev={n}"),
+            }
         });
         (source, calls)
+    }
+
+    #[test]
+    fn records_the_label_of_the_config_that_created_successfully() {
+        // 1 回目は Hello で切れ（rev=1 は成功の記録に残らない）、再試行の rev=2 で成功
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Ok(stream_with(&[])),
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        let (source, _) = counting_source();
+        conn.config_source = Some(source);
+        conn.ensure_connected().expect("retry connects");
+        assert_eq!(conn.created_with.as_deref(), Some("rev=2"));
+    }
+
+    #[test]
+    fn a_source_returning_no_json_does_not_fall_back_to_the_stored_one() {
+        let stream = stream_with(&[hello_ok(), Response::Unit]);
+        let outgoing = stream.outgoing.clone();
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream)]),
+            ..Default::default()
+        });
+        conn.config_json = Some("stored".into());
+        conn.config_source = Some(Arc::new(|| CreateConfig {
+            json: None,
+            label: "defaults".into(),
+        }));
+        conn.try_connect_once().expect("connect");
+        assert_eq!(sent_create_json(&outgoing), None);
     }
 
     #[test]

@@ -886,12 +886,13 @@ fn reload_in(
 ///
 /// 読み直しで新しい組が公開されると、`publish` により反映待ち（`pending_apply`）が
 /// 立ちうる。この関数は反映待ちを解除せず、再接続の `Create` の成功でも解除しない
-/// （次の契機の `ShutdownIfConfigDiffers` の応答で解除する）。
+/// （次の契機の `ShutdownIfConfigDiffers` / `Shutdown` の応答で解除する）。
 ///
 /// ロックの順序は「エンジン／接続のロック → 読込専用ロック → 設定状態のロック」。
-/// ここでは読込専用ロックと設定状態のロックだけを取り、`RAKUKAN_ENGINE` や RPC の
-/// 接続のロックは取らない。RPC も呼ばない。そのため、再接続の途中（それらのロックを
-/// 保持した状態）から呼んでよい。
+/// ここで取るのは、読込専用ロックと設定状態のロックのほかは、公開時のログのレベル
+/// （`publish_atomics` の `set_host_log_level`）やログの出力の Mutex だけで、
+/// `RAKUKAN_ENGINE` や RPC の接続のロックは取らない。RPC も呼ばない。そのため、
+/// 再接続の途中（それらのロックを保持した状態）から呼んでよい。
 ///
 /// 呼び出し元は `state::engine_config_source`（`RpcEngine` の接続試行ごとに呼ばれる）。
 pub fn snapshot_for_reconnect() -> Arc<ConfigSnapshot> {
