@@ -587,7 +587,7 @@ impl DynEngine {
 
     // ── BG 変換 ─────────────────────────────────────────────────────────────
 
-    /// BG 変換を起動する。true = 起動した
+    /// かなに確定していない未確定ローマ字（`Restore` の復元元に使う）。
     pub fn pending_romaji(&self) -> String {
         unsafe {
             self.take_cstr((self.vtable.pending_romaji)(self.handle))

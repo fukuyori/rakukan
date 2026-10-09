@@ -94,6 +94,14 @@ fn replayable(request: &ChangeRequest) -> bool {
             | ChangeRequest::ResetAll
     )
 }
+/// 変更の後に、手元の状態を保存するかどうか。
+///
+/// 新しい composition の最初の変更が、何も送らないまま失敗した場合（`Commit` などの
+/// 再送できない要求は所有権を取れない）は保存しない。世代の無い状態を残すと、次の復元まで
+/// 読み取りが `NoComposition` で失敗し続ける。送った後の失敗は、再送用の要求を残すために保存する。
+fn keep_after_change(fresh: bool, state: &RemoteComposition, ok: bool) -> bool {
+    ok || !fresh || state.generation.is_some() || state.pending.is_some()
+}
 pub fn note_read_error(error: &ReadError) {
     tracing::warn!("composition read failed: {error}");
     if error.ownership_lost() {
@@ -199,6 +207,11 @@ fn apply_via(
         }
     }
 }
+/// `recover_on_input` の結果。`bg` は、入口の読み取りで得た BG 状態（復元した場合は `None`）。
+pub struct InputEntry {
+    pub restored: bool,
+    pub bg: Option<BgView>,
+}
 pub struct DynEngine(RpcEngine);
 impl std::ops::Deref for DynEngine {
     type Target = RpcEngine;
@@ -239,13 +252,26 @@ impl DynEngine {
     }
 
     /// フォーカス中の有効な文脈へのキー入力からだけ呼ぶ。
-    pub fn recover_on_input(&self) -> anyhow::Result<bool> {
+    ///
+    /// 所有権の確認に使う読み取りは `BgStatus` で、その値を `InputEntry::bg` で返す。
+    /// 呼び出し側の診断ログはこの値を使い、同じ打鍵で `bg_status()` を読み直さない。
+    pub fn recover_on_input(&self) -> anyhow::Result<InputEntry> {
         let Some(mut state) = snapshot() else {
-            return Ok(false);
+            return Ok(InputEntry {
+                restored: false,
+                bg: Some(BgView::Idle),
+            });
         };
+        let mut bg = None;
         let lost = match state.expect() {
             Some(expect) => match self.0.bg_status(expect) {
-                Ok(_) => false,
+                Ok(view) => {
+                    if view != BgView::WorkerBusy {
+                        crate::tsf::candidate_window::reset_worker_busy_clock();
+                    }
+                    bg = Some(view);
+                    false
+                }
                 Err(error) if error.ownership_lost() => true,
                 Err(error) => {
                     note_read_error(&error);
@@ -255,17 +281,26 @@ impl DynEngine {
             None => true,
         };
         if !lost && self.0.unresolved().is_none() {
-            return Ok(false);
+            return Ok(InputEntry {
+                restored: false,
+                bg,
+            });
         }
         let pending = state.pending.clone().filter(replayable);
         if self.0.unresolved().is_some() && pending.is_none() {
             self.0.abandon_unresolved();
         }
         self.restore_state(&mut state, pending)?;
-        Ok(true)
+        // 復元の後の BG 状態は読んでいない。
+        Ok(InputEntry {
+            restored: true,
+            bg: None,
+        })
     }
     fn change_local(&self, request: ChangeRequest) -> anyhow::Result<ChangeOutcome> {
-        let mut state = match snapshot() {
+        let existing = snapshot();
+        let fresh = existing.is_none();
+        let mut state = match existing {
             Some(state) => state,
             None if matches!(
                 request,
@@ -286,7 +321,9 @@ impl DynEngine {
             request,
             FOREGROUND_INPUT.with(|flag| flag.get()),
         );
-        save(state);
+        if keep_after_change(fresh, &state, result.is_ok()) {
+            save(state);
+        }
         if let Err(error) = &result {
             tracing::warn!("composition change failed: {error}");
         }
@@ -440,13 +477,21 @@ impl DynEngine {
             tracing::warn!("composition mutation failed: {error}");
         }
     }
-    pub fn push_raw(&self, c: char) {
-        self.unit(ChangeRequest::PushRaw(c as u32));
+    /// 後ろに表示の読み取りが続くので、失敗を返す。呼び出し側は、そのキーの処理を中断する。
+    pub fn push_raw(&self, c: char) -> anyhow::Result<()> {
+        self.change_local(ChangeRequest::PushRaw(c as u32))
+            .map(|_| ())
     }
-    pub fn force_preedit(&self, text: String) {
-        self.unit(ChangeRequest::ForcePreedit { text });
+    /// `push_raw` と同じく、失敗を返す。
+    pub fn force_preedit(&self, text: String) -> anyhow::Result<()> {
+        self.change_local(ChangeRequest::ForcePreedit { text })
+            .map(|_| ())
     }
     pub fn bg_reclaim(&self) {
+        // 所有権を持つ composition が無ければ、回収する相手も無い。送らずに戻る。
+        if snapshot().and_then(|state| state.expect()).is_none() {
+            return;
+        }
         self.unit(ChangeRequest::BgReclaim);
     }
     pub fn commit(&self, text: &str) {
@@ -662,6 +707,30 @@ mod tests {
         ] {
             assert!(!replayable(&request));
         }
+    }
+    #[test]
+    fn first_change_that_sends_nothing_is_not_saved() {
+        // 再送できない最初の要求: 何も送らずに失敗し、状態も残さない。
+        let fake = rpc(vec![], vec![]);
+        let mut state = RemoteComposition::new();
+        let request = ChangeRequest::Commit {
+            text: "text".into(),
+        };
+        assert!(apply_via(&fake, &mut state, request, true).is_err());
+        assert!(fake.sent.borrow().is_empty());
+        assert!(!keep_after_change(true, &state, false));
+        // 送った後の失敗: 再送用の要求を残す。
+        let fake = rpc(
+            vec![],
+            vec![Err(rakukan_engine_rpc::ChangeError::Transport(
+                anyhow::anyhow!("disconnected"),
+            ))],
+        );
+        let mut state = RemoteComposition::new();
+        assert!(apply_via(&fake, &mut state, ChangeRequest::PushChar(116), true).is_err());
+        assert!(keep_after_change(true, &state, false));
+        // 既存の composition は、失敗しても保存する。
+        assert!(keep_after_change(false, &RemoteComposition::new(), false));
     }
     #[test]
     fn read_errors_distinguish_ownership_transport_host_and_no_composition() {

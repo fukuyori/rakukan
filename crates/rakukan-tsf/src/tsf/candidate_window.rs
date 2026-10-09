@@ -13,7 +13,7 @@
 //!
 //! # LLM 完了ポーリング（`WM_TIMER` ベース）
 //! Waiting 状態（⏳ 変換中）に遷移した際に `start_waiting_timer()` を呼ぶことで、
-//! 80ms ごとに `bg_status == rakukan_engine_rpc::BgView::Done` をポーリングする `WM_TIMER` を起動する。
+//! 80ms ごとに `bg_status` が `BgView::Done` になるのをポーリングする `WM_TIMER` を起動する。
 //! LLM 変換完了を検知したら候補ウィンドウを自動更新し、タイマーを停止する。
 //!
 //! TSF の `RequestEditSession` は TSF スレッドのキー入力コンテキスト外から呼べないため、
@@ -1165,7 +1165,7 @@ const WAITING_POLL_MS: u32 = 80; // 80ms ごとにポーリング
 // 呼べなければ（E_FAIL / deadlock）Phase 1B (Queue方式) へ進む。
 //
 // 起動条件: on_input が呼ばれるたびにデバウンス時刻をリセットし、タイマーを起動する。
-// 発火条件: LIVE_DEBOUNCE_MS 経過後に bg_status==rakukan_engine_rpc::BgView::Done を確認し、
+// 発火条件: LIVE_DEBOUNCE_MS 経過後に bg_status が BgView::Done であることを確認し、
 //           RequestEditSession でプレビューを composition に書き込む。
 
 const LIVE_TIMER_ID: usize = 0x1235;
@@ -1324,7 +1324,7 @@ fn bg_error_fallback_selecting(site: &str) {
 }
 
 /// WM_TIMER コールバック（TSFスレッド上で呼ばれる）。
-/// bg_status == rakukan_engine_rpc::BgView::Done になったら候補を取り出して表示する。
+/// bg_status が `BgView::Done` になったら候補を取り出して表示する。
 /// モデル読み込み完了を待って変換をやり直す（Step 13-1、Issue #39）。
 ///
 /// `on_convert` の `model_not_ready` 経路から呼ぶ。候補表（辞書候補か読み）は

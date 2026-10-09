@@ -300,7 +300,7 @@ fn restore_reading_from_selecting(
         return Ok(current);
     }
     let full = format!("{prefix}{original}{remainder}");
-    engine.force_preedit(full.clone());
+    engine.force_preedit(full.clone())?;
     Ok(full)
 }
 
@@ -390,7 +390,7 @@ impl super::TextServiceFactory_Impl {
                 // Preedit に遷移して通常変換フローへ
                 // engine の hiragana_buf を選択範囲に設定
                 engine.bg_reclaim();
-                engine.force_preedit(selected.clone());
+                engine.force_preedit(selected.clone())?;
                 sess.set_preedit(selected.clone());
                 // remainder を Selecting に渡すために保持
                 let remainder = unselected.clone();
@@ -887,7 +887,7 @@ impl super::TextServiceFactory_Impl {
             if let Some((prefix, target, suffix)) =
                 crate::engine::text_util::split_symbol_affixes(&preedit)
             {
-                engine.force_preedit(target.clone());
+                engine.force_preedit(target.clone())?;
                 let caret = caret_rect_get();
                 const AFFIX_DICT_LIMIT: usize = 40;
                 let llm_limit_a = crate::engine::state::get_num_candidates();
@@ -947,7 +947,7 @@ impl super::TextServiceFactory_Impl {
                     continue;
                 }
                 // engine のプリエディットをこのブロックの読みに差し替えて sync 変換
-                engine.force_preedit(reading.clone());
+                engine.force_preedit(reading.clone())?;
                 let candidates = engine_convert_sync_multi(
                     engine,
                     llm_limit_b,
@@ -964,7 +964,7 @@ impl super::TextServiceFactory_Impl {
             }
             // engine のプリエディットを最初の（非空）ブロックの読みに戻す
             if let Some(first_non_empty) = blocks.iter().find(|b| !b.reading.is_empty()) {
-                engine.force_preedit(first_non_empty.reading.clone());
+                engine.force_preedit(first_non_empty.reading.clone())?;
             }
             let caret = caret_rect_get();
             let full_reading = preedit.clone();
@@ -1777,7 +1777,7 @@ impl super::TextServiceFactory_Impl {
                 engine.reset_preedit();
                 // 残りを engine に設定して LiveConv 再開
                 for c in unselected.chars() {
-                    engine.push_raw(c);
+                    engine.push_raw(c)?;
                 }
                 let _ = crate::engine::state::start_live_bg_if_ready(engine, &unselected);
                 let preedit = engine.preedit_display()?;
@@ -1878,7 +1878,7 @@ impl super::TextServiceFactory_Impl {
                     engine.commit(&confirmed);
                     engine.reset_preedit();
                     for c in remainder_reading.chars() {
-                        engine.push_raw(c);
+                        engine.push_raw(c)?;
                     }
                     let _ =
                         crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
@@ -2017,7 +2017,7 @@ impl super::TextServiceFactory_Impl {
                 drop(sess);
                 candidate_window::hide();
                 engine.bg_reclaim();
-                engine.force_preedit(full_reading.clone());
+                engine.force_preedit(full_reading.clone())?;
                 drop(guard);
                 update_composition(ctx, tid, sink, full_reading)?;
                 return Ok(true);
@@ -2102,7 +2102,7 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
                 engine.bg_reclaim();
                 // engine のプリエディットを元の全体読みに復元
-                engine.force_preedit(full_reading.clone());
+                engine.force_preedit(full_reading.clone())?;
                 drop(guard);
                 update_composition(ctx, tid, sink, full_reading)?;
                 return Ok(true);

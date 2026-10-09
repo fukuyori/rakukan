@@ -70,7 +70,7 @@ impl super::TextServiceFactory_Impl {
             p.clone()
         };
         let t = convert_fn(&source);
-        engine.force_preedit(t.clone());
+        engine.force_preedit(t.clone())?;
         crate::tsf::live_session::suppress_commit_arm();
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_live_conv() {
@@ -145,7 +145,7 @@ impl super::TextServiceFactory_Impl {
                 text_util::to_half_latin(&p)
             }
         };
-        engine.force_preedit(t.clone());
+        engine.force_preedit(t.clone())?;
         crate::tsf::live_session::suppress_commit_arm();
         if let Ok(mut sess) = session_get() {
             if sess.is_selecting() || sess.is_live_conv() {
@@ -358,7 +358,7 @@ impl super::TextServiceFactory_Impl {
             engine.commit(&confirmed);
             engine.reset_preedit();
             for c in remainder_reading.chars() {
-                engine.push_raw(c);
+                engine.push_raw(c)?;
             }
             let _ = crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
             let preedit = engine.preedit_display()?;
@@ -524,7 +524,7 @@ impl super::TextServiceFactory_Impl {
 
         let mut sess = session_get()?;
         if engine.preedit_is_empty()? {
-            engine.push_raw(symbol);
+            engine.push_raw(symbol)?;
             let display = engine.preedit_display()?;
             sess.set_preedit(display.clone());
             drop(sess);
@@ -539,7 +539,7 @@ impl super::TextServiceFactory_Impl {
                 .map(|(r, p)| (r.to_string(), p.to_string()))
                 .unwrap_or_default();
             let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
-            engine.push_raw(symbol);
+            engine.push_raw(symbol)?;
             // engine は未確定ローマ字を閉じてから記号を足す（Step 10-2）ので、読みは
             // `reading + symbol` ではなく engine から取り直す（`on_input_raw` と同じ）。
             let new_reading = engine.hiragana_text()?.to_string();
@@ -565,8 +565,8 @@ impl super::TextServiceFactory_Impl {
         if sess.is_block_selecting() {
             let full_text = sess.block_selecting_full_text().unwrap_or_default();
             let full_reading = sess.block_selecting_full_reading().unwrap_or_default();
-            engine.force_preedit(full_reading.clone());
-            engine.push_raw(symbol);
+            engine.force_preedit(full_reading.clone())?;
+            engine.push_raw(symbol)?;
             let display = format!("{full_text}{symbol}");
             let next_reading = format!("{full_reading}{symbol}");
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
@@ -602,7 +602,7 @@ impl super::TextServiceFactory_Impl {
                     format!("{prefix_reading}{reading}{symbol}{remainder_reading}"),
                 )
             };
-            engine.force_preedit(next_reading.clone());
+            engine.force_preedit(next_reading.clone())?;
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);
@@ -612,7 +612,7 @@ impl super::TextServiceFactory_Impl {
 
         if sess.is_waiting() {
             let text = sess.preedit_text().unwrap_or("").to_string();
-            engine.push_raw(symbol);
+            engine.push_raw(symbol)?;
             let display = format!("{text}{symbol}");
             sess.set_preedit(display.clone());
             drop(sess);
@@ -621,7 +621,7 @@ impl super::TextServiceFactory_Impl {
             return Ok(true);
         }
 
-        engine.push_raw(symbol);
+        engine.push_raw(symbol)?;
         let display = engine.preedit_display()?;
         sess.set_preedit(display.clone());
         drop(sess);
@@ -748,7 +748,7 @@ impl super::TextServiceFactory_Impl {
             candidate_window::hide();
             candidate_window::stop_live_timer();
             engine.bg_reclaim();
-            engine.force_preedit(reading);
+            engine.force_preedit(reading)?;
             drop(guard);
             update_composition_range_select(ctx, tid, sink, selected, unselected)?;
             return Ok(true);
@@ -890,7 +890,7 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 engine.bg_reclaim();
-                engine.force_preedit(reading);
+                engine.force_preedit(reading)?;
                 drop(guard);
                 update_composition_range_select(ctx, tid, sink, selected, unselected)?;
                 return Ok(true);

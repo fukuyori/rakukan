@@ -119,7 +119,7 @@ impl super::TextServiceFactory_Impl {
             let pending = crate::engine::state::drain_pending_keys();
             for (pc, pk, raw) in pending {
                 if raw {
-                    engine.push_raw(pc);
+                    engine.push_raw(pc)?;
                 } else {
                     let _ = engine.input_char(pc, pk, None)?;
                 }
@@ -187,7 +187,7 @@ impl super::TextServiceFactory_Impl {
                 let reading = full_reading.clone();
                 sess.set_preedit(reading.clone());
                 candidate_window::hide();
-                engine.force_preedit(reading);
+                engine.force_preedit(reading)?;
             }
         }
 
@@ -379,7 +379,7 @@ impl super::TextServiceFactory_Impl {
             let pending = crate::engine::state::drain_pending_keys();
             for (pc, pk, raw) in pending {
                 if raw {
-                    engine.push_raw(pc);
+                    engine.push_raw(pc)?;
                 } else {
                     let _ = engine.input_char(pc, pk, None)?;
                 }
@@ -398,7 +398,7 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 crate::tsf::live_session::queue_preview_clear();
 
-                engine.push_raw(c);
+                engine.push_raw(c)?;
                 let new_reading = engine.hiragana_text()?.to_string();
                 let (display, display_shown) =
                     live_continuation_display(&preview_for, &preview, &reading, &new_reading, "");
@@ -467,7 +467,7 @@ impl super::TextServiceFactory_Impl {
                     Some(e) => e,
                     None => return Ok(true),
                 };
-                engine2.push_raw(c);
+                engine2.push_raw(c)?;
                 let preedit = engine2.preedit_display()?;
                 // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
                 // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
@@ -478,7 +478,7 @@ impl super::TextServiceFactory_Impl {
                 return Ok(true);
             }
         }
-        engine.push_raw(c);
+        engine.push_raw(c)?;
         let preedit = engine.preedit_display()?;
         // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
         // Space 押下時は on_convert 内で bg_reclaim + bg_start(num_candidates) により
