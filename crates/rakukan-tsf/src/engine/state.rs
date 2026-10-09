@@ -810,10 +810,9 @@ pub fn start_reload_watcher() {
 ///
 /// TSF プロセス内では engine DLL を一切ロードしない。代わりに
 /// `rakukan-engine-host.exe` に Named Pipe で接続する。ホストが動いていなければ
-/// `RpcEngine::connect_or_spawn` が `CreateProcessW` で detached 起動する。
+/// `RpcEngine::connect_or_spawn_with_source` が `CreateProcessW` で detached 起動する。
 fn create_engine() -> anyhow::Result<DynEngine> {
-    let cfg = build_engine_config_json();
-    let engine = DynEngine::connect_or_spawn(Some(cfg))
+    let engine = DynEngine::connect_or_spawn_with_source(engine_config_source())
         .map_err(|e| anyhow::anyhow!("engine RPC connect failed: {e}"))?;
     tracing::info!(
         "engine connected via RPC: backend={}",
@@ -823,10 +822,25 @@ fn create_engine() -> anyhow::Result<DynEngine> {
     Ok(engine)
 }
 
-/// 公開済みの設定の組から EngineConfig JSON を取る（Issue #65: 組は同じ読み取りから作られ、
-/// 変更後に書き換えない。生成は `config::engine_config_json`）。
-fn build_engine_config_json() -> String {
-    super::config::current_snapshot().engine_json.clone()
+/// ホストへの接続試行のたびに `Create` で送る EngineConfig JSON（Issue #65）。
+///
+/// 初回の接続・ハンドルの作り直し・自動の再接続のどれでも、送る直前に `config.toml` を
+/// 読み直した組（`config::snapshot_for_reconnect`）から取る。保存済みの文字列で
+/// `Create` すると、ホストが入れ替わったときに古い設定へ戻るため。
+///
+/// `RpcEngine` の内部のロックと `RAKUKAN_ENGINE` を保持したまま呼ばれる。
+/// `snapshot_for_reconnect` が取るのは読込専用ロックと設定状態のロックだけで、
+/// 逆向き（設定のロックを持ったままエンジンのロックや RPC）を取る箇所は無い
+/// （`config::begin_apply` / `finish_apply` は設定のロックを放してから RPC を呼ぶ）。
+///
+/// `Create` の成功では反映待ち（`pending_apply`）を解除しない。反映待ちは
+/// 次の契機の `ShutdownIfConfigDiffers` の応答で解除する。
+fn engine_config_source() -> rakukan_engine_rpc::ConfigSource {
+    std::sync::Arc::new(|| {
+        let snapshot = super::config::snapshot_for_reconnect();
+        tracing::debug!("engine config for Create: {}", snapshot.apply_id());
+        Some(snapshot.engine_json.clone())
+    })
 }
 
 /// config.toml から num_candidates を読む（ホットパスで使う軽量版）

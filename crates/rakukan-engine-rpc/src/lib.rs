@@ -18,8 +18,8 @@ pub mod protocol;
 pub mod server;
 
 pub use client::{
-    ChangeError, ChangeReply, ConditionalShutdown, ReadError, RestoreReply, RpcEngine,
-    ShutdownOutcome, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level, tsf_id,
+    ChangeError, ChangeReply, ConditionalShutdown, ConfigSource, ReadError, RestoreReply,
+    RpcEngine, ShutdownOutcome, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level, tsf_id,
 };
 pub use protocol::{
     BgStartOutcome, BgTakeOutcome, BgView, ChangeKind, ChangeOutcome, ChangeRequest, ConfigVersion,

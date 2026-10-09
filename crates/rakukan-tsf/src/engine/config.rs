@@ -885,17 +885,15 @@ fn reload_in(
 /// あれば、それを返す。呼び出し側は、1 回の接続試行ではこの組を固定して使う。
 ///
 /// 読み直しで新しい組が公開されると、`publish` により反映待ち（`pending_apply`）が
-/// 立ちうる。この関数は反映待ちを解除しない。再接続の `Create` の成功を反映待ちの
-/// 解除と結び付けるかは、組込みのときに決める。
+/// 立ちうる。この関数は反映待ちを解除せず、再接続の `Create` の成功でも解除しない
+/// （次の契機の `ShutdownIfConfigDiffers` の応答で解除する）。
 ///
 /// ロックの順序は「エンジン／接続のロック → 読込専用ロック → 設定状態のロック」。
 /// ここでは読込専用ロックと設定状態のロックだけを取り、`RAKUKAN_ENGINE` や RPC の
 /// 接続のロックは取らない。RPC も呼ばない。そのため、再接続の途中（それらのロックを
 /// 保持した状態）から呼んでよい。
 ///
-/// 呼び出し元への組込み（`rakukan-engine-rpc` の再接続）は、PR #68（#56 (b)）の
-/// マージ後に行う。それまでは呼び出し元が無い。
-#[allow(dead_code)]
+/// 呼び出し元は `state::engine_config_source`（`RpcEngine` の接続試行ごとに呼ばれる）。
 pub fn snapshot_for_reconnect() -> Arc<ConfigSnapshot> {
     snapshot_for_reconnect_in(&LOAD_LOCK, &CONFIG_MANAGER)
 }
@@ -922,11 +920,6 @@ pub fn init_config_manager() {
 
 pub fn current_config() -> AppConfig {
     lock_manager().current.app_config.clone()
-}
-
-/// 公開済みの設定の組（変更後に書き換えない）。
-pub fn current_snapshot() -> Arc<ConfigSnapshot> {
-    lock_manager().current.clone()
 }
 
 pub fn effective_num_candidates() -> usize {

@@ -220,8 +220,10 @@ impl std::ops::Deref for DynEngine {
     }
 }
 impl DynEngine {
-    pub fn connect_or_spawn(config: Option<String>) -> anyhow::Result<Self> {
-        Ok(Self(RpcEngine::connect_or_spawn(config)?))
+    pub fn connect_or_spawn_with_source(
+        source: rakukan_engine_rpc::ConfigSource,
+    ) -> anyhow::Result<Self> {
+        Ok(Self(RpcEngine::connect_or_spawn_with_source(source)?))
     }
     pub fn shutdown(
         &self,
