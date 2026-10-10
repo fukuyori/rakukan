@@ -1,6 +1,6 @@
 # Rakukan 引き継ぎ資料
 
-更新日: 2026-10-10（インストーラーの方式の決定、旧ホスト停止の先行実装の取りやめ、v6 のリリース条件とロードマップの改定。10/9: PR #68 のマージ、#69 / #70 の登録。10/8: PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
+更新日: 2026-10-10（午後: 実機試験 T1〜T3、0.12.0 への版数の更新、#71〜#76 の登録、regsvr32 の失敗とログの見直しの設計。午前: インストーラーの方式の決定、旧ホスト停止の先行実装の取りやめ、v6 のリリース条件とロードマップの改定。10/9: PR #68 のマージ、#69 / #70 の登録。10/8: PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
 
 この文書は「次のセッションが何を知っていれば作業を続けられるか」だけを書く。
 設計の全体は [DESIGN.md](DESIGN.md)、現在の作業計画と判断の経緯は [September_Late_Plan.md](September_Late_Plan.md)、9 月前半の作業記録は [September_Revised_Plan.md](September_Revised_Plan.md) にある。
@@ -16,11 +16,23 @@
 - **v6 のリリース条件（改定）**: (b)（PR #68、済）と #65 の再接続組込み（済）。この後、統合試験・実機試験（実 DLL を通した `apply_change` / `Restore`、ホスト交換中の composition 復元、#65 の再接続で新しい設定の `Create`、現在の手順でのインストール・更新・アンインストール）に合格したら 1 回だけリリースする。旧ホスト停止は条件から外した。#69 / #70 は条件に入れない
 - Mozc・CorvusSKK との比較で分かった、パイプとミューテックスの名前の範囲の食い違い（パイプは `USERNAME` でセッションをまたぎ、ミューテックスは `Local\`）、パイプに `FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS` が無いこと、`USERNAME` を使うことは、Issue にはまだしていない（起票するかはレモンの判断）。CorvusSKK は利用者 SID ＋ ログオンセッションから名前を作っている（`common/common.cpp:186-300`）
 
-### 次の順序（2026-10-10 改定）
+### 2026-10-10 午後の更新（この節の上の記述より優先）
 
-1. 統合試験・実機試験の手順を作る（元に戻す操作まで含める）→ [V6_Test_Procedure.md](V6_Test_Procedure.md)（10/10 作成）
-2. レモンが実機で試験し、合格したら v6 のリリース判断（版数の更新は `docs/version-update-checklist.md`、パッケージはレモンが `-Sign` 付きで作る）
-3. v6 の後: #33（インストーラーの見直し。`docs/Installer_Redesign_Plan.md` の 5 章の順）、#69 / #70（入力処理の見直し）、#66（古い設定の採用防止）
+- **実機試験（開発ビルド `7354de5-dirty`）**: T1〜T3 は合格（結果は [V6_Test_Procedure.md](V6_Test_Procedure.md) の末尾）。T2-3 で、候補選択中にホストが入れ替わると、状態は変換前に戻るが画面は変換後のまま書き換わらず、Enter でひらがなが確定する（#69 の資料。Issue への投稿は未実施、文案はセッションのスクラッチパッド）。T2-5（2 アプリ同時）は成立しない状況として外した。T4 は版数を上げた後のパッケージで行う。手順書は試験の結果で改定（`198c1e9`）
+- 試験で見つかって直したもの: Selecting の表示（`e132a8f`）、F9 / F10 で全角と半角を切り替えるときに大文字・小文字を保つ（`f1d7939`、実機未確認）。engine DLL のログを 16MiB × 5 世代にし、1 キー・1 候補ごとの行を TRACE へ（`9cece6b`）
+- **0.12.0 に版数を上げた**（`ef0f375`）。CHANGELOG の日付は仮に 2026-10-10
+- **[#71](https://github.com/fukuyori/rakukan/issues/71) を登録**: PR #68 以降、`OnCompositionTerminated` が `rpc_composition::close()` を `reset_all()` より先に呼ぶため `ResetAll` が送られず、フォーカス移動で LLM の文脈（`committed`）が消えない（DESIGN.md の設計から外れている）。直し方は照合と制約を含めて Issue に記録（Codex CLI のレビュー済み）。0.12.0 に入れるかは未決
+- **インストールが regsvr32 の失敗で止まる**: `sudo cargo make install` の regsvr32 が 4 回続けて 0xC0000005。cdb で、regsvr32 が DLL を外している間に `DllMain` が起動した `rakukan-log-cleanup` スレッドが外された CRT を実行して落ちることを確認（`C:\rb\regsvr32-cdb.log`）。同じ種類のクラッシュは 9/24・10/8 にもある。**今の作業ツリーのビルドは、レモンの PC にまだ入っていない（インストールは手順 3 で止まったまま）**
+- **ログの作り方の見直し**を設計した（[Log_Redesign_Plan.md](Log_Redesign_Plan.md)、Codex CLI のレビュー 4 回）。段 1〜5 を Issue に登録: [#72](https://github.com/fukuyori/rakukan/issues/72) 段 1（`DllMain` を空にし、最初の Activate で初期化。**0.12.0 に入れる**）、#73〜#76 段 2〜5（**#33 の対応の中で行う**。[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 4.3b）。インストールの経路で扱う事項（トレイの配布・起動、登録の成否の判定、旧版での登録解除）は #33 に回した（同 4.3a）。決めた値: 掃除はトレイの起動時、90 日・30000 ファイル、容量の上限なし、旧 `rakukan.log*` も消す。engine DLL のログはホストへ渡す。ファイルのログを主にし ETW は調査用
+- 0.11.9 リリース後のログの再計測（9/24〜10/10、TSF ログ 1229 ファイル）: `spawn_host failed` / `spawn suppressed` / `edit_session: SLOW grant` / `live_continuation_guard fallback` / keymap 直後の `SLOW [OnKeyDown]` / echo strip のカタカナ needle はいずれも 0。`rpc SLOW` 10 件（BgReclaim 9）。auto backend は設定が `cuda` 明示のため確認できず、#9 は再現操作が要る。月単位の目標は 10/24 ごろに再計測して判定する
+
+### 次の順序（2026-10-10 午後に改定）
+
+1. #72 を実装する（`DllMain` を空にし、最初の Activate で初期化）。regsvr32 の登録・解除を繰り返して終了コード 0 を確かめる
+2. 開発ビルドを入れ直し、F9 / F10（T1-4）と普段の入力を確かめる
+3. 0.12.0 のパッケージ（レモンが `-Sign` 付きで作る）で T4（更新・アンインストール・再インストール）
+4. 合格したら 0.12.0 をリリース（CHANGELOG の日付、#72 の記載を足す）
+5. 0.12.0 の後: #33（#73〜#76 を含む）、#71、#69 / #70、#66
 
 ### 2026-10-09 の更新（この節の 10/8 時点の記述より優先）
 

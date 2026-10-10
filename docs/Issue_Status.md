@@ -1,7 +1,7 @@
 # 開いている Issue の状況
 
-2026-09-25 時点。GitHub の一覧（`gh issue list --state open`、18 件）と [handoff.md](handoff.md) の記録を照合して作成した。
-最新リリースは 0.11.9（2026-09-24、main `4399279`）。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
+2026-10-10 時点。GitHub の一覧（`gh issue list --state open`、26 件）と [handoff.md](handoff.md) の記録を照合して更新した。
+最新リリースは 0.11.9（2026-09-24、main `4399279`）。main は 0.12.0 に版数を上げ済み（`ef0f375`、未リリース）。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
 Issue の状態を更新したら、この表も同じコミットで更新する。クローズしたら行を削除し、末尾の「クローズの記録」に移す。
@@ -10,8 +10,12 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#56](https://github.com/fukuyori/rakukan/issues/56) | ホスト再起動後、未確定文字が残ると Space / Backspace が効かず、Esc で消すしかない | nick が実装中。2026-09-25 に Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット、要求・応答の形だけ、プロトコル v6）が出て、同日に 5 点への回答と追加 3 点（`Restored` に `then` の結果を返す型、`ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`、`config_version: Option<[u8; 32]>` を `Create` / `ShutdownIfConfigDiffers` / `Change` に今回足す）を[返信](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616) | nick の反映を確認して形を確定 → (a) の残り → (b)。(a) 完成後にマージ、(b) も入ってから次版で 1 回リリース |
-| [#65](https://github.com/fukuyori/rakukan/issues/65) | 設定変更を全 TSF プロセスへ反映する（通知漏れ・同一 mtime の変更に対応） | 実装・故障試験（[Issue65_Fault_Test_Design.md](Issue65_Fault_Test_Design.md)）まで完了し、0.11.9 に含まれる | 残件は再接続時に公開済みの設定で `Create` する組込み（`ShutdownSkipped` を「同じ設定」と区別して反映待ちを残す扱いを含む）。#67 の (a) の形が固まってから着手 |
+| [#72](https://github.com/fukuyori/rakukan/issues/72) | ログ見直し 段 1: `DllMain` を空にし、最初の Activate で初期化する（regsvr32 が DLL を外す間に `DllMain` のスレッドが落ち、インストールが止まる） | 2026-10-10 起票。設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md) | **0.12.0 に入れる**。実装 → regsvr32 の登録・解除の繰り返しで確認 |
+| [#71](https://github.com/fukuyori/rakukan/issues/71) | フォーカス移動で `ResetAll` が送られず、LLM の文脈が消えない（PR #68 以降） | 2026-10-10 起票。原因と直し方（照合と制約を含む）を記録、Codex CLI のレビュー済み | 0.12.0 に入れるかは未決 |
+| [#69](https://github.com/fukuyori/rakukan/issues/69) | ホストとの通信失敗時に、打鍵や確定する文字列が失われる経路を見直す | 2026-10-09 起票。v6 の条件に入れない。T2-3 の表示の食い違い（2026-10-10）も資料 | 「キーをどこまで処理したか」の定義から設計 |
+| [#70](https://github.com/fukuyori/rakukan/issues/70) | エンジンの準備前・ロック競合中に打ったキーがアプリへ素通りする | 2026-10-09 起票。v6 の条件に入れない | #69 と合わせて設計 |
+| [#56](https://github.com/fukuyori/rakukan/issues/56) | ホスト再起動後、未確定文字が残ると Space / Backspace が効かず、Esc で消すしかない | PR #67（(a)）を 9/30、PR #68（(b)）を 10/9 にマージ（nick）。プロトコル v6、engine ABI 11。2026-10-10 の実機試験（[V6_Test_Procedure.md](V6_Test_Procedure.md) の T2）で復元を確認。0.12.0 に含まれる | 0.12.0 のリリース後にクローズ。T2-3 の表示の食い違いは #69 で扱う |
+| [#65](https://github.com/fukuyori/rakukan/issues/65) | 設定変更を全 TSF プロセスへ反映する（通知漏れ・同一 mtime の変更に対応） | 本体は 0.11.9。再接続のたびに `config.toml` の設定で `Create` する組込み（`05c2ca3` / `95bbc4f`）を 2026-10-10 の実機試験（T3）で確認。0.12.0 に含まれる | 0.12.0 のリリース後にクローズ |
 | [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ |
 | [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる | 運用ログで `unknown dm` / `skipped save for dead dm` の有無と回帰を見てクローズ |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
@@ -33,7 +37,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動またはサインアウト・サインインで完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)（2026-09-25 に改名し、ビルド出力からの収集・故障試験タスクの移行先・署名経路を補完、`7cef4a7`）。旧ホストの停止方針も組み込み済み | 着手は 9 月計画の後（10 月） |
+| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。2026-10-10 に方式を決定（`restartreplace`、再起動で完了、旧ホストは止めない）。ログの見直しから回した事項（4.3a）と、段 2〜5（#73〜#76、4.3b）を組み込んだ | 0.12.0 の後に着手 |
+| #73〜#76 | ログ見直し 段 2〜5（書き手を 1 つに・発生元、掃除をトレイへ、ホストと engine DLL のログを揃える、書き込みを別スレッドへ・ETW） | 2026-10-10 起票。設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md) | #33 の対応の中で行う |
 | [#46](https://github.com/fukuyori/rakukan/issues/46) | 学習履歴を個別に削除する手段が無い | #33 と合わせる予定 | #33 と同時 |
 | [#32](https://github.com/fukuyori/rakukan/issues/32) | 文節変換: 区読点を含まない文で変換対象を文節単位に分けて選び直せない | [Segment_Edit_Plan.md](Segment_Edit_Plan.md)。9〜10 月は対応しない | 計画とインストーラー改修の後 |
 | [#63](https://github.com/fukuyori/rakukan/issues/63) | 文節変換: 読みと変換結果を文節単位で対応付ける方式の検討 | 方式 1（かなアンカー）は不採用、2（辞書ラティス）/ 3（形態素解析）/ 4（jinen スコアリング）を比較して記録。実装予定なし | 進める前に文節の定義・発火タイミング・実験の順番を決める |
@@ -42,7 +47,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 ## 4. クローズ候補
 
 - #57 と #50 は修正が 0.11.9 で出ている。運用ログの確認が済めばクローズできる。
-- #65 は再接続の組込みまで開けておく。
+- #56 と #65 は 0.12.0 のリリース後にクローズできる（実機試験で確認済み）。
 
 ## 5. クローズの記録（2026-09 以降）
 
