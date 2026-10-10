@@ -1,6 +1,6 @@
 # Rakukan 引き継ぎ資料
 
-更新日: 2026-10-09（PR #68 のマージ、#69 / #70 の登録を追記。10/8: PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
+更新日: 2026-10-10（インストーラーの方式の決定、旧ホスト停止の先行実装の取りやめ、v6 のリリース条件とロードマップの改定。10/9: PR #68 のマージ、#69 / #70 の登録。10/8: PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
 
 この文書は「次のセッションが何を知っていれば作業を続けられるか」だけを書く。
 設計の全体は [DESIGN.md](DESIGN.md)、現在の作業計画と判断の経緯は [September_Late_Plan.md](September_Late_Plan.md)、9 月前半の作業記録は [September_Revised_Plan.md](September_Revised_Plan.md) にある。
@@ -9,6 +9,19 @@
 
 この節を現在の開始点とする。下に残る「現在」「次回」の記述は各日時点の履歴であり、この節と食い違う場合は再実行しない。
 
+### 2026-10-10 の更新（この節のうち、10/9 以前の記述より優先）
+
+- **インストーラーの方式を決めた**（#33 のコメント https://github.com/fukuyori/rakukan/issues/33#issuecomment-6092071876 、`docs/Installer_Redesign_Plan.md` を改定）。旧ホストは止めない。`[Files]` に `restartreplace uninsrestartdelete`、`AlwaysRestart=yes` / `UninstallRestartComputer=yes`（CorvusSKK と共通の方針）。完了は**再起動**だけ（サインアウト・サインインは完了の条件にしない）。再起動までは Rakukan が使えないことがあるのを制限として受け入れる。経緯: 旧ホスト停止の設計（設計メモ v1・v2、Codex CLI のレビュー 4 回）→ Mozc・CorvusSKK との比較 → 要件「切り替えまで旧状態で動く」に照らして、停止・改名退避・ローダーを比較し、要件を「再起動で完了」に改めた。当初の「サインアウトでも完了」はクロの見込み違い（改名退避では旧状態を保てない）
+- **旧ホスト停止の先行実装は取りやめた**。**現在のインストール方法（別の IME に切り替え → サインアウト → サインイン → インストール）は #33 の対応まで変えない**。v6 もこの手順で配布する（リリースノートで手順を守るよう案内する）
+- **v6 のリリース条件（改定）**: (b)（PR #68、済）と #65 の再接続組込み（済）。この後、統合試験・実機試験（実 DLL を通した `apply_change` / `Restore`、ホスト交換中の composition 復元、#65 の再接続で新しい設定の `Create`、現在の手順でのインストール・更新・アンインストール）に合格したら 1 回だけリリースする。旧ホスト停止は条件から外した。#69 / #70 は条件に入れない
+- Mozc・CorvusSKK との比較で分かった、パイプとミューテックスの名前の範囲の食い違い（パイプは `USERNAME` でセッションをまたぎ、ミューテックスは `Local\`）、パイプに `FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS` が無いこと、`USERNAME` を使うことは、Issue にはまだしていない（起票するかはレモンの判断）。CorvusSKK は利用者 SID ＋ ログオンセッションから名前を作っている（`common/common.cpp:186-300`）
+
+### 次の順序（2026-10-10 改定）
+
+1. 統合試験・実機試験の手順を作る（元に戻す操作まで含める）
+2. レモンが実機で試験し、合格したら v6 のリリース判断（版数の更新は `docs/version-update-checklist.md`、パッケージはレモンが `-Sign` 付きで作る）
+3. v6 の後: #33（インストーラーの見直し。`docs/Installer_Redesign_Plan.md` の 5 章の順）、#69 / #70（入力処理の見直し）、#66（古い設定の採用防止）
+
 ### 2026-10-09 の更新（この節の 10/8 時点の記述より優先）
 
 - **PR #68 は 10/9 に rebase merge 済み**（main `3dfd0e7` / `59fa141` / `39c438a`。マージ後の CI 成功）。マージ前の照合コメント: https://github.com/fukuyori/rakukan/pull/68#issuecomment-6078660113 。Issue #56 は開いたまま（`Refs` のため自動では閉じない）。実機での確認は v6 の統合試験で行う
@@ -16,7 +29,7 @@
 - PR #68 の照合で見つかった、ホストとの通信失敗時に打鍵や確定する文字列が失われる経路は、**[#69](https://github.com/fukuyori/rakukan/issues/69)**（部分確定の中断、Enter、確定の失敗が見えない、キーを食べるかの判断、F9/F10 で復元した部分が消える）と **[#70](https://github.com/fukuyori/rakukan/issues/70)**（エンジンの準備前・ロック競合中のキーがアプリへ素通りする）に登録した。**どちらも v6 のリリース条件に入れない**。小さく直すと別の経路に穴が残るので、#69 の「キーをどこまで処理したか」などの定義から設計する。検討した修正案とその課題（Codex CLI のレビューを含む）は #69 の本文の「論点」
 - #69 の C のうち、`commit_then_start_composition` の失敗をログに残す変更だけを先に入れた（挙動は変えない）
 - **#65 の再接続組込みを入れた**: `RpcEngine::connect_or_spawn_with_source` と `ConfigSource`（`crates/rakukan-engine-rpc/src/client.rs`）。接続試行のたびに、パイプを開く前に 1 回だけ `state::engine_config_source()`（`config::snapshot_for_reconnect()` で `config.toml` を読み直した組の JSON）を呼び、その試行の `Create` に固定して使う。初回の接続・ハンドルの作り直し・自動の再接続のすべてが対象（`create_engine` も切り替えた）。`Create` の成功では反映待ちを解除しない（成功した組の識別子は、`ConfigSource` が返す `CreateConfig.label` として接続ログ `Hello/Create ok config=(rev=… sha256=…)` に残る）。使われなくなった `config::current_snapshot()` は削除。#55 の計数・再試行のテストは組込み後も成功。実機の確認（設定を変えてからホストを入れ替え、新しい設定で `Create` されることをログで見る）は v6 の統合試験で行う。下の「#65 の再接続組込み」の項の「組込みのときに決める・確かめること」の状態: (1) `allow(dead_code)` は外した／(2) 反映待ちは解除せず、成功した組をログに記録（テストあり）／(3) 同期の読込は受け入れ（実測なし）／(4) ロックの順序は**コードを読んでの確認**。テストで確かめたのは、rpc 側の「試行ごとに 1 回だけ取り、固定する」「再試行で取り直す」「関数が無ければ保存値」「関数が `None` を返しても保存値に戻らない」「成功した組の識別子の記録」と、TSF 側の「`RAKUKAN_ENGINE` を取りに行かない」まで。設定の公開を伴う読込と、エンジン・接続のロックを組み合わせた検証はしていない。Codex CLI のレビューで、`ShutdownIfConfigDiffers` で A を送る途中の再接続で B を `Create` し、その後 A との比較でホストが終了しうる順序が指摘された（元の要求は書き換えない設計の範囲。#66 で扱う）
-- 次は、計画の順に旧ホスト停止（現行 `rakukan_installer.iss`）→ 統合試験・実機試験 → v6 のリリース判断。下の「現在の状態」「次の順序」は 10/8 時点のもの
+- （10/10 に改定）次の順序は上の「次の順序（2026-10-10 改定）」。下の「現在の状態」「次の順序」は 10/8 時点のもの
 
 ### 現在の状態
 
@@ -58,7 +71,7 @@
 ### こちらが担当する残作業とリリース条件
 
 - **#65 の再接続組込み**: 未着手（ブランチ・stash も無い）。ホスト入れ替わり時に反映待ちを残す処理（`ShutdownSkipped` → `HostReplaced`、`crates/rakukan-tsf/src/engine/state.rs:504-527`）は main にある。残りは、自動の再接続（`call_with_retry` → `try_connect_once`）で保存済みの `self.config_json`（`crates/rakukan-engine-rpc/src/client.rs:1281`）ではなく、公開済みの設定の組から作り直した JSON で `Create` すること（設計は `docs/September_Late_Plan.md` の 2079〜2083 行）。**PR #68 が `client.rs` を大きく変えるので、組込みは #68 のマージ後**に行う。**準備は 10/8 に main へ入れた**: `config::snapshot_for_reconnect()`（`crates/rakukan-tsf/src/engine/config.rs`。共通の読込処理を 1 回通してから公開済みの組を返す。読めなければ直前の組）と、テスト 4 件（`reconnect_snapshot_tests`）。テストのため `reload_config` の本体を、ロックを引数で受ける `reload_in` に移した（挙動は同じ）。呼び出し元はまだ無く、`#[allow(dead_code)]` を付けている。Codex CLI のレビュー済み。**組込みのときに決める・確かめること**: (1) `allow(dead_code)` を外す、(2) 読み直しで新しい組が公開されると反映待ちが立ちうる。再接続の `Create` 成功を反映待ちの解除と結び付けるか（計画書 2074 行の「`Create` 成功を別に記録」も未実装）、(3) `RAKUKAN_ENGINE` と `RpcEngine` の内部 Mutex を持ったまま同期でファイルを読むので、キー処理が待たされうる（数 KB の読込だが上限はコードから言えない）、(4) RPC の接続のロックとの順序のテスト（今のテストは `RAKUKAN_ENGINE` を取りに行かないことまで）。統合後に #55 の計数・再試行テストを再検証する。新しいハンドルを作る `create_engine` は、公開済みの組の JSON を読み直さずに渡している（`state.rs:814-830`）。生成関数へ切り替えるかは組込みと合わせて決める
-- **旧ホスト停止の先行実装**と**リリースしない条件**は、下の 9/30 の節のとおり（変更なし）
+- **旧ホスト停止の先行実装**は 2026-10-10 に取りやめた。**リリースしない条件**は上の「2026-10-10 の更新」で改定した（下の 9/30 の節は履歴）
 
 ### 次の順序
 

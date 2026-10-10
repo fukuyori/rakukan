@@ -994,6 +994,8 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 
 ## 15. 今後のロードマップ
 
+2026-10-10 に改定。作業の順序と判断の経緯は [handoff.md](handoff.md) の 0 章、インストーラーは [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md) が正。
+
 ### 完了済み
 
 - ライブ変換（LiveConv）— デバウンス付きタイマー + Phase1A/1B で composition 更新
@@ -1001,15 +1003,27 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 - アルファベット保護 — 半角/全角の両方を候補として提示
 - 範囲指定変換（RangeSelect）— Shift+矢印で先頭から順に確定
 - vibrato / SplitPreedit の完全削除 — 分節アライメント問題の根本解決
+- ホストのヘルスチェックと自己終了（#43 の推論失敗、#57 の詰まりの監視。`rakukan-engine-rpc/src/health.rs`）— 旧 [Engine-Host-2]
+- RPC の所要時間の記録（`rpc SLOW`、区間の集計）— 旧「RPC レイテンシ計測」
+- 設定変更の全 TSF プロセスへの反映（#65）と、ホストへの再接続時に `config.toml` を読み直した設定で `Create`（#65 の再接続組込み）
+- ホストの再起動をまたいだ composition の復元（#56。RPC protocol v6、要求の所有者・番号・保持応答、`Change` / `Restore`）
 
-### 優先度: 中
+### 次のリリース（v6）
 
-- **[Engine-Host-1] idle 自死** — 長時間アイドルのメモリ占有削減
-- **[Engine-Host-2] ヘルスチェックとクラッシュカウント**
-- **[Live-2] display_attr 拡張** — RangeSelect の選択範囲表示の改善
-- **用法辞書（Candidate.annotation）** — 候補ウィンドウに同音異義語の用途説明を表示
+- 統合試験・実機試験に合格したら 1 回だけリリースする（RPC protocol v6、engine ABI 11）。インストール方法は現在の手順のまま（別の IME に切り替え → サインアウト → サインイン → インストール）
 
-### 優先度: 低
+### v6 の後
 
-- **RPC レイテンシ計測**
-- **LLM 候補数の増加**（現状 `min(n, 3)`）
+- **インストーラーの見直し（#33）** — `%ProgramFiles%` への配置、使用中のファイルは再起動時に置き換え（`restartreplace`）、再起動で完了、`cargo make install` の一本化、winget
+- **入力処理の見直し（#69 / #70）** — ホストとの通信失敗時に打鍵・確定する文字列を失わない、エンジンの準備前・ロック競合中のキー
+- **古い設定の採用防止（#66）**
+- IPC の名前とパイプの設定（利用者 SID ＋ ログオンセッションでパイプ・ミューテックスの範囲をそろえる、`FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS`）— Issue 化は未定
+
+### 状況を確認していない旧項目（2026-10-10 時点）
+
+以前の版のロードマップにあった項目。現在の実装状況を確かめていないので、扱いは別途決める。
+
+- [Engine-Host-1] idle 自死 — 長時間アイドルのメモリ占有削減
+- [Live-2] display_attr 拡張 — RangeSelect の選択範囲表示の改善
+- 用法辞書（`Candidate.annotation`）— 候補ウィンドウに同音異義語の用途説明を表示（`annotation` フィールドは `rakukan-engine-abi` にある）
+- LLM 候補数の増加（以前の記述は `min(n, 3)`）
