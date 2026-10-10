@@ -571,11 +571,15 @@ impl LatinCycle {
     }
 
     /// 次のサイクル状態（F9: 全角サイクル、F10: 半角サイクル）
+    ///
+    /// 同じ幅の中では 小→大→先頭大→小 と回す。幅を切り替えるとき（半角で F9、
+    /// 全角で F10）は大文字・小文字の状態を保ったまま幅だけ変える。
     pub fn next_full(self) -> Self {
         match self {
-            Self::FullLower | Self::HalfLower | Self::HalfUpper | Self::HalfTitle => {
-                Self::FullUpper
-            }
+            Self::HalfLower => Self::FullLower,
+            Self::HalfUpper => Self::FullUpper,
+            Self::HalfTitle => Self::FullTitle,
+            Self::FullLower => Self::FullUpper,
             Self::FullUpper => Self::FullTitle,
             Self::FullTitle => Self::FullLower,
         }
@@ -583,9 +587,10 @@ impl LatinCycle {
 
     pub fn next_half(self) -> Self {
         match self {
-            Self::HalfLower | Self::FullLower | Self::FullUpper | Self::FullTitle => {
-                Self::HalfUpper
-            }
+            Self::FullLower => Self::HalfLower,
+            Self::FullUpper => Self::HalfUpper,
+            Self::FullTitle => Self::HalfTitle,
+            Self::HalfLower => Self::HalfUpper,
             Self::HalfUpper => Self::HalfTitle,
             Self::HalfTitle => Self::HalfLower,
         }
@@ -1011,7 +1016,7 @@ mod tests {
 
     #[test]
     fn full_latin_cycle() {
-        let s = "tesuto";
+        let s = "\u{FF54}\u{FF45}\u{FF53}\u{FF55}\u{FF54}\u{FF4F}";
         let s1 = to_full_latin(s);
         assert_eq!(s1, "\u{FF34}\u{FF25}\u{FF33}\u{FF35}\u{FF34}\u{FF2F}");
         let s2 = to_full_latin(&s1);
@@ -1033,6 +1038,36 @@ mod tests {
         assert_eq!(s3, "tesuto");
         let s4 = to_half_latin(&s3);
         assert_eq!(s4, "TESUTO");
+    }
+
+    #[test]
+    fn switching_width_keeps_case() {
+        // F9 → F10（全角 → 半角）
+        assert_eq!(
+            to_half_latin("\u{FF4B}\u{FF41}\u{FF4E}\u{FF4A}\u{FF49}"),
+            "kanji"
+        );
+        assert_eq!(
+            to_half_latin("\u{FF2B}\u{FF21}\u{FF2E}\u{FF2A}\u{FF29}"),
+            "KANJI"
+        );
+        assert_eq!(
+            to_half_latin("\u{FF2B}\u{FF41}\u{FF4E}\u{FF4A}\u{FF49}"),
+            "Kanji"
+        );
+        // F10 → F9（半角 → 全角）
+        assert_eq!(
+            to_full_latin("kanji"),
+            "\u{FF4B}\u{FF41}\u{FF4E}\u{FF4A}\u{FF49}"
+        );
+        assert_eq!(
+            to_full_latin("KANJI"),
+            "\u{FF2B}\u{FF21}\u{FF2E}\u{FF2A}\u{FF29}"
+        );
+        assert_eq!(
+            to_full_latin("Kanji"),
+            "\u{FF2B}\u{FF41}\u{FF4E}\u{FF4A}\u{FF49}"
+        );
     }
 
     #[test]
