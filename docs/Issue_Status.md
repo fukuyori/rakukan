@@ -1,7 +1,7 @@
 # 開いている Issue の状況
 
 2026-10-10 時点。GitHub の一覧（`gh issue list --state open`、23 件）と [handoff.md](handoff.md) の記録を照合して更新した。
-最新リリースは 0.12.0（2026-10-10、タグ `0.12.0` = main `c15fefe`）。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
+最新リリースは 0.12.0（2026-10-10、タグ `0.12.0` = main `c15fefe`）。10 月の作業計画（#71 → #69 / #70 → #33）は [October_Plan.md](October_Plan.md)。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
 Issue の状態を更新したら、この表も同じコミットで更新する。クローズしたら行を削除し、末尾の「クローズの記録」に移す。
