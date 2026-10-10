@@ -1,4 +1,4 @@
-# rakukan v0.11.9
+# rakukan v0.12.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,7 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.11.9 はログ・設定・IME 状態の扱いを直したリリースです。アプリごとの IME 初期状態を `config.toml` の `[input] ime_off_apps` / `ime_on_apps` で設定できるようにし（[Issue #51](https://github.com/fukuyori/rakukan/issues/51) の段 1）、ターミナル判定のコード直書きを廃止しました。設定の変更は IME を使っているすべてのアプリに反映されるようになり、保存通知を取りこぼした場合や手で編集した場合も、フォルダの変更通知と 30 秒ごとの定期確認で検出します（[Issue #65](https://github.com/fukuyori/rakukan/issues/65)）。TSF のログはアプリのプロセスごとのファイルになり（[Issue #60](https://github.com/fukuyori/rakukan/issues/60)）、旧 `rakukan.log` は書かれなくなります。エンジンホストとの通信も記録します（[Issue #54](https://github.com/fukuyori/rakukan/issues/54)）。タブ切替の多いブラウザで閉じた入力先の IME 状態が別の入力先に復元される問題（[Issue #50](https://github.com/fukuyori/rakukan/issues/50)）、`config.toml` が一時的に読めないと既定値に戻る問題（[Issue #61](https://github.com/fukuyori/rakukan/issues/61)）、ホストに接続できない状態で起動を繰り返す問題（[Issue #55](https://github.com/fukuyori/rakukan/issues/55)）を修正しました。nick20002005 さんの PR で、変換の詰まりの監視をホスト側へ移して誤った再起動を防ぎ（[Issue #57](https://github.com/fukuyori/rakukan/issues/57)）、「参」「拾」を含む変換結果の誤判定を直しました（[Issue #53](https://github.com/fukuyori/rakukan/issues/53)）。MOZC 辞書の取得元は SHA で固定しています（[Issue #62](https://github.com/fukuyori/rakukan/issues/62)）。engine ABI が 10 になるため、インストーラーでエンジンと TSF の両方が入れ替わります。
+v0.12.0 は、エンジンホストが入れ替わったときの未確定の文字の扱いを作り直したリリースです。ホストが再起動しても、未確定の文字は消えず、そのまま入力・変換を続けられます（[Issue #56](https://github.com/fukuyori/rakukan/issues/56)、nick20002005 さんの [PR #67](https://github.com/fukuyori/rakukan/pull/67) / [PR #68](https://github.com/fukuyori/rakukan/pull/68)）。復元の直後の Space は変換せず、もう一度 Space で変換します。ホストへの再接続ではその時点の `config.toml` を使い、設定の変更後に古い設定で起動しないようにしました（[Issue #65](https://github.com/fukuyori/rakukan/issues/65)）。Space → Backspace → Space で入力行がひらがなのまま残り、表示されていない候補が確定される問題と、F9 / F10 で全角と半角を切り替えると大文字に変わる問題を修正しました。エンジン DLL のログは約 1 か月分残ります。engine ABI が 11、通信のプロトコルが v6 になるため、インストーラーでエンジン・ホスト・TSF がすべて入れ替わります。インストールは従来どおり、別の IME に切り替え → サインアウト → サインイン → インストーラー実行の順で行ってください。
+
+- v0.11.9: **ログ・設定・IME 状態の扱いを修正**。アプリごとの IME 初期状態を `config.toml` の `[input] ime_off_apps` / `ime_on_apps` で設定（Issue #51 の段 1）。設定の変更をすべてのアプリに反映（Issue #65）。TSF のログをプロセスごとのファイルに分け（Issue #60）、ホストとの通信も記録（Issue #54）。閉じた入力先の IME 状態の誤復元（Issue #50）、`config.toml` が一時的に読めないと既定値に戻る問題（Issue #61）、起動の繰り返し（Issue #55）、変換の詰まりの誤判定（Issue #57）、「参」「拾」の誤判定（Issue #53）を修正。MOZC 辞書の取得元を SHA で固定（Issue #62）。
 
 - v0.11.7: **エンジンの異常からの復帰を中心に修正**。エンジンホストが入れ替わったときに辞書・ユーザー辞書・学習履歴が黙って無効になる問題、推論失敗で「⏳ 変換中...」のまま止まる問題（Issue #43）を修正し、連続して失敗した場合はエンジンが自分で再起動して復帰。モデル読み込み中の変換は読み込み後に自動でやり直す（Issue #39）。候補ウィンドウがタスクバーと Alt+Tab に出る問題（PR #48）、エンジン DLL のログレベルが `config.toml` に追随しない問題も修正。
 
