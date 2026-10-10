@@ -65,6 +65,8 @@ const LOG_ROTATE_GENERATIONS: usize = 5;
 ///
 /// **厳密な上限ではない。** 使用中のログは消さないので、使用中の分だけで
 /// これを超えることがある（その場合は超過を許容する）。
+// 掃除は #74 でトレイへ移すまで DLL からは呼ばない（Issue #72）。処理と試験は移すときに使うので残す。
+#[allow(dead_code)]
 const LOG_TOTAL_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
 
 /// プロセス別ログの接頭辞。旧方式の `rakukan.log` / `.1`〜`.5` は接頭辞が違うので
@@ -330,6 +332,7 @@ impl std::io::Write for RotatingLog {
 /// **このコードが作る名前だけを受け付ける。** 末尾を「空でなければ何でも可」に
 /// すると、`rakukan-tsf-1-2.log.backup` のような別のファイルまで掃除の削除対象に
 /// なってしまう。
+#[cfg_attr(not(test), allow(dead_code))]
 fn instance_stem_of(file_name: &str) -> Option<&str> {
     let rest = file_name.strip_prefix(LOG_FILE_PREFIX)?;
     let (stem, tail) = rest.split_once(".log")?;
@@ -351,6 +354,7 @@ fn instance_stem_of(file_name: &str) -> Option<&str> {
 }
 
 /// `<stem>` の中の起動識別子。並べ替えに使う。取れなければ 0（最も古い扱い）。
+#[cfg_attr(not(test), allow(dead_code))]
 fn startup_id_of(stem: &str) -> u128 {
     stem.rsplit_once('-')
         .and_then(|(_, id)| id.parse::<u128>().ok())
@@ -358,12 +362,14 @@ fn startup_id_of(stem: &str) -> u128 {
 }
 
 /// 掃除で数える起動インスタンス 1 件分。
+#[cfg_attr(not(test), allow(dead_code))]
 struct LogInstance {
     startup_id: u128,
     bytes: u64,
     files: Vec<PathBuf>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 impl LogInstance {
     fn new(startup_id: u128) -> Self {
         Self {
@@ -382,10 +388,12 @@ impl LogInstance {
 /// 削除が終わるまでロックのハンドルを保持する。
 ///
 /// 使用中のログだけで目安を超える場合は何も消さない。目安は厳密な上限ではない。
+#[allow(dead_code)]
 fn cleanup_logs(dir: &Path, own_stem: &str) {
     cleanup_logs_with_budget(dir, own_stem, LOG_TOTAL_BUDGET_BYTES);
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn cleanup_logs_with_budget(dir: &Path, own_stem: &str, budget: u64) {
     use std::collections::HashMap;
 
@@ -466,8 +474,67 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 hinst: Some(hinst.into()),
             })
         });
-        // ログをファイルに出力（デバッグ用）
-        // ログはプロセス間で共有せず、起動インスタンスごとのファイルに書く（Issue #60）
+        // ここでは何も起動しない・何も作らない（Issue #72）。
+        // regsvr32 は DllRegisterServer の直後に FreeLibrary するので、ここで起動した
+        // スレッドが外された DLL / CRT のコードを実行して落ちていた。ログ・設定・
+        // 設定の監視は、最初の Activate で `runtime_init_once()` が行う。
+    }
+    TRUE
+}
+
+/// 実行時の初期化が済んだか（最初の Activate の後なら `true`）。
+pub(crate) fn runtime_ready() -> bool {
+    RUNTIME_READY.load(std::sync::atomic::Ordering::Acquire)
+}
+
+static RUNTIME_READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static RUNTIME_INIT: std::sync::Once = std::sync::Once::new();
+
+/// 実行時の初期化（Issue #72）。最初の有効な Activate から、プロセスにつき 1 回。
+///
+/// 順序: DLL の固定 → ログ → 既定の設定ファイル → 設定の読み込み → 既定の keymap →
+/// 設定の監視。sink の登録・UI の操作・エンジンの起動はしない（再入を避ける）。
+/// どれかに失敗しても入力は止めない。
+pub(crate) fn runtime_init_once() {
+    RUNTIME_INIT.call_once(|| {
+        pin_dll();
+        init_logging();
+        let _ = crate::engine::config::config_save_default();
+        crate::engine::config::init_config_manager();
+        crate::engine::config::log_current_config("runtime_init");
+        let _ = crate::engine::keymap::keymap_save_default();
+        crate::engine::state::start_reload_watcher();
+        RUNTIME_READY.store(true, std::sync::atomic::Ordering::Release);
+    });
+}
+
+/// この DLL をプロセスが終わるまで外させない（Issue #72）。
+///
+/// Activate の後は設定の監視などのスレッドが DLL のコードを実行し続ける。
+/// `DllCanUnloadNow` の `S_FALSE` は明示的な `FreeLibrary` を止めないので、
+/// `GetModuleHandleExW(PIN)` で参照を固定する。登録・解除だけの読み込みでは呼ばれない。
+fn pin_dll() {
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
+    };
+    let mut module = windows::Win32::Foundation::HMODULE::default();
+    let anchor = pin_dll as *const ();
+    let pinned = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            windows::core::PCWSTR(anchor as *const u16),
+            &mut module,
+        )
+    };
+    // ログの初期化より前なので、結果は初期化の後に記録する
+    PIN_RESULT.get_or_init(|| pinned.map_err(|e| e.to_string()));
+}
+
+static PIN_RESULT: std::sync::OnceLock<Result<(), String>> = std::sync::OnceLock::new();
+
+/// ログの初期化。プロセス間で共有せず、起動インスタンスごとのファイルに書く（Issue #60）。
+fn init_logging() {
+    {
         let log_dir = std::env::var("LOCALAPPDATA")
             .map(|p| PathBuf::from(format!("{p}\\rakukan")))
             .unwrap_or_default();
@@ -498,10 +565,10 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
             })
         };
 
-        if log_dir.as_os_str().is_empty() {
-            let _ = tracing_subscriber::fmt()
+        let init = if log_dir.as_os_str().is_empty() {
+            tracing_subscriber::fmt()
                 .with_env_filter(make_filter())
-                .try_init();
+                .try_init()
         } else {
             let _ = std::fs::create_dir_all(&log_dir);
             // ロックはログ本体より先に取る。掃除側はロックを排他で取れたときだけ
@@ -510,32 +577,29 @@ pub extern "system" fn DllMain(hinst: HINSTANCE, reason: u32, _: *mut c_void) ->
                 let _ = LOG_LOCK.set(f);
             }
             let writer = RotatingLog::open(instance_log_path(&log_dir, &log_stem));
-            let _ = tracing_subscriber::fmt()
+            tracing_subscriber::fmt()
                 .compact()
                 .with_env_filter(make_filter())
                 .with_ansi(false)
                 .with_writer(std::sync::Mutex::new(writer))
-                .try_init();
+                .try_init()
+        };
+        // 失敗するのは別の subscriber が既に設定されている場合なので、そちらへ記録される
+        if let Err(e) = init {
+            tracing::warn!("tracing subscriber was not installed: {e}");
         }
         tracing::info!(
             "rakukan TSF DLL loaded  build={} log={}",
             option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown"),
             log_stem
         );
-        // 掃除は DllMain を待たせない（ローダーロックを持ったまま I/O をしない）。
-        if !log_dir.as_os_str().is_empty() {
-            let dir = log_dir.clone();
-            let stem = log_stem.clone();
-            let _ = std::thread::Builder::new()
-                .name("rakukan-log-cleanup".into())
-                .spawn(move || cleanup_logs(&dir, &stem));
+        match PIN_RESULT.get() {
+            Some(Ok(())) => tracing::debug!("dll pinned for the life of the process"),
+            Some(Err(e)) => tracing::warn!("dll pin failed: {e}"),
+            None => {}
         }
-        let _ = crate::engine::config::config_save_default();
-        crate::engine::config::init_config_manager();
-        let _ = crate::engine::keymap::keymap_save_default();
-        crate::engine::state::start_reload_watcher();
+        // 古いログの掃除は DLL の中では行わない（Issue #72）。トレイへ移す（#74）。
     }
-    TRUE
 }
 
 #[unsafe(no_mangle)]
@@ -576,37 +640,92 @@ pub unsafe extern "system" fn DllCanUnloadNow() -> windows::core::HRESULT {
     S_FALSE
 }
 
+/// 登録・解除の記録（`%LOCALAPPDATA%\rakukan\register_debug.log`、Issue #72）。
+///
+/// 実行時のログ（tracing）は最初の Activate まで初期化しないので、regsvr32 による
+/// 登録・解除は tracing に頼らず、このファイルへ各段階をその場で追記する。
+/// 1 MiB を超えたら作り直す。
+struct RegisterLog {
+    path: Option<PathBuf>,
+}
+
+impl RegisterLog {
+    const MAX_BYTES: u64 = 1024 * 1024;
+
+    fn open() -> Self {
+        let path = std::env::var("LOCALAPPDATA").ok().map(|p| {
+            let dir = PathBuf::from(p).join("rakukan");
+            let _ = std::fs::create_dir_all(&dir);
+            dir.join("register_debug.log")
+        });
+        if let Some(p) = &path
+            && std::fs::metadata(p).is_ok_and(|m| m.len() > Self::MAX_BYTES)
+        {
+            let _ = std::fs::remove_file(p);
+        }
+        Self { path }
+    }
+
+    fn line(&self, text: &str) {
+        use std::io::Write;
+        let Some(path) = &self.path else {
+            return;
+        };
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{} pid={} {text}", utc_now_text(), std::process::id());
+        }
+    }
+}
+
+/// `YYYY-MM-DDTHH:MM:SSZ`（UTC）。登録の記録用（時刻のクレートに依存しない）。
+fn utc_now_text() -> String {
+    utc_text(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+    )
+}
+
+fn utc_text(secs: u64) -> String {
+    let (days, rem) = (secs / 86_400, secs % 86_400);
+    // 1970-01-01 からの日数を暦日へ（Howard Hinnant の civil_from_days）
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60
+    )
+}
+
 #[unsafe(no_mangle)]
 pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
 
-    // デバッグ: 各ステップを個別に実行してエラー箇所を特定
-    let log_path = format!(
-        "{}\\rakukan\\register_debug.log",
-        std::env::var("LOCALAPPDATA").unwrap_or_default()
-    );
-    let mut log = String::new();
-
+    let log = RegisterLog::open();
     macro_rules! step {
         ($label:expr, $expr:expr) => {{
             match $expr {
                 Ok(v) => {
-                    log.push_str(&format!(
-                        "OK: {}
-",
-                        $label
-                    ));
+                    log.line(&format!("register OK: {}", $label));
                     v
                 }
                 Err(e) => {
-                    let msg = format!(
-                        "FAIL: {} — {}
-",
-                        $label, e
-                    );
-                    log.push_str(&msg);
-                    let _ = std::fs::write(&log_path, &log);
+                    log.line(&format!("register FAIL: {} — {}", $label, e));
                     CoUninitialize();
                     return E_FAIL;
                 }
@@ -614,17 +733,12 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
         }};
     }
 
-    log.push_str(
-        "DllRegisterServer start
-",
-    );
-
-    let dll_path = step!("get_path", crate::globals::DllModule::get_path());
-    log.push_str(&format!(
-        "dll_path: {dll_path}
-"
+    log.line(&format!(
+        "DllRegisterServer start build={}",
+        option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown")
     ));
-
+    let dll_path = step!("get_path", crate::globals::DllModule::get_path());
+    log.line(&format!("dll_path: {dll_path}"));
     step!(
         "clsid_register",
         tsf::registration::clsid_register(&dll_path)
@@ -634,12 +748,7 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
         tsf::registration::profile_register(&dll_path)
     );
     step!("category_register", tsf::registration::category_register());
-
-    log.push_str(
-        "DllRegisterServer success
-",
-    );
-    let _ = std::fs::write(&log_path, &log);
+    log.line("DllRegisterServer success");
 
     CoUninitialize();
     S_OK
@@ -649,23 +758,47 @@ pub unsafe extern "system" fn DllRegisterServer() -> windows::core::HRESULT {
 pub unsafe extern "system" fn DllUnregisterServer() -> windows::core::HRESULT {
     use windows::Win32::System::Com::{COINIT_APARTMENTTHREADED, CoInitializeEx, CoUninitialize};
     let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    let r = match tsf::registration::unregister_server() {
-        Ok(_) => S_OK,
-        Err(e) => {
-            tracing::error!("DllUnregisterServer: {e}");
-            E_FAIL
+    let log = RegisterLog::open();
+    log.line(&format!(
+        "DllUnregisterServer start build={}",
+        option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown")
+    ));
+    // 各段階の結果を残す。戻り値は今までどおり S_OK（既に解除済みの項目の失敗で
+    // 解除全体を失敗にしない）。成否の判断は記録とレジストリの状態で行う（#33）。
+    for (label, result) in tsf::registration::unregister_server() {
+        match result {
+            Ok(()) => log.line(&format!("unregister OK: {label}")),
+            Err(e) => log.line(&format!("unregister FAIL: {label} — {e}")),
         }
-    };
+    }
+    log.line("DllUnregisterServer end");
     CoUninitialize();
-    r
+    S_OK
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    #[test]
+    fn register_log_time_is_utc_text() {
+        assert_eq!(utc_text(0), "1970-01-01T00:00:00Z");
+        // 2026-10-10 の TSF ログの起動識別子 1791599318973 の秒の部分
+        assert_eq!(utc_text(1_791_599_318), "2026-10-10T02:28:38Z");
+        assert_eq!(utc_text(951_782_400), "2000-02-29T00:00:00Z");
+    }
+
+    #[test]
+    fn default_files_are_created_only_when_absent() {
+        let dir = super::log_rotation_tests::temp_dir("write-if-absent");
+        let path = dir.join("config.toml");
+        assert!(crate::engine::config::write_if_absent(&path, b"first").expect("create"));
+        // 既にあるファイルは上書きしない（同時に作られた設定を消さない）
+        assert!(!crate::engine::config::write_if_absent(&path, b"second").expect("exists"));
+        assert_eq!(std::fs::read(&path).expect("read"), b"first");
+    }
 
     struct CountTargets {
         tsf: Arc<AtomicUsize>,

@@ -223,13 +223,19 @@ pub fn request_reload() {
     }
 }
 
-/// 監視スレッドを起動する（DllMain から 1 回）。
+/// 監視スレッドを起動する（最初の Activate の初期化から 1 回、Issue #72）。
+///
+/// 起動に失敗しても再試行しない。記録だけ残し、IME の切り替え・言語バーの
+/// 「エンジン再起動」・ホストへの再接続のときの読み直しに任せる。
 pub fn start_watcher() {
     #[cfg(windows)]
     {
-        let _ = std::thread::Builder::new()
+        if let Err(e) = std::thread::Builder::new()
             .name("rakukan-config-watch".into())
-            .spawn(win32::run_loop);
+            .spawn(win32::run_loop)
+        {
+            tracing::error!("config_watch: failed to start the watch thread: {e}");
+        }
     }
 }
 
@@ -342,6 +348,8 @@ mod win32 {
         publish_request: bool,
         periodic_ms: u64,
         control_poll_ms: Option<u64>,
+        /// 監視源を作った直後に 1 回読み直す（初期読み込みと監視開始の間の保存を逃さない、Issue #72）。
+        initial_read: bool,
     }
 
     fn retry_missing(
@@ -406,6 +414,7 @@ mod win32 {
             publish_request: true,
             periodic_ms: super::PERIODIC_MS,
             control_poll_ms: poll_ms,
+            initial_read: true,
         };
         run_loop_with(
             options,
@@ -457,6 +466,10 @@ mod win32 {
             dir.is_some(),
             options.periodic_ms
         );
+        if options.initial_read {
+            let outcome = read("watch_start");
+            tracing::debug!("config_watch: read (watch_start) -> {outcome}");
+        }
 
         loop {
             let set = super::WaitSet::new(named.is_some(), request.is_some(), dir.is_some());
@@ -641,6 +654,7 @@ mod win32 {
                         publish_request: false,
                         periodic_ms,
                         control_poll_ms: Some(20),
+                        initial_read: false,
                     },
                     move |reason| {
                         let body = std::fs::read_to_string(&path).expect("read config");
@@ -778,6 +792,7 @@ mod win32 {
                         publish_request: false,
                         periodic_ms: 2_000,
                         control_poll_ms: None,
+                        initial_read: false,
                     },
                     move |reason| {
                         if reads == 0 {
@@ -847,6 +862,7 @@ mod win32 {
                         publish_request: false,
                         periodic_ms: 2_000,
                         control_poll_ms: None,
+                        initial_read: false,
                     },
                     move |_| {
                         let result = manager.reinit();
@@ -913,6 +929,7 @@ mod win32 {
                         publish_request: false,
                         periodic_ms: 800,
                         control_poll_ms: None,
+                        initial_read: false,
                     },
                     move |reason| {
                         let result = manager.reinit();

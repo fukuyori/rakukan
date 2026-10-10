@@ -826,10 +826,31 @@ pub fn config_save_default() -> Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&path, default_config_text())?;
-        tracing::info!("config.toml created: {}", path.display());
+        if write_if_absent(&path, default_config_text().as_bytes())? {
+            tracing::info!("config.toml created: {}", path.display());
+        }
     }
     Ok(())
+}
+
+/// ファイルが無いときだけ作って書く。作ったら `true`。
+///
+/// `exists()` の確認と書き込みの間に別のプロセス（設定アプリや別の TSF）が作った
+/// ファイルを上書きしないよう、新規作成（`create_new`）で開く（Issue #72）。
+pub(crate) fn write_if_absent(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<bool> {
+    use std::io::Write;
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            f.write_all(bytes)?;
+            Ok(true)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+        Err(e) => Err(e),
+    }
 }
 
 /// 共通の読込処理（すべての読込経路がここを通る、Issue #65）。
@@ -917,6 +938,15 @@ pub fn init_config_manager() {
         mgr.path = config_path().unwrap_or_else(|_| mgr.path.clone());
     }
     let _ = reload_config("init");
+}
+
+/// 今使っている設定をログに残す（Issue #72）。
+///
+/// ログの初期化より前に設定が読まれていた場合、そのときの記録は残っていない。
+/// 初期化の後で、使っている組（revision と本文のハッシュ）を明示する。
+pub fn log_current_config(context: &str) {
+    let snapshot = lock_manager().current.clone();
+    tracing::info!("config in use ({context}): {}", snapshot.apply_id());
 }
 
 pub fn current_config() -> AppConfig {

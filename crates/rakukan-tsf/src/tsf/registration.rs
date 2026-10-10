@@ -181,34 +181,56 @@ fn install_layout_or_tip() -> Result<()> {
 
 // ─── 削除 ────────────────────────────────────────────────────────────────────
 
-pub fn unregister_server() -> Result<()> {
-    let _ = category_unregister();
-    let _ = profile_unregister();
-    let _ = clsid_unregister();
+/// 登録を解除する。各段階の結果を返す（Issue #72）。
+///
+/// どれかが失敗しても残りの段階は続ける（今までどおり）。結果は呼び出し側
+/// （`DllUnregisterServer`）が `register_debug.log` に残す。解除の成否を
+/// regsvr32 の終了コードだけで判断できないため、記録で確かめられるようにする。
+pub fn unregister_server() -> Vec<(&'static str, Result<()>)> {
+    let results = vec![
+        ("category_unregister", category_unregister()),
+        ("profile_unregister", profile_unregister()),
+        ("clsid_unregister", clsid_unregister()),
+    ];
     tracing::info!("Unregistered");
-    Ok(())
+    results
 }
 
 fn clsid_unregister() -> Result<()> {
     let clsid_str = GUID_TEXT_SERVICE.to_guid_string();
-    let _ = HKEY_CLASSES_ROOT.delete_tree(&format!("CLSID\\{}", clsid_str));
-    Ok(())
+    HKEY_CLASSES_ROOT
+        .delete_tree(&format!("CLSID\\{}", clsid_str))
+        .map_err(|e| anyhow::anyhow!("delete CLSID key: {e}"))
 }
 
 fn profile_unregister() -> Result<()> {
+    let mut errors = Vec::new();
     unsafe {
         let profiles: ITfInputProcessorProfiles =
             CoCreateInstance(&CLSID_TF_InputProcessorProfiles, None, CLSCTX_INPROC_SERVER)
                 .map_err(|e| anyhow::anyhow!("{e}"))?;
 
         // モダン API
-        if let Ok(mgr) = Interface::cast::<ITfInputProcessorProfileMgr>(&profiles) {
-            let _ = mgr.UnregisterProfile(&GUID_TEXT_SERVICE, LANG_JAPANESE, &GUID_PROFILE, 0);
+        match Interface::cast::<ITfInputProcessorProfileMgr>(&profiles) {
+            Ok(mgr) => {
+                if let Err(e) =
+                    mgr.UnregisterProfile(&GUID_TEXT_SERVICE, LANG_JAPANESE, &GUID_PROFILE, 0)
+                {
+                    errors.push(format!("UnregisterProfile: {e}"));
+                }
+            }
+            Err(e) => errors.push(format!("cast ProfileMgr: {e}")),
         }
         // 旧 API
-        let _ = profiles.Unregister(&GUID_TEXT_SERVICE);
+        if let Err(e) = profiles.Unregister(&GUID_TEXT_SERVICE) {
+            errors.push(format!("Unregister: {e}"));
+        }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(errors.join("; ")))
+    }
 }
 
 fn category_unregister() -> Result<()> {
@@ -222,14 +244,20 @@ fn category_unregister() -> Result<()> {
         GUID_TFCAT_TIPCAP_SYSTRAYSUPPORT,
     ];
 
+    let mut errors = Vec::new();
     unsafe {
-        if let Ok(catmgr) =
-            CoCreateInstance::<_, ITfCategoryMgr>(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
-        {
-            for cat in CATEGORIES {
-                let _ = catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE);
+        let catmgr: ITfCategoryMgr =
+            CoCreateInstance(&CLSID_TF_CategoryMgr, None, CLSCTX_INPROC_SERVER)
+                .map_err(|e| anyhow::anyhow!("CoCreateInstance CategoryMgr: {e}"))?;
+        for cat in CATEGORIES {
+            if let Err(e) = catmgr.UnregisterCategory(&GUID_TEXT_SERVICE, cat, &GUID_TEXT_SERVICE) {
+                errors.push(format!("{}: {e}", cat.to_guid_string()));
             }
         }
     }
-    Ok(())
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!("UnregisterCategory: {}", errors.join("; ")))
+    }
 }

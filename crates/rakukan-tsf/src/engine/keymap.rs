@@ -522,6 +522,21 @@ impl Keymap {
     }
 }
 
+impl Keymap {
+    /// 空の keymap。設定を読まない（Issue #72）。
+    ///
+    /// COM オブジェクトの生成時（Activate より前）に置く仮の値。生成だけで
+    /// `config.toml` を読まないようにするため、`Default`（設定のレイアウトを読む）を使わない。
+    /// キー処理の sink は Activate で `Keymap::load()` に置き換えた後に登録される。
+    pub fn placeholder() -> Self {
+        Self::build(KeymapConfig {
+            preset: None,
+            inherit_preset: false,
+            bindings: Vec::new(),
+        })
+    }
+}
+
 impl Default for Keymap {
     fn default() -> Self {
         let preset = match super::config::keyboard_layout() {
@@ -715,8 +730,9 @@ pub fn keymap_save_default() -> Result<()> {
             "action = \"cursor_end\"\n",
             "\n",
         );
-        std::fs::write(&path, header)?;
-        tracing::info!("keymap.toml created: {}", path.display());
+        if super::config::write_if_absent(&path, header.as_bytes())? {
+            tracing::info!("keymap.toml created: {}", path.display());
+        }
     }
     Ok(())
 }

@@ -158,6 +158,12 @@ fn apply_langbar_mode(factory: &TextServiceFactory_Impl, new_mode: ImeMode) {
 }
 
 fn handle_langbar_menu_command(factory: &TextServiceFactory_Impl, id: u32) {
+    // Activate より前（初期化前）は何もしない。設定・keymap の読み直しや
+    // エンジンの再起動へ進めない（Issue #72）。
+    if !crate::runtime_ready() {
+        tracing::info!("langbar menu: cmd={id} ignored before Activate");
+        return;
+    }
     match id {
         ID_MENU_IME_ON => {
             apply_langbar_mode(factory, ImeMode::On);
@@ -278,7 +284,6 @@ fn to_wide_menu_text(text: &str) -> Vec<u16> {
 
 // ─── TextServiceState ─────────────────────────────────────────────────────────
 
-#[derive(Default)]
 pub struct TextServiceState {
     pub client_id: u32,
     pub thread_mgr: Option<ITfThreadMgr>,
@@ -292,6 +297,23 @@ pub struct TextServiceState {
     /// （Deactivate で解除。解除には登録先のコンパートメントが要る）
     pub openclose_cookie: u32,
     pub openclose_comp: Option<ITfCompartment>,
+}
+
+impl Default for TextServiceState {
+    /// COM オブジェクトの生成（`DllGetClassObject` / `CreateInstance`）で呼ばれる。
+    /// Activate より前なので、設定を読まない仮の keymap を置く（Issue #72）。
+    fn default() -> Self {
+        Self {
+            client_id: 0,
+            thread_mgr: None,
+            keymap: Keymap::placeholder(),
+            langbar_sink: None,
+            threadmgr_cookie: 0,
+            threadfocus_cookie: 0,
+            openclose_cookie: 0,
+            openclose_comp: None,
+        }
+    }
 }
 
 // Safety: TSF は STA。RefCell + COM オブジェクトを持つが
@@ -357,6 +379,10 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
     fn Activate(&self, ptim: Option<&ITfThreadMgr>, tid: u32) -> windows::core::Result<()> {
         let _t = diag::span("Activate");
         let tm = ptim.ok_or_else(|| windows::core::Error::new(E_FAIL, "null thread_mgr"))?;
+
+        // ログ・設定・設定の監視の初期化（プロセスにつき 1 回、Issue #72）。
+        // keymap の読み込みより前、`inner` を借用する前に行う。
+        crate::runtime_init_once();
 
         {
             let mut inner = self
@@ -1100,8 +1126,11 @@ pub(super) fn action_name(a: &UserAction) -> &'static str {
 // ─── ITfLangBarItem ──────────────────────────────────────────────────────────
 
 /// 現在のバックエンドラベルを返す（例: "CPU" / "Vulkan" / "CUDA" / "初期化中..."）
+///
+/// 既にあるエンジンを参照するだけで、無ければ作らない（Issue #72）。ツールチップの
+/// 表示だけでエンジンの初期化やホストの起動まで進めない。初期化は最初の入力で始まる。
 fn current_backend_label() -> String {
-    engine_try_get_or_create()
+    crate::engine::state::engine_try_get()
         .ok()
         .as_deref() // Option<MutexGuard<EngineWrapper>> → Option<&EngineWrapper>
         .and_then(|g| g.as_ref()) // Deref: EngineWrapper → Option<RakunEngine>
