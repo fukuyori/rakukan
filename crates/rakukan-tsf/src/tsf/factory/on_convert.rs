@@ -317,6 +317,8 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
         crate::engine::state::maybe_log_gpu_memory(engine);
+        // 変換結果を待つ経路では、待機タイマーが候補を差し込むときに入力行も書き換える。
+        candidate_window::set_waiting_context(&ctx, tid);
         let _t = diag::span("Convert");
         // Convert 1 回の RPC 回数・合計時間を Drop で記録する（Step 13-2）
         let _rpc_probe = ConvertRpcProbe::start();

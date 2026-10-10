@@ -1153,6 +1153,160 @@ thread_local! {
     static TL_MODEL_WAIT: RefCell<Option<ModelWait>> = const { RefCell::new(None) };
     /// Waiting に入った時刻（Step 13-1 の上限判定用）。`None` = Waiting ではない。
     static TL_WAITING_SINCE: Cell<Option<std::time::Instant>> = const { Cell::new(None) };
+    /// 待機タイマーが入力行を書き換えるための (ctx, tid, DocumentMgr ポインタ)。
+    /// Space の変換開始時（`on_convert`）に保存する。ライブ変換の文脈は
+    /// `stop_live_timer` で消えるので、別に持つ。
+    static TL_WAIT_CTX: RefCell<Option<(windows::Win32::UI::TextServices::ITfContext, u32, usize)>> =
+        const { RefCell::new(None) };
+}
+
+/// 待機タイマーが入力行を書き換えるための文脈を保存する（`on_convert` の入口から呼ぶ）。
+pub fn set_waiting_context(ctx: &windows::Win32::UI::TextServices::ITfContext, tid: u32) {
+    use windows::core::Interface;
+    let dm_ptr = unsafe { ctx.GetDocumentMgr().ok() }
+        .map(|dm| dm.as_raw() as usize)
+        .unwrap_or(0);
+    TL_WAIT_CTX.with(|c| *c.borrow_mut() = Some((ctx.clone(), tid, dm_ptr)));
+}
+
+/// 待機タイマーで候補を差し込んだとき、入力行を「前置き＋選択中の候補＋残り」に書き換える。
+///
+/// ライブ変換の Phase1A（`try_apply_phase1a`）と同じく WM_TIMER から
+/// `RequestEditSession` を呼ぶ。フォーカス中の文書であること、読みの世代が進んで
+/// いないこと、セッションがまだ同じ候補を選んでいることを確かめ、`SetText` を
+/// 確認できたときだけ `true` を返す。確認できなければ `false`（従来どおり、入力行は
+/// 次のキー入力まで変わらない）。
+fn try_apply_selecting_composition(prefix: String, converted: String, suffix: String) -> bool {
+    use crate::engine::state::{SessionState, composition_clone, session_get};
+    use crate::tsf::edit_session::EditSession;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use windows::Win32::UI::TextServices::TF_ES_READWRITE;
+
+    let Some((ctx, tid, dm_ptr)) = TL_WAIT_CTX.with(|c| c.borrow().clone()) else {
+        tracing::debug!("waiting timer: no context, composition not updated");
+        return false;
+    };
+    let focused = current_focus_dm_ptr();
+    let has_composition = composition_clone().map(|g| g.is_some()).unwrap_or(false);
+    if tid == 0 || dm_ptr == 0 || focused != Some(dm_ptr) || !has_composition {
+        tracing::debug!(
+            "waiting timer: composition not updated (tid={tid} dm={dm_ptr:#x} focus={focused:?} composition={has_composition})"
+        );
+        return false;
+    }
+
+    let captured_gen = crate::tsf::live_session::conv_gen_snapshot();
+    let applied = Arc::new(AtomicBool::new(false));
+    let cancelled = Arc::new(AtomicBool::new(false));
+    let applied_in = applied.clone();
+    let cancelled_in = cancelled.clone();
+    let ctx_req = ctx.clone();
+
+    let session = EditSession::new(move |ec| unsafe {
+        use windows::Win32::Foundation::E_FAIL;
+        use windows::Win32::UI::TextServices::{
+            TF_ANCHOR_END, TF_HALTCOND, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+        };
+        if cancelled_in.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        if current_focus_dm_ptr() != Some(dm_ptr) {
+            return Err(windows::core::Error::new(E_FAIL, "focus DM changed"));
+        }
+        if crate::tsf::live_session::conv_gen_snapshot() != captured_gen {
+            return Err(windows::core::Error::new(E_FAIL, "stale gen"));
+        }
+        // 実行時点でも同じ候補を選んだ Selecting であること（遅延実行の間に
+        // 候補送り・確定・取り消しがあれば書き換えない）。
+        let still_selected = session_get().is_ok_and(|s| {
+            matches!(&*s, SessionState::Selecting { .. })
+                && s.current_candidate() == Some(converted.as_str())
+        });
+        if !still_selected {
+            return Err(windows::core::Error::new(E_FAIL, "selection changed"));
+        }
+        let comp = composition_clone()
+            .unwrap_or(None)
+            .ok_or_else(|| windows::core::Error::new(E_FAIL, "no composition"))?;
+        let range = comp
+            .GetRange()
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
+        let full_w: Vec<u16> = format!("{prefix}{converted}{suffix}")
+            .encode_utf16()
+            .collect();
+        {
+            let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
+                Ok(g) => g,
+                Err(_) => {
+                    tracing::debug!("waiting timer: COMPOSITION_APPLY_LOCK busy, skip SetText");
+                    return Ok(());
+                }
+            };
+            range
+                .SetText(ec, 0, &full_w)
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+        }
+        applied_in.store(true, Ordering::Release);
+
+        // 表示属性: 全体を入力中（点線）、選択中の候補を変換済み（太実線）にする
+        // （`update_composition_candidate_parts` と同じ塗り方）。
+        let set_attr = |r: &windows::Win32::UI::TextServices::ITfRange, atom: u32| {
+            if atom != 0
+                && let Ok(prop) =
+                    ctx.GetProperty(&windows::Win32::UI::TextServices::GUID_PROP_ATTRIBUTE)
+            {
+                let _ = prop.Clear(ec, r);
+                let var = windows_core::VARIANT::from(atom as i32);
+                let _ = prop.SetValue(ec, r, &var);
+            }
+        };
+        set_attr(&range, crate::tsf::display_attr::atom_input());
+        if let Ok(sel_range) = range.Clone() {
+            let mut actual = 0i32;
+            let _ = sel_range.ShiftStart(
+                ec,
+                prefix.encode_utf16().count() as i32,
+                &mut actual,
+                std::ptr::null::<TF_HALTCOND>(),
+            );
+            let suffix_utf16 = suffix.encode_utf16().count() as i32;
+            if suffix_utf16 > 0 {
+                let _ = sel_range.ShiftEnd(
+                    ec,
+                    -suffix_utf16,
+                    &mut actual,
+                    std::ptr::null::<TF_HALTCOND>(),
+                );
+            }
+            set_attr(&sel_range, crate::tsf::display_attr::atom_converted());
+        }
+        if let Ok(cursor) = range.Clone() {
+            let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+            let sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(cursor)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            };
+            let _ = ctx.SetSelection(ec, &[sel]);
+        }
+        Ok(())
+    });
+
+    let result = unsafe { ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) };
+    if result.is_ok() && applied.load(Ordering::Acquire) {
+        true
+    } else {
+        // 未確認のまま遅延実行されると、ここで返した結果と表示が食い違うので取り消す。
+        cancelled.store(true, Ordering::Release);
+        tracing::debug!(
+            "waiting timer: composition SetText not confirmed (result_ok={})",
+            result.is_ok()
+        );
+        false
+    }
 }
 
 const WAITING_TIMER_ID: usize = 0x1234;
@@ -1564,6 +1718,8 @@ fn waiting_tick() -> anyhow::Result<()> {
         let page_selected;
         let probe_view;
         let probe_selected_text;
+        let composition_prefix;
+        let composition_suffix;
         {
             let mut sess = match session_get() {
                 Ok(s) => s,
@@ -1582,24 +1738,8 @@ fn waiting_tick() -> anyhow::Result<()> {
             page_info_str = sess.page_info().to_string();
             probe_view = sess.current_candidate_view().cloned();
             probe_selected_text = sess.current_candidate().unwrap_or("").to_string();
-        }
-
-        // Phase 6b 第2段: WM_TIMER 経路の pending update を観測する。
-        // この経路では candidate window は更新するが、WndProc コンテキストで
-        // EditSession を開けないため TSF composition は更新しない（次のキー入力時の
-        // poll で拾う）。composition_updated=false でこの設計上のラグを可視化する。
-        if let Some(view) = probe_view {
-            tracing::info!(
-                "candidate_display_probe event=wm_timer_pending_update reading_len={} source={} first_candidate={:?} page_selected={} selected_candidate={:?} composition_candidate={:?} selected_match=false composition_updated=false llm_pending=false corresponding_reading_len={} suffix_len={}",
-                preedit_key.chars().count(),
-                view.source.as_str(),
-                page_cands.first().map(String::as_str).unwrap_or(""),
-                page_selected,
-                probe_selected_text,
-                "",
-                view.corresponding_reading_len,
-                view.suffix.chars().count()
-            );
+            composition_prefix = sess.selecting_prefix_clone();
+            composition_suffix = sess.selecting_remainder_clone();
         }
 
         stop_waiting_timer();
@@ -1611,6 +1751,35 @@ fn waiting_tick() -> anyhow::Result<()> {
             pos_y,
             None,
         );
+        // 候補ウィンドウと同じく、入力行も選択中の候補（差し込んだ直後は 1 番目）に
+        // 書き換える。確認できなければ従来どおり次のキー入力まで変わらない。
+        let composition_updated = !probe_selected_text.is_empty()
+            && try_apply_selecting_composition(
+                composition_prefix,
+                probe_selected_text.clone(),
+                composition_suffix,
+            );
+
+        // Phase 6b 第2段: WM_TIMER 経路の pending update を観測する。
+        if let Some(view) = probe_view {
+            tracing::info!(
+                "candidate_display_probe event=wm_timer_pending_update reading_len={} source={} first_candidate={:?} page_selected={} selected_candidate={:?} composition_candidate={:?} selected_match={} composition_updated={} llm_pending=false corresponding_reading_len={} suffix_len={}",
+                preedit_key.chars().count(),
+                view.source.as_str(),
+                page_cands.first().map(String::as_str).unwrap_or(""),
+                page_selected,
+                probe_selected_text,
+                if composition_updated {
+                    probe_selected_text.as_str()
+                } else {
+                    ""
+                },
+                composition_updated,
+                composition_updated,
+                view.corresponding_reading_len,
+                view.suffix.chars().count()
+            );
+        }
         tracing::debug!(
             "on_waiting_timer(selecting): updated {} cands for {:?}",
             page_cands.len(),
@@ -1822,6 +1991,9 @@ fn waiting_tick() -> anyhow::Result<()> {
     let remainder = format!("{pending_suffix}{remainder}");
     let page_info_str;
     let page_cands;
+    let selected_text;
+    let composition_prefix;
+    let composition_suffix;
     {
         let mut sess = match session_get() {
             Ok(s) => s,
@@ -1840,17 +2012,22 @@ fn waiting_tick() -> anyhow::Result<()> {
         );
         page_cands = sess.page_candidates().to_vec();
         page_info_str = sess.page_info().to_string();
+        selected_text = sess.current_candidate().unwrap_or("").to_string();
+        composition_prefix = sess.selecting_prefix_clone();
+        composition_suffix = sess.selecting_remainder_clone();
     }
 
     show_with_status(&page_cands, 0, &page_info_str, pos_x, pos_y, None);
 
-    // composition text を更新するには TSF API が必要だが、ここは WndProc コンテキスト
-    // → composition 更新は次のキー入力時にポーリングが拾う（既存の poll ブランチ）
-    // ここでは候補ウィンドウだけ更新して、ユーザーに候補が来たことを見せる
+    // 候補ウィンドウと同じく、入力行も 1 番目の候補に書き換える。確認できなければ
+    // 従来どおり、次のキー入力のときに反映する。
+    let composition_updated = !selected_text.is_empty()
+        && try_apply_selecting_composition(composition_prefix, selected_text, composition_suffix);
     tracing::debug!(
-        "on_waiting_timer: showed {} cands for {:?}",
+        "on_waiting_timer: showed {} cands for {:?} composition_updated={}",
         page_cands.len(),
-        wait_preedit
+        wait_preedit,
+        composition_updated
     );
     Ok(())
 }
