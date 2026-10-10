@@ -76,6 +76,46 @@ static LOG_INIT: OnceLock<()> = OnceLock::new();
 /// 「DLL 内ログがどこにも出ない」状態を host ログから判別できるようにする（Issue #8）。
 static LOG_STATUS: OnceLock<String> = OnceLock::new();
 
+/// DLL ログのローテーション。上限・世代数は host / TSF のログと揃える
+/// （月単位の再計測に足りる期間を残すため）。判定は DLL ロード時の 1 回だけ。
+const DLL_LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const DLL_LOG_ROTATE_GENERATIONS: usize = 5;
+
+fn rotated_dll_log_path(path: &std::path::Path, generation: usize) -> Option<std::path::PathBuf> {
+    let mut file_name = path.file_name()?.to_os_string();
+    file_name.push(format!(".{generation}"));
+    Some(path.with_file_name(file_name))
+}
+
+/// `path` が上限を超えていれば `.1`〜`.N` を 1 つずつずらし、最古の世代を消す。
+fn rotate_dll_log_if_needed(path: &std::path::Path) {
+    let Ok(meta) = std::fs::metadata(path) else {
+        return;
+    };
+    if meta.len() <= DLL_LOG_ROTATE_MAX_BYTES {
+        return;
+    }
+    for generation in (1..=DLL_LOG_ROTATE_GENERATIONS).rev() {
+        let Some(dst) = rotated_dll_log_path(path, generation) else {
+            return;
+        };
+        if generation == DLL_LOG_ROTATE_GENERATIONS {
+            let _ = std::fs::remove_file(&dst);
+        }
+        let src = if generation == 1 {
+            path.to_path_buf()
+        } else {
+            let Some(src) = rotated_dll_log_path(path, generation - 1) else {
+                return;
+            };
+            src
+        };
+        if src.exists() {
+            let _ = std::fs::rename(src, dst);
+        }
+    }
+}
+
 /// DLL 内の tracing subscriber を初期化する。
 ///
 /// cdylib は tracing の static をホストプロセスと共有しないため、これを
@@ -91,14 +131,7 @@ fn init_dll_logging() {
             .map(|d| std::path::PathBuf::from(d).join("rakukan"))
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
         let path = dir.join("rakukan-engine-dll.log");
-        // 8 MiB 超で 1 世代ローテーション
-        if let Ok(meta) = std::fs::metadata(&path)
-            && meta.len() > 8 * 1024 * 1024
-        {
-            let rotated = dir.join("rakukan-engine-dll.log.1");
-            let _ = std::fs::remove_file(&rotated);
-            let _ = std::fs::rename(&path, &rotated);
-        }
+        rotate_dll_log_if_needed(&path);
         let status = match std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -942,5 +975,46 @@ mod abi11_tests {
         let ptr = engine_pending_romaji(handle);
         assert_eq!(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(), "t");
         engine_free_string(ptr);
+    }
+}
+
+#[cfg(test)]
+mod dll_log_rotation_tests {
+    use super::*;
+
+    #[test]
+    fn rotates_only_over_limit_and_keeps_five_generations() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rakukan-engine-dll.log");
+        let gen_path = |g| rotated_dll_log_path(&path, g).unwrap();
+
+        // 上限以下ならずらさない
+        std::fs::write(&path, b"small").unwrap();
+        rotate_dll_log_if_needed(&path);
+        assert!(path.exists());
+        assert!(!gen_path(1).exists());
+
+        // 既存の .1〜.5 を置き、上限超えの本体をずらす
+        for g in 1..=DLL_LOG_ROTATE_GENERATIONS {
+            std::fs::write(gen_path(g), format!("gen{g}")).unwrap();
+        }
+        let big = std::fs::File::create(&path).unwrap();
+        big.set_len(DLL_LOG_ROTATE_MAX_BYTES + 1).unwrap();
+        drop(big);
+        rotate_dll_log_if_needed(&path);
+
+        assert!(!path.exists());
+        assert_eq!(
+            std::fs::metadata(gen_path(1)).unwrap().len(),
+            DLL_LOG_ROTATE_MAX_BYTES + 1
+        );
+        for g in 2..=DLL_LOG_ROTATE_GENERATIONS {
+            assert_eq!(
+                std::fs::read_to_string(gen_path(g)).unwrap(),
+                format!("gen{}", g - 1)
+            );
+        }
+        // 最古（旧 .5）は消え、.6 は作らない
+        assert!(!gen_path(DLL_LOG_ROTATE_GENERATIONS + 1).exists());
     }
 }

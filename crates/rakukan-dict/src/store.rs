@@ -12,7 +12,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{debug, info, trace, warn};
 
 use crate::cost_band;
 use crate::mozc_dict::MozcDict;
@@ -525,7 +525,7 @@ impl DictStore {
     /// cost 昇順、最大 `limit` 件）
     pub fn lookup_dict(&self, reading: &str, limit: usize) -> Vec<String> {
         let result = self.lookup_class(reading, cost_band::Class::Normal, limit);
-        debug!(
+        trace!(
             "dict::store: lookup reading={:?} mozc={} n={}",
             reading,
             self.inner.mozc.is_some(),

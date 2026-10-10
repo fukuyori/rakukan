@@ -578,9 +578,10 @@ impl KanaKanjiConverter {
         });
 
         // 自信度 (平均 log-prob) の観測ログ。閾値チューニングの材料になる。
-        if tracing::enabled!(tracing::Level::DEBUG) {
+        // 候補ごとに出て DLL ログの大半を占めるため TRACE（必要時は RAKUKAN_LOG で有効化）。
+        if tracing::enabled!(tracing::Level::TRACE) {
             for (c, lp) in &scored {
-                tracing::debug!(reading = %reading, candidate = %c, avg_logprob = lp, "conv candidate confidence");
+                tracing::trace!(reading = %reading, candidate = %c, avg_logprob = lp, "conv candidate confidence");
             }
         }
 

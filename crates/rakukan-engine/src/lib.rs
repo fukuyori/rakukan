@@ -47,7 +47,7 @@ pub use rakukan_dict::{DictStore, find_mozc_dict, user_dict_path};
 
 use kanji::{Backend as KarukanBackend, registry};
 use thiserror::Error;
-use tracing::{debug, info};
+use tracing::{debug, info, trace};
 
 // ── コンテキストトリミング ────────────────────────────────────────────────────
 
@@ -713,7 +713,7 @@ impl RakunEngine {
         let typed = std::mem::take(&mut self.pending_romaji_buf);
         let output = self.romaji.flush();
         self.hiragana_buf.push_str(&output);
-        debug!("engine::close_pending: {:?} → {:?}", typed, output);
+        trace!("engine::close_pending: {:?} → {:?}", typed, output);
         self.input_log.push(InputEntry {
             typed,
             output,
@@ -740,7 +740,7 @@ impl RakunEngine {
         {
             self.hiragana_buf.push(separator);
             self.log_push(c, separator, InputKind::Separator);
-            debug!("engine::push: numeric separator {:?} → {:?}", c, separator);
+            trace!("engine::push: numeric separator {:?} → {:?}", c, separator);
             return self.current_preedit();
         }
 
@@ -756,7 +756,7 @@ impl RakunEngine {
         {
             self.hiragana_buf.push(separator);
             self.log_push(c, separator, InputKind::Separator);
-            debug!(
+            trace!(
                 "engine::push: alpha/symbol separator {:?} → {:?}",
                 c, separator
             );
@@ -771,7 +771,7 @@ impl RakunEngine {
             };
             self.hiragana_buf.push(out);
             self.log_push(c, out, InputKind::Digit);
-            debug!("engine::push: digit {:?} → {:?}", c, out);
+            trace!("engine::push: digit {:?} → {:?}", c, out);
             return self.current_preedit();
         }
 
@@ -790,7 +790,7 @@ impl RakunEngine {
                 };
                 self.hiragana_buf.push(out);
                 self.log_push(c, out, InputKind::Symbol);
-                debug!("engine::push: symbol {:?} → {:?}", c, out);
+                trace!("engine::push: symbol {:?} → {:?}", c, out);
                 return self.current_preedit();
             }
         }
@@ -803,7 +803,7 @@ impl RakunEngine {
         if let Some((entry, added)) = romaji_step(&mut self.romaji, &mut self.pending_romaji_buf, c)
         {
             self.hiragana_buf.push_str(&added);
-            debug!("engine::push: romaji {:?} → {:?}", entry, added);
+            trace!("engine::push: romaji {:?} → {:?}", entry, added);
             self.log_push(entry, added, InputKind::Romaji);
         }
         self.current_preedit()
