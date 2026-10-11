@@ -996,7 +996,7 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 
 ## 15. 今後のロードマップ
 
-2026-10-10 に改定。作業の順序と判断の経緯は [handoff.md](handoff.md) の 0 章、インストーラーは [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md) が正。
+2026-10-11 に改定。作業の順序と各段の作業・完了条件は [October_Plan.md](October_Plan.md)、引き継ぎは [handoff.md](handoff.md) の 0 章、インストーラーは [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md) が正。
 
 ### 完了済み
 
@@ -1009,16 +1009,20 @@ Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
 - RPC の所要時間の記録（`rpc SLOW`、区間の集計）— 旧「RPC レイテンシ計測」
 - 設定変更の全 TSF プロセスへの反映（#65）と、ホストへの再接続時に `config.toml` を読み直した設定で `Create`（#65 の再接続組込み）
 - ホストの再起動をまたいだ composition の復元（#56。RPC protocol v6、要求の所有者・番号・保持応答、`Change` / `Restore`）
+- **0.12.0 のリリース（2026-10-10、タグ `0.12.0` = `c15fefe`）** — RPC protocol v6、engine ABI 11。上の #56・#65 を含む。インストールは従来の手順（別の IME に切り替え → サインアウト → サインイン → インストール）
 
-### 次のリリース（v6）
+### 次の作業（順序は [October_Plan.md](October_Plan.md) の 1 節）
 
-- 統合試験・実機試験に合格したら 1 回だけリリースする（RPC protocol v6、engine ABI 11）。インストール方法は現在の手順のまま（別の IME に切り替え → サインアウト → サインイン → インストール）
+1. **フォーカス移動での文脈のリセット（#71、段 A）** — フォーカス移動で `ResetAll` が送られず、LLM の文脈が残る（0.12.0 にある）
+2. **入力処理の見直し（#69 / #70、段 B）** — ホストとの通信失敗時に打鍵・確定する文字列を失わない、エンジンの準備前・ロック競合中のキー
+3. **インストーラーの見直し（#33、段 C。ログの見直し #73〜#76 を含む）** — `%ProgramFiles%` への配置、使用中のファイルは再起動時に置き換え（`restartreplace`）、再起動で完了、`cargo make install` の一本化、winget
 
-### v6 の後
+並行して行う: **ビームサーチの所要時間の計測と上位 k 件の部分選択（#83 の前段）** — engine の中だけで閉じ、RPC・ABI を変えない
 
-- **インストーラーの見直し（#33）** — `%ProgramFiles%` への配置、使用中のファイルは再起動時に置き換え（`restartreplace`）、再起動で完了、`cargo make install` の一本化、winget
-- **入力処理の見直し（#69 / #70）** — ホストとの通信失敗時に打鍵・確定する文字列を失わない、エンジンの準備前・ロック競合中のキー
-- **古い設定の採用防止（#66）**
+### 段 C の後
+
+- **設定とモデルの扱い（#66 / #64 / #49 / #82）** — 古い設定の採用防止（#66）、設定が合わない `Create` での旧 engine DLL の寿命（#64）、モデル変更の反映（#49）、モデル定義の config.toml の `[models]` への移動（#82。engine ABI の変更）を合わせて設計する
+- **ビームサーチの KV キャッシュ再利用（#83）** — 並行作業の計測の結果を見て判断する。入れる場合は、今の方式へ戻せる設定、新旧が同じ候補を選ぶ試験、CPU / Vulkan / CUDA の各版での確認を条件にする
 - IPC の名前とパイプの設定（利用者 SID ＋ ログオンセッションでパイプ・ミューテックスの範囲をそろえる、`FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS`）— Issue 化は未定
 
 ### 状況を確認していない旧項目（2026-10-10 時点）

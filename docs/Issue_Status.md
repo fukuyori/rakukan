@@ -1,6 +1,6 @@
 # 開いている Issue の状況
 
-2026-10-10 時点。GitHub の一覧（`gh issue list --state open`、23 件）と [handoff.md](handoff.md) の記録を照合して更新した。
+2026-10-11 時点。GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合して更新した。
 最新リリースは 0.12.0（2026-10-10、タグ `0.12.0` = main `c15fefe`）。10 月の作業計画（#71 → #69 / #70 → #33）は [October_Plan.md](October_Plan.md)。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
@@ -25,9 +25,16 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 |---|---|---|---|
 | [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | 2026-09-22 起票、設計案あり（`config_version` の照合とホスト再起動への統一）。方式採用・実装着手は未承認。#67 で `config_version` の項目だけ先取りする形を返信中 | 方式の承認。設計に「`config_version = None` は一致として受理しない」を明記する。#49 / #64 と合わせて設計 |
 | [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。対処方針は未決定、再現・実機検証は未実施。#66 に、古い設定の拒否とホスト内のエンジン置き換え・`Reload` の廃止を組み合わせる案を記録 | #66 と同時に方針を決める |
-| [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | 未着手。計画書の J-3（推奨: モデル設定の変更でホストを終了） | #66 と合わせて設計 |
+| [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | 未着手。計画書の J-3（推奨: モデル設定の変更でホストを終了） | #66 と合わせて設計（#82 のモデル定義の移動も同時に） |
 | [#35](https://github.com/fukuyori/rakukan/issues/35) | 区読点だけの読み（。。。）が変換に乗らず、リーダー記号（… ‥）の標準的な入力手段が無い | 判断待ち。計画書の J-6（推奨: Space 変換の候補を先に、`z` キー列は後）。[Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) の 3.1.1 の A〜C が未決。PR #31 は nick が取り下げ済み | 方式と文字の割り当てを決める |
-| [#16](https://github.com/fukuyori/rakukan/issues/16) | 数字混在の読みで、かな run が辞書（ユーザー辞書・学習履歴・MOZC）候補を参照できない | 判断待ち。計画書の J-7（推奨: 段 4 で設計から）。変換ワーカーへ辞書を渡す配線は #53 と共通 | 段 4 で設計 |
+| [#16](https://github.com/fukuyori/rakukan/issues/16) | 数字混在の読みで、かな run が辞書（ユーザー辞書・学習履歴・MOZC）候補を参照できない | 判断待ち。計画書の J-7（推奨: 段 4 で設計から）。変換ワーカーへ辞書を渡す配線は #53 と共通 | 段 4 で設計（#80 の助数詞の学習を含める） |
+| [#77](https://github.com/fukuyori/rakukan/issues/77) | 数字・英字の全角/半角をユーザーの選択から学習する仕組みが無い | 2026-10-11 起票。検討段階。mozc の 2026-10 の修正 6 件を参考として記録。数字の後の `,` `.` が全角数字と混在するかは未確認 | 学習の単位・対象・使い道・設定との優先・保存先（#46 と関係）を決める |
+| [#78](https://github.com/fukuyori/rakukan/issues/78) | MOZC 辞書をリポジトリで指定した版からビルド時に取得し、mozc 本来の辞書との差（除外・追加語・aux）を反映する | 2026-10-11 起票。方式は決定（版の一覧と SHA256 をリポジトリに置き、ビルド時に 1 回取得。版の更新は指示時のみ、個別指定は一覧にある完全 SHA のみ）。反映順は 切替 → 除外 → 追加語 → aux。ライセンス表記の誤り（Apache 2.0 としていた）は別途先に修正 | 着手時期（#33 との関係）と、本文の未決（一覧の作成手順・置き場所と名前・呼び出すタスクなど）を決める |
+| [#79](https://github.com/fukuyori/rakukan/issues/79) | ヒエログリフや珍しい仮名（濁点付き仮名・鼻濁音・アイヌ語カナ）が一般的な読みの変換で上位に出る | 2026-10-11 起票。実測で 4 番目前後に出ることを確認。mozc は `d901f2c2f` / `028c3b36c` で降格（削除ではない）。重要度は中〜低（先頭 3 件は変わらず、誤確定にもつながらない）として、10 月の計画には入れない | 降格の方式を決める。推奨はエンジン側で文字のコードで判定する方式（辞書の作り直し不要。固定版の `symbol.tsv` で対象 120 件に一致、誤検出 0）。辞書側で印を付ける方式にするかは #78 のときに改めて決める |
+| [#80](https://github.com/fukuyori/rakukan/issues/80) | 数字の後の助数詞の学習が、数字が変わると効かない（読み全体で学習しているため） | 2026-10-11 起票。mozc `662147864`（数字の直後という条件付きの学習）を参考に記録 | #16 の設計に含めて検討する |
+| [#81](https://github.com/fukuyori/rakukan/issues/81) | 候補ウィンドウがダークテーマに対応していない | 2026-10-11 起票。色はライト用のみで固定。入力モード表示は `SystemUsesLightTheme` で判定している | 判定に使う値・判定の時期・配色・config での選択・高コントラストの扱いを決める |
+| [#82](https://github.com/fukuyori/rakukan/issues/82) | モデルの定義をエンジン埋め込みの `models.toml` から config.toml の `[models]` に移す（karukan #111 方式） | 2026-10-11 起票。今はモデルの追加に再ビルドが要り、一覧が `install.ps1`・設定アプリ・config のコメントに重複 | 既定の定義の置き場所、engine へ渡す形（ABI 変更）、`model_variant` との互換を決める。#49 と合わせて設計 |
+| [#83](https://github.com/fukuyori/rakukan/issues/83) | Space 変換のビームサーチで、ステップごとに全系列を計算し直している（KV キャッシュの再利用） | 2026-10-11 起票。karukan `8d132a9`（#95）を参考に記録。効果は未計測 | まず所要時間を計測。次に上位 k 件の部分選択、その後に KV 再利用（旧方式へ戻せる設定、新旧比較の試験、3 variant での確認） |
 | [#29](https://github.com/fukuyori/rakukan/issues/29) | ユーザー辞書エントリに `priority = "low"` を追加する | 保留 | 要望があれば再検討 |
 
 ## 3. 別計画で扱う
