@@ -575,6 +575,135 @@ enum InputKind {
     Raw,
     /// `push_fullwidth_alpha`。Shift+英字（`typed` は ASCII 大文字）
     ShiftAlpha,
+    /// `seed_preedit` / `retain_range` の境界。打鍵の無い文字列を、綴りを選んで入れた項目
+    /// （`typed` は選んだ綴り、`output` はかな。docs/Input_Pipeline_Plan.md 4.8）
+    Seeded,
+}
+
+/// 種の綴りの優先表（docs/Input_Pipeline_Plan.md 4.8）。無いかなは最短の綴り（同じ長さなら
+/// `c` / `q` で始まらないもの、その中で辞書順の先頭。か = ka・く = ku のため）。
+const SEED_PREFERRED: &[(&str, &str)] = &[
+    ("し", "shi"),
+    ("ち", "chi"),
+    ("つ", "tsu"),
+    ("ふ", "fu"),
+    ("じ", "ji"),
+    ("しゃ", "sha"),
+    ("しゅ", "shu"),
+    ("しょ", "sho"),
+    ("ちゃ", "cha"),
+    ("ちゅ", "chu"),
+    ("ちょ", "cho"),
+    ("じゃ", "ja"),
+    ("じゅ", "ju"),
+    ("じょ", "jo"),
+    ("を", "wo"),
+];
+
+/// 1 つの綴りで出せるかなの最大の長さ（文字数。最長一致の上限）。
+const SEED_MAX_KANA: usize = 3;
+
+/// かな `kana` の種の綴り（綴りが無ければ `None`）。
+fn seed_spelling(kana: &str) -> Option<String> {
+    if let Some((_, spelling)) = SEED_PREFERRED.iter().find(|(k, _)| *k == kana) {
+        return Some((*spelling).to_string());
+    }
+    let c_or_q = |s: &str| s.starts_with('c') || s.starts_with('q');
+    romaji::spellings_for(kana)
+        .iter()
+        .min_by(|a, b| {
+            a.len()
+                .cmp(&b.len())
+                .then_with(|| c_or_q(a).cmp(&c_or_q(b)))
+                .then_with(|| a.cmp(b))
+        })
+        .cloned()
+}
+
+/// 種の項目の区切り。
+enum SeedPart {
+    /// 綴りのあるかな（かな, 綴り）
+    Spelled(String, String),
+    /// 「っ」（次の綴りで決める）
+    Sokuon,
+    /// 「ん」（次の綴りで決める）
+    Hatsuon,
+    /// 逆引きの無い文字
+    Raw(char),
+}
+
+/// `text` を種の項目に分ける（docs/Input_Pipeline_Plan.md 4.8 の `engine_seed_preedit`）。
+/// かなは綴りの最長一致で分け、`typed` に綴り、`output` にかな。逆引きの無い文字は
+/// `typed = output` の Raw 項目。「っ」は次の綴りが子音（`n` を除く）で始まればその子音を
+/// 重ね、それ以外は `xtu`。「ん」は次の綴りが母音・`y`・`n` で始まれば `nn`、それ以外は `n`。
+fn seed_entries(text: &str) -> Vec<InputEntry> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut parts = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        match chars[i] {
+            'っ' => {
+                parts.push(SeedPart::Sokuon);
+                i += 1;
+                continue;
+            }
+            'ん' => {
+                parts.push(SeedPart::Hatsuon);
+                i += 1;
+                continue;
+            }
+            _ => {}
+        }
+        let longest = (1..=SEED_MAX_KANA.min(chars.len() - i))
+            .rev()
+            .find_map(|len| {
+                let kana: String = chars[i..i + len].iter().collect();
+                seed_spelling(&kana).map(|spelling| (kana, spelling, len))
+            });
+        match longest {
+            Some((kana, spelling, len)) => {
+                parts.push(SeedPart::Spelled(kana, spelling));
+                i += len;
+            }
+            None => {
+                parts.push(SeedPart::Raw(chars[i]));
+                i += 1;
+            }
+        }
+    }
+    // 「っ」「ん」は次の綴りで決まるので、後ろから決める
+    let mut entries: Vec<InputEntry> = Vec::with_capacity(parts.len());
+    let mut next_typed: Option<String> = None;
+    for part in parts.into_iter().rev() {
+        let (typed, output, kind) = match part {
+            SeedPart::Spelled(kana, spelling) => (spelling, kana, InputKind::Seeded),
+            SeedPart::Sokuon => {
+                let typed = match next_typed.as_deref().and_then(|t| t.chars().next()) {
+                    // `n` は重ねると「ん」になるので重ねない
+                    Some(c) if c.is_ascii_alphabetic() && !"aiueon".contains(c) => c.to_string(),
+                    _ => "xtu".to_string(),
+                };
+                (typed, "っ".to_string(), InputKind::Seeded)
+            }
+            SeedPart::Hatsuon => {
+                let typed = match next_typed.as_deref().and_then(|t| t.chars().next()) {
+                    Some(c) if "aiueoyn".contains(c) => "nn",
+                    _ => "n",
+                };
+                (typed.to_string(), "ん".to_string(), InputKind::Seeded)
+            }
+            SeedPart::Raw(c) => (c.to_string(), c.to_string(), InputKind::Raw),
+        };
+        next_typed = (kind == InputKind::Seeded).then(|| typed.clone());
+        entries.push(InputEntry {
+            typed,
+            output,
+            kind,
+            closes_run: true,
+        });
+    }
+    entries.reverse();
+    entries
 }
 
 /// 入力ログの 1 エントリ。
@@ -845,6 +974,59 @@ impl RakunEngine {
         self.log_detached_at = self.input_log.len();
     }
 
+    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を種の項目で入れる（engine ABI 12、
+    /// docs/Input_Pipeline_Plan.md 4.8）。打鍵ログは選んだ綴りになり、F9 / F10 はその綴りで
+    /// 変換する（打った綴りには戻らない）。
+    pub fn seed_preedit(&mut self, text: &str) {
+        self.reset_preedit();
+        self.hiragana_buf = text.to_string();
+        self.input_log = seed_entries(text);
+    }
+
+    /// 読みの `start..end` 文字を残し、未確定ローマ字を消す（engine ABI 12、確定の引き継ぎ。
+    /// docs/Input_Pipeline_Plan.md 4.8）。打鍵ログの出力の連結が読みと一致していれば、区間に
+    /// 入る項目を残し、境界にかかる項目は残る部分を種にして `true`。一致していなければ
+    /// `seed_preedit(残す文字列)` と同じにして `false`。
+    pub fn retain_range(&mut self, start: usize, end: usize) -> bool {
+        let chars: Vec<char> = self.hiragana_buf.chars().collect();
+        let end = end.min(chars.len());
+        let start = start.min(end);
+        let kept: String = chars[start..end].iter().collect();
+        let logged: String = self.input_log.iter().map(|e| e.output.as_str()).collect();
+        if self.log_detached_at != 0 || logged != self.hiragana_buf {
+            self.seed_preedit(&kept);
+            return false;
+        }
+        let mut log = Vec::new();
+        let mut pos = 0;
+        for entry in std::mem::take(&mut self.input_log) {
+            let len = entry.output.chars().count();
+            let (from, to) = (pos, pos + len);
+            pos = to;
+            if len == 0 || to <= start || from >= end {
+                continue;
+            }
+            if from >= start && to <= end {
+                log.push(entry);
+                continue;
+            }
+            // 境界にかかる項目: 残る部分を種にする
+            let part: String = entry
+                .output
+                .chars()
+                .skip(start.saturating_sub(from))
+                .take(to.min(end) - from.max(start))
+                .collect();
+            log.extend(seed_entries(&part));
+        }
+        self.hiragana_buf = kept;
+        self.pending_romaji_buf.clear();
+        self.romaji = RomajiConverter::new();
+        self.input_log = log;
+        self.log_detached_at = 0;
+        true
+    }
+
     /// ローマ字変換を経由せず hiragana_buf に直接1文字追加する。
     /// テンキー記号など、かなルールに登録されている文字をそのまま入力する場合に使用する。
     pub fn push_raw(&mut self, c: char) {
@@ -908,7 +1090,8 @@ impl RakunEngine {
             self.log_pop();
             return true;
         }
-        let start = if last.kind != InputKind::Romaji {
+        // 種の項目（複数文字のかな）は、1 項目の閉じたローマ字区間として書き換える
+        let start = if last.kind != InputKind::Romaji && last.kind != InputKind::Seeded {
             len
         } else if last.closes_run {
             len - 1
@@ -2914,5 +3097,132 @@ mod digit_license_dict_tests {
         // 注入前に完了した結果は、辞書なしの判定のまま返る（再変換まで）
         assert_eq!(rejected_without_dict(&cands), 0, "{cands:?}");
         assert!(!cands.iter().any(|c| c == "2枚目を参考"), "{cands:?}");
+    }
+}
+
+#[cfg(test)]
+mod seed_tests {
+    //! engine ABI 12 の `seed_preedit` / `retain_range`（docs/Input_Pipeline_Plan.md 4.8）
+    use super::{EngineConfig, InputKind, RakunEngine};
+
+    fn engine() -> RakunEngine {
+        RakunEngine::new(EngineConfig::default())
+    }
+
+    fn typed(e: &mut RakunEngine, s: &str) {
+        for c in s.chars() {
+            e.push_char(c);
+        }
+    }
+
+    #[test]
+    fn a_seeded_reading_continues_with_typed_keys() {
+        // F-8: seed_preedit("か") → s → a
+        let mut e = engine();
+        e.seed_preedit("か");
+        typed(&mut e, "sa");
+        assert_eq!(e.hiragana_text(), "かさ");
+        assert_eq!(e.romaji_log_str(), "kasa");
+        assert_eq!(e.hiragana_from_romaji_log(), "かさ");
+    }
+
+    #[test]
+    fn seed_spellings_follow_the_preferred_table_sokuon_and_hatsuon() {
+        let spelled = |text: &str| {
+            let mut e = engine();
+            e.seed_preedit(text);
+            assert_eq!(e.hiragana_text(), text);
+            assert_eq!(e.hiragana_from_romaji_log(), text);
+            e.romaji_log_str()
+        };
+        // F-9: 種の綴り（打鍵の sinbun には戻らない）
+        assert_eq!(spelled("しんぶん"), "shinbun");
+        assert_eq!(spelled("ちゃを"), "chawo");
+        assert_eq!(spelled("きゃ"), "kya");
+        // 「っ」は次の子音を重ね、次が無ければ xtu
+        assert_eq!(spelled("かった"), "katta");
+        assert_eq!(spelled("あっ"), "axtu");
+        // 「ん」は次が母音・y・n なら nn
+        assert_eq!(spelled("はんい"), "hanni");
+        assert_eq!(spelled("こんや"), "konnya");
+        assert_eq!(spelled("ほんの"), "honnno");
+        // 「っ」の次が「ん」なら重ねない（nn は「ん」になる）
+        assert_eq!(spelled("っん"), "xtun");
+        // 逆引きの無い文字は Raw（打鍵 = 出力）
+        assert_eq!(spelled("漢じ"), "漢ji");
+    }
+
+    #[test]
+    fn retain_range_keeps_whole_entries_and_seeds_the_cut_one() {
+        // F-10: 打鍵 kyo の「きょ」に retain_range(1, 2)
+        let mut e = engine();
+        typed(&mut e, "kyo");
+        assert_eq!(e.hiragana_text(), "きょ");
+        assert!(e.retain_range(1, 2));
+        assert_eq!(e.hiragana_text(), "ょ");
+        assert_eq!(e.input_log.len(), 1);
+        assert_eq!(e.input_log[0].kind, InputKind::Seeded);
+        assert_eq!(e.input_log[0].output, "ょ");
+        assert_eq!(e.hiragana_from_romaji_log(), "ょ");
+
+        // 区間に入る項目は打鍵のまま残す（F-4・F-5: 残り「かん」の F10 は kan）
+        let mut e = engine();
+        typed(&mut e, "sikan");
+        e.flush_pending_n();
+        assert_eq!(e.hiragana_text(), "しかん");
+        assert!(e.retain_range(1, 3));
+        assert_eq!(e.hiragana_text(), "かん");
+        assert_eq!(e.romaji_log_str(), "kan");
+        // 続けて打てる
+        typed(&mut e, "ji");
+        assert_eq!(e.hiragana_text(), "かんじ");
+        assert_eq!(e.romaji_log_str(), "kanji");
+    }
+
+    #[test]
+    fn retain_range_seeds_when_the_log_does_not_match_the_reading() {
+        let mut e = engine();
+        typed(&mut e, "kanji");
+        // F9 などで表示を差し替えた後はログと読みが対応しない
+        e.force_preedit("かんじあ".to_string());
+        assert!(!e.retain_range(2, 4));
+        assert_eq!(e.hiragana_text(), "じあ");
+        assert_eq!(e.romaji_log_str(), "jia");
+    }
+
+    #[test]
+    fn backspace_through_seeded_entries_keeps_the_log_in_step() {
+        // 優先表の綴り・「っ」・複数文字のかなをまたいで 1 文字ずつ消す
+        let mut e = engine();
+        e.seed_preedit("しゃっかん");
+        let mut reading = "しゃっかん".to_string();
+        while !reading.is_empty() {
+            assert!(e.backspace());
+            reading.pop();
+            assert_eq!(e.hiragana_text(), reading);
+            assert_eq!(e.hiragana_from_romaji_log(), reading, "{reading:?}");
+        }
+        assert_eq!(e.romaji_log_str(), "");
+        // 種の後に打った文字も、続けて消せる
+        let mut e = engine();
+        e.seed_preedit("ちゃ");
+        typed(&mut e, "ka");
+        assert_eq!(e.hiragana_text(), "ちゃか");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "ちゃ");
+        assert_eq!(e.hiragana_from_romaji_log(), "ちゃ");
+        assert_eq!(e.romaji_log_str(), "cha");
+    }
+
+    #[test]
+    fn backspace_after_a_seeded_multi_kana_entry_keeps_the_log_in_step() {
+        let mut e = engine();
+        e.seed_preedit("きゃ");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "き");
+        assert_eq!(e.hiragana_from_romaji_log(), "き");
+        assert!(e.backspace());
+        assert_eq!(e.hiragana_text(), "");
+        assert_eq!(e.romaji_log_str(), "");
     }
 }

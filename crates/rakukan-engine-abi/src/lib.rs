@@ -20,7 +20,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 use libloading::{Library, Symbol};
 
-const EXPECTED_ENGINE_ABI_VERSION: u32 = 11;
+const EXPECTED_ENGINE_ABI_VERSION: u32 = 12;
 
 // ─── Segments モデル（CONVERTER_REDESIGN Phase A） ────────────────────────────
 
@@ -239,6 +239,9 @@ struct EngineVTable {
     commit_as_hiragana: unsafe extern "C" fn(*mut c_void),
     reset_preedit: unsafe extern "C" fn(*mut c_void),
     force_preedit: unsafe extern "C" fn(*mut c_void, *const c_char),
+    // 種と確定の引き継ぎ（ABI v12、docs/Input_Pipeline_Plan.md 4.8）
+    seed_preedit: unsafe extern "C" fn(*mut c_void, *const c_char),
+    retain_range: unsafe extern "C" fn(*mut c_void, u32, u32) -> bool,
     reset_all: unsafe extern "C" fn(*mut c_void),
 
     // 変換（同期）
@@ -347,6 +350,8 @@ impl EngineVTable {
             commit_as_hiragana: load_sym!(lib, b"engine_commit_as_hiragana\0"),
             reset_preedit: load_sym!(lib, b"engine_reset_preedit\0"),
             force_preedit: load_sym!(lib, b"engine_force_preedit\0"),
+            seed_preedit: load_sym!(lib, b"engine_seed_preedit\0"),
+            retain_range: load_sym!(lib, b"engine_retain_range\0"),
             reset_all: load_sym!(lib, b"engine_reset_all\0"),
             convert_sync: load_sym!(lib, b"engine_convert_sync\0"),
             merge_candidates: load_sym!(lib, b"engine_merge_candidates\0"),
@@ -715,6 +720,19 @@ impl DynEngine {
         unsafe {
             (self.vtable.force_preedit)(self.handle, c.as_ptr());
         }
+    }
+
+    /// 読み・未確定・打鍵ログを消し、`text` を種の項目で入れる（ABI v12）。
+    pub fn seed_preedit(&mut self, text: &str) {
+        let c = std::ffi::CString::new(text.replace('\0', "")).unwrap_or_default();
+        unsafe {
+            (self.vtable.seed_preedit)(self.handle, c.as_ptr());
+        }
+    }
+
+    /// 読みの `start..end` 文字を残し、未確定を消す（ABI v12）。打鍵ログを保てたかを返す。
+    pub fn retain_range(&mut self, start: u32, end: u32) -> bool {
+        unsafe { (self.vtable.retain_range)(self.handle, start, end) }
     }
 
     pub fn reset_all(&mut self) {

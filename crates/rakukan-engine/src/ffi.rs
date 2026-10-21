@@ -17,7 +17,7 @@ use crate::{EngineConfig, RakunEngine};
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 
-pub const ENGINE_ABI_VERSION: u32 = 11;
+pub const ENGINE_ABI_VERSION: u32 = 12;
 
 /// ABI 11: 0=エラー（poison）、1=Empty、2/3=Queued、4/5=Running、6..9=Done。
 /// 偶奇が `same_reading`、Done の 8 以上が `failed`。
@@ -543,6 +543,23 @@ pub extern "C" fn engine_force_preedit(handle: *mut c_void, text: *const c_char)
     engine.force_preedit(s);
 }
 
+/// 読み・未確定・打鍵ログを消し、`text` を種の項目で入れる（ABI v12。
+/// docs/Input_Pipeline_Plan.md 4.8）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_seed_preedit(handle: *mut c_void, text: *const c_char) {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    let s = unsafe { std::ffi::CStr::from_ptr(text).to_string_lossy() };
+    engine.seed_preedit(&s);
+}
+
+/// 読みの `start..end` 文字を残し、未確定を消す（ABI v12）。戻り値: 打鍵ログを保てたか
+/// （false なら `seed_preedit` と同じにした）
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_retain_range(handle: *mut c_void, start: u32, end: u32) -> bool {
+    let engine = unsafe { &mut *(handle as *mut RakunEngine) };
+    engine.retain_range(start as usize, end as usize)
+}
+
 /// すべての状態をリセット
 #[unsafe(no_mangle)]
 pub extern "C" fn engine_reset_all(handle: *mut c_void) {
@@ -963,18 +980,32 @@ mod build_info_tests {
 }
 
 #[cfg(test)]
-mod abi11_tests {
+mod abi_tests {
     use super::*;
     #[test]
-    fn every_backend_exports_abi11_and_exact_pending_romaji() {
+    fn every_backend_exports_the_abi_version_and_exact_pending_romaji() {
         // この export に feature の条件は無く、cpu / vulkan / cuda で共通。
-        assert_eq!(engine_abi_version(), 11);
+        assert_eq!(engine_abi_version(), ENGINE_ABI_VERSION);
         let mut engine = RakunEngine::new(EngineConfig::default());
         engine.push_char('t');
         let handle = &mut engine as *mut RakunEngine as *mut c_void;
         let ptr = engine_pending_romaji(handle);
         assert_eq!(unsafe { CStr::from_ptr(ptr) }.to_str().unwrap(), "t");
         engine_free_string(ptr);
+    }
+
+    #[test]
+    fn abi12_exports_seed_preedit_and_retain_range() {
+        assert_eq!(engine_abi_version(), 12);
+        let mut engine = RakunEngine::new(EngineConfig::default());
+        let handle = &mut engine as *mut RakunEngine as *mut c_void;
+        let text = std::ffi::CString::new("しかん").unwrap();
+        engine_seed_preedit(handle, text.as_ptr());
+        assert_eq!(engine.romaji_log_str(), "shikan");
+        let handle = &mut engine as *mut RakunEngine as *mut c_void;
+        assert!(engine_retain_range(handle, 1, 3));
+        assert_eq!(engine.hiragana_text(), "かん");
+        assert_eq!(engine.romaji_log_str(), "kan");
     }
 }
 

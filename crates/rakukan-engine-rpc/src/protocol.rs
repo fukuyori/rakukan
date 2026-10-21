@@ -163,14 +163,13 @@ pub enum ChangeRequest {
         surface: String,
     },
     // ─── v7（docs/Input_Pipeline_Plan.md 4.8）──────────────
-    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を入れる。打鍵ログには種の項目として
-    /// 入れる（engine ABI の次の版で）。それまでのホストは `reset_preedit` と各文字の
-    /// `push_raw` で代える。
+    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を種の項目として入れる（engine ABI 12 の
+    /// `engine_seed_preedit`。F9 / F10 は選んだ綴りで変換する）。
     SeedPreedit {
         text: String,
     },
-    /// 読みの `start..end` 文字を残し、未確定ローマ字を消す（確定の引き継ぎ）。
-    /// engine ABI の次の版の前は、残す文字列を `SeedPreedit` と同じ方法で入れ直す。
+    /// 読みの `start..end` 文字を残し、未確定ローマ字を消す（確定の引き継ぎ。engine ABI 12 の
+    /// `engine_retain_range`。打鍵ログが読みと対応しなければ `SeedPreedit` と同じにする）。
     RetainRange {
         start: u32,
         end: u32,

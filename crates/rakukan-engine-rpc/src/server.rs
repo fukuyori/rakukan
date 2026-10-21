@@ -1052,7 +1052,10 @@ trait JournalEngine {
     fn backspace(&mut self);
     fn flush_pending_n(&mut self);
     fn force_preedit(&mut self, text: String);
-    fn reading(&self) -> String;
+    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を種の項目で入れる（engine ABI 12）。
+    fn seed_preedit(&mut self, text: &str);
+    /// 読みの `start..end` 文字を残し、未確定ローマ字を消す（engine ABI 12）。
+    fn retain_range(&mut self, start: u32, end: u32);
     fn edit(&self) -> EditState;
 }
 
@@ -1078,33 +1081,18 @@ impl JournalEngine for DynEngine {
     fn force_preedit(&mut self, text: String) {
         DynEngine::force_preedit(self, text);
     }
-    fn reading(&self) -> String {
-        self.hiragana_text()
+    fn seed_preedit(&mut self, text: &str) {
+        DynEngine::seed_preedit(self, text);
+    }
+    fn retain_range(&mut self, start: u32, end: u32) {
+        let kept_log = DynEngine::retain_range(self, start, end);
+        if !kept_log {
+            tracing::debug!("retain_range({start}, {end}): log did not match; seeded");
+        }
     }
     fn edit(&self) -> EditState {
         edit_state(self)
     }
-}
-
-/// `SeedPreedit` の代替（engine ABI の次の版の前）: 読み・未確定ローマ字・打鍵ログを消し、
-/// 各文字を Raw の項目として入れる。打鍵ログは Raw のかなになる（設計書 4.8 の代替期間の制限）。
-fn seed_preedit(eng: &mut impl JournalEngine, text: &str) {
-    eng.reset_preedit();
-    for c in text.chars() {
-        eng.push_raw(c);
-    }
-}
-
-/// `RetainRange` の代替（engine ABI の次の版の前）: 読みの `start..end` 文字を、
-/// `seed_preedit` と同じ方法で入れ直す。
-fn retain_range(eng: &mut impl JournalEngine, start: u32, end: u32) {
-    let kept: String = eng
-        .reading()
-        .chars()
-        .skip(start as usize)
-        .take(end.saturating_sub(start) as usize)
-        .collect();
-    seed_preedit(eng, &kept);
 }
 
 /// journal の 1 件を適用する。結果は作らない（設計書 4.3 の費用）。journal に入らない種類の
@@ -1139,8 +1127,8 @@ fn apply_edit(eng: &mut impl JournalEngine, request: &ChangeRequest) -> Result<(
         ChangeRequest::Backspace => eng.backspace(),
         ChangeRequest::FlushPendingN => eng.flush_pending_n(),
         ChangeRequest::ForcePreedit { text } => eng.force_preedit(text.clone()),
-        ChangeRequest::SeedPreedit { text } => seed_preedit(eng, text),
-        ChangeRequest::RetainRange { start, end } => retain_range(eng, *start, *end),
+        ChangeRequest::SeedPreedit { text } => eng.seed_preedit(text),
+        ChangeRequest::RetainRange { start, end } => eng.retain_range(*start, *end),
         other => return Err(format!("not a journal request: {:?}", other.kind())),
     }
     Ok(())
@@ -1173,7 +1161,7 @@ fn replay_journal(
     let replay = if prefix_ok && eng.edit() == checkpoint.checkpoint_edit {
         Replay::Exact
     } else {
-        seed_preedit(eng, &checkpoint.checkpoint_edit.reading);
+        eng.seed_preedit(&checkpoint.checkpoint_edit.reading);
         for c in checkpoint.checkpoint_edit.pending_romaji.chars() {
             eng.push_char(c);
         }
@@ -1460,8 +1448,10 @@ fn apply_change(
                     warn_if_dict_missing(eng, "LearnForce", &reading);
                     eng.learn_force(&reading, &surface);
                 }
-                ChangeRequest::SeedPreedit { text } => seed_preedit(eng, &text),
-                ChangeRequest::RetainRange { start, end } => retain_range(eng, start, end),
+                ChangeRequest::SeedPreedit { text } => JournalEngine::seed_preedit(eng, &text),
+                ChangeRequest::RetainRange { start, end } => {
+                    JournalEngine::retain_range(eng, start, end)
+                }
                 _ => unreachable!(),
             }
             ChangeOutcome::Unit {
@@ -2431,6 +2421,21 @@ mod journal_replay_tests {
         fn push_fullwidth_alpha(&mut self, c: char) {
             self.push_raw(c);
         }
+        fn seed_preedit(&mut self, text: &str) {
+            self.reset_preedit();
+            for c in text.chars() {
+                self.push_raw(c);
+            }
+        }
+        fn retain_range(&mut self, start: u32, end: u32) {
+            let kept: String = self
+                .reading
+                .chars()
+                .skip(start as usize)
+                .take(end.saturating_sub(start) as usize)
+                .collect();
+            self.seed_preedit(&kept);
+        }
         fn backspace(&mut self) {
             if self.pending.pop().is_none() {
                 self.reading.pop();
@@ -2445,9 +2450,6 @@ mod journal_replay_tests {
         fn force_preedit(&mut self, text: String) {
             self.reading = text;
             self.pending.clear();
-        }
-        fn reading(&self) -> String {
-            self.reading.clone()
         }
         fn edit(&self) -> EditState {
             EditState {
