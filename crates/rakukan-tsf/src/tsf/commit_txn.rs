@@ -43,6 +43,8 @@ pub(crate) struct CommitEffects {
     pub context: bool,
     /// 編集状態を閉じる（`reset_preedit`）。
     pub reset_preedit: bool,
+    /// 最後に、この読みで BG 変換を始める（`start_live_bg_if_ready`。部分確定の残り）。
+    pub bg_start: Option<String>,
 }
 
 /// 文書の結果。
@@ -189,8 +191,9 @@ fn finish_one(id: u64, commit: &PendingCommit, result: &DocResult) {
 }
 
 /// 文書の結果に対して送る後処理を決める。確定した文字列が分かるときだけ学習と文脈を
-/// 送る。BG の回収と編集状態を閉じる処理は、結果によらず送る（composition は
-/// 手放しているので、ホストの読みを残すと次の入力が古い読みに続いてしまう）。
+/// 送る。BG の回収・編集状態を閉じる処理・新しい読みの BG 変換の開始は、結果によらず
+/// 送る（composition は手放しているので、ホストの読みを残すと次の入力が古い読みに
+/// 続いてしまう。BG の開始は今までどおり）。
 fn plan_for_result(effects: &CommitEffects, planned: &str, result: &DocResult) -> EffectPlan {
     match result {
         DocResult::Committed { text } => plan_effects(effects, planned, text),
@@ -199,12 +202,110 @@ fn plan_for_result(effects: &CommitEffects, planned: &str, result: &DocResult) -
             learn: None,
             context: None,
             reset_preedit: effects.reset_preedit,
+            bg_start: effects.bg_start.clone(),
         },
     }
 }
 
 fn send_effects(id: u64, plan: &EffectPlan) {
-    if !plan.bg_reclaim && plan.learn.is_none() && plan.context.is_none() && !plan.reset_preedit {
+    if !plan.bg_reclaim
+        && plan.learn.is_none()
+        && plan.context.is_none()
+        && !plan.reset_preedit
+        && plan.bg_start.is_none()
+    {
+        return;
+    }
+    deliver(id, plan);
+}
+
+/// 後処理を送る先（試験では偽物）。
+trait EffectTarget {
+    fn bg_reclaim(&mut self);
+    fn learn(&mut self, reading: &str, surface: &str);
+    fn learn_force(&mut self, reading: &str, surface: &str);
+    fn commit(&mut self, text: &str);
+    fn reset_preedit(&mut self);
+    /// 新しい読みの BG 変換を始める。始めたかを返す。
+    fn start_live_bg(&mut self, reading: &str) -> bool;
+}
+
+impl EffectTarget for crate::engine::state::DynEngine {
+    fn bg_reclaim(&mut self) {
+        crate::engine::state::DynEngine::bg_reclaim(self);
+    }
+    fn learn(&mut self, reading: &str, surface: &str) {
+        crate::engine::state::DynEngine::learn(self, reading, surface);
+    }
+    fn learn_force(&mut self, reading: &str, surface: &str) {
+        crate::engine::state::DynEngine::learn_force(self, reading, surface);
+    }
+    fn commit(&mut self, text: &str) {
+        crate::engine::state::DynEngine::commit(self, text);
+    }
+    fn reset_preedit(&mut self) {
+        crate::engine::state::DynEngine::reset_preedit(self);
+    }
+    fn start_live_bg(&mut self, reading: &str) -> bool {
+        crate::engine::state::start_live_bg_if_ready(self, reading)
+    }
+}
+
+/// 後処理を決まった順に送る。BG 変換の開始は学習の後（BG の要求が結果不明で台帳に
+/// 残ると、後の学習の要求が断られるため）。BG 変換を始めたかを返す。
+fn apply_plan(target: &mut impl EffectTarget, plan: &EffectPlan) -> bool {
+    if plan.bg_reclaim {
+        target.bg_reclaim();
+    }
+    if let Some(learn) = &plan.learn {
+        match learn.action {
+            LearnAction::Learn => target.learn(&learn.reading, &learn.surface),
+            LearnAction::LearnForce => target.learn_force(&learn.reading, &learn.surface),
+            LearnAction::Skip => {}
+        }
+    }
+    if let Some(context) = &plan.context {
+        target.commit(context);
+    }
+    if plan.reset_preedit {
+        target.reset_preedit();
+    }
+    plan.bg_start
+        .as_deref()
+        .is_some_and(|reading| target.start_live_bg(reading))
+}
+
+thread_local! {
+    /// 直前に送った後処理で BG 変換を始めたか（`take_bg_started`）。
+    static BG_STARTED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 直前の後処理で BG 変換を始めたかを返し、印を消す（呼び出し側がライブ変換の
+/// タイマーを始めるかの判定に使う）。
+pub(crate) fn take_bg_started() -> bool {
+    BG_STARTED.with(|b| b.replace(false))
+}
+
+// 試験では、送る後処理をエンジンへ送らずに記録する
+#[cfg(test)]
+thread_local! {
+    static DELIVERED: RefCell<Vec<(u64, EffectPlan)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// 試験では記録して `true` を返す（エンジンへは送らない）。
+#[cfg(test)]
+fn delivered_in_test(id: u64, plan: &EffectPlan) -> bool {
+    DELIVERED.with(|d| d.borrow_mut().push((id, plan.clone())));
+    true
+}
+
+#[cfg(not(test))]
+fn delivered_in_test(_id: u64, _plan: &EffectPlan) -> bool {
+    false
+}
+
+fn deliver(id: u64, plan: &EffectPlan) {
+    if delivered_in_test(id, plan) {
         return;
     }
     let Ok(mut guard) = crate::engine::state::engine_get() else {
@@ -214,31 +315,18 @@ fn send_effects(id: u64, plan: &EffectPlan) {
     let Some(engine) = guard.as_mut() else {
         return;
     };
-    if plan.bg_reclaim {
-        engine.bg_reclaim();
-    }
-    if let Some(learn) = &plan.learn {
-        match learn.action {
-            LearnAction::Learn => engine.learn(&learn.reading, &learn.surface),
-            LearnAction::LearnForce => engine.learn_force(&learn.reading, &learn.surface),
-            LearnAction::Skip => {}
-        }
-    }
-    if let Some(context) = &plan.context {
-        engine.commit(context);
-    }
-    if plan.reset_preedit {
-        engine.reset_preedit();
-    }
+    let started = apply_plan(engine, plan);
+    BG_STARTED.with(|b| b.set(started));
 }
 
 /// 送る後処理（試験のため、エンジンを使わない部分を切り出す）。
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 struct EffectPlan {
     bg_reclaim: bool,
     learn: Option<LearnPlan>,
     context: Option<String>,
     reset_preedit: bool,
+    bg_start: Option<String>,
 }
 
 /// 確定した文字列 `committed` に対して送る後処理を決める。学習は、確定した文字列が
@@ -255,6 +343,7 @@ fn plan_effects(effects: &CommitEffects, planned: &str, committed: &str) -> Effe
         learn,
         context: effects.context.then(|| committed.to_string()),
         reset_preedit: effects.reset_preedit,
+        bg_start: effects.bg_start.clone(),
     }
 }
 
@@ -272,6 +361,7 @@ mod tests {
             }),
             context: true,
             reset_preedit: true,
+            bg_start: None,
         }
     }
 
@@ -353,10 +443,172 @@ mod tests {
                     learn: None,
                     context: None,
                     reset_preedit: true,
+                    bg_start: None,
                 },
                 "{result:?}"
             );
         }
+    }
+
+    fn learn_only() -> CommitEffects {
+        CommitEffects {
+            learn: effects().learn,
+            ..Default::default()
+        }
+    }
+
+    fn delivered_learns() -> Vec<Option<String>> {
+        DELIVERED.with(|d| {
+            d.borrow_mut()
+                .drain(..)
+                .map(|(_, plan)| plan.learn.map(|l| l.surface))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn learning_is_sent_once_after_the_document_result() {
+        delivered_learns();
+        // 同期で確定できた: 結果の後で 1 回
+        let a = begin("漢字".into(), learn_only());
+        assert!(delivered_learns().is_empty());
+        *a.borrow_mut() = ReqState::Done(DocResult::Committed {
+            text: "漢字".into(),
+        });
+        finish_completed();
+        finish_completed();
+        assert_eq!(delivered_learns(), vec![Some("漢字".to_string())]);
+        // 確定に失敗した・要求が拒否された・確定した文字列が分からない: 送らない
+        for result in [
+            DocResult::Failed("EndComposition"),
+            DocResult::CommittedUnknown,
+        ] {
+            let c = begin("漢字".into(), learn_only());
+            *c.borrow_mut() = ReqState::Done(result);
+            finish_completed();
+        }
+        let c = begin("漢字".into(), learn_only());
+        mark_not_run(&c, "edit session refused");
+        finish_completed();
+        assert!(delivered_learns().is_empty());
+        // 後で実行される: その場で 1 回送り、結果の後では送らない
+        let d = begin("漢字".into(), learn_only());
+        send_early_if_pending(&d);
+        assert_eq!(delivered_learns(), vec![Some("漢字".to_string())]);
+        *d.borrow_mut() = ReqState::Done(DocResult::Committed {
+            text: "漢字".into(),
+        });
+        finish_completed();
+        assert!(delivered_learns().is_empty());
+        assert!(remaining().is_empty());
+    }
+
+    /// 送った順を記録する偽のエンジン。
+    #[derive(Default)]
+    struct FakeTarget {
+        calls: Vec<String>,
+    }
+
+    impl EffectTarget for FakeTarget {
+        fn bg_reclaim(&mut self) {
+            self.calls.push("bg_reclaim".into());
+        }
+        fn learn(&mut self, _: &str, surface: &str) {
+            self.calls.push(format!("learn {surface}"));
+        }
+        fn learn_force(&mut self, _: &str, surface: &str) {
+            self.calls.push(format!("learn_force {surface}"));
+        }
+        fn commit(&mut self, text: &str) {
+            self.calls.push(format!("commit {text}"));
+        }
+        fn reset_preedit(&mut self) {
+            self.calls.push("reset_preedit".into());
+        }
+        fn start_live_bg(&mut self, reading: &str) -> bool {
+            self.calls.push(format!("bg_start {reading}"));
+            true
+        }
+    }
+
+    #[test]
+    fn the_bg_start_for_the_remainder_is_sent_after_learning() {
+        // 部分確定: 学習と、残りの読みの BG 変換の開始だけを後に送る
+        let e = CommitEffects {
+            learn: effects().learn,
+            bg_start: Some("のこり".into()),
+            ..Default::default()
+        };
+        let mut target = FakeTarget::default();
+        let plan = plan_for_result(
+            &e,
+            "漢字",
+            &DocResult::Committed {
+                text: "漢字".into(),
+            },
+        );
+        assert!(apply_plan(&mut target, &plan));
+        assert_eq!(target.calls, vec!["learn 漢字", "bg_start のこり"]);
+        // 確定に失敗しても、BG 変換は今までどおり始める（学習は送らない）
+        let mut target = FakeTarget::default();
+        let plan = plan_for_result(&e, "漢字", &DocResult::Failed("EndComposition"));
+        assert!(apply_plan(&mut target, &plan));
+        assert_eq!(target.calls, vec!["bg_start のこり"]);
+        // 全体の確定: 学習 → 文脈 → 編集状態を閉じる
+        let mut target = FakeTarget::default();
+        let plan = plan_for_result(
+            &effects(),
+            "漢字",
+            &DocResult::Committed {
+                text: "漢字".into(),
+            },
+        );
+        assert!(!apply_plan(&mut target, &plan));
+        assert_eq!(
+            target.calls,
+            vec!["bg_reclaim", "learn 漢字", "commit 漢字", "reset_preedit"]
+        );
+    }
+
+    #[test]
+    fn the_bg_start_is_sent_once_through_the_transaction() {
+        delivered_learns();
+        let partial = || CommitEffects {
+            learn: effects().learn,
+            bg_start: Some("のこり".into()),
+            ..Default::default()
+        };
+        let bg_starts = || -> Vec<(Option<String>, Option<String>)> {
+            DELIVERED.with(|d| {
+                d.borrow_mut()
+                    .drain(..)
+                    .map(|(_, plan)| (plan.learn.map(|l| l.surface), plan.bg_start))
+                    .collect()
+            })
+        };
+        let once =
+            |learn: Option<&str>| vec![(learn.map(String::from), Some("のこり".to_string()))];
+        // 同期で確定できた: 学習と BG の開始を 1 回
+        let a = begin("漢字".into(), partial());
+        *a.borrow_mut() = ReqState::Done(DocResult::Committed {
+            text: "漢字".into(),
+        });
+        finish_completed();
+        finish_completed();
+        assert_eq!(bg_starts(), once(Some("漢字")));
+        // 確定に失敗した: BG の開始だけを 1 回
+        let b = begin("漢字".into(), partial());
+        *b.borrow_mut() = ReqState::Done(DocResult::Failed("EndComposition"));
+        finish_completed();
+        assert_eq!(bg_starts(), once(None));
+        // 後で実行される: その場で 1 回送り、結果の後では送らない
+        let c = begin("漢字".into(), partial());
+        send_early_if_pending(&c);
+        *c.borrow_mut() = ReqState::Done(DocResult::Committed {
+            text: "漢字".into(),
+        });
+        finish_completed();
+        assert_eq!(bg_starts(), once(Some("漢字")));
     }
 
     #[test]

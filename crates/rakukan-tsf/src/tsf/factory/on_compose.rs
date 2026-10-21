@@ -277,13 +277,24 @@ pub(super) fn update_composition(
 /// end_composition + update_composition を別々に呼ぶと TSF が2セッションを
 /// 別タイミングで実行し、"composition=None" の瞬間にアプリがテキストを
 /// クリアすることがある。これを1セッションにまとめて防ぐ。
+///
+/// 学習（`learn`）だけは、文書の結果を見てから送る（入力処理の見直しの段 5 の 5b）。
+/// 残りの読みの BG 変換の開始（`bg_start`）は、その後に送る（BG の要求が結果不明で台帳に
+/// 残ると、後の学習の要求が断られるため）。BG 変換を始めたかを返す。
+/// 確定部分に縮めた後の範囲を読み直し、それが `commit_text` と同じときだけ学習する。
+/// 文脈・編集状態を閉じる処理・残りの読みの引き継ぎは、今までどおり呼び出し側が
+/// 先に送る（新しい composition にホストの表示を書くため）。EditSession が後で実行
+/// される場合は、学習もその場で先に送る（5a と同じ）。
 pub(super) fn commit_then_start_composition(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
     commit_text: String,
     next_preedit: String,
-) -> Result<()> {
+    learn: Option<crate::tsf::commit_txn::LearnPlan>,
+    bg_start: Option<String>,
+) -> Result<bool> {
+    use crate::tsf::commit_txn::{CommitEffects, DocResult, ReqState};
     use windows::Win32::Foundation::E_FAIL;
 
     // M1.8 T-MID1 拡張: 確定はライブ変換の世代を進める。これをしないと、
@@ -291,6 +302,17 @@ pub(super) fn commit_then_start_composition(
     // 確定後の新 composition に古い preview を書き込み、テキストが
     // 二重に見える競合が起こりうる。
     crate::tsf::live_session::conv_gen_bump();
+
+    let cell = crate::tsf::commit_txn::begin(
+        commit_text.clone(),
+        CommitEffects {
+            learn,
+            bg_start,
+            ..Default::default()
+        },
+    );
+    let session_cell = cell.clone();
+    let _ = crate::tsf::commit_txn::take_bg_started();
 
     // composition_take() をセッション内に移動する（end_composition と同じ理由）。
     // セッション外で take すると COMPOSITION=None になった瞬間に update_composition が
@@ -312,6 +334,17 @@ pub(super) fn commit_then_start_composition(
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
         crate::engine::state::clear_pending_replacement(replacement);
+        {
+            let mut state = session_cell.borrow_mut();
+            if *state != ReqState::Pending {
+                return Ok(());
+            }
+            *state = ReqState::Running;
+        }
+        let finish = |result: DocResult| {
+            *session_cell.borrow_mut() = ReqState::Done(result);
+            crate::tsf::candidate_window::post_commit_done();
+        };
 
         // SetText 排他化（M1.8 T-MID3 の commit 版）: Phase1A / update_composition
         // の SetText と直列化する。他サイトは try_lock + skip だが、確定はスキップ
@@ -350,6 +383,8 @@ pub(super) fn commit_then_start_composition(
         // EndComposition 前に range の末尾を取得しておく。
         let mut insert_after_commit: Option<windows::Win32::UI::TextServices::ITfRange> = None;
         if let Some(comp) = comp {
+            // 確定した文字列（縮めた後に読み直した値。読めなければ分からない）
+            let mut committed: Option<String> = None;
             // composition テキストを commit_text だけに縮める
             if let Ok(range) = comp.GetRange() {
                 if let Err(e) = range.SetText(ec, 0, &commit_w) {
@@ -361,6 +396,7 @@ pub(super) fn commit_then_start_composition(
                         next_preedit
                     );
                 }
+                committed = range_text(ec, &range);
                 // 確定テキストの末尾位置を保存
                 if let Ok(end_range) = range.Clone() {
                     let _ = end_range.Collapse(ec, TF_ANCHOR_END);
@@ -371,20 +407,34 @@ pub(super) fn commit_then_start_composition(
             }
             comp.EndComposition(ec)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))
-                .inspect_err(warn_step)?;
+                .inspect_err(warn_step)
+                .inspect_err(|_| finish(DocResult::Failed("EndComposition")))?;
+            finish(match committed {
+                Some(text) => DocResult::Committed { text },
+                None => DocResult::CommittedUnknown,
+            });
         } else if !commit_text.is_empty() {
             let insert_point = get_insert_range_or_end(&ctx, ec, "commit_then_start direct commit")
-                .inspect_err(warn_step)?;
+                .inspect_err(warn_step)
+                .inspect_err(|_| finish(DocResult::Failed("direct commit")))?;
             insert_point
                 .SetText(ec, 0, &commit_w)
                 .map_err(|e| {
                     windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}"))
                 })
-                .inspect_err(warn_step)?;
+                .inspect_err(warn_step)
+                .inspect_err(|_| finish(DocResult::Failed("direct commit")))?;
+            finish(DocResult::Committed {
+                text: commit_text.clone(),
+            });
             if let Ok(end_range) = insert_point.Clone() {
                 let _ = end_range.Collapse(ec, TF_ANCHOR_END);
                 insert_after_commit = Some(end_range);
             }
+        } else {
+            finish(DocResult::Committed {
+                text: String::new(),
+            });
         }
 
         if next_preedit.is_empty() {
@@ -480,15 +530,20 @@ pub(super) fn commit_then_start_composition(
             Ok(hr) if hr.is_err() => {
                 crate::engine::state::clear_pending_replacement(replacement);
                 tracing::warn!("commit_then_start: edit session failed hr={hr:?}");
+                crate::tsf::commit_txn::mark_not_run(&cell, "edit session refused");
             }
             Ok(_) => crate::engine::state::clear_pending_replacement(replacement),
             Err(e) => {
                 crate::engine::state::clear_pending_replacement(replacement);
                 tracing::warn!("commit_then_start: RequestEditSession failed: {e}");
+                crate::tsf::commit_txn::mark_not_run(&cell, "request failed");
             }
         }
     }
-    Ok(())
+    // 後で実行される場合は学習をここで先に送る。同期で実行されていれば、結果を見て送る
+    crate::tsf::commit_txn::send_early_if_pending(&cell);
+    crate::tsf::commit_txn::finish_completed();
+    Ok(crate::tsf::commit_txn::take_bg_started())
 }
 
 /// GUID_PROP_ATTRIBUTE プロパティを range にセットしてアンダーラインを要求する

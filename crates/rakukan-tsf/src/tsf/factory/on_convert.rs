@@ -1760,6 +1760,7 @@ impl super::TextServiceFactory_Impl {
                         }),
                         context: true,
                         reset_preedit: true,
+                        bg_start: None,
                     },
                 )?;
                 return Ok(true);
@@ -1805,7 +1806,7 @@ impl super::TextServiceFactory_Impl {
                     sess.set_preedit(unselected.clone());
                 }
                 drop(guard);
-                commit_then_start_composition(ctx, tid, sink, selected, preedit)?;
+                commit_then_start_composition(ctx, tid, sink, selected, preedit, None, None)?;
                 return Ok(true);
             }
             // ── BlockSelecting（区読点分割変換）: Enter → 全ブロックまとめて確定 ──
@@ -1869,6 +1870,7 @@ impl super::TextServiceFactory_Impl {
                         learn: None,
                         context: true,
                         reset_preedit: true,
+                        bg_start: None,
                     },
                 )?;
                 return Ok(true);
@@ -1905,28 +1907,31 @@ impl super::TextServiceFactory_Impl {
                 let confirmed = format!("{prefix}{commit_text}");
                 if !remainder_reading.is_empty() {
                     // remainder がある → 確定部分を commit し、残りで LiveConv 再開
-                    // （部分確定は段 5 の後の段で確定トランザクションに移す。それまでは今の順）
-                    match action {
-                        crate::engine::state::LearnAction::LearnForce => {
-                            engine.learn_force(&reading, &text)
-                        }
-                        crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
-                        crate::engine::state::LearnAction::Skip => {}
-                    }
+                    // （学習は、文書に確定部分を確定できてから送る: commit_then_start_composition）
                     engine.commit(&confirmed);
                     engine.reset_preedit();
                     for c in remainder_reading.chars() {
                         engine.push_raw(c)?;
                     }
-                    let _ =
-                        crate::engine::state::start_live_bg_if_ready(engine, &remainder_reading);
                     let preedit = engine.preedit_display()?;
                     {
                         let mut sess = session_get()?;
                         sess.set_preedit(remainder_reading.clone());
                     }
                     drop(guard);
-                    commit_then_start_composition(ctx, tid, sink, confirmed, preedit)?;
+                    commit_then_start_composition(
+                        ctx,
+                        tid,
+                        sink,
+                        confirmed,
+                        preedit,
+                        Some(LearnPlan {
+                            reading,
+                            surface: text,
+                            action,
+                        }),
+                        Some(remainder_reading.clone()),
+                    )?;
                 } else {
                     let full_text = format!("{confirmed}{remainder}");
                     drop(guard);
@@ -1994,6 +1999,7 @@ impl super::TextServiceFactory_Impl {
                 learn: None,
                 context: true,
                 reset_preedit: true,
+                bg_start: None,
             },
         )?;
         Ok(true)

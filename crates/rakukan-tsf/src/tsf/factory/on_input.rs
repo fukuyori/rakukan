@@ -18,6 +18,7 @@ use super::{
     commit_full, commit_text, commit_then_start_composition, loading_indicator_symbol,
     update_composition,
 };
+use crate::tsf::commit_txn::LearnPlan;
 
 /// LiveConv 中の追加入力で表示する文字列を決める。
 ///
@@ -202,12 +203,15 @@ impl super::TextServiceFactory_Impl {
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
-                if crate::engine::state::is_auto_learn_enabled()
+                // 学習は、文書に確定できてから送る（commit_then_start_composition）
+                let learn = (crate::engine::state::is_auto_learn_enabled()
                     && full_text != full_reading
-                    && !full_reading.is_empty()
-                {
-                    engine.learn(&full_reading, &full_text);
-                }
+                    && !full_reading.is_empty())
+                .then(|| LearnPlan {
+                    reading: full_reading,
+                    surface: full_text.clone(),
+                    action: crate::engine::state::LearnAction::Learn,
+                });
                 engine.commit(&full_text);
                 engine.reset_preedit();
                 drop(guard);
@@ -225,15 +229,22 @@ impl super::TextServiceFactory_Impl {
                 if let Ok(mut sess2) = session_get() {
                     sess2.set_preedit(new_reading2.clone());
                 }
-                let live_ready =
-                    crate::engine::state::start_live_bg_if_ready(engine2, &new_reading2);
                 drop(guard2);
-                if live_ready {
-                    candidate_window::live_input_notify(&ctx, tid);
-                }
+                let ctx_live = ctx.clone();
                 // 確定テキスト + 新規入力プリエディットを表示
                 use super::commit_then_start_composition;
-                commit_then_start_composition(ctx, tid, sink, full_text, preedit2)?;
+                // BG 変換は学習の後に始まる（commit_then_start_composition）
+                if commit_then_start_composition(
+                    ctx,
+                    tid,
+                    sink,
+                    full_text,
+                    preedit2,
+                    learn,
+                    Some(new_reading2),
+                )? {
+                    candidate_window::live_input_notify(&ctx_live, tid);
+                }
                 return Ok(true);
             }
             if sess.is_selecting() {
@@ -258,20 +269,17 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                match crate::engine::state::learn_action(
-                    &reading,
-                    &selected_text,
-                    candidate_source,
-                    explicit_pick,
-                ) {
-                    crate::engine::state::LearnAction::LearnForce => {
-                        engine.learn_force(&reading, &selected_text)
-                    }
-                    crate::engine::state::LearnAction::Learn => {
-                        engine.learn(&reading, &selected_text)
-                    }
-                    crate::engine::state::LearnAction::Skip => {}
-                }
+                // 学習は、文書に確定できてから送る（commit_then_start_composition）
+                let learn = Some(LearnPlan {
+                    action: crate::engine::state::learn_action(
+                        &reading,
+                        &selected_text,
+                        candidate_source,
+                        explicit_pick,
+                    ),
+                    reading,
+                    surface: selected_text,
+                });
                 engine.commit(&full_text);
                 engine.reset_preedit();
                 drop(guard);
@@ -289,13 +297,20 @@ impl super::TextServiceFactory_Impl {
                 // 打鍵時の prefetch はライブプレビュー用なので、読みが十分長い場合だけ
                 // 後段で live_conv_beam_size を使って起動する。
                 let (preedit, hiragana, _bg) = engine2.input_char(c, kind, None)?;
-                let _ = crate::engine::state::start_live_bg_if_ready(engine2, &hiragana);
                 diag::event(DiagEvent::InputChar {
                     ch: c,
                     preedit_after: preedit.clone(),
                 });
                 drop(guard2);
-                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
+                commit_then_start_composition(
+                    ctx,
+                    tid,
+                    sink,
+                    full_text,
+                    preedit,
+                    learn,
+                    Some(hiragana),
+                )?;
                 return Ok(true);
             }
         }
@@ -444,20 +459,17 @@ impl super::TextServiceFactory_Impl {
                     selected_text.clone()
                 };
                 let full_text = format!("{prefix}{committed_text}{remainder}");
-                match crate::engine::state::learn_action(
-                    &reading,
-                    &selected_text,
-                    candidate_source,
-                    explicit_pick,
-                ) {
-                    crate::engine::state::LearnAction::LearnForce => {
-                        engine.learn_force(&reading, &selected_text)
-                    }
-                    crate::engine::state::LearnAction::Learn => {
-                        engine.learn(&reading, &selected_text)
-                    }
-                    crate::engine::state::LearnAction::Skip => {}
-                }
+                // 学習は、文書に確定できてから送る（commit_then_start_composition）
+                let learn = Some(LearnPlan {
+                    action: crate::engine::state::learn_action(
+                        &reading,
+                        &selected_text,
+                        candidate_source,
+                        explicit_pick,
+                    ),
+                    reading,
+                    surface: selected_text,
+                });
                 engine.commit(&full_text);
                 engine.reset_preedit();
                 drop(guard);
@@ -472,9 +484,16 @@ impl super::TextServiceFactory_Impl {
                 // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
                 // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
                 let reading = engine2.hiragana_text()?;
-                let _ = crate::engine::state::start_live_bg_if_ready(engine2, &reading);
                 drop(guard2);
-                commit_then_start_composition(ctx, tid, sink, full_text, preedit)?;
+                commit_then_start_composition(
+                    ctx,
+                    tid,
+                    sink,
+                    full_text,
+                    preedit,
+                    learn,
+                    Some(reading),
+                )?;
                 return Ok(true);
             }
         }

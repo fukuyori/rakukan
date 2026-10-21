@@ -1036,6 +1036,7 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
             learn: None,
             context: true,
             reset_preedit: true,
+            bg_start: None,
         },
     )
 }
