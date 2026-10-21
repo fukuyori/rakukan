@@ -733,6 +733,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
         let vk = normalize_key_event_vk(wparam.0 as u16);
+        // 回復できない場合の処置の途中: IME のオン・オフ、割り当ての有無にかかわらず、
+        // すべて食べる（文字は後で文書へ入れ、それ以外は捨てる。OnKeyDown と同じ）
+        if crate::tsf::key_queue::rescue_active() {
+            return Ok(TRUE);
+        }
         // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
         // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
         let resolved = self
@@ -746,11 +751,19 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
         // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
         // その場でアプリへ渡す
-        if crate::engine::state::ime_mode_get_atomic().is_on()
-            && crate::tsf::key_queue::should_hold()
-        {
-            let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
-            return Ok(if eat { TRUE } else { FALSE });
+        if crate::engine::state::ime_mode_get_atomic().is_on() {
+            // 回復できない場合の処置の後の直接入力: IME のモードキーだけを食べる
+            if crate::tsf::key_queue::direct_fallback() {
+                return Ok(if is_ime_mode_action(&action) {
+                    TRUE
+                } else {
+                    FALSE
+                });
+            }
+            if crate::tsf::key_queue::should_hold() {
+                let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
+                return Ok(if eat { TRUE } else { FALSE });
+            }
         }
 
         // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
@@ -772,7 +785,9 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                             }
                         })
                     })
-                    .unwrap_or(false)
+                    // エンジンを取れないときは、KeyDown（handle_action の入口）と同じく
+                    // composition の有無で判定する（確かめられなければ、あるものとする）
+                    .unwrap_or_else(|| crate::engine::state::composition_held().unwrap_or(true))
             },
             // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
             // AtomicBool でロックなし高速チェック
@@ -829,6 +844,14 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                     vk,
                     reason: "unmapped",
                 });
+                // 回復できない場合の処置の途中は、割り当ての無いキー（Delete など）も
+                // アプリへ渡さず捨てる（入れていない文字より先に文書を変えないように）
+                if crate::tsf::key_queue::rescue_active() {
+                    tracing::warn!(
+                        "key_queue: unmapped key dropped while inserting typed characters vk={vk:#04x}"
+                    );
+                    return Ok(TRUE);
+                }
                 return Ok(FALSE);
             }
         };
@@ -859,6 +882,18 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // モードインジケーターを非表示（キー入力があれば消す）
         crate::tsf::mode_indicator::hide();
 
+        // 回復できない場合の処置の途中: IME のオン・オフにかかわらず、モードキー以外は
+        // 文字を入れ終わるまでアプリへ渡さず、文字キーは打った文字として、届いた順に後で
+        // 入れる（入力処理の見直しの段 6。後の入力が入れていない文字を追い越さないように）
+        if crate::tsf::key_queue::rescue_active() && !is_ime_mode_action(&action) {
+            use windows::core::Interface;
+            let dm = unsafe { ctx.GetDocumentMgr() }
+                .map(|d| d.as_raw() as usize)
+                .unwrap_or(0);
+            crate::tsf::key_queue::absorb_into_rescue(entry.seq(), &action, dm, &ctx, tid);
+            return Ok(TRUE);
+        }
+
         // ── IME オフガード（最終防衛線）───────────────────────────────────
         // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
         // アトミックなのでロック競合なし。
@@ -867,6 +902,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                 vk,
                 reason: "ime_off",
             });
+            return Ok(FALSE);
+        }
+
+        // 回復できない場合の処置の後の直接入力: IME のモードキー以外はアプリへ渡す
+        if crate::tsf::key_queue::direct_fallback() && !is_ime_mode_action(&action) {
             return Ok(FALSE);
         }
 
@@ -1220,6 +1260,25 @@ impl TextServiceFactory_Impl {
         }
         keydown_return(&result)
     }
+}
+
+pub(crate) use on_compose::InsertState;
+
+/// 文字列を今の選択位置にそのまま入れる要求を出す（`key_queue` の回復できない場合の
+/// 処置から呼ぶ）。
+pub(crate) fn insert_text_direct(
+    ctx: &ITfContext,
+    tid: u32,
+    text: &str,
+    still_valid: Box<dyn Fn() -> bool>,
+) -> std::rc::Rc<std::cell::Cell<InsertState>> {
+    on_compose::insert_text_direct(ctx, tid, text, still_valid)
+}
+
+/// エンジンの準備中・停止中の表示（`key_queue` から呼ぶ）。
+pub(crate) fn show_engine_waiting() {
+    let (sym, _msg) = loading_indicator_symbol();
+    crate::tsf::mode_indicator::show(sym, 0, 0);
 }
 
 fn key_resolve(resolved: Option<UserAction>, vk: u16) -> Option<UserAction> {

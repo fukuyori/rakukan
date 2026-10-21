@@ -14,10 +14,7 @@ use crate::engine::state::{
 use crate::engine::text_util;
 use crate::tsf::candidate_window;
 
-use super::{
-    commit_full, commit_text, commit_then_start_composition, loading_indicator_symbol,
-    update_composition,
-};
+use super::{commit_full, commit_text, commit_then_start_composition, update_composition};
 use crate::tsf::commit_txn::LearnPlan;
 
 /// LiveConv 中の追加入力で表示する文字列を決める。
@@ -91,41 +88,11 @@ impl super::TextServiceFactory_Impl {
         // 前進させる。Phase1B キューに残っている古い preview は apply 時に
         // gen 不一致で discard される。
         crate::tsf::live_session::conv_gen_bump();
-        let engine = match guard.as_mut() {
-            Some(e) => e,
-            None => {
-                // M1.6 T-HOST4: engine 未ロード中の握り潰しを撤去。
-                // キーを後で replay するためにバッファへ積み、composition は
-                // 空のままにして次回復帰時にまとめて流し込む。return Ok(true) で
-                // アプリ側にはキーが消費されたことを示す（アプリがそのまま受け
-                // 取ってしまうと二重入力になるため）。
-                let kind = if c.is_ascii_uppercase() {
-                    crate::engine::state::InputCharKind::FullwidthAlpha
-                } else {
-                    crate::engine::state::InputCharKind::Char
-                };
-                crate::engine::state::push_pending_key(c, kind, false);
-                // M1.6 T-HOST3: 読込中のキャレット近傍フィードバック。
-                // 経過時間に応じて記号を切り替える。位置は (0,0) で
-                // get_caret_screen_pos() fallback に任せる。
-                let (sym, _msg) = loading_indicator_symbol();
-                crate::tsf::mode_indicator::show(sym, 0, 0);
-                return Ok(true);
-            }
+        // エンジンが無いときは handle_action の入口でキーを保留するので、ここには来ない
+        // （#70、入力処理の見直しの段 6）
+        let Some(engine) = guard.as_mut() else {
+            return Ok(false);
         };
-        // engine が復帰した時点で、過去に積んだキーを先に replay する。
-        // 現在の c を処理する前に hiragana_buf を最新状態に揃えることで
-        // 「先に押したキーほど先に反映される」挙動を保つ。
-        {
-            let pending = crate::engine::state::drain_pending_keys();
-            for (pc, pk, raw) in pending {
-                if raw {
-                    engine.push_raw(pc)?;
-                } else {
-                    let _ = engine.input_char(pc, pk, None)?;
-                }
-            }
-        }
         crate::engine::state::maybe_log_gpu_memory(engine);
         let _t = diag::span("Input");
 
@@ -373,33 +340,10 @@ impl super::TextServiceFactory_Impl {
     ) -> Result<bool> {
         // M1.8 T-MID1: reading 変化経路。on_input と同じく gen を前進させる。
         crate::tsf::live_session::conv_gen_bump();
-        let engine = match guard.as_mut() {
-            Some(e) => e,
-            None => {
-                // M1.6 T-HOST4: raw 経路（テンキー記号等）も握り潰しをやめて
-                // buffer へ。raw フラグを立てて後で `push_raw` 経由で replay する。
-                crate::engine::state::push_pending_key(
-                    c,
-                    crate::engine::state::InputCharKind::Char,
-                    true,
-                );
-                // M1.6 T-HOST3: 読込中の視覚フィードバック
-                let (sym, _msg) = loading_indicator_symbol();
-                crate::tsf::mode_indicator::show(sym, 0, 0);
-                return Ok(true);
-            }
+        // エンジンが無いときは handle_action の入口でキーを保留するので、ここには来ない
+        let Some(engine) = guard.as_mut() else {
+            return Ok(false);
         };
-        // 積まれていた未処理キーを先に流し込む（on_input と同じ replay ポリシー）。
-        {
-            let pending = crate::engine::state::drain_pending_keys();
-            for (pc, pk, raw) in pending {
-                if raw {
-                    engine.push_raw(pc)?;
-                } else {
-                    let _ = engine.input_char(pc, pk, None)?;
-                }
-            }
-        }
         crate::engine::state::maybe_log_gpu_memory(engine);
         if let Ok(mut sess) = session_get() {
             crate::tsf::live_session::suppress_commit_clear();

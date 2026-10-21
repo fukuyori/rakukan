@@ -29,14 +29,37 @@ impl super::TextServiceFactory_Impl {
         crate::tsf::commit_txn::finish_completed();
         let mut guard = match engine_try_get_or_create() {
             Ok(guard) => guard,
-            // 保留したキーの再生でエンジンを取れなければ、捨てずに止めて列に戻す
-            // （入力処理の見直しの段 5 の 5c。直接のキーは今までどおり）
-            Err(_) if crate::tsf::key_queue::in_replay() => {
-                tracing::debug!("held key: engine busy; retried later");
+            Err(e) => {
+                // composition を確かめられなければ、あるものとして扱う（保留する側へ倒す）
+                let composing = crate::engine::state::composition_held().unwrap_or(true);
+                // IME のモードキー: composition が無ければ確定するものも無いので、エンジン
+                // 無しで切り替える（設計書 4.2）。composition があれば下で保留する
+                if super::is_ime_mode_action(&action) && !composing {
+                    let new = match action {
+                        UserAction::ImeOff => crate::engine::ime_mode::ImeMode::Off,
+                        UserAction::ImeOn => crate::engine::ime_mode::ImeMode::On,
+                        _ => crate::engine::state::ime_mode_get_atomic().toggled(),
+                    };
+                    return self.switch_ime(None, tid, new);
+                }
+                // 直接届いたキーは、今の入力の有無で IME が食べるキーだけを保留する
+                // （OnTestKeyDown と同じ判定。食べないキーは今までどおりアプリへ渡す）
+                if !crate::tsf::key_queue::in_replay()
+                    && !super::key_should_eat(
+                        &action,
+                        composing || crate::engine::state::session_is_selecting_fast(),
+                    )
+                {
+                    return Ok(false);
+                }
+                // エンジンの準備中・ロックの競合（#70、入力処理の見直しの段 6）: キーを
+                // アプリへ渡さず、止めて保留の列に入れ、エンジンが使えるようになってから
+                // 実行する（保持の上限を過ぎたら key_queue が回復できない場合の処置をする）
+                tracing::debug!("engine unavailable ({e}); {} held", action_name(&action));
                 crate::tsf::key_queue::suspend_current();
+                super::show_engine_waiting();
                 return Ok(true);
             }
-            Err(e) => return Err(e),
         };
         // 所有権を復元してよいのは、フォーカス中の生存している文脈へのキー入力だけ。
         let focused_dm = (|| {

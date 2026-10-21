@@ -19,6 +19,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
@@ -53,6 +54,11 @@ struct Queued {
     key: HeldKey,
 }
 
+/// 処置の途中に届いた文字（届いた順の通し番号・文書・文脈・クライアント ID・文字）。
+type ExtraChar = (u64, usize, ITfContext, u32, char);
+/// 同じ文書へ入れる文字列（文書・文脈・クライアント ID・文字列）。
+type TextBatch = (usize, ITfContext, u32, String);
+
 thread_local! {
     static QUEUE: RefCell<VecDeque<Queued>> = const { RefCell::new(VecDeque::new()) };
     static REPLAYING: Cell<bool> = const { Cell::new(false) };
@@ -65,12 +71,17 @@ thread_local! {
     static SUSPENDED: Cell<bool> = const { Cell::new(false) };
     /// 保留したキーを再生している（[`pump`] の中で `replay_key` を呼んでいる間）。
     static IN_REPLAY: Cell<bool> = const { Cell::new(false) };
-}
-
-/// 保留したキーを再生している最中か。再生したキーがエンジンを取れないときは、捨てずに
-/// 止めて（[`suspend_current`]）列に戻すために使う。
-pub(crate) fn in_replay() -> bool {
-    IN_REPLAY.with(|r| r.get())
+    /// 回復できない場合の処置の後の直接入力（[`direct_fallback`]）。
+    static DIRECT_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    /// 回復できない場合の処置で、文書へ入れている文字列。
+    static RESCUES: RefCell<Vec<Rescue>> = const { RefCell::new(Vec::new()) };
+    /// 回復できない場合の処置の途中（文字を入れ終わるまで）。この間のキーはアプリへ渡さず、
+    /// 文字キーは打った文字として後で同じように入れる（[`absorb_into_rescue`]）。
+    static RESCUE_ACTIVE: Cell<bool> = const { Cell::new(false) };
+    /// 処置の途中に届いた文字キーの文字（届いた順の通し番号・文書・文字）。
+    static RESCUE_EXTRA: RefCell<Vec<ExtraChar>> = const { RefCell::new(Vec::new()) };
+    /// 文字を入れる要求の失効の世代（Deactivate で進める）。取り出し中の要求にも届く。
+    static RESCUE_EPOCH: Cell<u64> = const { Cell::new(0) };
 }
 
 /// 処理中のキーを、確定の結果を待つために止める（読みの長さの上限で確定した場合など）。
@@ -268,6 +279,7 @@ pub(crate) fn pump() {
     }
     OUTCOMES.with(|o| o.borrow_mut().clear());
     settle();
+    check_rescues();
     while !crate::tsf::commit_txn::commit_pending() {
         let Some(Queued { seq, key }) = QUEUE.with(|q| q.borrow_mut().pop_front()) else {
             break;
@@ -288,6 +300,12 @@ pub(crate) fn pump() {
         IN_REPLAY.with(|r| r.set(false));
         if take_suspended() {
             if kept.at.elapsed() >= MAX_AGE {
+                if engine_unavailable() {
+                    // エンジンが使えないまま保持の上限を過ぎた: 回復できない場合の処置
+                    // （列の文字キーを打った文字のまま入れ、直接入力に切り替える）
+                    give_up(kept);
+                    break;
+                }
                 // 保持の上限を過ぎても実行できない: 捨てて後のキーへ進む
                 tracing::warn!(
                     "key_queue: held key could not run within {MAX_AGE:?}; dropped seq={seq} vk={vk:#04x}"
@@ -307,11 +325,252 @@ pub(crate) fn pump() {
         crate::tsf::commit_txn::finish_completed();
     }
     REPLAYING.with(|r| r.set(false));
-    if QUEUE.with(|q| q.borrow().is_empty()) && !crate::tsf::commit_txn::commit_pending() {
+    if QUEUE.with(|q| q.borrow().is_empty())
+        && !crate::tsf::commit_txn::commit_pending()
+        && RESCUES.with(|r| r.borrow().is_empty())
+    {
         crate::tsf::candidate_window::stop_key_queue_timer();
     } else {
         crate::tsf::candidate_window::start_key_queue_timer();
     }
+}
+
+/// 保留したキーを再生している最中か（再生するキーは、食べたキーなのでアプリへは渡せない）。
+pub(crate) fn in_replay() -> bool {
+    IN_REPLAY.with(|r| r.get())
+}
+
+/// エンジンが使えない（まだ無い・ロックが取れない）。
+fn engine_unavailable() -> bool {
+    crate::engine::state::engine_try_get().map_or(true, |g| g.0.is_none())
+}
+
+/// 文字キーが出す文字（打った文字のまま。回復できない場合の処置で文書へ入れる）。
+fn typed_text(action: &UserAction) -> Option<char> {
+    match action {
+        UserAction::Input(c) | UserAction::InputRaw(c) | UserAction::Punctuate(c) => Some(*c),
+        UserAction::FullWidthSpace => Some(' '),
+        _ => None,
+    }
+}
+
+/// 回復できない場合の処置で、文書へ入れている文字列（[`give_up`]）。
+struct Rescue {
+    dm: usize,
+    ctx: ITfContext,
+    tid: u32,
+    text: String,
+    /// 要求した回数（3 回まで）。
+    attempts: u32,
+    state: Rc<Cell<crate::tsf::factory::InsertState>>,
+    at: Instant,
+}
+
+/// 文字を入れる要求の上限の回数と、1 回の要求が実行されるのを待つ時間。
+const RESCUE_ATTEMPTS: u32 = 3;
+const RESCUE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// 回復できない場合の処置（入力処理の見直しの段 6、前提の決定 3-B）: 先頭の `first` と
+/// 列のキーのうち、文字キーを打った文字のまま、そのキーが届いた文書の選択位置へ入れる
+/// （同じ文書へ続く文字は 1 回で。届いた文書が破棄されていれば入れない。前提の決定 2）。
+/// 文字以外のキーは捨てる。その後、入れ終わり、エンジンが使えるようになるまで直接入力に
+/// する（[`direct_fallback`]）。入れた結果は [`pump`] で確かめる（[`check_rescues`]）。
+fn give_up(first: HeldKey) {
+    let mut keys = vec![first];
+    keys.extend(QUEUE.with(|q| q.borrow_mut().drain(..).map(|e| e.key).collect::<Vec<_>>()));
+    let mut dropped = 0usize;
+    let mut batches: Vec<TextBatch> = Vec::new();
+    for key in keys {
+        let Some(c) = typed_text(&key.action) else {
+            dropped += 1;
+            continue;
+        };
+        match batches.last_mut() {
+            Some((dm, _, _, text)) if *dm == key.dm => text.push(c),
+            _ => batches.push((key.dm, key.ctx.clone(), key.tid, c.to_string())),
+        }
+    }
+    tracing::warn!(
+        "key_queue: engine unavailable for {MAX_AGE:?}; inserting {} typed character batch(es) as is, {dropped} other key(s) dropped; direct input until the engine is back",
+        batches.len()
+    );
+    // 状態と表示を先に決める（入れられなかった通知を、この表示で上書きしない）
+    DIRECT_FALLBACK.with(|d| d.set(true));
+    RESCUE_ACTIVE.with(|a| a.set(true));
+    crate::tsf::factory::show_engine_waiting();
+    crate::tsf::candidate_window::start_key_queue_timer();
+    let epoch = RESCUE_EPOCH.with(|e| e.get());
+    for (dm, ctx, tid, text) in batches {
+        request_rescue(new_rescue(dm, ctx, tid, text), epoch);
+    }
+    // 同期で入れ終わっていれば、ここで片づける
+    check_rescues();
+}
+
+/// 回復できない場合の処置の途中か。この間のキーは [`absorb_into_rescue`] に渡す
+/// （IME のモードキーを除く）。
+pub(crate) fn rescue_active() -> bool {
+    RESCUE_ACTIVE.with(|a| a.get())
+}
+
+/// 処置の途中に届いたキー: 文字キーは打った文字として、今入れている文字の後に入れる
+/// （アプリへ渡すと、まだ入っていない文字を追い越すため）。届いた順の通し番号（`seq`）で
+/// 並べる。文字以外は捨てる。
+pub(crate) fn absorb_into_rescue(
+    seq: u64,
+    action: &UserAction,
+    dm: usize,
+    ctx: &ITfContext,
+    tid: u32,
+) {
+    let Some(c) = typed_text(action) else {
+        tracing::warn!("key_queue: key dropped while inserting typed characters action={action:?}");
+        return;
+    };
+    RESCUE_EXTRA.with(|e| e.borrow_mut().push((seq, dm, ctx.clone(), tid, c)));
+}
+
+/// 処置の途中に届いた文字を、届いた順に並べ、同じ文書へ続く文字をまとめる。
+fn batch_extra<C>(mut extra: Vec<(u64, usize, C, u32, char)>) -> Vec<(usize, C, u32, String)> {
+    extra.sort_by_key(|e| e.0);
+    let mut batches: Vec<(usize, C, u32, String)> = Vec::new();
+    for (_, dm, ctx, tid, c) in extra {
+        match batches.last_mut() {
+            Some((last_dm, _, _, text)) if *last_dm == dm => text.push(c),
+            _ => batches.push((dm, ctx, tid, c.to_string())),
+        }
+    }
+    batches
+}
+
+fn new_rescue(dm: usize, ctx: ITfContext, tid: u32, text: String) -> Rescue {
+    Rescue {
+        dm,
+        ctx,
+        tid,
+        text,
+        attempts: 0,
+        state: Rc::new(Cell::new(crate::tsf::factory::InsertState::Pending)),
+        at: Instant::now(),
+    }
+}
+
+/// 要求を失効させ（後で実行されても文書に触れない）、入れられなかったものとして記録する。
+fn expire_rescue(rescue: &Rescue, reason: &str) {
+    if rescue.state.get() != crate::tsf::factory::InsertState::Inserted {
+        rescue
+            .state
+            .set(crate::tsf::factory::InsertState::NotInserted {
+                reason: "expired",
+                retryable: false,
+            });
+        unrescued(&rescue.text, reason);
+    }
+}
+
+/// 文字を入れる要求を出して記録する。届いた文書が破棄されていれば入れずに記録だけする。
+/// `epoch` は要求を始めた時点の失効の世代。要求の間に Deactivate で進んでいたら、出した
+/// 要求を失効させて記録する。
+fn request_rescue(mut rescue: Rescue, epoch: u64) {
+    // 要求の時点の文書（ポインタと世代）。実行の時点でも同じ文書が生きているかを確かめる
+    let Some(dm_ref) = crate::engine::dm_registry::lookup(rescue.dm)
+        .filter(|dm| crate::engine::dm_registry::is_live(*dm))
+    else {
+        unrescued(&rescue.text, "document gone");
+        return;
+    };
+    rescue.attempts += 1;
+    rescue.at = Instant::now();
+    // EditSession の実行の時点で、失効していない（Deactivate で世代が進んでいない）こと、
+    // 文書が破棄されていないことを確かめる
+    let still_valid: Box<dyn Fn() -> bool> = Box::new(move || {
+        RESCUE_EPOCH.with(|e| e.get()) == epoch && crate::engine::dm_registry::is_live(dm_ref)
+    });
+    rescue.state =
+        crate::tsf::factory::insert_text_direct(&rescue.ctx, rescue.tid, &rescue.text, still_valid);
+    if RESCUE_EPOCH.with(|e| e.get()) != epoch {
+        expire_rescue(&rescue, "deactivated");
+        return;
+    }
+    RESCUES.with(|r| r.borrow_mut().push(rescue));
+}
+
+/// 入れられなかった文字列を記録し、通知する（設計書 4.2 の救済の原則）。
+fn unrescued(text: &str, reason: &str) {
+    tracing::warn!(
+        "key_queue: typed characters could not be inserted ({reason}); chars={} text={text:?}",
+        text.chars().count()
+    );
+    // 入力の一部を文書へ入れられなかったことを知らせる（エンジン待ちの表示とは別）
+    crate::tsf::mode_indicator::show("未入力", 0, 0);
+}
+
+/// 文字を入れる要求の結果を確かめる。入れた・入れられない（位置を確かめられない）なら
+/// 片づけ、文書を変えていない失敗・時間切れなら上限まで要求し直す。
+fn check_rescues() {
+    use crate::tsf::factory::InsertState;
+    let epoch = RESCUE_EPOCH.with(|e| e.get());
+    let rescues = RESCUES.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for rescue in rescues {
+        // 取り出した後に Deactivate で失効した
+        if RESCUE_EPOCH.with(|e| e.get()) != epoch {
+            expire_rescue(&rescue, "deactivated");
+            continue;
+        }
+        let mut state = rescue.state.get();
+        if state == InsertState::Pending && rescue.at.elapsed() >= RESCUE_TIMEOUT {
+            // 失効させる（後で実行されても文書に触れない）
+            state = InsertState::NotInserted {
+                reason: "timeout",
+                retryable: true,
+            };
+            rescue.state.set(state);
+        }
+        match state {
+            InsertState::Inserted => {}
+            InsertState::Pending | InsertState::Running => {
+                RESCUES.with(|r| r.borrow_mut().push(rescue));
+            }
+            InsertState::NotInserted {
+                retryable: true, ..
+            } if rescue.attempts < RESCUE_ATTEMPTS => {
+                request_rescue(rescue, epoch);
+            }
+            InsertState::NotInserted { reason, .. } => unrescued(&rescue.text, reason),
+        }
+    }
+    // 入れ終わったら、処置の途中に届いた文字を続けて入れる。それも無ければ処置を終える
+    if rescue_active()
+        && RESCUE_EPOCH.with(|e| e.get()) == epoch
+        && RESCUES.with(|r| r.borrow().is_empty())
+    {
+        let extra = RESCUE_EXTRA.with(|e| std::mem::take(&mut *e.borrow_mut()));
+        for (dm, ctx, tid, text) in batch_extra(extra) {
+            request_rescue(new_rescue(dm, ctx, tid, text), epoch);
+        }
+        if RESCUES.with(|r| r.borrow().is_empty()) && RESCUE_EXTRA.with(|e| e.borrow().is_empty()) {
+            RESCUE_ACTIVE.with(|a| a.set(false));
+        }
+    }
+}
+
+/// 直接入力（回復できない場合の処置の後）。IME のモードキー以外はアプリへ渡す。文字を
+/// 入れ終わり、エンジンが使えるようになったら外す（キーの入口で確かめる）。直接入力の
+/// 間なら `true`。
+pub(crate) fn direct_fallback() -> bool {
+    if !DIRECT_FALLBACK.with(|d| d.get()) {
+        return false;
+    }
+    if rescue_active() {
+        return true;
+    }
+    // エンジンを取れれば外す（取れなければ、初期化をもう一度促す）
+    if crate::engine::state::engine_try_get_or_create().is_ok() {
+        DIRECT_FALLBACK.with(|d| d.set(false));
+        tracing::info!("key_queue: engine is back; direct input ended");
+        return false;
+    }
+    true
 }
 
 /// キーの処理（`f`）の間、再生を止める。処理の途中でタイマーや通知が届いても、保留した
@@ -325,6 +584,19 @@ pub(crate) fn run_exclusive<R>(f: impl FnOnce() -> R) -> R {
 
 /// 保留したキーをすべて捨てる（Deactivate）。捨てた数を返す。
 pub(crate) fn discard_all(reason: &str) -> usize {
+    // 文字を入れる要求は失効させ（後で実行されても文書に触れない）、入れられなかった
+    // ものとして記録する
+    // 取り出し中・要求中の要求にも届くよう、失効の世代を進める
+    RESCUE_EPOCH.with(|e| e.set(e.get() + 1));
+    let rescues = RESCUES.with(|r| std::mem::take(&mut *r.borrow_mut()));
+    for rescue in rescues {
+        expire_rescue(&rescue, reason);
+    }
+    let extra = RESCUE_EXTRA.with(|e| std::mem::take(&mut *e.borrow_mut()));
+    for (_, _, _, text) in batch_extra(extra) {
+        unrescued(&text, reason);
+    }
+    RESCUE_ACTIVE.with(|a| a.set(false));
     let dropped = QUEUE.with(|q| q.borrow_mut().drain(..).count());
     if dropped > 0 {
         tracing::warn!("key_queue: {dropped} held key(s) dropped ({reason})");
@@ -373,6 +645,33 @@ mod tests {
         // 受け付けずに戻ったキーは数えない
         drop(enter());
         assert!(!should_hold());
+    }
+
+    #[test]
+    fn only_character_keys_are_inserted_as_typed_when_giving_up() {
+        assert_eq!(typed_text(&UserAction::Input('k')), Some('k'));
+        assert_eq!(typed_text(&UserAction::InputRaw('/')), Some('/'));
+        assert_eq!(typed_text(&UserAction::Punctuate('.')), Some('.'));
+        assert_eq!(typed_text(&UserAction::FullWidthSpace), Some(' '));
+        assert_eq!(typed_text(&UserAction::Backspace), None);
+        assert_eq!(typed_text(&UserAction::CommitRaw), None);
+        assert_eq!(typed_text(&UserAction::ImeToggle), None);
+    }
+
+    #[test]
+    fn characters_typed_during_a_rescue_are_inserted_in_arrival_order() {
+        // 割り込みで後の番号が先に届いても、番号の順に並べ、同じ文書へ続く文字をまとめる
+        let extra = vec![
+            (7, 1, (), 0, 'c'),
+            (5, 1, (), 0, 'a'),
+            (6, 1, (), 0, 'b'),
+            (8, 2, (), 0, 'x'),
+        ];
+        let batches: Vec<(usize, String)> = batch_extra(extra)
+            .into_iter()
+            .map(|(dm, _, _, text)| (dm, text))
+            .collect();
+        assert_eq!(batches, vec![(1, "abc".to_string()), (2, "x".to_string())]);
     }
 
     #[test]

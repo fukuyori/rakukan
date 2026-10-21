@@ -219,51 +219,6 @@ pub fn ready_reset_elapsed_ms() -> Option<u64> {
     Some(now_ms().saturating_sub(reset_at))
 }
 
-/// M1.6 T-HOST4: engine が未 ready（None）の期間に打鍵されたキーを積むバッファ。
-///
-/// 旧実装では [factory::on_input] / [factory::on_input_raw] が `guard.as_mut()`
-/// で `None` を受けると `return Ok(true)` で入力を握り潰していた。reload 中や
-/// 初回起動中に打鍵した文字が全部消える原因。
-///
-/// T-HOST4 ではここに積んでおき、engine 復帰後の最初の on_input で先に drain
-/// してから現在のキーを処理する。これによりユーザ体感は「入力が一瞬遅れるが
-/// 消えない」状態になる。
-static PENDING_KEYS: LazyLock<Mutex<Vec<(char, InputCharKind, bool)>>> =
-    LazyLock::new(|| Mutex::new(Vec::new()));
-
-/// engine 未 ready 時の「握り潰さない」代替: 後で engine に流し込むため積む。
-/// `raw` = true なら `input_char` ではなく `push_raw` 経路を使いたい旨のフラグ。
-pub fn push_pending_key(c: char, kind: InputCharKind, raw: bool) {
-    if let Ok(mut v) = PENDING_KEYS.lock() {
-        v.push((c, kind, raw));
-        tracing::debug!(
-            "pending_keys: buffered c={:?} kind={:?} raw={} (total={})",
-            c,
-            kind,
-            raw,
-            v.len()
-        );
-    }
-}
-
-/// engine が復帰した時点で呼び、積んだキーを返す（所有権を奪う）。
-/// 呼び出し元は返却された各要素に対して engine メソッドを呼んで replay する。
-pub fn drain_pending_keys() -> Vec<(char, InputCharKind, bool)> {
-    if let Ok(mut v) = PENDING_KEYS.lock() {
-        if v.is_empty() {
-            return Vec::new();
-        }
-        let out = std::mem::take(&mut *v);
-        tracing::info!(
-            "pending_keys: draining {} buffered keys for replay",
-            out.len()
-        );
-        out
-    } else {
-        Vec::new()
-    }
-}
-
 static LAST_GPU_MEMORY_LOG_MS: AtomicU64 = AtomicU64::new(0);
 const GPU_MEMORY_LOG_INTERVAL_MS: u64 = 30_000;
 
@@ -1215,6 +1170,11 @@ pub static COMPOSITION: LazyLock<Mutex<CompositionWrapper>> = LazyLock::new(|| {
         stale: false,
     })
 });
+
+/// composition を保持しているか。ロックが取れず確かめられなければ `None`。
+pub fn composition_held() -> Option<bool> {
+    composition_clone().ok().map(|c| c.is_some())
+}
 
 /// ホットパス用: ブロックしない
 #[inline]

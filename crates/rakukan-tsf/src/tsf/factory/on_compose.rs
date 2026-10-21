@@ -78,6 +78,41 @@ pub(super) unsafe fn get_cursor_range(
     Some(cloned)
 }
 
+/// 選択位置を長さ 0 に縮めた range を返す。縮められなければ `None`（選択中の文字を
+/// 置き換えないよう、挿入に使わない）。
+unsafe fn get_insertion_point(
+    ctx: &windows::Win32::UI::TextServices::ITfContext,
+    ec: u32,
+) -> Option<windows::Win32::UI::TextServices::ITfRange> {
+    use windows::Win32::Foundation::BOOL;
+    use windows::Win32::UI::TextServices::{
+        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+    };
+    let mut sel_buf = [TF_SELECTION {
+        range: std::mem::ManuallyDrop::new(None),
+        style: TF_SELECTIONSTYLE {
+            ase: TfActiveSelEnd(0),
+            fInterimChar: BOOL(0),
+        },
+    }];
+    let mut fetched: u32 = 0;
+    unsafe {
+        ctx.GetSelection(ec, 0xFFFF_FFFF_u32, &mut sel_buf, &mut fetched as *mut u32)
+            .ok()?;
+    }
+    // 受け取った選択範囲の参照は、ここで取り出して所有する（ManuallyDrop のまま残さない）
+    let range = std::mem::ManuallyDrop::into_inner(std::mem::replace(
+        &mut sel_buf[0].range,
+        std::mem::ManuallyDrop::new(None),
+    ));
+    if fetched == 0 {
+        return None;
+    }
+    let range = range?;
+    unsafe { range.Collapse(ec, TF_ANCHOR_END) }.ok()?;
+    Some(range)
+}
+
 /// 現在カーソル位置の range を優先し、取得できなければ `GetEnd` にフォールバックする。
 ///
 /// TSF/COM が不安定な瞬間でも panic でホストプロセスを巻き込まないよう、
@@ -548,6 +583,132 @@ pub(super) fn commit_then_start_composition(
         crate::tsf::candidate_window::start_key_queue_timer();
     }
     Ok(crate::tsf::commit_txn::take_bg_started())
+}
+
+/// 直接の挿入の要求の状態（[`insert_text_direct`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InsertState {
+    Pending,
+    Running,
+    Inserted,
+    /// 入れなかった。`retryable` なら文書は変わっていない（要求し直してよい）。
+    NotInserted {
+        reason: &'static str,
+        retryable: bool,
+    },
+}
+
+/// 文字列を今の選択位置にそのまま入れる要求を出す（入力処理の見直しの段 6、設計書 4.2 の
+/// `InsertTxn`。回復できないときに、保留した文字キーを打った文字のまま入れる）。
+///
+/// 位置を確かめられないときは入れない（設計書 4.2 の救済の原則）: composition が残って
+/// いる（その中に入ると消えうる）、選択位置が取れない。結果は返した状態の箱に記録する
+/// （後で実行される場合は、実行の後に `WM_APP_COMMIT_DONE` を送る）。箱が `Pending` の
+/// ままなら、呼び出し側が失効（`NotInserted`）にしてよい。失効した要求は後で実行されても
+/// 文書に触れない。
+///
+/// `still_valid` は EditSession の実行の時点で呼び、偽なら文書に触れずに失効させる（要求の
+/// 後に Deactivate した・文書が破棄されたなど）。
+pub(super) fn insert_text_direct(
+    ctx: &ITfContext,
+    tid: u32,
+    text: &str,
+    still_valid: Box<dyn Fn() -> bool>,
+) -> std::rc::Rc<std::cell::Cell<InsertState>> {
+    use windows::Win32::UI::TextServices::{
+        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+    };
+    let state = std::rc::Rc::new(std::cell::Cell::new(InsertState::Pending));
+    let session_state = state.clone();
+    let session_ctx = ctx.clone();
+    let text_w: Vec<u16> = text.encode_utf16().collect();
+    let session = EditSession::new(move |ec| unsafe {
+        if session_state.get() != InsertState::Pending {
+            return Ok(());
+        }
+        if !still_valid() {
+            session_state.set(InsertState::NotInserted {
+                reason: "expired",
+                retryable: false,
+            });
+            crate::tsf::candidate_window::post_commit_done();
+            return Ok(());
+        }
+        session_state.set(InsertState::Running);
+        let finish = |result: InsertState| {
+            session_state.set(result);
+            crate::tsf::candidate_window::post_commit_done();
+        };
+        match crate::engine::state::composition_held() {
+            Some(false) => {}
+            Some(true) => {
+                finish(InsertState::NotInserted {
+                    reason: "composition",
+                    retryable: false,
+                });
+                return Ok(());
+            }
+            // 確かめられない: 書かない（文書は変えていないので、要求し直してよい）
+            None => {
+                finish(InsertState::NotInserted {
+                    reason: "composition unknown",
+                    retryable: true,
+                });
+                return Ok(());
+            }
+        }
+        let Some(range) = get_insertion_point(&session_ctx, ec) else {
+            finish(InsertState::NotInserted {
+                reason: "no selection",
+                retryable: false,
+            });
+            return Ok(());
+        };
+        if let Err(e) = range.SetText(ec, 0, &text_w) {
+            tracing::warn!("insert_text_direct: SetText failed: {e}");
+            finish(InsertState::NotInserted {
+                reason: "SetText",
+                retryable: true,
+            });
+            return Ok(());
+        }
+        if let Ok(cursor) = range.Clone() {
+            let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+            let sels = [TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(cursor)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            }];
+            let _ = session_ctx.SetSelection(ec, &sels);
+            // 渡した range の参照を放す（ManuallyDrop のまま残さない）
+            let [sel] = sels;
+            drop(std::mem::ManuallyDrop::into_inner(sel.range));
+        }
+        finish(InsertState::Inserted);
+        Ok(())
+    });
+    match unsafe { ctx.RequestEditSession(tid, &session, TF_ES_READWRITE) } {
+        Ok(hr) if hr.is_ok() => {}
+        Ok(hr) => {
+            tracing::warn!("insert_text_direct: edit session refused hr={hr:?}");
+            if state.get() == InsertState::Pending {
+                state.set(InsertState::NotInserted {
+                    reason: "refused",
+                    retryable: true,
+                });
+            }
+        }
+        Err(e) => {
+            tracing::warn!("insert_text_direct: request failed: {e}");
+            state.set(InsertState::NotInserted {
+                reason: "request failed",
+                retryable: true,
+            });
+        }
+    }
+    state
 }
 
 /// GUID_PROP_ATTRIBUTE プロパティを range にセットしてアンダーラインを要求する
