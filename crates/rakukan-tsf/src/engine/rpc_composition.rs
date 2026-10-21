@@ -22,7 +22,16 @@ impl Drop for InputScope {
     }
 }
 static NEXT_COMPOSITION: AtomicU64 = AtomicU64::new(1);
-static COMPOSITIONS: LazyLock<Mutex<HashMap<usize, RemoteComposition>>> =
+/// 編集状態の鍵: DM のポインタと世代（入力処理の見直しの段 3）。
+///
+/// ポインタだけでは、破棄された DM と同じアドレスに作られた別の DM の状態を取り違える。
+type DmKey = crate::engine::dm_registry::DmRef;
+/// フォーカス中の DM が無いときの鍵。
+const NO_DM: DmKey = DmKey {
+    ptr: 0,
+    generation: 0,
+};
+static COMPOSITIONS: LazyLock<Mutex<HashMap<DmKey, RemoteComposition>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
@@ -51,7 +60,7 @@ impl RemoteComposition {
             pending: None,
             bg_reading: None,
             tsf_comp: 0,
-            created_under: crate::engine::state::current_composition_identity_for(dm_key()),
+            created_under: crate::engine::state::current_composition_identity_for(dm_key().ptr),
         }
     }
     fn expect(&self) -> Option<Expect> {
@@ -61,12 +70,12 @@ impl RemoteComposition {
         })
     }
 }
-fn dm_key() -> usize {
+fn dm_key() -> DmKey {
     crate::tsf::candidate_window::current_dm_hwnd()
         .0
-        .map_or(0, |dm| dm.ptr)
+        .unwrap_or(NO_DM)
 }
-fn lock_states() -> std::sync::MutexGuard<'static, HashMap<usize, RemoteComposition>> {
+fn lock_states() -> std::sync::MutexGuard<'static, HashMap<DmKey, RemoteComposition>> {
     COMPOSITIONS.lock().unwrap_or_else(|poisoned| {
         tracing::warn!("composition snapshot mutex poisoned; preserving its contents");
         poisoned.into_inner()
@@ -82,8 +91,13 @@ pub fn close() {
     crate::tsf::candidate_window::reset_worker_busy_clock();
     lock_states().remove(&dm_key());
 }
-pub fn dispose(dm: usize) {
+/// その DM（ポインタと世代）の状態を外す（Deactivate で失効させた DM）。
+pub fn dispose_ref(dm: DmKey) {
     lock_states().remove(&dm);
+}
+/// DM（ポインタ `dm`）が破棄された。その DM の状態を、世代にかかわらずすべて外す。
+pub fn dispose(dm: usize) {
+    lock_states().retain(|key, _| key.ptr != dm);
 }
 /// composition の表示を要求した時点の、編集状態の位置と所有者（Issue #71）。
 ///
@@ -91,7 +105,7 @@ pub fn dispose(dm: usize) {
 /// 要求の時点で控え、実行時に同じ状態のままなら結び付ける。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BindTarget {
-    dm: usize,
+    dm: DmKey,
     owner: Owner,
 }
 /// 今の文脈の編集状態の [`BindTarget`]。状態が無ければ `None`。
@@ -114,15 +128,15 @@ pub fn bind_composition(target: Option<BindTarget>, tsf_comp: usize, comp_dm: us
     }
 }
 fn bind_in(
-    states: &mut HashMap<usize, RemoteComposition>,
+    states: &mut HashMap<DmKey, RemoteComposition>,
     target: BindTarget,
     tsf_comp: usize,
     comp_dm: usize,
 ) {
-    if comp_dm != target.dm {
+    if comp_dm != target.dm.ptr {
         tracing::debug!(
             "composition bind skipped: composition dm={comp_dm:#x} state dm={:#x}",
-            target.dm
+            target.dm.ptr
         );
         return;
     }
@@ -148,14 +162,14 @@ pub fn take_terminated(tsf_comp: usize, replacing: bool) -> Vec<RemoteCompositio
     taken
 }
 fn take_terminated_from(
-    states: &mut HashMap<usize, RemoteComposition>,
+    states: &mut HashMap<DmKey, RemoteComposition>,
     tsf_comp: usize,
     replacing: bool,
 ) -> Vec<RemoteComposition> {
     if tsf_comp == 0 {
         return Vec::new();
     }
-    let dms: Vec<usize> = states
+    let dms: Vec<DmKey> = states
         .iter()
         .filter(|(_, state)| {
             state.tsf_comp == tsf_comp
@@ -970,14 +984,17 @@ mod tests {
         );
     }
     /// (DM, 結び付いた composition, 作ったときに保持していた composition)
-    fn states_with(entries: &[(usize, usize, usize)]) -> HashMap<usize, RemoteComposition> {
+    fn dm(ptr: usize) -> DmKey {
+        DmKey { ptr, generation: 1 }
+    }
+    fn states_with(entries: &[(usize, usize, usize)]) -> HashMap<DmKey, RemoteComposition> {
         entries
             .iter()
-            .map(|&(dm, tsf_comp, created_under)| {
+            .map(|&(dm_ptr, tsf_comp, created_under)| {
                 let mut state = owned_state();
                 state.tsf_comp = tsf_comp;
                 state.created_under = created_under;
-                (dm, state)
+                (dm(dm_ptr), state)
             })
             .collect()
     }
@@ -988,15 +1005,15 @@ mod tests {
         let taken = take_terminated_from(&mut states, 0x1, false);
         assert_eq!(taken.len(), 1);
         assert_eq!(taken[0].tsf_comp, 0x1);
-        assert!(states.contains_key(&0xB), "B の状態を消さない");
-        assert!(!states.contains_key(&0xA));
+        assert!(states.contains_key(&dm(0xB)), "B の状態を消さない");
+        assert!(!states.contains_key(&dm(0xA)));
     }
     #[test]
     fn late_notification_for_an_unknown_composition_changes_nothing() {
         // 同じ DM で新しい composition（0x3）が始まった後に、古い通知（0x1）が届く
         let mut states = states_with(&[(0xA, 0x3, 0x1)]);
         assert!(take_terminated_from(&mut states, 0x1, false).is_empty());
-        assert!(states.contains_key(&0xA));
+        assert!(states.contains_key(&dm(0xA)));
     }
     #[test]
     fn unbound_state_created_under_the_composition_is_taken_unless_replacing() {
@@ -1004,7 +1021,7 @@ mod tests {
         let mut states = states_with(&[(0xA, 0, 0x1)]);
         // 部分確定で置き換え中: 新しい composition のための状態なので外さない
         assert!(take_terminated_from(&mut states, 0x1, true).is_empty());
-        assert!(states.contains_key(&0xA));
+        assert!(states.contains_key(&dm(0xA)));
         // 置き換え中でなければ、終わった composition の続きとして外す
         assert_eq!(take_terminated_from(&mut states, 0x1, false).len(), 1);
         assert!(states.is_empty());
@@ -1015,28 +1032,50 @@ mod tests {
         let mut states = states_with(&[(0xA, 0, 0)]);
         assert!(take_terminated_from(&mut states, 0x1, false).is_empty());
         assert!(take_terminated_from(&mut states, 0, false).is_empty());
-        assert!(states.contains_key(&0xA));
+        assert!(states.contains_key(&dm(0xA)));
     }
     #[test]
     fn binding_uses_the_dm_and_owner_captured_at_request_time() {
         let mut states = states_with(&[(0xA, 0, 0), (0xB, 0, 0)]);
         let target_a = BindTarget {
-            dm: 0xA,
-            owner: states[&0xA].owner,
+            dm: dm(0xA),
+            owner: states[&dm(0xA)].owner,
         };
         // 共有の composition が別の文書（B）のものなら結び付けない
         bind_in(&mut states, target_a, 0x1, 0xB);
-        assert_eq!(states[&0xA].tsf_comp, 0);
+        assert_eq!(states[&dm(0xA)].tsf_comp, 0);
         // 実行時にフォーカスが B に移っていても、要求の時点の A に結び付ける
         bind_in(&mut states, target_a, 0x1, 0xA);
-        assert_eq!(states[&0xA].tsf_comp, 0x1);
-        assert_eq!(states[&0xB].tsf_comp, 0);
+        assert_eq!(states[&dm(0xA)].tsf_comp, 0x1);
+        assert_eq!(states[&dm(0xB)].tsf_comp, 0);
         // 同じ DM の状態が別の所有者に替わっていれば結び付けない
         let mut replaced = owned_state();
         replaced.tsf_comp = 0;
-        states.insert(0xA, replaced);
+        states.insert(dm(0xA), replaced);
         bind_in(&mut states, target_a, 0x2, 0xA);
-        assert_eq!(states[&0xA].tsf_comp, 0);
+        assert_eq!(states[&dm(0xA)].tsf_comp, 0);
+    }
+    #[test]
+    fn states_of_a_reused_dm_address_are_kept_apart_by_generation() {
+        // 破棄された DM と同じアドレスに新しい DM ができても、世代で区別する
+        let old = DmKey {
+            ptr: 0xA,
+            generation: 1,
+        };
+        let new = DmKey {
+            ptr: 0xA,
+            generation: 2,
+        };
+        let mut states = HashMap::new();
+        states.insert(old, owned_state());
+        let target_new = BindTarget {
+            dm: new,
+            owner: states[&old].owner,
+        };
+        // 新しい DM の鍵では、古い DM の状態に結び付けない
+        bind_in(&mut states, target_new, 0x1, 0xA);
+        assert_eq!(states[&old].tsf_comp, 0);
+        assert!(!states.contains_key(&new));
     }
     #[test]
     fn first_change_restores_then_later_change_uses_restored_generation() {

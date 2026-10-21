@@ -383,6 +383,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // ログ・設定・設定の監視の初期化（プロセスにつき 1 回、Issue #72）。
         // keymap の読み込みより前、`inner` を借用する前に行う。
         crate::runtime_init_once();
+        // 1 つのプロセスで複数のスレッドが TSF を使うかを記録する（入力処理の見直しの段 3）
+        crate::engine::state::note_tsf_thread_activated();
 
         {
             let mut inner = self
@@ -656,6 +658,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
         }
+        crate::engine::state::note_tsf_thread_deactivated();
         tracing::info!("rakukan Deactivate");
         Ok(())
     }

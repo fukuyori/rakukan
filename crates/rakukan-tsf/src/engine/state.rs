@@ -1630,6 +1630,45 @@ pub static SESSION_SELECTING: std::sync::atomic::AtomicBool =
 // / `LIVE_CONV_GEN` / `live_conv_gen_bump` / `live_conv_gen_snapshot` /
 // `PreviewEntry`) はそちらに移動。
 
+// ─── TSF を使うスレッドの記録（入力処理の見直しの段 3、設計書 4.4）──────────────
+//
+// `SESSION_STATE`・`COMPOSITION`・RPC の編集状態はプロセス共通だが、候補ウィンドウや
+// タイマー・今の DM はスレッドローカル。1 つのプロセスで複数のスレッドが TSF を使うと
+// 両者が食い違う可能性がある（※推測）。実際に起きるかを確かめるため、Activate している
+// スレッドを数え、2 つ目のスレッドが Activate したときに WARN を残す。所有スレッドの
+// 仕組みを入れるかは、このログで確かめてから決める。
+
+static TSF_THREADS: LazyLock<Mutex<Vec<u32>>> = LazyLock::new(|| Mutex::new(Vec::new()));
+
+fn current_thread_id() -> u32 {
+    unsafe { windows::Win32::System::Threading::GetCurrentThreadId() }
+}
+
+/// Activate で呼ぶ。
+pub fn note_tsf_thread_activated() {
+    let me = current_thread_id();
+    let Ok(mut threads) = TSF_THREADS.lock() else {
+        return;
+    };
+    if !threads.contains(&me) {
+        threads.push(me);
+    }
+    if threads.len() > 1 {
+        tracing::warn!(
+            "multiple threads have activated the TSF text service in this process: {:?}",
+            *threads
+        );
+    }
+}
+
+/// Deactivate で呼ぶ。
+pub fn note_tsf_thread_deactivated() {
+    let me = current_thread_id();
+    if let Ok(mut threads) = TSF_THREADS.lock() {
+        threads.retain(|t| *t != me);
+    }
+}
+
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
     SESSION_STATE
         .lock()
@@ -2861,6 +2900,11 @@ pub fn doc_mode_deactivate() {
         return;
     }
     tracing::debug!("doc_mode: deactivate expired {} live dm(s)", expired.len());
+    // このスレッドの DM の RPC の編集状態も外す（入力処理の見直しの段 3）。DM はスレッドごと
+    // なので、所有スレッドでない Deactivate でも、ほかのスレッドの状態には触れない
+    for dm in &expired {
+        super::rpc_composition::dispose_ref(*dm);
+    }
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
         for dm in expired {
             store.remove(dm);
