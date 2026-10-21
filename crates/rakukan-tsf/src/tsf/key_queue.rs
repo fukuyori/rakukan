@@ -82,6 +82,9 @@ thread_local! {
     static RESCUE_EXTRA: RefCell<Vec<ExtraChar>> = const { RefCell::new(Vec::new()) };
     /// 文字を入れる要求の失効の世代（Deactivate で進める）。取り出し中の要求にも届く。
     static RESCUE_EPOCH: Cell<u64> = const { Cell::new(0) };
+    /// composition の救済（`RescueTxn`）。回復できない場合の処置の締め切りで composition が
+    /// あったときだけ。
+    static COMP_RESCUE: RefCell<Option<CompRescue>> = const { RefCell::new(None) };
     /// 接続の確認（`host_probe`）への登録の番号（0 なら未登録）。
     static WATCH_TOKEN: Cell<u64> = const { Cell::new(0) };
     /// 処置の途中に接続の回復の通知を受けた（処置の終わりに読み直す。設計書 4.2 の W2）。
@@ -339,6 +342,7 @@ pub(crate) fn pump() {
     if QUEUE.with(|q| q.borrow().is_empty())
         && !crate::tsf::commit_txn::commit_pending()
         && RESCUES.with(|r| r.borrow().is_empty())
+        && COMP_RESCUE.with(|c| c.borrow().is_none())
     {
         crate::tsf::candidate_window::stop_key_queue_timer();
     } else {
@@ -384,11 +388,25 @@ const RESCUE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 回復できない場合の処置（入力処理の見直しの段 6、前提の決定 3-B）: 先頭の `first` と
 /// 列のキーのうち、文字キーを打った文字のまま、そのキーが届いた文書の選択位置へ入れる
 /// （同じ文書へ続く文字は 1 回で。届いた文書が破棄されていれば入れない。前提の決定 2）。
-/// 文字以外のキーは捨てる。その後、入れ終わり、接続の確認が成功するまで直接入力に
-/// する（[`direct_fallback`]）。入れた結果は [`pump`] で確かめる（[`check_rescues`]）。
+/// composition があれば、その文書の文字は composition の救済（[`cut_off_composition`]）で
+/// 表示の後ろに続けて確定する。文字以外のキーは捨てる。その後、入れ終わり、接続の確認が
+/// 成功するまで直接入力にする（[`direct_fallback`]）。入れた結果は [`pump`] で確かめる
+/// （[`check_rescues`]）。
 fn give_up(first: HeldKey) {
+    let tid = first.tid;
     let mut keys = vec![first];
     keys.extend(QUEUE.with(|q| q.borrow_mut().drain(..).map(|e| e.key).collect::<Vec<_>>()));
+    // 状態と表示を先に決める（入れられなかった通知を、この表示で上書きしない。締め切りの
+    // 後の表示の要求を止める）
+    DIRECT_FALLBACK.with(|d| d.set(true));
+    RESCUE_ACTIVE.with(|a| a.set(true));
+    crate::tsf::factory::show_engine_waiting();
+    crate::tsf::candidate_window::start_key_queue_timer();
+    watch_link();
+    let epoch = RESCUE_EPOCH.with(|e| e.get());
+    if let Some(rescue) = cut_off_composition(&mut keys, tid) {
+        request_comp_rescue(rescue, epoch, false);
+    }
     let mut dropped = 0usize;
     let mut batches: Vec<TextBatch> = Vec::new();
     for key in keys {
@@ -405,13 +423,6 @@ fn give_up(first: HeldKey) {
         "key_queue: engine unavailable for {MAX_AGE:?}; inserting {} typed character batch(es) as is, {dropped} other key(s) dropped; direct input until the engine is back",
         batches.len()
     );
-    // 状態と表示を先に決める（入れられなかった通知を、この表示で上書きしない）
-    DIRECT_FALLBACK.with(|d| d.set(true));
-    RESCUE_ACTIVE.with(|a| a.set(true));
-    crate::tsf::factory::show_engine_waiting();
-    crate::tsf::candidate_window::start_key_queue_timer();
-    watch_link();
-    let epoch = RESCUE_EPOCH.with(|e| e.get());
     for (dm, ctx, tid, text) in batches {
         request_rescue(new_rescue(dm, ctx, tid, text), epoch);
     }
@@ -551,10 +562,12 @@ fn check_rescues() {
             InsertState::NotInserted { reason, .. } => unrescued(&rescue.text, reason),
         }
     }
+    check_comp_rescue(epoch);
     // 入れ終わったら、処置の途中に届いた文字を続けて入れる。それも無ければ処置を終える
     if rescue_active()
         && RESCUE_EPOCH.with(|e| e.get()) == epoch
         && RESCUES.with(|r| r.borrow().is_empty())
+        && COMP_RESCUE.with(|c| c.borrow().is_none())
     {
         let extra = RESCUE_EXTRA.with(|e| std::mem::take(&mut *e.borrow_mut()));
         for (dm, ctx, tid, text) in batch_extra(extra) {
@@ -564,6 +577,234 @@ fn check_rescues() {
             RESCUE_ACTIVE.with(|a| a.set(false));
             rescue_finished();
         }
+    }
+}
+
+/// composition の救済（設計書 4.2 の `RescueTxn`）。
+struct CompRescue {
+    ctx: ITfContext,
+    tid: u32,
+    /// 締め切りの時点の composition（`composition_identity`）と、その文書。
+    identity: usize,
+    dm: crate::engine::dm_registry::DmRef,
+    /// 締め切りの時点の表示（`shown_at_cutoff`）。
+    shown: String,
+    /// 入れる文字列（表示 ＋ 確かめていない末尾の文字 ＋ 列の文字キー）。以後は増やさない。
+    target: String,
+    /// 通常の要求の回数（`Retryable` で [`COMP_RESCUE_ATTEMPTS`] 回まで）。
+    attempts: u32,
+    /// 最後の 1 回（EndComposition だけ）を要求した。
+    last_sent: bool,
+    state: Rc<RefCell<crate::tsf::factory::RescueStep>>,
+    at: Instant,
+}
+
+/// composition の救済で、`Retryable` のときに要求し直す回数（この後に最後の 1 回）。
+const COMP_RESCUE_ATTEMPTS: u32 = 4;
+
+/// 救済の締め切り（設計書 4.2 の手順 1。同期に行う）。composition があれば、未実行の表示の
+/// 要求を失効させ、その時点の表示に、確かめていない末尾の文字と、その文書へ届いた列の
+/// 文字キーの文字（`keys` から取り除く）を続けた文字列を対象にする。
+fn cut_off_composition(keys: &mut Vec<HeldKey>, tid: u32) -> Option<CompRescue> {
+    let comp = crate::engine::state::composition_clone().ok().flatten()?;
+    let identity = crate::engine::state::composition_identity(&comp);
+    let dm_ptr = crate::engine::state::composition_dm();
+    let shown = crate::tsf::factory::cut_off_display(identity);
+    let (tail, skipped) = crate::engine::rpc_composition::unconfirmed_typed_text(identity);
+    let mut queued = String::new();
+    keys.retain(|key| {
+        if key.dm != dm_ptr {
+            return true;
+        }
+        match typed_text(&key.action) {
+            Some(c) => {
+                queued.push(c);
+                false
+            }
+            None => true,
+        }
+    });
+    let target = format!("{shown}{tail}{queued}");
+    tracing::warn!(
+        "key_queue: rescuing the composition shown={} unconfirmed={} queued={} skipped_requests={skipped} target={target:?}",
+        shown.chars().count(),
+        tail.chars().count(),
+        queued.chars().count()
+    );
+    let rest = crate::tsf::factory::not_shown_part(&target, &shown);
+    let Some(dm) = crate::engine::dm_registry::lookup(dm_ptr)
+        .filter(|dm| crate::engine::dm_registry::is_live(*dm))
+    else {
+        unrescued(&rest, "composition document gone");
+        return None;
+    };
+    // composition の文脈（範囲から取る。編集の権限は要らない）
+    let Some(ctx) = (unsafe { comp.GetRange().and_then(|r| r.GetContext()) }).ok() else {
+        unrescued(&rest, "composition context unavailable");
+        return None;
+    };
+    Some(CompRescue {
+        ctx,
+        tid,
+        identity,
+        dm,
+        shown,
+        target,
+        attempts: 0,
+        last_sent: false,
+        state: Rc::new(RefCell::new(crate::tsf::factory::RescueStep::Pending)),
+        at: Instant::now(),
+    })
+}
+
+/// composition の救済を要求して記録する。`last` なら最後の 1 回（EndComposition だけ）。
+fn request_comp_rescue(mut rescue: CompRescue, epoch: u64, last: bool) {
+    if !crate::engine::dm_registry::is_live(rescue.dm) {
+        unrescued(&rescue.target, "composition document gone");
+        return;
+    }
+    if last {
+        rescue.last_sent = true;
+    } else {
+        rescue.attempts += 1;
+    }
+    rescue.at = Instant::now();
+    let dm = rescue.dm;
+    let still_valid: Box<dyn Fn() -> bool> = Box::new(move || {
+        RESCUE_EPOCH.with(|e| e.get()) == epoch && crate::engine::dm_registry::is_live(dm)
+    });
+    rescue.state = crate::tsf::factory::rescue_composition(
+        &rescue.ctx,
+        rescue.tid,
+        rescue.identity,
+        rescue.shown.clone(),
+        rescue.target.clone(),
+        last,
+        still_valid,
+    );
+    if RESCUE_EPOCH.with(|e| e.get()) != epoch {
+        expire_comp_rescue(rescue, "deactivated");
+        return;
+    }
+    COMP_RESCUE.with(|c| *c.borrow_mut() = Some(rescue));
+}
+
+/// composition の救済の結果を確かめる。
+fn check_comp_rescue(epoch: u64) {
+    use crate::tsf::factory::{RescueOutcome, RescueStep};
+    let Some(rescue) = COMP_RESCUE.with(|c| c.borrow_mut().take()) else {
+        return;
+    };
+    if RESCUE_EPOCH.with(|e| e.get()) != epoch {
+        expire_comp_rescue(rescue, "deactivated");
+        return;
+    }
+    let step = rescue.state.borrow().clone();
+    let step = if step == RescueStep::Pending && rescue.at.elapsed() >= RESCUE_TIMEOUT {
+        // 失効させる（後で実行されても文書に触れない。文書は変えていない）
+        let done = RescueStep::Done(RescueOutcome::Retryable);
+        *rescue.state.borrow_mut() = done.clone();
+        done
+    } else {
+        step
+    };
+    match step {
+        RescueStep::Pending | RescueStep::Running => {
+            COMP_RESCUE.with(|c| *c.borrow_mut() = Some(rescue));
+        }
+        RescueStep::Done(outcome) => settle_comp_rescue(rescue, outcome, Some(epoch)),
+    }
+}
+
+/// composition の救済の結果を片づける。`retry` が `Some` なら、`Retryable` を予算の中で
+/// 要求し直す（設計書 4.2 の手順 4・5）。
+fn settle_comp_rescue(
+    rescue: CompRescue,
+    outcome: crate::tsf::factory::RescueOutcome,
+    retry: Option<u64>,
+) {
+    use crate::tsf::factory::RescueOutcome;
+    match (outcome, retry) {
+        (RescueOutcome::Retryable, Some(epoch))
+            if let Some(last) = next_comp_request(rescue.attempts, rescue.last_sent) =>
+        {
+            request_comp_rescue(rescue, epoch, last);
+        }
+        (RescueOutcome::Retryable | RescueOutcome::Expired, _) => {
+            unrescued(&rescue.target, "composition rescue not run");
+        }
+        (RescueOutcome::Rescued, _) => {
+            tracing::info!(
+                "key_queue: composition rescued chars={}",
+                rescue.target.chars().count()
+            );
+            composition_rescue_ended(rescue.identity);
+        }
+        (RescueOutcome::WrittenNotEnded, _) => {
+            // 文字は composition の中にある（アプリがフォーカスの移動などで確定する）
+            tracing::warn!(
+                "key_queue: composition rescue wrote the text but could not end the composition chars={}",
+                rescue.target.chars().count()
+            );
+            crate::tsf::mode_indicator::show("未確定", 0, 0);
+        }
+        (
+            RescueOutcome::PartlyKept {
+                unrescued: rest,
+                ended,
+            },
+            _,
+        ) => {
+            if ended {
+                composition_rescue_ended(rescue.identity);
+            }
+            if !rest.is_empty() {
+                unrescued(&rest, "composition kept as shown");
+            }
+        }
+        (RescueOutcome::Stopped { unrescued: rest }, _) => {
+            unrescued(&rest, "composition rescue stopped");
+        }
+    }
+}
+
+/// `Retryable` の後の次の要求: 通常の要求（`Some(false)`）を [`COMP_RESCUE_ATTEMPTS`] 回
+/// まで、その後に最後の 1 回（`Some(true)`）。最後の 1 回の後は無い（`None`）。
+fn next_comp_request(attempts: u32, last_sent: bool) -> Option<bool> {
+    if last_sent {
+        None
+    } else {
+        Some(attempts >= COMP_RESCUE_ATTEMPTS)
+    }
+}
+
+/// 要求を失効させ（後で実行されても文書に触れない）、結果が出ていればそれを片づける。
+fn expire_comp_rescue(rescue: CompRescue, reason: &str) {
+    use crate::tsf::factory::{RescueOutcome, RescueStep};
+    let step = rescue.state.borrow().clone();
+    match step {
+        RescueStep::Done(outcome) => settle_comp_rescue(rescue, outcome, None),
+        RescueStep::Pending | RescueStep::Running => {
+            *rescue.state.borrow_mut() = RescueStep::Done(RescueOutcome::Expired);
+            unrescued(&rescue.target, reason);
+        }
+    }
+}
+
+/// 救済で composition を終えた: 候補・タイマー・セッションと、その composition の編集状態を
+/// 片づける（`OnCompositionTerminated` と同じ。ホストへは送らない: エンジンが使えない）。
+fn composition_rescue_ended(identity: usize) {
+    crate::tsf::candidate_window::hide();
+    crate::tsf::candidate_window::stop_live_timer();
+    if let Ok(mut sess) = crate::engine::state::session_get() {
+        sess.set_idle();
+    }
+    let states = crate::engine::rpc_composition::take_terminated(identity, false);
+    if !states.is_empty() {
+        tracing::info!(
+            "key_queue: {} edit state(s) of the rescued composition dropped without telling the host",
+            states.len()
+        );
     }
 }
 
@@ -709,6 +950,9 @@ pub(crate) fn discard_all(reason: &str) -> usize {
     // ものとして記録する
     // 取り出し中・要求中の要求にも届くよう、失効の世代を進める
     RESCUE_EPOCH.with(|e| e.set(e.get() + 1));
+    if let Some(rescue) = COMP_RESCUE.with(|c| c.borrow_mut().take()) {
+        expire_comp_rescue(rescue, reason);
+    }
     let rescues = RESCUES.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for rescue in rescues {
         expire_rescue(&rescue, reason);
@@ -822,6 +1066,24 @@ mod tests {
         // 処置の終わりに読み直す: そのときの状態だけで決める
         assert_eq!(link_up_action(true, false, up, None), LinkUp::Release);
         assert_eq!(link_up_action(true, false, down, None), LinkUp::Keep);
+    }
+
+    #[test]
+    fn a_composition_rescue_is_retried_four_times_then_ended_as_shown_once() {
+        // 通常の要求 1〜3 回目の後は通常の要求、4 回目の後は最後の 1 回、その後は無い
+        assert_eq!(next_comp_request(1, false), Some(false));
+        assert_eq!(next_comp_request(3, false), Some(false));
+        assert_eq!(next_comp_request(4, false), Some(true));
+        assert_eq!(next_comp_request(4, true), None);
+    }
+
+    #[test]
+    fn only_the_part_not_shown_at_the_cutoff_is_reported_as_unrescued() {
+        use crate::tsf::factory::not_shown_part;
+        assert_eq!(not_shown_part("かんじka", "かんじ"), "ka");
+        assert_eq!(not_shown_part("かんじ", "かんじ"), "");
+        // 表示が対象の先頭でなければ、全体を確かめられないものとする
+        assert_eq!(not_shown_part("漢字ka", "かんじ"), "漢字ka");
     }
 
     #[test]

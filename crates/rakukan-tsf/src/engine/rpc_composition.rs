@@ -197,6 +197,45 @@ fn take_terminated_from(
         .filter_map(|dm| states.remove(&dm))
         .collect()
 }
+/// composition（`tsf_comp`）の編集状態の journal のうち、ホストの適用を確かめていない末尾の
+/// 文字を、打った文字のまま返す（入力処理の見直しの段 6、回復できない場合の救済）。
+/// Backspace は直前の末尾の文字を消す（消す文字が末尾に無ければ数えるだけ）。文字以外の
+/// 要求は数えるだけ。返り値は（文字列, 反映できなかった要求の数）。
+pub fn unconfirmed_typed_text(tsf_comp: usize) -> (String, usize) {
+    let states = lock_states();
+    let mut text = String::new();
+    let mut skipped = 0;
+    for state in states.values().filter(|state| {
+        tsf_comp != 0
+            && (state.tsf_comp == tsf_comp
+                || (state.tsf_comp == 0 && state.created_under == tsf_comp))
+    }) {
+        let (t, s) = typed_tail(&state.journal[state.confirmed_len()..]);
+        text.push_str(&t);
+        skipped += s;
+    }
+    (text, skipped)
+}
+fn typed_tail(tail: &[ChangeRequest]) -> (String, usize) {
+    let mut text = String::new();
+    let mut skipped = 0;
+    for request in tail {
+        match request {
+            ChangeRequest::InputChar { c, .. }
+            | ChangeRequest::PushChar(c)
+            | ChangeRequest::PushRaw(c)
+            | ChangeRequest::PushFullwidthAlpha(c) => match char::from_u32(*c) {
+                Some(ch) => text.push(ch),
+                None => skipped += 1,
+            },
+            ChangeRequest::Backspace if !text.is_empty() => {
+                text.pop();
+            }
+            _ => skipped += 1,
+        }
+    }
+    (text, skipped)
+}
 /// 今の文脈の編集状態を、手元から外して返す（Deactivate 用）。
 pub fn take_current() -> Option<RemoteComposition> {
     crate::tsf::candidate_window::reset_worker_busy_clock();
@@ -847,6 +886,29 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    #[test]
+    fn the_unconfirmed_tail_is_rescued_as_typed() {
+        let input = |c: char| ChangeRequest::InputChar {
+            c: c as u32,
+            kind: InputCharKind::Char,
+            bg_start_n_cands: None,
+        };
+        // 打った文字のまま。Backspace は末尾の文字を消す
+        let tail = [
+            input('k'),
+            ChangeRequest::PushRaw('a' as u32),
+            ChangeRequest::Backspace,
+            ChangeRequest::PushChar('i' as u32),
+        ];
+        assert_eq!(typed_tail(&tail), ("ki".to_string(), 0));
+        // 末尾に消す文字が無い Backspace と、文字以外の要求は数えるだけ
+        let tail = [
+            ChangeRequest::Backspace,
+            ChangeRequest::FlushPendingN,
+            input('n'),
+        ];
+        assert_eq!(typed_tail(&tail), ("n".to_string(), 2));
+    }
     #[derive(Debug)]
     enum Sent {
         Restore(Owner, Vec<ChangeRequest>, Option<Checkpoint>),

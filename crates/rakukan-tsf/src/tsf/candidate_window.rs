@@ -1255,6 +1255,10 @@ fn try_apply_selecting_composition(prefix: String, converted: String, suffix: St
         if crate::tsf::live_session::conv_gen_snapshot() != captured_gen {
             return Err(windows::core::Error::new(E_FAIL, "stale gen"));
         }
+        // 回復できない場合の救済の途中は表示を更新しない（入力処理の見直しの段 6）
+        if crate::tsf::key_queue::rescue_active() {
+            return Err(windows::core::Error::new(E_FAIL, "rescue in progress"));
+        }
         // 実行時点でも同じ候補を選んだ Selecting であること（遅延実行の間に
         // 候補送り・確定・取り消しがあれば書き換えない）。
         let still_selected = session_get().is_ok_and(|s| {
@@ -1270,9 +1274,8 @@ fn try_apply_selecting_composition(prefix: String, converted: String, suffix: St
         let range = comp
             .GetRange()
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
-        let full_w: Vec<u16> = format!("{prefix}{converted}{suffix}")
-            .encode_utf16()
-            .collect();
+        let full = format!("{prefix}{converted}{suffix}");
+        let full_w: Vec<u16> = full.encode_utf16().collect();
         {
             let _apply_guard = match crate::engine::state::COMPOSITION_APPLY_LOCK.try_lock() {
                 Ok(g) => g,
@@ -1284,6 +1287,7 @@ fn try_apply_selecting_composition(prefix: String, converted: String, suffix: St
             range
                 .SetText(ec, 0, &full_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            crate::tsf::factory::note_shown(&comp, &full);
         }
         applied_in.store(true, Ordering::Release);
 
@@ -2654,6 +2658,10 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
             );
             return Err(windows::core::Error::new(E_FAIL, "stale gen in Phase1A"));
         }
+        // 回復できない場合の救済の途中は表示を更新しない（入力処理の見直しの段 6）
+        if crate::tsf::key_queue::rescue_active() {
+            return Err(windows::core::Error::new(E_FAIL, "rescue in progress"));
+        }
         let comp = crate::engine::state::composition_clone()
             .unwrap_or(None)
             .ok_or_else(|| windows::core::Error::new(E_FAIL, "no composition"))?;
@@ -2676,6 +2684,7 @@ fn try_apply_phase1a(snapshot: &LiveSnapshot) -> bool {
             range
                 .SetText(ec, 0, &text_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            crate::tsf::factory::note_shown(&comp, &preview_1a);
         }
         applied_in.store(true, std::sync::atomic::Ordering::Release);
 

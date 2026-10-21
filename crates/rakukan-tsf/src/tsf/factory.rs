@@ -1262,7 +1262,27 @@ impl TextServiceFactory_Impl {
     }
 }
 
-pub(crate) use on_compose::InsertState;
+pub(crate) use on_compose::{InsertState, RescueOutcome, RescueStep, not_shown_part, note_shown};
+
+/// composition の救済の要求を出す（`key_queue` の回復できない場合の処置から呼ぶ）。
+pub(crate) fn rescue_composition(
+    ctx: &ITfContext,
+    tid: u32,
+    identity: usize,
+    shown: String,
+    target: String,
+    last: bool,
+    still_valid: Box<dyn Fn() -> bool>,
+) -> std::rc::Rc<std::cell::RefCell<RescueStep>> {
+    on_compose::rescue_composition(ctx, tid, identity, shown, target, last, still_valid)
+}
+
+/// 救済の締め切り: 未実行の表示の要求を失効させ、締め切りの時点の表示を返す。
+pub(crate) fn cut_off_display(identity: usize) -> String {
+    on_compose::void_pending_display();
+    crate::tsf::live_session::conv_gen_bump();
+    on_compose::shown_text(identity)
+}
 
 /// 文字列を今の選択位置にそのまま入れる要求を出す（`key_queue` の回復できない場合の
 /// 処置から呼ぶ）。

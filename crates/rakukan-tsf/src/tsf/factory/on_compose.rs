@@ -23,6 +23,49 @@ use crate::engine::state::{
 use crate::tsf::display_attr;
 use crate::tsf::edit_session::EditSession;
 
+thread_local! {
+    /// 表示の要求の世代（入力処理の見直しの段 6、設計書 4.2 の救済の締め切り）。救済の
+    /// 締め切りで進め、それより前に要求した表示の EditSession を何もさせない。
+    static DISPLAY_EPOCH: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// composition に最後に SetText が成功した文字列と、その composition
+    /// （`composition_identity`）。救済の締め切りの時点の表示（`shown_at_cutoff`）に使う。
+    static SHOWN: std::cell::RefCell<(usize, String)> =
+        const { std::cell::RefCell::new((0, String::new())) };
+}
+
+/// 未実行の表示の要求をすべて失効させる（救済の締め切り）。
+pub(crate) fn void_pending_display() {
+    DISPLAY_EPOCH.with(|e| e.set(e.get() + 1));
+}
+
+fn display_epoch() -> u64 {
+    DISPLAY_EPOCH.with(|e| e.get())
+}
+
+/// 表示の要求を実行してよいか（要求の時点の世代のままで、救済の途中でない）。
+fn display_allowed(epoch: u64) -> bool {
+    display_epoch() == epoch && !crate::tsf::key_queue::rescue_active()
+}
+
+/// composition に SetText が成功した文字列を記録する（救済の締め切りの時点の表示に使う。
+/// composition に SetText するすべての経路から呼ぶ）。
+pub(crate) fn note_shown(comp: &windows::Win32::UI::TextServices::ITfComposition, text: &str) {
+    let identity = crate::engine::state::composition_identity(comp);
+    SHOWN.with(|s| *s.borrow_mut() = (identity, text.to_string()));
+}
+
+/// composition（`identity`）に最後に SetText が成功した文字列。一度も成功していなければ空。
+pub(crate) fn shown_text(identity: usize) -> String {
+    SHOWN.with(|s| {
+        let s = s.borrow();
+        if s.0 == identity {
+            s.1.clone()
+        } else {
+            String::new()
+        }
+    })
+}
+
 /// TSF コンテキストからキャレットのスクリーン座標 (x, y_bottom) を取得する。
 /// mozc の FillCharPosition と同じアプローチ: GetSelection → GetTextExt。
 /// 取得できない場合は None を返す（インジケーターは表示しない）。
@@ -156,6 +199,12 @@ pub(super) fn update_composition(
 ) -> Result<()> {
     use windows::Win32::Foundation::E_FAIL;
 
+    // 救済の途中は表示を更新しない（入力処理の見直しの段 6）
+    if crate::tsf::key_queue::rescue_active() {
+        tracing::debug!("update_composition: rescue in progress; display skipped");
+        return Ok(());
+    }
+    let epoch = display_epoch();
     let existing = composition_clone()?;
     // M1.8 T-MID2: stale check 用に外側 snapshot のポインタを記録。
     // EditSession クロージャは TF_ES_READWRITE で遅延実行されるため、
@@ -169,6 +218,12 @@ pub(super) fn update_composition(
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+
+        // 救済の締め切りで失効した・救済の途中: composition を作らず、SetText もしない
+        if !display_allowed(epoch) {
+            tracing::debug!("update_composition: display request voided by a rescue");
+            return Ok(());
+        }
 
         // M1.8 T-MID2: クロージャ実行時点で composition が
         // 外側 snapshot と同一かを再確認。異なれば SetText せず no-op。
@@ -195,14 +250,16 @@ pub(super) fn update_composition(
             existing.is_some()
         );
 
-        let range = if let Some(comp) = &existing {
+        let (range, comp_for_shown) = if let Some(comp) = &existing {
             crate::engine::rpc_composition::bind_composition(
                 bind,
                 crate::engine::state::composition_identity(comp),
                 crate::engine::state::composition_dm(),
             );
-            comp.GetRange()
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
+            let r = comp
+                .GetRange()
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
+            (r, comp.clone())
         } else {
             // Fix2: GetEnd(文書末尾)ではなく現在のカーソル位置を使う
             let insert_point = get_insert_range_or_end(&ctx, ec, "update_composition")?;
@@ -225,8 +282,8 @@ pub(super) fn update_composition(
                 crate::engine::state::composition_identity(&new_comp),
                 dm_ptr,
             );
-            let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
-            r
+            let _ = composition_set_with_dm(Some(new_comp.clone()), dm_ptr);
+            (r, new_comp)
         };
 
         // M1.8 T-MID3: SetText 排他化。Phase1A 経路の SetText と直列化する。
@@ -245,6 +302,7 @@ pub(super) fn update_composition(
             range
                 .SetText(ec, 0, &preedit_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            note_shown(&comp_for_shown, &preedit);
         }
 
         // アンダーライン属性をセット
@@ -512,13 +570,14 @@ pub(super) fn commit_then_start_composition(
             crate::engine::state::composition_identity(&new_comp),
             dm_ptr,
         );
-        let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
+        let _ = composition_set_with_dm(Some(new_comp.clone()), dm_ptr);
 
         let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
         new_range
             .SetText(ec, 0, &preedit_w)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText new: {e}")))
             .inspect_err(warn_step)?;
+        note_shown(&new_comp, &next_preedit);
 
         // 新 composition にもアンダーライン属性をセット
         set_display_attr_prop(&ctx, ec, &new_range, display_attr::atom_input());
@@ -711,6 +770,199 @@ pub(super) fn insert_text_direct(
     state
 }
 
+/// composition の救済の要求の状態（[`rescue_composition`]）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RescueStep {
+    Pending,
+    Running,
+    Done(RescueOutcome),
+}
+
+/// composition の救済の結果（設計書 4.2 の手順 4 の表の `RescueOutcome`）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum RescueOutcome {
+    /// 全部入れて確定した。
+    Rescued,
+    /// 文書は変わっていない（要求が実行されなかった・SetText の失敗の後も表示のまま）。
+    /// 新しい要求でもう一度試してよい。
+    Retryable,
+    /// 書いたが EndComposition に失敗した（確定していない）。
+    WrittenNotEnded,
+    /// 表示のまま確定した・アプリが確定した・範囲が編集されていた。`unrescued` は入らな
+    /// かった文字列。`ended` は、この要求が composition を終えたか。
+    PartlyKept { unrescued: String, ended: bool },
+    /// 書かずにやめた（composition には触れずに残す）。
+    Stopped { unrescued: String },
+    /// 失効した（Deactivate・文書の破棄）。文書に触れていない。
+    Expired,
+}
+
+/// 締め切りの時点の表示 `shown` に出ていなかった部分（`shown` が `target` の先頭でなければ、
+/// `target` 全体を確かめられないものとする）。
+pub(crate) fn not_shown_part(target: &str, shown: &str) -> String {
+    target
+        .strip_prefix(shown)
+        .map_or_else(|| target.to_string(), str::to_string)
+}
+
+/// composition の救済の要求を出す（入力処理の見直しの段 6、設計書 4.2 の `RescueTxn`）。
+///
+/// 1 つの EditSession の中で、実行の時点の状態で 1 回だけ判断する（設計書 4.2 の手順 4 の表）:
+/// - composition `identity` を保持し、範囲が `shown` のまま: 範囲を `target` に SetText して
+///   EndComposition（`last` なら SetText せず EndComposition だけ: 手順 5 の最後の 1 回）。
+///   SetText に失敗したら範囲を読み直し、`shown` のままなら `Retryable`
+/// - 範囲が `shown` と違う（アプリが編集した）: 上書きせず EndComposition だけ
+/// - composition を保持していない（アプリが確定した）: 書かない
+///
+/// `still_valid` は実行の時点で呼び、偽なら文書に触れずに `Expired` にする。結果は返した
+/// 箱に記録し、`WM_APP_COMMIT_DONE` を送る。箱が `Pending` のままなら、呼び出し側が失効
+/// （`Done(Retryable)`）にしてよい（失効した要求は、後で実行されても文書に触れない）。
+pub(super) fn rescue_composition(
+    ctx: &ITfContext,
+    tid: u32,
+    identity: usize,
+    shown: String,
+    target: String,
+    last: bool,
+    still_valid: Box<dyn Fn() -> bool>,
+) -> std::rc::Rc<std::cell::RefCell<RescueStep>> {
+    use windows::Win32::UI::TextServices::{
+        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+    };
+    let state = std::rc::Rc::new(std::cell::RefCell::new(RescueStep::Pending));
+    let session_state = state.clone();
+    let session_ctx = ctx.clone();
+    let session = EditSession::new(move |ec| unsafe {
+        if *session_state.borrow() != RescueStep::Pending {
+            return Ok(());
+        }
+        let finish = |outcome: RescueOutcome| {
+            *session_state.borrow_mut() = RescueStep::Done(outcome);
+            crate::tsf::candidate_window::post_commit_done();
+        };
+        if !still_valid() {
+            finish(RescueOutcome::Expired);
+            return Ok(());
+        }
+        *session_state.borrow_mut() = RescueStep::Running;
+        let rest = not_shown_part(&target, &shown);
+        let _apply_guard = crate::engine::state::COMPOSITION_APPLY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let comp = composition_clone()
+            .ok()
+            .flatten()
+            .filter(|c| crate::engine::state::composition_identity(c) == identity);
+        let Some(comp) = comp else {
+            // 締め切りの後にアプリが確定した（終了の通知を受けた）: 書かない
+            finish(RescueOutcome::PartlyKept {
+                unrescued: rest,
+                ended: false,
+            });
+            return Ok(());
+        };
+        let Ok(range) = comp.GetRange() else {
+            finish(RescueOutcome::Stopped {
+                unrescued: target.clone(),
+            });
+            return Ok(());
+        };
+        let Some(now) = range_text(ec, &range) else {
+            finish(RescueOutcome::Stopped {
+                unrescued: target.clone(),
+            });
+            return Ok(());
+        };
+        // 確定の後の選択位置を範囲の末尾へ（EndComposition の前に置く: end_composition と同じ）
+        let caret_to_end = |range: &windows::Win32::UI::TextServices::ITfRange| {
+            if let Ok(cursor) = range.Clone() {
+                let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+                let sels = [TF_SELECTION {
+                    range: std::mem::ManuallyDrop::new(Some(cursor)),
+                    style: TF_SELECTIONSTYLE {
+                        ase: TfActiveSelEnd(0),
+                        fInterimChar: windows::Win32::Foundation::BOOL(0),
+                    },
+                }];
+                let _ = session_ctx.SetSelection(ec, &sels);
+                let [sel] = sels;
+                drop(std::mem::ManuallyDrop::into_inner(sel.range));
+            }
+        };
+        let end = || -> bool {
+            match comp.EndComposition(ec) {
+                Ok(()) => {
+                    let _ = composition_take();
+                    true
+                }
+                Err(e) => {
+                    tracing::warn!("rescue_composition: EndComposition failed: {e}");
+                    false
+                }
+            }
+        };
+        if now != shown || last {
+            // 範囲が締め切りの時点と違う（利用者の編集を残す）、または予算を使い切った
+            // （表示どおりに確定する）: 上書きせず EndComposition だけ
+            if now != shown {
+                tracing::warn!(
+                    "rescue_composition: the composition was edited after the cutoff; ending it as is"
+                );
+            }
+            caret_to_end(&range);
+            let ended = end();
+            if last && now == shown && !ended {
+                finish(RescueOutcome::Stopped {
+                    unrescued: target.clone(),
+                });
+            } else {
+                finish(RescueOutcome::PartlyKept {
+                    unrescued: rest,
+                    ended,
+                });
+            }
+            return Ok(());
+        }
+        let target_w: Vec<u16> = target.encode_utf16().collect();
+        if let Err(e) = range.SetText(ec, 0, &target_w) {
+            tracing::warn!("rescue_composition: SetText failed: {e}");
+            // 読み直して、表示のままなら何も変わっていない
+            let outcome = match range_text(ec, &range) {
+                Some(t) if t == shown => RescueOutcome::Retryable,
+                _ => RescueOutcome::Stopped {
+                    unrescued: target.clone(),
+                },
+            };
+            finish(outcome);
+            return Ok(());
+        }
+        caret_to_end(&range);
+        // 書いた後は元に戻さず、再試行もしない（EndComposition の結果は不確か）
+        if end() {
+            finish(RescueOutcome::Rescued);
+        } else {
+            finish(RescueOutcome::WrittenNotEnded);
+        }
+        Ok(())
+    });
+    match unsafe { ctx.RequestEditSession(tid, &session, TF_ES_READWRITE) } {
+        Ok(hr) if hr.is_ok() => {}
+        Ok(hr) => {
+            tracing::warn!("rescue_composition: edit session refused hr={hr:?}");
+            if *state.borrow() == RescueStep::Pending {
+                *state.borrow_mut() = RescueStep::Done(RescueOutcome::Retryable);
+            }
+        }
+        Err(e) => {
+            tracing::warn!("rescue_composition: request failed: {e}");
+            if *state.borrow() == RescueStep::Pending {
+                *state.borrow_mut() = RescueStep::Done(RescueOutcome::Retryable);
+            }
+        }
+    }
+    state
+}
+
 /// GUID_PROP_ATTRIBUTE プロパティを range にセットしてアンダーラインを要求する
 ///
 /// atom が 0（未登録）の場合は何もしない。
@@ -810,6 +1062,12 @@ fn update_composition_parts_impl(
         return update_composition(ctx, tid, sink, converted);
     }
 
+    // 救済の途中は表示を更新しない（入力処理の見直しの段 6）
+    if crate::tsf::key_queue::rescue_active() {
+        tracing::debug!("update_composition_candidate_parts: rescue in progress; display skipped");
+        return Ok(());
+    }
+    let epoch = display_epoch();
     let existing = composition_clone()?;
     // M1.8 T-MID2: update_composition と同じ stale check を入れる
     let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
@@ -823,6 +1081,14 @@ fn update_composition_parts_impl(
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+
+        // 救済の締め切りで失効した・救済の途中: composition を作らず、SetText もしない
+        if !display_allowed(epoch) {
+            tracing::debug!(
+                "update_composition_candidate_parts: display request voided by a rescue"
+            );
+            return Ok(());
+        }
 
         // M1.8 T-MID2: クロージャ実行時点の stale check
         let current = composition_clone()
@@ -840,14 +1106,16 @@ fn update_composition_parts_impl(
         let full_w: Vec<u16> = full.encode_utf16().collect();
 
         // ── Step1: テキストをセット ──
-        let range = if let Some(comp) = &existing {
+        let (range, comp_for_shown) = if let Some(comp) = &existing {
             crate::engine::rpc_composition::bind_composition(
                 bind,
                 crate::engine::state::composition_identity(comp),
                 crate::engine::state::composition_dm(),
             );
-            comp.GetRange()
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
+            let r = comp
+                .GetRange()
+                .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?;
+            (r, comp.clone())
         } else {
             let insert_point =
                 get_insert_range_or_end(&ctx, ec, "update_composition_candidate_parts")?;
@@ -870,8 +1138,8 @@ fn update_composition_parts_impl(
                 crate::engine::state::composition_identity(&new_comp),
                 dm_ptr,
             );
-            let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
-            r
+            let _ = composition_set_with_dm(Some(new_comp.clone()), dm_ptr);
+            (r, new_comp)
         };
 
         // M1.8 T-MID3: SetText 排他化（candidate_parts 経路）。
@@ -888,6 +1156,7 @@ fn update_composition_parts_impl(
             range
                 .SetText(ec, 0, &full_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
+            note_shown(&comp_for_shown, &full);
         }
 
         // ── Step2: 属性セット ──
