@@ -142,3 +142,15 @@ v6 のリリース条件（`docs/handoff.md` 0 章「2026-10-10 の更新」）�
   - T4-2: 別の IME への切り替え・サインアウトをせずにアンインストールしたため「いくつかの項目が削除できませんでした」と表示され、使用中のファイル（TSF DLL・ホスト・engine DLL・トレイ）と `rakukan-dict-builder.exe` が残った。登録の解除は 3 段階とも OK、CLSID は消えた。README にアンインストールの節を追加。サインアウト → サインイン → 再インストールで、登録 OK・変換できる・利用者のデータは残った。
 - 試験中に見たログ: フォーカスが外れたときに毎回 `composition change failed: timer or irreversible request cannot acquire ownership` が出る（`OnCompositionTerminated` が `rpc_composition::close()` を `reset_all()` より先に呼ぶため。次の入力は空の状態から始まり、表示の害は見つかっていない）。
 - #72（DllMain を空にし Activate で初期化）の確認（2026-10-10、開発ビルド 05:02:54）: `sudo cargo make install` が手順 5 まで完了。regsvr32 の登録・解除を 5 回繰り返して終了コードはすべて 0、クラッシュなし、Activate されない読み込みでログのファイル・`.lock` を作らない。変換・F9 → F10・設定の反映を確認。
+
+## 2026-10-22 の結果（入力処理の見直しのフェーズ 2: 開発ビルド `317ae85`、engine ABI 12）
+
+`cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入。ホストのログで、ホストと engine DLL がどちらも `317ae85`・ABI 12 で読み込まれたことを確かめた。設定はライブ変換の `min_chars = 4`。
+
+- T1 相当（`kanji` → Space → Enter、`kanji` → Backspace × 2 → Enter）: 合格。Space で変換・確定でき、Backspace 2 回で「か」が確定する。「かんじ」（3 文字）がライブ変換されないのは `min_chars = 4` の設定どおり。
+- 部分確定の残りの F10（docs/Input_Pipeline_Plan.md 4.8 の F-4。3 文字ではライブ変換が始まらず範囲指定に入れないので、`kankou` で行った）: `kankou` → Shift+← × 2（「かん」）→ Space → Enter → F10 → F6 → Esc。合格（F10 で「kou」、F6 で「こう」）。
+- 範囲変換の候補表示中の F10（同 F-6）: `kankou` → Shift+← × 2 → Space → F10 → F6 → Esc。合格（F10 で「kankou」、F6 で「かんこう」）。
+- T2-1b（改訂後）: 合格。止めた後の Space で、ホストを起動して繋ぎ直し、流し直した後にそのまま変換し、候補ウィンドウが出た（モデルの読み込みを待ってから候補が出る）。2 回目の Space で次の候補へ移り、Enter で確定した。
+- T2-2: 合格（「かんじか」）。
+- T2-3: 合格。流し直した後も候補を選んでいる状態が保たれ、↓ で入力行が次の候補（「漢字」）に変わり、Enter で「漢字」が確定した（2026-10-10 の食い違いは解消）。
+- 確かめていないもの（ホストを止めても次のキーで自動で起動し直すので、この手順では状態を作れない）: エンジンが 30 s 以上使えないときの処置（打った文字の救済・直接入力・背景の接続確認での解除）、IME をオフにした後の保留したキーの挿入、journal の上限。
