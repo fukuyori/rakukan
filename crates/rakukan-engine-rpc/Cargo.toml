@@ -13,6 +13,10 @@ tracing  = { workspace = true }
 serde    = { workspace = true }
 postcard = { version = "1", features = ["use-std"] }
 
+[dev-dependencies]
+# spawn_log_env が作る RAKUKAN_LOG を、engine DLL と同じ EnvFilter で解釈して確かめる
+tracing-subscriber = { workspace = true }
+
 [dependencies.windows]
 version = "0.58.0"
 features = [

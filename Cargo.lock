@@ -1761,6 +1761,7 @@ dependencies = [
  "rakukan-engine-abi",
  "serde",
  "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 

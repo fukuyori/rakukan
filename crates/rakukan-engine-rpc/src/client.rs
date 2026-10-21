@@ -68,16 +68,42 @@ fn host_log_level() -> Option<String> {
     HOST_LOG_LEVEL.lock().ok().and_then(|g| g.clone())
 }
 
+/// エンジン DLL の中で rakukan のログを出すクレート（engine DLL の依存のうち
+/// ワークスペース内のもの）。
+const DLL_LOG_TARGETS: &[&str] = &["rakukan_engine", "rakukan_dict"];
+
 /// spawn するホストへ設定する `RAKUKAN_LOG` の値を決める。
 ///
 /// 既にこのプロセスの環境に `RAKUKAN_LOG` がある場合は何も設定しない。
 /// 子はそれを継承するので、調査のために手で設定した値を config の値で
 /// 上書きしてしまわないようにする。
+///
+/// `log_level` がレベル名（error / warn / info / debug / trace、大文字小文字は
+/// 問わない）なら、そのレベルを rakukan のクレートだけに適用し、外部ライブラリは
+/// info までに抑える。レベル名をそのまま渡すと外部ライブラリまで同じレベルになり、
+/// trace では `tokenizers::tokenizer::normalizer` の 1 文字ごとの TRACE が DLL の
+/// ログの大半を占めていた（2026-10-15〜21 で 1.5 GB）。
+/// レベル名以外（`off`、数値、target 指定など）は従来どおりそのまま渡す。
 fn spawn_log_env(env_already_set: bool, configured: Option<String>) -> Option<String> {
     if env_already_set {
         return None;
     }
-    configured.filter(|level| !level.trim().is_empty())
+    let configured = configured?;
+    let value = configured.trim();
+    if value.is_empty() {
+        return None;
+    }
+    let level = value.to_ascii_lowercase();
+    let base = match level.as_str() {
+        "trace" | "debug" => "info",
+        "info" | "warn" | "error" => level.as_str(),
+        _ => return Some(configured),
+    };
+    let targets = DLL_LOG_TARGETS
+        .iter()
+        .map(|target| format!(",{target}={level}"))
+        .collect::<String>();
+    Some(format!("{base}{targets}"))
 }
 
 /// 1 回の RPC がこの時間を超えたら WARN を出す（Step 13-2）。
@@ -1495,13 +1521,131 @@ mod tests {
 
     #[test]
     fn spawn_log_env_uses_configured_level() {
-        assert_eq!(
-            spawn_log_env(false, Some("debug".into())),
-            Some("debug".to_string())
-        );
         assert_eq!(spawn_log_env(false, None), None);
         // 空文字は EnvFilter を壊すので渡さない
         assert_eq!(spawn_log_env(false, Some("  ".into())), None);
+    }
+
+    #[test]
+    fn spawn_log_env_limits_verbose_levels_to_rakukan_crates() {
+        // 外部ライブラリ（tokenizers など）は info までに抑える
+        assert_eq!(
+            spawn_log_env(false, Some("trace".into())),
+            Some("info,rakukan_engine=trace,rakukan_dict=trace".to_string())
+        );
+        assert_eq!(
+            spawn_log_env(false, Some("debug".into())),
+            Some("info,rakukan_engine=debug,rakukan_dict=debug".to_string())
+        );
+    }
+
+    #[test]
+    fn spawn_log_env_keeps_quiet_levels_for_all_crates() {
+        // info 以下では外部ライブラリも同じレベル（info より多くは出さない）
+        assert_eq!(
+            spawn_log_env(false, Some("info".into())),
+            Some("info,rakukan_engine=info,rakukan_dict=info".to_string())
+        );
+        assert_eq!(
+            spawn_log_env(false, Some("warn".into())),
+            Some("warn,rakukan_engine=warn,rakukan_dict=warn".to_string())
+        );
+        assert_eq!(
+            spawn_log_env(false, Some("error".into())),
+            Some("error,rakukan_engine=error,rakukan_dict=error".to_string())
+        );
+    }
+
+    #[test]
+    fn spawn_log_env_level_names_ignore_case_and_spaces() {
+        assert_eq!(
+            spawn_log_env(false, Some("TRACE".into())),
+            Some("info,rakukan_engine=trace,rakukan_dict=trace".to_string())
+        );
+        assert_eq!(
+            spawn_log_env(false, Some(" Debug ".into())),
+            Some("info,rakukan_engine=debug,rakukan_dict=debug".to_string())
+        );
+    }
+
+    /// engine DLL（`rakukan-engine` の `ffi.rs`）と同じ `EnvFilter` で、どの target の
+    /// イベントが通るかを数える。
+    fn passed_targets(spec: &str) -> Vec<&'static str> {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::SubscriberExt;
+
+        struct Collect(Arc<Mutex<Vec<String>>>);
+        impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Collect {
+            fn on_event(
+                &self,
+                event: &tracing::Event<'_>,
+                _: tracing_subscriber::layer::Context<'_, S>,
+            ) {
+                let meta = event.metadata();
+                self.0
+                    .lock()
+                    .unwrap()
+                    .push(format!("{} {}", meta.level(), meta.target()));
+            }
+        }
+
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let filter = tracing_subscriber::EnvFilter::try_new(spec).expect("valid filter");
+        let subscriber = tracing_subscriber::registry()
+            .with(filter)
+            .with(Collect(seen.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::trace!(target: "tokenizers::tokenizer::normalizer", "x");
+            tracing::debug!(target: "llama_cpp_2::model", "x");
+            tracing::info!(target: "llama_cpp_2::model", "x");
+            tracing::trace!(target: "rakukan_engine::kanji::backend", "x");
+            tracing::trace!(target: "rakukan_dict::store", "x");
+        });
+        let seen = seen.lock().unwrap().clone();
+        [
+            (
+                "TRACE tokenizers::tokenizer::normalizer",
+                "tokenizers_trace",
+            ),
+            ("DEBUG llama_cpp_2::model", "llama_debug"),
+            ("INFO llama_cpp_2::model", "llama_info"),
+            ("TRACE rakukan_engine::kanji::backend", "engine_trace"),
+            ("TRACE rakukan_dict::store", "dict_trace"),
+        ]
+        .into_iter()
+        .filter(|(line, _)| seen.iter().any(|s| s == line))
+        .map(|(_, name)| name)
+        .collect()
+    }
+
+    #[test]
+    fn spawn_log_env_trace_drops_external_trace_in_env_filter() {
+        let spec = spawn_log_env(false, Some("trace".into())).unwrap();
+        assert_eq!(
+            passed_targets(&spec),
+            ["llama_info", "engine_trace", "dict_trace"]
+        );
+    }
+
+    #[test]
+    fn spawn_log_env_passes_non_level_values_through() {
+        // EnvFilter はレベル名以外の単語を target 指定として受け取る。展開すると
+        // 指定全体が不正になり info へ戻るので、元の文字列のまま渡す
+        for value in [
+            "verbose",
+            "rakukan_engine",
+            "off",
+            "0",
+            "5",
+            "info,tokenizers=warn",
+            "rakukan_engine=trace",
+        ] {
+            assert_eq!(
+                spawn_log_env(false, Some(value.into())),
+                Some(value.to_string()),
+                "{value}"
+            );
+        }
     }
 
     // ── HostSpawnGuard 単体 ───────────────────────────────────────────────
