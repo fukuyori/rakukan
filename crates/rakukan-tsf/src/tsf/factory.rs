@@ -728,21 +728,15 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
         let vk = normalize_key_event_vk(wparam.0 as u16);
-        let action = match self
+        // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
+        // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
+        let resolved = self
             .inner
             .try_borrow()
             .ok()
-            .and_then(|g| g.keymap.resolve_action(vk))
-        {
-            Some(a) => a,
-            None => {
-                // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
-                // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
-                match crate::engine::keymap::essential_fallback_action(vk) {
-                    Some(a) => a,
-                    None => return Ok(FALSE),
-                }
-            }
+            .and_then(|g| g.keymap.resolve_action(vk));
+        let Some(action) = key_resolve(resolved, vk) else {
+            return Ok(FALSE);
         };
 
         // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
@@ -750,33 +744,27 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // 起動直後はコンパートメントが 0（オフ）のまま内部が On になる場合があり、
         // コンパートメントを参照すると ImeToggle が逆方向に動くバグを引き起こす。
         // → 内部状態のアトミックのみを正とし、コンパートメントは参照しない。
-        if !crate::engine::state::ime_mode_get_atomic().is_on() {
-            let eat = matches!(
-                action,
-                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
-            );
-            return Ok(if eat { TRUE } else { FALSE });
-        }
-
-        let has_preedit = engine_try_get_or_create()
-            .ok()
-            .and_then(|g| {
-                g.as_ref().map(|e| match e.preedit_is_empty() {
-                    Ok(empty) => !empty,
-                    Err(_) => crate::engine::state::composition_clone().is_ok_and(|c| c.is_some()),
-                })
-            })
-            .unwrap_or(false);
-
-        // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
-        // AtomicBool でロックなし高速チェック
-        let is_selecting = session_is_selecting_fast();
-
-        Ok(if key_should_eat(&action, has_preedit || is_selecting) {
-            TRUE
-        } else {
-            FALSE
-        })
+        let eat = test_key_eat(
+            &action,
+            crate::engine::state::ime_mode_get_atomic().is_on(),
+            || {
+                engine_try_get_or_create()
+                    .ok()
+                    .and_then(|g| {
+                        g.as_ref().map(|e| match e.preedit_is_empty() {
+                            Ok(empty) => !empty,
+                            Err(_) => {
+                                crate::engine::state::composition_clone().is_ok_and(|c| c.is_some())
+                            }
+                        })
+                    })
+                    .unwrap_or(false)
+            },
+            // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
+            // AtomicBool でロックなし高速チェック
+            session_is_selecting_fast,
+        );
+        Ok(if eat { TRUE } else { FALSE })
     }
 
     fn OnKeyDown(
@@ -804,12 +792,15 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             }
         }
 
-        let action = match self
+        let resolved = self
             .inner
             .try_borrow()
             .ok()
-            .and_then(|g| g.keymap.resolve_action(vk))
-        {
+            .and_then(|g| g.keymap.resolve_action(vk));
+        // keymap を借用できない・解決できない場合は、OnTestKeyDown と同じく重要キーの
+        // fallback を使う。Test が食べると判断した Enter などを、KeyDown で
+        // unmapped としてアプリへ渡さない（入力処理の見直しの段 2）。
+        let action = match key_resolve(resolved, vk) {
             Some(a) => a,
             None => {
                 tracing::debug!(
@@ -854,28 +845,22 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // ── IME オフガード（最終防衛線）───────────────────────────────────
         // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
         // アトミックなのでロック競合なし。
-        if !crate::engine::state::ime_mode_get_atomic().is_on() {
-            let is_ime_ctrl = matches!(
-                action,
-                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
-            );
-            if !is_ime_ctrl {
-                diag::event(DiagEvent::KeyIgnored {
-                    vk,
-                    reason: "ime_off",
-                });
-                return Ok(FALSE);
-            }
+        if keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on()) {
+            diag::event(DiagEvent::KeyIgnored {
+                vk,
+                reason: "ime_off",
+            });
+            return Ok(FALSE);
         }
 
-        match self.handle_action(action.clone(), ctx, tid, sink) {
+        let result = self.handle_action(action.clone(), ctx, tid, sink);
+        match &result {
             Ok(ate) => {
                 diag::event(DiagEvent::KeyHandled {
                     vk,
                     action: action_name(&action),
-                    ate,
+                    ate: *ate,
                 });
-                Ok(if ate { TRUE } else { FALSE })
             }
             Err(e) => {
                 diag::event(DiagEvent::Error {
@@ -883,9 +868,9 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                     msg: e.to_string(),
                 });
                 tracing::warn!("handle_action: {e}");
-                Ok(FALSE)
             }
         }
+        Ok(if keydown_return(&result) { TRUE } else { FALSE })
     }
 
     fn OnTestKeyUp(
@@ -1072,6 +1057,53 @@ fn engine_convert_sync_multi(
 }
 
 // ─── OnTestKeyDown ヘルパー ──────────────────────────────────────────────────
+//
+// 入力処理の見直しの段 1: キーを食べるかの判定を、今の挙動のまま関数に取り出した。
+// 呼び出す側は今の位置でこれらを呼ぶ。段 2 で、keymap で解決できないときの重要キーの
+// fallback を OnKeyDown にも使い、OnTestKeyDown と揃えた。
+
+/// IME オン/オフを切り替える操作か。
+fn is_ime_mode_action(action: &UserAction) -> bool {
+    matches!(
+        action,
+        UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
+    )
+}
+
+/// `OnTestKeyDown` と `OnKeyDown` のキーの解決。keymap の借用に失敗した場合と、keymap で
+/// 解決できなかった場合（どちらも `resolved = None`）は、重要キーの fallback を使う。
+fn key_resolve(resolved: Option<UserAction>, vk: u16) -> Option<UserAction> {
+    resolved.or_else(|| crate::engine::keymap::essential_fallback_action(vk))
+}
+
+/// `OnTestKeyDown` がキーを食べるか。
+///
+/// IME オフのときはモード切り替えだけを食べ、`has_preedit` / `is_selecting` は呼ばない
+/// （エンジンを取りに行かない）。IME オンのときは `has_preedit` → `is_selecting` の順に
+/// 1 回ずつ呼んでから組み合わせる。
+fn test_key_eat(
+    action: &UserAction,
+    ime_on: bool,
+    has_preedit: impl FnOnce() -> bool,
+    is_selecting: impl FnOnce() -> bool,
+) -> bool {
+    if !ime_on {
+        return is_ime_mode_action(action);
+    }
+    let has_preedit = has_preedit();
+    let is_selecting = is_selecting();
+    key_should_eat(action, has_preedit || is_selecting)
+}
+
+/// `OnKeyDown` の IME オフガード: このキーを処理せずアプリへ渡すか。
+fn keydown_ime_off_ignores(action: &UserAction, ime_on: bool) -> bool {
+    !ime_on && !is_ime_mode_action(action)
+}
+
+/// `OnKeyDown` が返す値。`handle_action` の `Err` はアプリへ渡す（FALSE）。
+fn keydown_return(result: &Result<bool>) -> bool {
+    matches!(result, Ok(true))
+}
 
 #[inline]
 fn key_should_eat(action: &UserAction, has_preedit: bool) -> bool {
@@ -1511,8 +1543,151 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
 
 #[cfg(test)]
 mod key_should_eat_tests {
-    use super::key_should_eat;
+    use super::{
+        key_resolve, key_should_eat, keydown_ime_off_ignores, keydown_return, test_key_eat,
+    };
     use crate::engine::user_action::UserAction;
+    use std::cell::RefCell;
+
+    /// UserAction の全 variant（user_action.rs）。
+    fn all_actions() -> Vec<UserAction> {
+        use UserAction::*;
+        vec![
+            Input('a'),
+            InputRaw('/'),
+            FullWidthSpace,
+            Convert,
+            CommitRaw,
+            Backspace,
+            CancelAll,
+            Cancel,
+            Hiragana,
+            Katakana,
+            HalfKatakana,
+            FullLatin,
+            HalfLatin,
+            CycleKana,
+            CandidateNext,
+            CandidatePrev,
+            CandidatePageDown,
+            CandidatePageUp,
+            CandidateSelect(1),
+            ImeOff,
+            ImeOn,
+            ImeToggle,
+            CursorLeft,
+            CursorRight,
+            CursorHome,
+            CursorEnd,
+            SegmentShrink,
+            SegmentExtend,
+            Punctuate('。'),
+            Tab,
+            Unknown,
+        ]
+    }
+
+    /// 今の `key_should_eat` を写した期待値: (常に食べる, 入力中だけ食べる)
+    fn expected(action: &UserAction) -> (bool, bool) {
+        use UserAction::*;
+        match action {
+            Input(_) | InputRaw(_) | FullWidthSpace | Convert | ImeToggle | ImeOff | ImeOn
+            | Punctuate(_) => (true, true),
+            Tab | Unknown => (false, false),
+            _ => (false, true),
+        }
+    }
+
+    #[test]
+    fn key_should_eat_matches_the_current_table() {
+        for action in all_actions() {
+            let (without, with) = expected(&action);
+            assert_eq!(
+                key_should_eat(&action, false),
+                without,
+                "{action:?} without preedit"
+            );
+            assert_eq!(
+                key_should_eat(&action, true),
+                with,
+                "{action:?} with preedit"
+            );
+        }
+    }
+
+    #[test]
+    fn test_key_eat_with_ime_off_eats_only_mode_keys_and_reads_nothing() {
+        for action in all_actions() {
+            let calls = RefCell::new(Vec::new());
+            let eat = test_key_eat(
+                &action,
+                false,
+                || {
+                    calls.borrow_mut().push("has_preedit");
+                    true
+                },
+                || {
+                    calls.borrow_mut().push("is_selecting");
+                    true
+                },
+            );
+            let mode = matches!(
+                action,
+                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
+            );
+            assert_eq!(eat, mode, "{action:?}");
+            assert!(calls.borrow().is_empty(), "{action:?}");
+        }
+    }
+
+    #[test]
+    fn test_key_eat_with_ime_on_reads_preedit_then_selecting_once_each() {
+        for (has_preedit, selecting) in [(false, false), (true, false), (false, true), (true, true)]
+        {
+            let calls = RefCell::new(Vec::new());
+            let eat = test_key_eat(
+                &UserAction::Backspace,
+                true,
+                || {
+                    calls.borrow_mut().push("has_preedit");
+                    has_preedit
+                },
+                || {
+                    calls.borrow_mut().push("is_selecting");
+                    selecting
+                },
+            );
+            assert_eq!(eat, has_preedit || selecting);
+            assert_eq!(*calls.borrow(), ["has_preedit", "is_selecting"]);
+        }
+    }
+
+    #[test]
+    fn key_resolve_uses_the_essential_fallback_on_both_entries() {
+        // OnTestKeyDown と OnKeyDown は、keymap で解決できなくても重要キーを fallback で
+        // 解決する（段 2 で揃えた。以前の KeyDown は unmapped として FALSE を返していた）
+        assert_eq!(key_resolve(None, 0x0D), Some(UserAction::CommitRaw));
+        assert_eq!(key_resolve(None, 0x41), None);
+        assert_eq!(
+            key_resolve(Some(UserAction::Input('x')), 0x0D),
+            Some(UserAction::Input('x'))
+        );
+    }
+
+    #[test]
+    fn keydown_ime_off_guard_and_return_value() {
+        for action in all_actions() {
+            let mode = matches!(
+                action,
+                UserAction::ImeToggle | UserAction::ImeOn | UserAction::ImeOff
+            );
+            assert_eq!(keydown_ime_off_ignores(&action, false), !mode, "{action:?}");
+            assert!(!keydown_ime_off_ignores(&action, true), "{action:?}");
+        }
+        assert!(keydown_return(&Ok(true)));
+        assert!(!keydown_return(&Ok(false)));
+        assert!(!keydown_return(&Err(anyhow::anyhow!("engine busy"))));
+    }
 
     #[test]
     fn home_end_are_eaten_only_while_preedit_exists() {

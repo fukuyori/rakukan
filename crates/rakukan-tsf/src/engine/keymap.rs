@@ -433,11 +433,20 @@ impl Keymap {
     ///
     /// キーマップにあればそのアクション、なければ ToUnicode で文字変換。
     pub fn resolve_action(&self, vk: u16) -> Option<UserAction> {
-        use windows::Win32::UI::Input::KeyboardAndMouse::{
-            GetKeyState, GetKeyboardState, ToUnicode,
-        };
-        let mods = Modifiers::current();
-        let space_down = unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 };
+        self.resolve_action_with(vk, &Win32KeyState)
+    }
+
+    /// [`resolve_action`](Self::resolve_action) の本体。キーの状態の読み取りを `keys` から行う。
+    ///
+    /// 読み取りの順序と有無は、`Win32KeyState` で呼んだときの Win32 API の呼び出しと同じ。
+    /// ① 〜 ② で決まった場合は `to_unicode`（`GetKeyboardState` / `ToUnicode`）を呼ばない。
+    pub(crate) fn resolve_action_with(
+        &self,
+        vk: u16,
+        keys: &impl KeyStateSource,
+    ) -> Option<UserAction> {
+        let mods = keys.modifiers();
+        let space_down = keys.space_down();
         let (vk, ctrl, shift, alt) = normalize_key_event(
             vk,
             mods.ctrl.is_pressed(),
@@ -462,7 +471,7 @@ impl Keymap {
 
         // ② 数字キー（修飾なし）→ 候補選択モード中のみ候補番号選択
         //    選択モード外では ToUnicode に落として通常文字として入力する
-        if !ctrl && !alt && super::state::session_is_selecting_fast() {
+        if !ctrl && !alt && keys.selecting() {
             let n = match vk {
                 0x31..=0x39 => Some(vk - 0x30), // 1–9
                 0x61..=0x69 => Some(vk - 0x60), // テンキー 1–9
@@ -491,13 +500,8 @@ impl Keymap {
         }
 
         // ③ ToUnicode で文字変換（ローマ字入力）
-        let key_state = {
-            let mut state = [0u8; 256];
-            unsafe { GetKeyboardState(&mut state).ok()? };
-            state
-        };
-        let mut buf = [0u16; 2];
-        let n = unsafe { ToUnicode(vk as u32, 0, Some(&key_state), &mut buf, 0) };
+        // GetKeyboardState が失敗したら None（④ にも進まない）
+        let (n, buf) = keys.to_unicode(vk)?;
         if n > 0 {
             let c = buf[0];
             if c >= 0x20
@@ -519,6 +523,49 @@ impl Keymap {
             0x09 => Some(UserAction::Tab),
             _ => None,
         }
+    }
+}
+
+/// キーの解決で読むキーボードと入力の状態（入力処理の見直しの段 1）。
+///
+/// `resolve_action_with` が今の順序で読む値を取り出したもの。試験では偽の実装で
+/// 読み取りの順序と有無を記録する。
+pub(crate) trait KeyStateSource {
+    /// 今の修飾キーの状態（[`Modifiers::current`]）。
+    fn modifiers(&self) -> Modifiers;
+    /// Space が押されているか（`GetKeyState(VK_SPACE)`）。
+    fn space_down(&self) -> bool;
+    /// 候補選択中か（`session_is_selecting_fast`）。
+    fn selecting(&self) -> bool;
+    /// `GetKeyboardState` と `ToUnicode` の結果（文字数と UTF-16 の値）。
+    /// `GetKeyboardState` が失敗したら `None`。
+    fn to_unicode(&self, vk: u16) -> Option<(i32, [u16; 2])>;
+}
+
+/// 本番用。今までと同じ引数で Win32 API を呼ぶ。
+pub(crate) struct Win32KeyState;
+
+impl KeyStateSource for Win32KeyState {
+    fn modifiers(&self) -> Modifiers {
+        Modifiers::current()
+    }
+    fn space_down(&self) -> bool {
+        use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState;
+        unsafe { GetKeyState(0x20) as u16 & 0x8000 != 0 }
+    }
+    fn selecting(&self) -> bool {
+        super::state::session_is_selecting_fast()
+    }
+    fn to_unicode(&self, vk: u16) -> Option<(i32, [u16; 2])> {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{GetKeyboardState, ToUnicode};
+        let key_state = {
+            let mut state = [0u8; 256];
+            unsafe { GetKeyboardState(&mut state).ok()? };
+            state
+        };
+        let mut buf = [0u16; 2];
+        let n = unsafe { ToUnicode(vk as u32, 0, Some(&key_state), &mut buf, 0) };
+        Some((n, buf))
     }
 }
 
@@ -984,6 +1031,181 @@ pub(crate) fn essential_fallback_action(vk: u16) -> Option<UserAction> {
         0x16 => Some(UserAction::ImeOn),     // VK_IME_ON
         0x19 => Some(UserAction::ImeToggle), // VK_KANJI（半角/全角）
         _ => None,
+    }
+}
+
+/// `resolve_action_with` の今の挙動（読み取りの順序と有無を含む）を固定する試験
+/// （入力処理の見直しの段 1）。
+#[cfg(test)]
+mod resolve_order_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    struct FakeKeys {
+        mods: Modifiers,
+        selecting: bool,
+        unicode: Option<(i32, [u16; 2])>,
+        calls: RefCell<Vec<&'static str>>,
+    }
+    impl FakeKeys {
+        fn new() -> Self {
+            Self {
+                mods: Modifiers::default(),
+                selecting: false,
+                unicode: Some((0, [0, 0])),
+                calls: RefCell::new(Vec::new()),
+            }
+        }
+        fn calls(&self) -> Vec<&'static str> {
+            self.calls.borrow().clone()
+        }
+    }
+    impl KeyStateSource for FakeKeys {
+        fn modifiers(&self) -> Modifiers {
+            self.calls.borrow_mut().push("modifiers");
+            self.mods
+        }
+        fn space_down(&self) -> bool {
+            self.calls.borrow_mut().push("space_down");
+            false
+        }
+        fn selecting(&self) -> bool {
+            self.calls.borrow_mut().push("selecting");
+            self.selecting
+        }
+        fn to_unicode(&self, _vk: u16) -> Option<(i32, [u16; 2])> {
+            self.calls.borrow_mut().push("to_unicode");
+            self.unicode
+        }
+    }
+    fn empty_keymap() -> Keymap {
+        Keymap::build(resolve_keymap_config(KeymapConfig {
+            preset: Some(KeymapPreset::Custom),
+            inherit_preset: false,
+            bindings: vec![],
+        }))
+    }
+    fn ctrl() -> Modifiers {
+        Modifiers::from_bools(true, false, false)
+    }
+
+    #[test]
+    fn unmapped_enter_uses_the_essential_fallback_without_further_reads() {
+        let keys = FakeKeys::new();
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x0D, &keys),
+            Some(UserAction::CommitRaw)
+        );
+        assert_eq!(keys.calls(), ["modifiers", "space_down"]);
+    }
+
+    #[test]
+    fn essential_fallback_ignores_modifiers() {
+        let mut keys = FakeKeys::new();
+        keys.mods = ctrl();
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x0D, &keys),
+            Some(UserAction::CommitRaw)
+        );
+    }
+
+    #[test]
+    fn mapped_key_returns_its_action_without_further_reads() {
+        let keymap = Keymap::build(resolve_keymap_config(KeymapConfig {
+            preset: Some(KeymapPreset::Custom),
+            inherit_preset: false,
+            bindings: vec![KeyBinding {
+                key: "F12".to_string(),
+                action: KeyAction::ImeOff,
+            }],
+        }));
+        let keys = FakeKeys::new();
+        assert_eq!(
+            keymap.resolve_action_with(0x7B, &keys),
+            Some(UserAction::ImeOff)
+        );
+        assert_eq!(keys.calls(), ["modifiers", "space_down"]);
+    }
+
+    #[test]
+    fn digit_selects_a_candidate_only_while_selecting() {
+        let mut keys = FakeKeys::new();
+        keys.selecting = true;
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x31, &keys),
+            Some(UserAction::CandidateSelect(1))
+        );
+        assert_eq!(keys.calls(), ["modifiers", "space_down", "selecting"]);
+
+        let mut keys = FakeKeys::new();
+        keys.unicode = Some((1, ['1' as u16, 0]));
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x31, &keys),
+            Some(UserAction::Input('1'))
+        );
+        assert_eq!(
+            keys.calls(),
+            ["modifiers", "space_down", "selecting", "to_unicode"]
+        );
+
+        // Ctrl 付きでは候補選択中かを読まない
+        let mut keys = FakeKeys::new();
+        keys.mods = ctrl();
+        keys.selecting = true;
+        keys.unicode = Some((1, ['1' as u16, 0]));
+        empty_keymap().resolve_action_with(0x31, &keys);
+        assert!(!keys.calls().contains(&"selecting"));
+    }
+
+    #[test]
+    fn numpad_symbol_is_raw_input_without_to_unicode() {
+        let keys = FakeKeys::new();
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x6F, &keys),
+            Some(UserAction::InputRaw('/'))
+        );
+        assert!(!keys.calls().contains(&"to_unicode"));
+    }
+
+    #[test]
+    fn shifted_letter_is_input_of_the_uppercase_character() {
+        let mut keys = FakeKeys::new();
+        keys.mods = Modifiers::from_bools(false, true, false);
+        keys.unicode = Some((1, ['A' as u16, 0]));
+        assert_eq!(
+            empty_keymap().resolve_action_with(0x41, &keys),
+            Some(UserAction::Input('A'))
+        );
+    }
+
+    #[test]
+    fn control_or_empty_translation_falls_through_to_tab_or_none() {
+        for unicode in [
+            Some((1, [0x09u16, 0])),
+            Some((0, [0, 0])),
+            Some((1, [0x7F, 0])),
+        ] {
+            let mut keys = FakeKeys::new();
+            keys.unicode = unicode;
+            assert_eq!(
+                empty_keymap().resolve_action_with(0x09, &keys),
+                Some(UserAction::Tab)
+            );
+            let mut keys = FakeKeys::new();
+            keys.unicode = unicode;
+            assert_eq!(empty_keymap().resolve_action_with(0x41, &keys), None);
+        }
+    }
+
+    #[test]
+    fn keyboard_state_failure_returns_none_even_for_tab() {
+        let mut keys = FakeKeys::new();
+        keys.unicode = None;
+        assert_eq!(empty_keymap().resolve_action_with(0x09, &keys), None);
+        assert_eq!(
+            keys.calls(),
+            ["modifiers", "space_down", "selecting", "to_unicode"]
+        );
     }
 }
 
