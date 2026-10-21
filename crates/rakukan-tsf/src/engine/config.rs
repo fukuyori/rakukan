@@ -1299,6 +1299,7 @@ enabled = true
 #[cfg(test)]
 mod config_load_failure_tests {
     //! 読み込みに失敗したときの扱い（Issue #61）
+    use super::config_load_warning_tests::warn_lock;
     use super::{ConfigManager, load_app_config_from_path};
     use std::path::PathBuf;
 
@@ -1337,6 +1338,7 @@ mod config_load_failure_tests {
 
     #[test]
     fn first_load_uses_defaults_on_parse_error() {
+        let _warn = warn_lock();
         let dir = temp_dir("first");
         let path = dir.join("config.toml");
         write_config(&path, BROKEN);
@@ -1353,6 +1355,7 @@ mod config_load_failure_tests {
 
     #[test]
     fn reinit_keeps_the_previous_config_on_parse_error() {
+        let _warn = warn_lock();
         let dir = temp_dir("keep");
         let path = dir.join("config.toml");
         write_config(&path, VALID);
@@ -1374,6 +1377,7 @@ mod config_load_failure_tests {
 
     #[test]
     fn reinit_keeps_the_previous_config_when_the_file_is_missing() {
+        let _warn = warn_lock();
         let dir = temp_dir("missing");
         let path = dir.join("config.toml");
         write_config(&path, VALID);
@@ -1395,6 +1399,7 @@ mod config_load_failure_tests {
 
     #[test]
     fn reinit_does_not_recreate_a_missing_file() {
+        let _warn = warn_lock();
         let dir = temp_dir("norecreate");
         let path = dir.join("config.toml");
         write_config(&path, VALID);
@@ -1411,6 +1416,7 @@ mod config_load_failure_tests {
 
     #[test]
     fn reinit_applies_a_fixed_toml() {
+        let _warn = warn_lock();
         let dir = temp_dir("fixed");
         let path = dir.join("config.toml");
         write_config(&path, VALID);
@@ -1440,7 +1446,7 @@ mod config_load_warning_tests {
     use super::config_load_failure_tests::{BROKEN, VALID, temp_dir, write_config};
     use std::io::Write;
     use std::path::Path;
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, Mutex, MutexGuard};
 
     /// tracing の出力を受け取る writer。
     #[derive(Clone)]
@@ -1466,11 +1472,25 @@ mod config_load_warning_tests {
         }
     }
 
+    /// 読込失敗の警告を出すテストを、同時に 1 つだけ動かすためのロック。
+    static WARN_LOCK: Mutex<()> = Mutex::new(());
+
+    /// 読込失敗の警告を出すテストは、捕まえるかどうかにかかわらずこれを持つ。
+    ///
+    /// 同じ警告を、捕まえないテスト（`config_load_failure_tests`）が並行して出すと、
+    /// 捕まえる側にログが 1 行も届かないことがあった（並行で 20 回中 13 回。
+    /// 他のモジュールとの並行や、1 つずつの実行では 0 回）。
+    pub(crate) fn warn_lock() -> MutexGuard<'static, ()> {
+        // 他のテストが失敗して毒になっていても、ロックとしては使える
+        WARN_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     /// `f` の間の WARN 以上を捕まえる。
     ///
     /// `with_default` はこのスレッドだけに効くので、並行して走る他のテストの
     /// 出力は混ざらない。
     pub(crate) fn capture_warnings<R>(f: impl FnOnce() -> R) -> (R, String) {
+        let _guard = warn_lock();
         let capture = LogCapture::new();
         let writer = capture.clone();
         let subscriber = tracing_subscriber::fmt()
