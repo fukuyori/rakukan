@@ -185,13 +185,57 @@ pub enum LinkState {
     Disconnected(DisconnectKind),
 }
 
-/// 接続の失敗の分類。
+/// 接続の失敗の分類（設計書 4.9 の `ConnectError` の `kind`）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DisconnectKind {
+    /// 接続・起動の待ちの失敗、または繋がっていた接続での読み書きの失敗。
+    Transport,
+    /// 起動の抑止中で、既に動いているホストにも繋がらなかった。
+    Suppressed,
     /// ホストのプロトコルの版が違う（古いホストが動いている）。待っても回復しない。
     VersionMismatch,
-    /// それ以外（接続・起動・応答の失敗）。
-    Other,
+    /// `Hello` の応答がエラー・想定外だった（版の違いを除く）。
+    HelloError,
+    /// `Create` の応答がエラー・想定外だった。
+    CreateError,
+}
+
+/// 接続の試行の失敗（設計書 4.9）。`finish_attempt` が失敗の段階から分類して、エラーに
+/// 付ける。`HostLink` の分類に使う。表示は元のエラーの文言のまま（ログを変えない）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectError {
+    /// 失敗した段階（`connect_after_spawn` / `connect_while_blocked` / `hello` / `create`）。
+    pub stage: &'static str,
+    pub kind: DisconnectKind,
+    message: String,
+}
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// エラーの分類（`HostLink` の `Disconnected` の中身）。
+fn disconnect_kind(e: &anyhow::Error) -> DisconnectKind {
+    if is_version_mismatch(e) {
+        return DisconnectKind::VersionMismatch;
+    }
+    e.downcast_ref::<ConnectError>()
+        .map_or(DisconnectKind::Transport, |c| c.kind)
+}
+
+/// 拒否（`Rejected`）のとき、要求が適用されたかもしれない（結果不明のまま残す）か。
+/// `_` を使わずに分ける（設計書 4.9。理由を足したら、ここで扱いを決める）。
+fn rejection_may_have_applied(reason: Reason) -> bool {
+    match reason {
+        // 照合で拒否した: 適用していない
+        Reason::GenMismatch | Reason::OwnerMismatch => false,
+        // 適用されたかをホストも判断できない
+        Reason::ResultUnavailable => true,
+        // #66 用に予約（v7 のホストは返さない）。結果不明（通信失敗と同じ）として扱う
+        Reason::ConfigStale | Reason::ConfigUnusable => true,
+    }
 }
 
 /// ホストとの接続の状態と、その世代。世代は状態が変わるたびに進む。
@@ -234,16 +278,13 @@ impl LinkCell {
     fn note(&self, result: std::result::Result<(), &anyhow::Error>) {
         self.set(match result {
             Ok(()) => LinkState::Connected,
-            Err(e) if is_version_mismatch(e) => {
-                LinkState::Disconnected(DisconnectKind::VersionMismatch)
-            }
-            Err(_) => LinkState::Disconnected(DisconnectKind::Other),
+            Err(e) => LinkState::Disconnected(disconnect_kind(e)),
         });
     }
 
     /// 接続を捨てた（通信の失敗・ホストの終了）。
     fn note_lost(&self) {
-        self.set(LinkState::Disconnected(DisconnectKind::Other));
+        self.set(LinkState::Disconnected(DisconnectKind::Transport));
     }
 
     fn set(&self, state: LinkState) {
@@ -1210,7 +1251,7 @@ impl<T: HostTransport> Connection<T> {
         };
         // 答えが出た（適用・拒否・エラーのどれでも）。ただし `ResultUnavailable` は
         // 適用されたかをホストも判断できないという答えなので、結果不明のまま残す
-        if !matches!(resp, Response::Rejected(Reason::ResultUnavailable)) {
+        if !matches!(resp, Response::Rejected(reason) if rejection_may_have_applied(reason)) {
             self.ledger.resolve(seq);
         }
         match resp {
@@ -1261,7 +1302,7 @@ impl<T: HostTransport> Connection<T> {
             // `ResultUnavailable` だけは復元と `then` が適用済みの可能性があるので戻さない
             // （`then` があればそれが、無ければそれまでの未解決が結果不明のまま残る）
             Response::Rejected(reason) => {
-                if reason != Reason::ResultUnavailable {
+                if !rejection_may_have_applied(reason) {
                     self.ledger.set_unresolved(prev);
                 }
                 tracing::debug!("rpc: Restore seq={seq} rejected: {reason:?}");
@@ -1333,7 +1374,7 @@ impl<T: HostTransport> Connection<T> {
             }
             // `ResultUnavailable` は適用済みの可能性があるので、結果不明のまま残す
             Response::Rejected(reason) => {
-                if reason != Reason::ResultUnavailable {
+                if !rejection_may_have_applied(reason) {
                     self.ledger.set_unresolved(prev);
                 }
                 tracing::debug!("rpc: RestoreJournal seq={seq} rejected: {reason:?}");
@@ -1697,7 +1738,19 @@ impl<T: HostTransport> Connection<T> {
                         failure.error
                     );
                 }
-                Err(failure.error)
+                // 失敗の段階から分類して付ける（`HostLink` の分類に使う。設計書 4.9）
+                let kind = match failure.stage {
+                    AttemptStage::ConnectAfterSpawn => DisconnectKind::Transport,
+                    AttemptStage::ConnectWhileBlocked => DisconnectKind::Suppressed,
+                    AttemptStage::Hello => DisconnectKind::HelloError,
+                    AttemptStage::Create => DisconnectKind::CreateError,
+                };
+                let message = failure.error.to_string();
+                Err(failure.error.context(ConnectError {
+                    stage,
+                    kind,
+                    message,
+                }))
             }
         }
     }
@@ -2302,15 +2355,70 @@ mod tests {
         );
         assert_eq!(first.epoch, 1);
 
+        // 古いホストの 2 回と合わせて失敗が閾値に達し、4 回目は起動の抑止中の接続になる
         conn.ensure_connected().expect_err("no host");
         let second = conn.link.get();
-        assert_eq!(second.state, LinkState::Disconnected(DisconnectKind::Other));
+        assert_eq!(
+            second.state,
+            LinkState::Disconnected(DisconnectKind::Suppressed)
+        );
         assert_eq!(second.epoch, 2, "状態が変われば世代が進む");
 
         conn.ensure_connected().expect("connects");
         let third = conn.link.get();
         assert_eq!(third.state, LinkState::Connected);
         assert_eq!(third.epoch, 3);
+    }
+
+    #[test]
+    fn connect_failures_are_classified_by_stage() {
+        let kind_of = |connects: Vec<std::result::Result<FakeStream, &'static str>>| {
+            let mut conn = connection(FakeTransport {
+                connects: connects.into(),
+                ..Default::default()
+            });
+            conn.ensure_connected().expect_err("fails");
+            match conn.link.get().state {
+                LinkState::Disconnected(kind) => kind,
+                other => panic!("{other:?}"),
+            }
+        };
+        let hello_error = || Ok(stream_with(&[Response::Error("busy".into())]));
+        assert_eq!(
+            kind_of(vec![hello_error(), hello_error()]),
+            DisconnectKind::HelloError
+        );
+        let create_error = || Ok(stream_with(&[hello_ok(), Response::Error("bad".into())]));
+        assert_eq!(
+            kind_of(vec![create_error(), create_error()]),
+            DisconnectKind::CreateError
+        );
+        assert_eq!(
+            kind_of(vec![Err("a"), Err("b"), Err("c"), Err("d")]),
+            DisconnectKind::Transport
+        );
+        // 起動の抑止中
+        let mut conn = connection(FakeTransport::default());
+        conn.with_guard(|g| {
+            for _ in 0..HOST_FAILURE_THRESHOLD {
+                g.record_failure(0);
+            }
+        });
+        conn.ensure_connected().expect_err("suppressed");
+        assert_eq!(
+            conn.link.get().state,
+            LinkState::Disconnected(DisconnectKind::Suppressed)
+        );
+    }
+
+    #[test]
+    fn only_owner_and_generation_rejections_count_as_not_applied() {
+        assert!(!rejection_may_have_applied(Reason::GenMismatch));
+        assert!(!rejection_may_have_applied(Reason::OwnerMismatch));
+        assert!(rejection_may_have_applied(Reason::ResultUnavailable));
+        // #66 用の予約は結果不明として扱う
+        assert!(rejection_may_have_applied(Reason::ConfigStale));
+        assert!(rejection_may_have_applied(Reason::ConfigUnusable));
     }
 
     #[test]
@@ -2333,7 +2441,10 @@ mod tests {
         conn.call_with_retry(Request::EngineHealth)
             .expect_err("no more responses");
         let lost = conn.link.get();
-        assert_eq!(lost.state, LinkState::Disconnected(DisconnectKind::Other));
+        assert_eq!(
+            lost.state,
+            LinkState::Disconnected(DisconnectKind::Transport)
+        );
         assert_eq!(lost.epoch, connected.epoch + 1);
     }
 

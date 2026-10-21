@@ -1276,7 +1276,7 @@ mod tests {
     fn direct_input_ends_only_on_a_current_link_up_after_the_rescue() {
         use rakukan_engine_rpc::{DisconnectKind, LinkState};
         let up = link(LinkState::Connected, 4);
-        let down = link(LinkState::Disconnected(DisconnectKind::Other), 5);
+        let down = link(LinkState::Disconnected(DisconnectKind::Transport), 5);
         // 直接入力でなければ何もしない
         assert_eq!(link_up_action(false, false, up, Some(4)), LinkUp::Ignore);
         // 処置の途中: 外さず印を残す（W2）

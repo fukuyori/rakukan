@@ -18,9 +18,9 @@ pub mod protocol;
 pub mod server;
 
 pub use client::{
-    ChangeError, ChangeReply, ConditionalShutdown, ConfigSource, CreateConfig, DisconnectKind,
-    HostLink, LinkState, ReadError, RestoreJournalReply, RestoreReply, RpcEngine, ShutdownOutcome,
-    host_link, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level, tsf_id,
+    ChangeError, ChangeReply, ConditionalShutdown, ConfigSource, ConnectError, CreateConfig,
+    DisconnectKind, HostLink, LinkState, ReadError, RestoreJournalReply, RestoreReply, RpcEngine,
+    ShutdownOutcome, host_link, rpc_stats_reset, rpc_stats_snapshot, set_host_log_level, tsf_id,
 };
 pub use protocol::{
     BgStartOutcome, BgTakeOutcome, BgView, ChangeKind, ChangeOutcome, ChangeRequest, Checkpoint,
