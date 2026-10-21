@@ -12,10 +12,10 @@
 //! キー（全体の確定の後の Home など）は、保留せずその場でアプリへ渡す。今のキーも列の末尾に
 //! 積んでから再生し、今のキーまで実行できたら、その結果で食べるかを決める。
 //!
-//! この段の制限（設計書 7 節）: 宛先は「キーが届いた文書（DM）」だけで照合し、フォーカスが
-//! 別の文書へ移っていたキーは捨てて WARN を残す。前に保留したキーが、実行の時点で IME が
-//! オフだった・IME が使わなかった場合は、アプリへ渡せずに失われる（打った文字を元の文書へ
-//! 入れる扱い（前提の決定 2）は段 6）。
+//! 宛先は「キーが届いた文書（DM）」だけで照合する。前に保留したキーが、実行の時点で
+//! フォーカスが別の文書へ移っていた・IME がオフだった・IME が使わなかった場合、文字キーは
+//! 打った文字のまま、届いた文書の選択位置へ入れる（[`InsertTxn`]。前提の決定 2、段 6）。
+//! 文字以外のキーは捨てて WARN を残す。
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -82,6 +82,8 @@ thread_local! {
     static RESCUE_EXTRA: RefCell<Vec<ExtraChar>> = const { RefCell::new(Vec::new()) };
     /// 文字を入れる要求の失効の世代（Deactivate で進める）。取り出し中の要求にも届く。
     static RESCUE_EPOCH: Cell<u64> = const { Cell::new(0) };
+    /// 保留したキーの文字を文書へ入れている要求（[`InsertTxn`]）。結果が出るまで再生を止める。
+    static INSERTING: RefCell<Option<InsertTxn>> = const { RefCell::new(None) };
     /// composition の救済（`RescueTxn`）。回復できない場合の処置の締め切りで composition が
     /// あったときだけ。
     static COMP_RESCUE: RefCell<Option<CompRescue>> = const { RefCell::new(None) };
@@ -118,11 +120,21 @@ pub(crate) fn put_back(seq: u64, key: HeldKey) {
 /// 残るものとして扱う（後続のキーが処理中のキーを追い越してアプリへ届かないように）。
 pub(crate) fn input_after_pending() -> bool {
     input_after(
-        REPLAYING.with(|r| r.get())
-            || ADMITTING.with(|a| a.get()) > 0
-            || QUEUE.with(|q| !q.borrow().is_empty()),
+        REPLAYING.with(|r| r.get()) || ADMITTING.with(|a| a.get()) > 0 || held_or_inserting(),
         crate::tsf::commit_txn::pending_leaves_input(),
     )
+}
+
+/// 保留したキーがあるか、その文字を文書へ入れている途中に届いた文字キーか。IME のオン・
+/// オフにかかわらず保留する（アプリへ渡すと、まだ入っていない文字を追い越すため。再生で
+/// IME がオフなら、今のキーはアプリへ渡し、前のキーは文書へ入れる）。
+pub(crate) fn holds_typed_char(action: &UserAction) -> bool {
+    held_or_inserting() && typed_text(action).is_some()
+}
+
+/// 保留したキーがあるか、その文字を文書へ入れている途中か（後のキーに追い越させない）。
+fn held_or_inserting() -> bool {
+    QUEUE.with(|q| !q.borrow().is_empty()) || INSERTING.with(|i| i.borrow().is_some())
 }
 
 fn input_after(busy_or_queued: bool, pending_leaves_input: Option<bool>) -> bool {
@@ -187,7 +199,7 @@ pub(crate) fn admit(
     if !busy {
         settle();
     }
-    let queued = QUEUE.with(|q| !q.borrow().is_empty());
+    let queued = held_or_inserting();
     let result = if !(busy || queued || crate::tsf::commit_txn::commit_pending()) {
         Admit::Direct
     } else if !eats(input_after(
@@ -215,7 +227,7 @@ fn settle() {
 pub(crate) fn should_hold() -> bool {
     REPLAYING.with(|r| r.get())
         || ADMITTING.with(|a| a.get()) > 0
-        || QUEUE.with(|q| !q.borrow().is_empty())
+        || held_or_inserting()
         || crate::tsf::commit_txn::commit_pending()
 }
 
@@ -276,6 +288,13 @@ pub(crate) fn take_outcome(seq: u64) -> Option<bool> {
 ///
 /// キーの処理の途中（`run_exclusive`）・再生の途中に呼ばれたら、何もしない。
 pub(crate) fn pump() {
+    pump_for(None);
+}
+
+/// [`pump`] と同じ。`current` は今 OnKeyDown で処理しているキーの通し番号で、そのキーを
+/// IME が使わなかったら、文書へ入れずにアプリへ渡す（呼び出し側が [`take_outcome`] で知る）。
+/// それ以外の保留したキーは、文字を文書へ入れる（[`divert`]）。
+pub(crate) fn pump_for(current: Option<u64>) {
     // 受け付けを終えていないキーがあれば、それを追い越さないよう再生しない（そのキーの
     // 受け付けの後の pump か、タイマーで再生する）
     if ADMITTING.with(|a| a.get()) > 0 {
@@ -288,6 +307,10 @@ pub(crate) fn pump() {
     settle();
     check_rescues();
     while !crate::tsf::commit_txn::commit_pending() {
+        // 前のキーの文字を文書へ入れている途中なら、後のキーを実行しない（追い越さない）
+        if check_inserting() {
+            break;
+        }
         let Some(Queued { seq, key }) = QUEUE.with(|q| q.borrow_mut().pop_front()) else {
             break;
         };
@@ -303,8 +326,14 @@ pub(crate) fn pump() {
             ..
         } = key;
         IN_REPLAY.with(|r| r.set(true));
-        let ate = factory.replay_key(action, vk, ctx, tid, sink, dm);
+        let replayed = factory.replay_key(action, vk, ctx, tid, sink, dm);
         IN_REPLAY.with(|r| r.set(false));
+        let Some(ate) = replayed else {
+            // フォーカスが別の文書へ移っていた: 文字は届いた文書へ入れる（前提の決定 2）
+            divert(seq, kept, "focus moved");
+            OUTCOMES.with(|o| o.borrow_mut().push((seq, true)));
+            continue;
+        };
         if take_suspended() {
             // ホストの版が違う（古いホストが動いている）なら、待っても回復しない
             let version_mismatch = matches!(
@@ -331,15 +360,19 @@ pub(crate) fn pump() {
             put_back(seq, kept);
             break;
         }
-        if !ate {
-            // 今のキー（OnKeyDown の中）ならアプリへ渡す。前に保留したキーは渡せない
-            tracing::info!("key_queue: replayed key not used by the IME seq={seq} vk={vk:#04x}");
+        if !ate && current != Some(seq) {
+            // 前に保留したキーはアプリへ渡せない: 文字は文書へ入れる（IME がオフだった・
+            // IME が使わなかった）
+            divert(seq, kept, "not used by the IME");
+            OUTCOMES.with(|o| o.borrow_mut().push((seq, true)));
+            continue;
         }
+        // 今のキー（OnKeyDown の中）で IME が使わなかったなら、アプリへ渡す
         OUTCOMES.with(|o| o.borrow_mut().push((seq, ate)));
         crate::tsf::commit_txn::finish_completed();
     }
     REPLAYING.with(|r| r.set(false));
-    if QUEUE.with(|q| q.borrow().is_empty())
+    if !held_or_inserting()
         && !crate::tsf::commit_txn::commit_pending()
         && RESCUES.with(|r| r.borrow().is_empty())
         && COMP_RESCUE.with(|c| c.borrow().is_none())
@@ -366,6 +399,132 @@ fn typed_text(action: &UserAction) -> Option<char> {
         UserAction::Input(c) | UserAction::InputRaw(c) | UserAction::Punctuate(c) => Some(*c),
         UserAction::FullWidthSpace => Some(' '),
         _ => None,
+    }
+}
+
+/// 保留したキーの文字を、そのキーが届いた文書の選択位置へ入れる要求（入力処理の見直しの
+/// 段 6、設計書 4.2 の `InsertTxn`。前提の決定 2）。入れ終わるまで後のキーを実行しない。
+struct InsertTxn {
+    seq: u64,
+    vk: u16,
+    ctx: ITfContext,
+    tid: u32,
+    dm: crate::engine::dm_registry::DmRef,
+    text: String,
+    /// 要求した回数（[`INSERT_ATTEMPTS`] 回まで）。
+    attempts: u32,
+    state: Rc<Cell<crate::tsf::factory::InsertState>>,
+    at: Instant,
+}
+
+/// 文字を入れる要求の上限の回数（設計書 4.2 の `InsertTxn`）。
+const INSERT_ATTEMPTS: u32 = 3;
+
+/// IME が扱わなかった、前に保留したキー: 文字キーは打った文字のまま届いた文書へ入れる。
+/// 届いた文書が破棄されていた・文字以外のキーは捨てて WARN。
+fn divert(seq: u64, key: HeldKey, reason: &str) {
+    let Some(c) = typed_text(&key.action) else {
+        tracing::warn!(
+            "key_queue: held key dropped ({reason}) seq={seq} vk={:#04x} action={:?}",
+            key.vk,
+            key.action
+        );
+        return;
+    };
+    let Some(dm) = crate::engine::dm_registry::lookup(key.dm)
+        .filter(|dm| crate::engine::dm_registry::is_live(*dm))
+    else {
+        tracing::warn!(
+            "key_queue: held character dropped ({reason}; document gone) seq={seq} vk={:#04x}",
+            key.vk
+        );
+        return;
+    };
+    tracing::info!("key_queue: inserting a held character as typed ({reason}) seq={seq}");
+    request_insert(InsertTxn {
+        seq,
+        vk: key.vk,
+        ctx: key.ctx,
+        tid: key.tid,
+        dm,
+        text: c.to_string(),
+        attempts: 0,
+        state: Rc::new(Cell::new(crate::tsf::factory::InsertState::Pending)),
+        at: Instant::now(),
+    });
+}
+
+/// 文字を入れる要求を出して記録する（新しい要求の箱で。前の要求は失効させてある）。
+fn request_insert(mut txn: InsertTxn) {
+    let epoch = RESCUE_EPOCH.with(|e| e.get());
+    txn.attempts += 1;
+    txn.at = Instant::now();
+    let dm = txn.dm;
+    let still_valid: Box<dyn Fn() -> bool> = Box::new(move || {
+        RESCUE_EPOCH.with(|e| e.get()) == epoch && crate::engine::dm_registry::is_live(dm)
+    });
+    txn.state = crate::tsf::factory::insert_text_direct(&txn.ctx, txn.tid, &txn.text, still_valid);
+    if RESCUE_EPOCH.with(|e| e.get()) != epoch {
+        expire_insert(&txn, "deactivated");
+        return;
+    }
+    INSERTING.with(|i| *i.borrow_mut() = Some(txn));
+    crate::tsf::candidate_window::start_key_queue_timer();
+}
+
+/// 文字を入れる要求の結果を確かめる。まだ結果が出ていなければ `true`（後のキーを待たせる）。
+/// 文書を変えていない失敗・時間切れは、上限まで新しい要求で入れ直す。
+fn check_inserting() -> bool {
+    use crate::tsf::factory::InsertState;
+    let Some(txn) = INSERTING.with(|i| i.borrow_mut().take()) else {
+        return false;
+    };
+    let mut state = txn.state.get();
+    if state == InsertState::Pending && txn.at.elapsed() >= RESCUE_TIMEOUT {
+        // 失効させる（後で実行されても文書に触れない）
+        state = InsertState::NotInserted {
+            reason: "timeout",
+            retryable: true,
+        };
+        txn.state.set(state);
+    }
+    match state {
+        InsertState::Inserted => false,
+        InsertState::Pending | InsertState::Running => {
+            INSERTING.with(|i| *i.borrow_mut() = Some(txn));
+            true
+        }
+        InsertState::NotInserted {
+            retryable: true, ..
+        } if txn.attempts < INSERT_ATTEMPTS => {
+            request_insert(txn);
+            INSERTING.with(|i| i.borrow().is_some())
+        }
+        InsertState::NotInserted { reason, .. } => {
+            tracing::warn!(
+                "key_queue: held character dropped; the document did not take it ({reason}) seq={} vk={:#04x} attempts={}",
+                txn.seq,
+                txn.vk,
+                txn.attempts
+            );
+            false
+        }
+    }
+}
+
+/// 要求を失効させ（後で実行されても文書に触れない）、入れられなかったものとして記録する。
+fn expire_insert(txn: &InsertTxn, reason: &str) {
+    use crate::tsf::factory::InsertState;
+    if txn.state.get() != InsertState::Inserted {
+        txn.state.set(InsertState::NotInserted {
+            reason: "expired",
+            retryable: false,
+        });
+        tracing::warn!(
+            "key_queue: held character dropped ({reason}) seq={} vk={:#04x}",
+            txn.seq,
+            txn.vk
+        );
     }
 }
 
@@ -952,6 +1111,9 @@ pub(crate) fn discard_all(reason: &str) -> usize {
     RESCUE_EPOCH.with(|e| e.set(e.get() + 1));
     if let Some(rescue) = COMP_RESCUE.with(|c| c.borrow_mut().take()) {
         expire_comp_rescue(rescue, reason);
+    }
+    if let Some(txn) = INSERTING.with(|i| i.borrow_mut().take()) {
+        expire_insert(&txn, reason);
     }
     let rescues = RESCUES.with(|r| std::mem::take(&mut *r.borrow_mut()));
     for rescue in rescues {

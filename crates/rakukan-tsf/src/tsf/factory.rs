@@ -748,6 +748,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         let Some(action) = key_resolve(resolved, vk) else {
             return Ok(FALSE);
         };
+        // 保留した文字がある間の文字キーは、IME のオン・オフにかかわらず食べる（OnKeyDown で
+        // 積む。入力処理の見直しの段 6）
+        if crate::tsf::key_queue::holds_typed_char(&action) {
+            return Ok(TRUE);
+        }
         // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
         // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
         // その場でアプリへ渡す
@@ -862,6 +867,14 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                     vk,
                     reason: "no_ctx",
                 });
+                // 保留した文字がある間の文字キーは、保留できなくてもアプリへ渡さない
+                // （OnTestKeyDown は食べている。まだ入っていない文字を追い越さない）
+                if crate::tsf::key_queue::holds_typed_char(&action) {
+                    tracing::warn!(
+                        "key_queue: character key dropped while held characters remain (no context) vk={vk:#04x}"
+                    );
+                    return Ok(TRUE);
+                }
                 return Ok(FALSE);
             }
         };
@@ -873,6 +886,13 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                     vk,
                     reason: "no_sink",
                 });
+                // 保留した文字がある間の文字キー: 上の no_ctx と同じ
+                if crate::tsf::key_queue::holds_typed_char(&action) {
+                    tracing::warn!(
+                        "key_queue: character key dropped while held characters remain (no sink) vk={vk:#04x}"
+                    );
+                    return Ok(TRUE);
+                }
                 return Ok(FALSE);
             }
         };
@@ -894,10 +914,16 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             return Ok(TRUE);
         }
 
+        // 保留した文字がある間の文字キー: IME がオフでも保留する（まだ入っていない文字を
+        // 追い越さない。入力処理の見直しの段 6）。再生で IME がオフなら、今のキーはアプリへ渡す
+        let hold_char = crate::tsf::key_queue::holds_typed_char(&action);
+
         // ── IME オフガード（最終防衛線）───────────────────────────────────
         // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
         // アトミックなのでロック競合なし。
-        if keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on()) {
+        if !hold_char
+            && keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on())
+        {
             diag::event(DiagEvent::KeyIgnored {
                 vk,
                 reason: "ime_off",
@@ -915,7 +941,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         // 確定の後の Home など）は、保留せずその場でアプリへ渡す（OnTestKeyDown と同じ判定）
         let admitted = crate::tsf::key_queue::admit(
             &mut entry,
-            |input_after| key_should_eat(&action, input_after),
+            |input_after| hold_char || key_should_eat(&action, input_after),
             || {
                 use windows::core::Interface;
                 use windows_core::IUnknownImpl;
@@ -941,7 +967,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                 // 今のキーまで実行できたら、その結果（IME がオフだった・IME が使わなかった）
                 // でアプリへ渡すかを決める。実行できなければ列に残り、食べたものとして後で
                 // 実行する
-                crate::tsf::key_queue::pump();
+                crate::tsf::key_queue::pump_for(seq);
                 let ate = seq
                     .and_then(crate::tsf::key_queue::take_outcome)
                     .unwrap_or(true);
@@ -1203,9 +1229,9 @@ fn is_ime_mode_action(action: &UserAction) -> bool {
 /// 解決できなかった場合（どちらも `resolved = None`）は、重要キーの fallback を使う。
 impl TextServiceFactory_Impl {
     /// 保留したキーを実行する（`key_queue::pump`）。食べたかを返す。届いた文書にフォーカスが
-    /// 無いキーは捨てて WARN。IME がオフになっていたキー・IME が使わなかったキーは `false`
-    /// （今のキーならアプリへ渡す。前に保留したキーは渡せないので WARN。打った文字を
-    /// 元の文書へ入れる扱いは段 6）。
+    /// 無いキーは実行せず `None`。IME がオフになっていたキー・IME が使わなかったキーは
+    /// `Some(false)`（今のキーならアプリへ渡す。前に保留したキーの文字は、`key_queue` が
+    /// 届いた文書へ入れる）。
     pub(crate) fn replay_key(
         &self,
         action: UserAction,
@@ -1214,7 +1240,7 @@ impl TextServiceFactory_Impl {
         tid: u32,
         sink: ITfCompositionSink,
         dm: usize,
-    ) -> bool {
+    ) -> Option<bool> {
         use windows::core::Interface;
         let focused = self
             .inner
@@ -1224,14 +1250,15 @@ impl TextServiceFactory_Impl {
             .and_then(|tm| unsafe { tm.GetFocus() }.ok())
             .map(|d| d.as_raw() as usize);
         if dm == 0 || focused != Some(dm) {
-            tracing::warn!(
-                "key_queue: held key dropped; focus moved vk={vk:#04x} action={action:?}"
+            // 実行しない（文字は届いた文書へ入れる: key_queue）
+            tracing::debug!(
+                "key_queue: held key not handled; focus moved vk={vk:#04x} action={action:?}"
             );
             diag::event(DiagEvent::KeyIgnored {
                 vk,
                 reason: "held_focus_moved",
             });
-            return true;
+            return None;
         }
         if keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on()) {
             tracing::debug!(
@@ -1241,7 +1268,7 @@ impl TextServiceFactory_Impl {
                 vk,
                 reason: "held_ime_off",
             });
-            return false;
+            return Some(false);
         }
         let result = self.handle_action(action.clone(), ctx, tid, sink);
         match &result {
@@ -1258,7 +1285,7 @@ impl TextServiceFactory_Impl {
                 tracing::warn!("handle_action (held key): {e}");
             }
         }
-        keydown_return(&result)
+        Some(keydown_return(&result))
     }
 }
 

@@ -725,9 +725,10 @@ pub(super) fn insert_text_direct(
         };
         if let Err(e) = range.SetText(ec, 0, &text_w) {
             tracing::warn!("insert_text_direct: SetText failed: {e}");
+            // 文書が変わっていないと確かめられないので、入れ直さない（二重にしない）
             finish(InsertState::NotInserted {
                 reason: "SetText",
-                retryable: true,
+                retryable: false,
             });
             return Ok(());
         }
