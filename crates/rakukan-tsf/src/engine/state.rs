@@ -1228,6 +1228,142 @@ pub fn composition_set(comp: Option<ITfComposition>) -> anyhow::Result<()> {
     composition_set_with_dm(comp, 0)
 }
 
+/// composition の COM の同一性を表す値（`IUnknown` のポインタ値）。
+///
+/// 同じオブジェクトでもインターフェイスのポインタは一致するとは限らないので、
+/// COM の規則で一致が保証される `IUnknown` で比べる（Issue #71）。
+pub fn composition_identity(comp: &ITfComposition) -> usize {
+    use windows::core::Interface;
+    comp.cast::<windows::core::IUnknown>()
+        .map_or(comp.as_raw() as usize, |unknown| unknown.as_raw() as usize)
+}
+
+/// 今保持している composition が文書 `dm` のものなら、その識別子。そうでなければ 0。
+///
+/// RPC の編集状態を作るときに呼ぶ（Issue #71）。フォーカスの移った別の文書で作った
+/// 状態を、前の文書の composition の続きとして扱わないため。
+pub fn current_composition_identity_for(dm: usize) -> usize {
+    let g = COMPOSITION.lock().unwrap_or_else(|p| p.into_inner());
+    match (&g.comp, g.stale) {
+        (Some(comp), false) if dm != 0 && g.dm_ptr == dm => composition_identity(comp),
+        _ => 0,
+    }
+}
+
+/// 今保持している composition を始めた文書（`composition_set_with_dm` の値）。無ければ 0。
+pub fn composition_dm() -> usize {
+    COMPOSITION
+        .lock()
+        .map_or(0, |g| if g.comp.is_some() { g.dm_ptr } else { 0 })
+}
+
+/// 置き換えを要求済みの composition（Issue #71）。
+///
+/// `commit_then_start_composition` は、今の composition を確定して新しい composition を
+/// 始める EditSession を要求する。その実行より先に今の composition の終了通知が届いた
+/// 場合、新しい composition のために作った状態・セッションを片づけないために使う。
+/// 要求ごとの番号を持ち、その要求の実行・失敗でだけ消す（別の要求の印を消さない）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct PendingReplacement {
+    identity: usize,
+    token: u64,
+}
+
+impl PendingReplacement {
+    /// 印を置く。置き換える composition が無い（0）なら置かない。
+    fn set(&mut self, identity: usize, next_token: &mut u64) -> Option<u64> {
+        if identity == 0 {
+            return None;
+        }
+        *next_token += 1;
+        *self = Self {
+            identity,
+            token: *next_token,
+        };
+        Some(*next_token)
+    }
+    /// `token` の要求が置いた印なら消す。
+    fn clear(&mut self, token: u64) {
+        if self.token == token {
+            *self = Self::default();
+        }
+    }
+    fn is(&self, identity: usize) -> bool {
+        identity != 0 && self.identity == identity
+    }
+}
+
+thread_local! {
+    static PENDING_REPLACEMENT: std::cell::Cell<PendingReplacement> =
+        const { std::cell::Cell::new(PendingReplacement { identity: 0, token: 0 }) };
+    static PENDING_REPLACEMENT_TOKEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 文書 `ctx_dm` の composition を置き換える要求の印を置き、その番号を返す。
+/// 今保持している composition がその文書のものでなければ置かない。
+pub fn set_pending_replacement(ctx_dm: usize) -> Option<u64> {
+    let identity = current_composition_identity_for(ctx_dm);
+    let mut pending = PENDING_REPLACEMENT.with(|p| p.get());
+    let mut next = PENDING_REPLACEMENT_TOKEN.with(|t| t.get());
+    let token = pending.set(identity, &mut next);
+    PENDING_REPLACEMENT_TOKEN.with(|t| t.set(next));
+    PENDING_REPLACEMENT.with(|p| p.set(pending));
+    token
+}
+
+pub fn clear_pending_replacement(token: Option<u64>) {
+    if let Some(token) = token {
+        PENDING_REPLACEMENT.with(|p| {
+            let mut pending = p.get();
+            pending.clear(token);
+            p.set(pending);
+        });
+    }
+}
+
+pub fn is_pending_replacement(identity: usize) -> bool {
+    PENDING_REPLACEMENT.with(|p| p.get().is(identity))
+}
+
+#[cfg(test)]
+mod pending_replacement_tests {
+    use super::PendingReplacement;
+
+    #[test]
+    fn only_the_request_that_set_it_clears_it() {
+        let mut next = 0;
+        let mut pending = PendingReplacement::default();
+        let first = pending.set(0x1, &mut next).expect("set");
+        // 後の要求が印を置き直すと、前の要求の実行・失敗では消えない
+        let second = pending.set(0x1, &mut next).expect("set");
+        pending.clear(first);
+        assert!(pending.is(0x1));
+        pending.clear(second);
+        assert!(!pending.is(0x1));
+    }
+
+    #[test]
+    fn nothing_is_set_without_a_composition_of_that_document() {
+        let mut next = 0;
+        let mut pending = PendingReplacement::default();
+        assert_eq!(pending.set(0, &mut next), None);
+        assert!(!pending.is(0));
+        assert!(!pending.is(0x1));
+    }
+}
+
+/// `comp` が、今保持している（失効していない）composition か。
+pub fn composition_is_current(comp: &ITfComposition) -> bool {
+    let target = composition_identity(comp);
+    let Ok(g) = COMPOSITION.lock() else {
+        return false;
+    };
+    !g.stale
+        && g.comp
+            .as_ref()
+            .is_some_and(|current| composition_identity(current) == target)
+}
+
 pub fn composition_set_with_dm(comp: Option<ITfComposition>, dm_ptr: usize) -> anyhow::Result<()> {
     // set はホットパスでもブロックを許容（短い操作のため）
     let starting = comp.is_some();

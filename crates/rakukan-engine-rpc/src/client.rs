@@ -369,6 +369,21 @@ impl RequestLedger {
     fn abandon(&self) -> Option<Unresolved> {
         self.lock().unresolved.take()
     }
+
+    /// 結果不明の要求が `owner` のものなら断念する（Issue #71）。
+    /// 照合と放棄を 1 回のロックの中で行い、別の composition の要求には触れない。
+    ///
+    /// 世代では照合しない。`Restore` の応答を失うと、台帳はホストから知った新しい世代、
+    /// TSF の手元は古い世代（初回なら世代なし）のままになるため。`owner` は composition
+    /// ごとに採り直す番号を含み、同じ値が別の composition に使われることはない。
+    fn abandon_if(&self, owner: Owner) -> Option<Unresolved> {
+        let mut g = self.lock();
+        if g.unresolved.is_some_and(|u| u.owner == owner) {
+            g.unresolved.take()
+        } else {
+            None
+        }
+    }
 }
 
 /// 接続・spawn・時刻・待機の口。実装は Named Pipe と `CreateProcess`（`PipeTransport`）。
@@ -708,6 +723,20 @@ impl RpcEngine {
         if let Some(u) = abandoned {
             tracing::info!(
                 "rpc: abandoned unresolved request seq={} kind={:?}",
+                u.seq,
+                u.kind
+            );
+        }
+        abandoned
+    }
+
+    /// 結果不明の要求が、終わった composition（`owner`）のものなら断念する（Issue #71）。
+    /// 別の composition の要求は残す。
+    pub fn abandon_unresolved_for(&self, owner: Owner) -> Option<Unresolved> {
+        let abandoned = REQUEST_LEDGER.abandon_if(owner);
+        if let Some(u) = abandoned {
+            tracing::info!(
+                "rpc: abandoned unresolved request of a finished composition seq={} kind={:?}",
                 u.seq,
                 u.kind
             );
@@ -2284,6 +2313,53 @@ mod tests {
         ));
         assert!(matches!(reqs[2], Request::Change { seq: 1, .. }));
         assert!(matches!(reqs[3], Request::Change { seq: 2, .. }));
+    }
+
+    #[test]
+    fn abandon_if_takes_only_the_matching_owner() {
+        let ledger = RequestLedger::new(TsfId(0x75F));
+        let owner = Owner {
+            tsf_id: TsfId(0x75F),
+            composition: 1,
+        };
+        let other = Owner {
+            tsf_id: TsfId(0x75F),
+            composition: 2,
+        };
+        let engine_gen = EngineGen {
+            host_id: HOST_A,
+            generation: 3,
+        };
+        let expect = Expect { engine_gen, owner };
+        ledger
+            .begin_change(&ChangeRequest::BgReclaim, &expect)
+            .expect("no unresolved");
+        // 別の composition の放棄では消えない
+        assert_eq!(ledger.abandon_if(other), None);
+        assert!(ledger.unresolved().is_some());
+        // 一致すれば消える
+        let abandoned = ledger.abandon_if(owner).expect("abandoned");
+        assert_eq!(abandoned.owner, owner);
+        assert_eq!(ledger.unresolved(), None);
+    }
+
+    #[test]
+    fn abandon_if_takes_a_lost_restore_recorded_with_the_new_generation() {
+        // ホストが入れ替わった後の Restore{then} の応答を失った: 台帳はホストから知った
+        // 新しい世代で記録し、TSF の手元は古い世代のまま。世代が違っても断念できる
+        let ledger = RequestLedger::new(TsfId(0x75F));
+        let owner = Owner {
+            tsf_id: TsfId(0x75F),
+            composition: 1,
+        };
+        let new_gen = EngineGen {
+            host_id: HOST_B,
+            generation: 1,
+        };
+        ledger.begin_restore(owner, new_gen, Some(&ChangeRequest::PushChar(97)));
+        let abandoned = ledger.abandon_if(owner).expect("abandoned");
+        assert_eq!(abandoned.engine_gen, new_gen);
+        assert_eq!(ledger.unresolved(), None);
     }
 
     #[test]

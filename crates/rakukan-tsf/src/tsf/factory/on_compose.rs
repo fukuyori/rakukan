@@ -127,6 +127,8 @@ pub(super) fn update_composition(
     // ここで取った composition が DM 破棄や invalidate_composition_for_dm で
     // stale 化したまま SetText しないよう、クロージャ先頭で再検査する。
     let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
+    // 表示する編集状態を、要求の時点で控える（Issue #71）
+    let bind = crate::engine::rpc_composition::bind_target();
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
@@ -159,6 +161,11 @@ pub(super) fn update_composition(
         );
 
         let range = if let Some(comp) = &existing {
+            crate::engine::rpc_composition::bind_composition(
+                bind,
+                crate::engine::state::composition_identity(comp),
+                crate::engine::state::composition_dm(),
+            );
             comp.GetRange()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
         } else {
@@ -178,6 +185,11 @@ pub(super) fn update_composition(
                 .ok()
                 .map(|dm| dm.as_raw() as usize)
                 .unwrap_or(0);
+            crate::engine::rpc_composition::bind_composition(
+                bind,
+                crate::engine::state::composition_identity(&new_comp),
+                dm_ptr,
+            );
             let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
             r
         };
@@ -283,11 +295,23 @@ pub(super) fn commit_then_start_composition(
     // composition_take() をセッション内に移動する（end_composition と同じ理由）。
     // セッション外で take すると COMPOSITION=None になった瞬間に update_composition が
     // 誤ったカーソル位置から新 composition を開始するリスクがある。
+    // 新しい composition に表示する編集状態（残りの読み）を、要求の時点で控える（Issue #71）
+    let bind = crate::engine::rpc_composition::bind_target();
+    // 今の composition を置き換える EditSession を要求済みであることを示す（Issue #71）。
+    // 実行より先に今の composition の終了通知が届いても、新しい composition のための
+    // 状態・セッションを片づけない。この要求の EditSession の冒頭か、EditSession が
+    // 後から実行されない結果（同期で終わった・拒否された・要求の失敗）で消す。
+    let ctx_dm = unsafe { ctx.GetDocumentMgr() }
+        .ok()
+        .map(|dm| dm.as_raw() as usize)
+        .unwrap_or(0);
+    let replacement = crate::engine::state::set_pending_replacement(ctx_dm);
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+        crate::engine::state::clear_pending_replacement(replacement);
 
         // SetText 排他化（M1.8 T-MID3 の commit 版）: Phase1A / update_composition
         // の SetText と直列化する。他サイトは try_lock + skip だが、確定はスキップ
@@ -397,6 +421,11 @@ pub(super) fn commit_then_start_composition(
             .ok()
             .map(|dm| dm.as_raw() as usize)
             .unwrap_or(0);
+        crate::engine::rpc_composition::bind_composition(
+            bind,
+            crate::engine::state::composition_identity(&new_comp),
+            dm_ptr,
+        );
         let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
 
         let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
@@ -445,11 +474,16 @@ pub(super) fn commit_then_start_composition(
     // 失敗をログに残す（Issue #69）。戻り値と後続の処理は変えない。
     unsafe {
         match ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) {
+            // 非同期で受け付けた: EditSession の冒頭で印を消す
+            Ok(hr) if hr == windows::Win32::UI::TextServices::TF_S_ASYNC => {}
+            // 実行されずに拒否された場合もある（読み取り専用など）。後から実行されないので消す
             Ok(hr) if hr.is_err() => {
+                crate::engine::state::clear_pending_replacement(replacement);
                 tracing::warn!("commit_then_start: edit session failed hr={hr:?}");
             }
-            Ok(_) => {}
+            Ok(_) => crate::engine::state::clear_pending_replacement(replacement),
             Err(e) => {
+                crate::engine::state::clear_pending_replacement(replacement);
                 tracing::warn!("commit_then_start: RequestEditSession failed: {e}");
             }
         }
@@ -559,6 +593,8 @@ fn update_composition_parts_impl(
     let existing = composition_clone()?;
     // M1.8 T-MID2: update_composition と同じ stale check を入れる
     let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
+    // 表示する編集状態を、要求の時点で控える（Issue #71）
+    let bind = crate::engine::rpc_composition::bind_target();
     let ctx_req = ctx.clone();
     let full = format!("{prefix}{converted}{suffix}");
     let prefix_utf16: i32 = prefix.encode_utf16().count() as i32;
@@ -585,6 +621,11 @@ fn update_composition_parts_impl(
 
         // ── Step1: テキストをセット ──
         let range = if let Some(comp) = &existing {
+            crate::engine::rpc_composition::bind_composition(
+                bind,
+                crate::engine::state::composition_identity(comp),
+                crate::engine::state::composition_dm(),
+            );
             comp.GetRange()
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange: {e}")))?
         } else {
@@ -604,6 +645,11 @@ fn update_composition_parts_impl(
                 .ok()
                 .map(|dm| dm.as_raw() as usize)
                 .unwrap_or(0);
+            crate::engine::rpc_composition::bind_composition(
+                bind,
+                crate::engine::state::composition_identity(&new_comp),
+                dm_ptr,
+            );
             let _ = composition_set_with_dm(Some(new_comp), dm_ptr);
             r
         };

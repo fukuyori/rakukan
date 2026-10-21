@@ -850,8 +850,14 @@ fn dispatch_change(
     };
     let mut g = lock_engine(engine);
     let state = &mut *g;
+    // ResetAll の到達を確かめる記録（Issue #71）。committed の中身は残さず、空かどうかだけ。
+    // committed_text() は文字列をコピーするので、DEBUG が有効なときだけ読む。
+    let trace_reset =
+        matches!(request, ChangeRequest::ResetAll) && tracing::enabled!(tracing::Level::DEBUG);
+    let (current_gen, current_owner) = (state.engine_gen, state.owner);
+    let mut committed_empty: Option<(bool, bool)> = None;
     // エンジンが無ければ世代も無いので、ここで GenMismatch になる
-    apply_recorded_change(
+    let response = apply_recorded_change(
         &engine.records,
         tsf,
         seq,
@@ -863,14 +869,62 @@ fn dispatch_change(
                 return Response::Rejected(Reason::GenMismatch);
             };
             inject_ready(eng);
+            let before = trace_reset.then(|| eng.committed_text().is_empty());
             let outcome = apply_change(eng, &mut state.bg_owner, expect.owner, request);
+            if let Some(before) = before {
+                committed_empty = Some((before, eng.committed_text().is_empty()));
+            }
             apply_health_action(engine, eng);
             match outcome {
                 Ok(outcome) => Response::Changed { outcome },
                 Err(error) => Response::Error(error),
             }
         },
-    )
+    );
+    if trace_reset {
+        log_reset_all(
+            seq,
+            &expect,
+            current_gen,
+            current_owner,
+            committed_empty,
+            &response,
+        );
+    }
+    response
+}
+
+/// `ResetAll` の結果の分類。`committed_empty` は、今回エンジンに適用したときだけ `Some`。
+fn reset_all_result(committed_empty: Option<(bool, bool)>, response: &Response) -> String {
+    match (committed_empty, response) {
+        (Some(_), Response::Changed { .. }) => "applied".to_string(),
+        (None, Response::Changed { .. }) => "replayed stored response".to_string(),
+        (_, Response::Rejected(reason)) => format!("rejected {reason:?}"),
+        (_, Response::Error(error)) => format!("error {error}"),
+        (_, other) => format!("unexpected {other:?}"),
+    }
+}
+
+/// `ResetAll` の結果を 1 行で残す（Issue #71）。適用した場合だけ committed の前後を書き、
+/// 保存した応答の再送は「今回消した」と区別する。
+fn log_reset_all(
+    seq: RequestSeq,
+    expect: &Expect,
+    current_gen: Option<EngineGen>,
+    current_owner: Option<Owner>,
+    committed_empty: Option<(bool, bool)>,
+    response: &Response,
+) {
+    let result = reset_all_result(committed_empty, response);
+    let committed = match committed_empty {
+        Some((before, after)) => format!(" committed_empty before={before} after={after}"),
+        None => String::new(),
+    };
+    tracing::debug!(
+        "change ResetAll seq={seq} result={result} expect_owner={:?} expect_gen={:?} current_owner={current_owner:?} current_gen={current_gen:?}{committed}",
+        expect.owner,
+        expect.engine_gen
+    );
 }
 
 /// 照合・保持応答の再送・適用を 1 か所にまとめる。テストも dispatch と同じ経路を通す。
@@ -2304,6 +2358,45 @@ mod bg_protocol_tests {
             Ok(BgStartOutcome::Started)
         );
         assert_eq!(bg.starts, 1);
+    }
+    #[test]
+    fn reset_all_replay_is_not_logged_as_applied() {
+        // dispatch_change と同じく、適用のクロージャが呼ばれたときだけ committed の前後を取る
+        let records = Mutex::new(RecordTable::default());
+        records.lock().unwrap().hello(owner(1).tsf_id, 0);
+        let mut results = Vec::new();
+        for _ in 0..2 {
+            let mut committed_empty = None;
+            let response = apply_recorded_change(
+                &records,
+                owner(1).tsf_id,
+                1,
+                Some(generation()),
+                Some(owner(1)),
+                &expect(),
+                || {
+                    committed_empty = Some((false, true));
+                    Response::Changed {
+                        outcome: ChangeOutcome::Unit {
+                            edit: EditState::default(),
+                        },
+                    }
+                },
+            );
+            results.push(reset_all_result(committed_empty, &response));
+        }
+        assert_eq!(results, ["applied", "replayed stored response"]);
+        // 所有者が違えば適用せず拒否
+        let response = apply_recorded_change(
+            &records,
+            owner(1).tsf_id,
+            2,
+            Some(generation()),
+            Some(owner(2)),
+            &expect(),
+            || unreachable!("must not apply"),
+        );
+        assert_eq!(reset_all_result(None, &response), "rejected OwnerMismatch");
     }
     #[test]
     fn bg_take_replay_uses_retained_outcome_without_taking_twice() {

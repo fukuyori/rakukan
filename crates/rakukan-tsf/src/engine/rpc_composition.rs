@@ -26,12 +26,18 @@ static COMPOSITIONS: LazyLock<Mutex<HashMap<usize, RemoteComposition>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 #[derive(Clone)]
-struct RemoteComposition {
+pub struct RemoteComposition {
     owner: Owner,
     generation: Option<EngineGen>,
     edit: EditState,
     pending: Option<ChangeRequest>,
     bg_reading: Option<String>,
+    /// この編集状態を表示している TSF の composition（`composition_identity`）。
+    /// 0 = まだ結び付いていない。終了の通知の照合に使う（Issue #71）。
+    tsf_comp: usize,
+    /// この状態を作ったときに保持していた composition（0 = 無し）。まだ結び付いていない
+    /// 状態が、どの composition の続きとして作られたかの照合に使う（Issue #71）。
+    created_under: usize,
 }
 impl RemoteComposition {
     fn new() -> Self {
@@ -44,6 +50,8 @@ impl RemoteComposition {
             edit: EditState::default(),
             pending: None,
             bg_reading: None,
+            tsf_comp: 0,
+            created_under: crate::engine::state::current_composition_identity_for(dm_key()),
         }
     }
     fn expect(&self) -> Option<Expect> {
@@ -76,6 +84,93 @@ pub fn close() {
 }
 pub fn dispose(dm: usize) {
     lock_states().remove(&dm);
+}
+/// composition の表示を要求した時点の、編集状態の位置と所有者（Issue #71）。
+///
+/// EditSession は遅れて実行されることがあり、その間にフォーカスや所有者が変わりうる。
+/// 要求の時点で控え、実行時に同じ状態のままなら結び付ける。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BindTarget {
+    dm: usize,
+    owner: Owner,
+}
+/// 今の文脈の編集状態の [`BindTarget`]。状態が無ければ `None`。
+pub fn bind_target() -> Option<BindTarget> {
+    let dm = dm_key();
+    lock_states().get(&dm).map(|state| BindTarget {
+        dm,
+        owner: state.owner,
+    })
+}
+/// 要求の時点で控えた編集状態を、表示している TSF の composition に結び付ける（Issue #71）。
+/// その位置の状態が別の所有者に替わっていれば、何もしない。
+///
+/// `comp_dm` は composition を始めた文書（`composition_set_with_dm` に渡した値、
+/// 新しく始める場合はその文脈の文書）。控えた文書と違えば結び付けない。共有の
+/// composition が、フォーカスの移った別の文書の状態と対応していない場合があるため。
+pub fn bind_composition(target: Option<BindTarget>, tsf_comp: usize, comp_dm: usize) {
+    if let Some(target) = target {
+        bind_in(&mut lock_states(), target, tsf_comp, comp_dm);
+    }
+}
+fn bind_in(
+    states: &mut HashMap<usize, RemoteComposition>,
+    target: BindTarget,
+    tsf_comp: usize,
+    comp_dm: usize,
+) {
+    if comp_dm != target.dm {
+        tracing::debug!(
+            "composition bind skipped: composition dm={comp_dm:#x} state dm={:#x}",
+            target.dm
+        );
+        return;
+    }
+    if let Some(state) = states.get_mut(&target.dm)
+        && state.owner == target.owner
+    {
+        state.tsf_comp = tsf_comp;
+    }
+}
+/// アプリが終わらせた composition の編集状態を、手元から外して返す（Issue #71）。
+///
+/// 外すのは次の状態。遅れて届いた通知で、別の composition の状態を消さない。
+/// - その composition に結び付いた状態
+/// - まだ結び付いていない状態のうち、その composition を保持している間に作られたもの
+///   （表示の前に失敗した、または表示の EditSession がまだ実行されていない続きの入力）。
+///   ただし `replacing`（部分確定などで、その composition を新しいものへ置き換える
+///   EditSession を要求済み）の場合は、新しい composition のための状態なので外さない
+pub fn take_terminated(tsf_comp: usize, replacing: bool) -> Vec<RemoteComposition> {
+    let taken = take_terminated_from(&mut lock_states(), tsf_comp, replacing);
+    if !taken.is_empty() {
+        crate::tsf::candidate_window::reset_worker_busy_clock();
+    }
+    taken
+}
+fn take_terminated_from(
+    states: &mut HashMap<usize, RemoteComposition>,
+    tsf_comp: usize,
+    replacing: bool,
+) -> Vec<RemoteComposition> {
+    if tsf_comp == 0 {
+        return Vec::new();
+    }
+    let dms: Vec<usize> = states
+        .iter()
+        .filter(|(_, state)| {
+            state.tsf_comp == tsf_comp
+                || (!replacing && state.tsf_comp == 0 && state.created_under == tsf_comp)
+        })
+        .map(|(dm, _)| *dm)
+        .collect();
+    dms.into_iter()
+        .filter_map(|dm| states.remove(&dm))
+        .collect()
+}
+/// 今の文脈の編集状態を、手元から外して返す（Deactivate 用）。
+pub fn take_current() -> Option<RemoteComposition> {
+    crate::tsf::candidate_window::reset_worker_busy_clock();
+    lock_states().remove(&dm_key())
 }
 fn save(c: RemoteComposition) {
     lock_states().insert(dm_key(), c);
@@ -123,8 +218,13 @@ trait CompositionRpc {
         pending: String,
         then: Option<ChangeRequest>,
     ) -> Result<RestoreReply, rakukan_engine_rpc::ChangeError>;
+    /// `owner` の結果不明の要求を断念する。断念したら `true`。
+    fn abandon_for(&self, owner: Owner) -> bool;
 }
 impl CompositionRpc for RpcEngine {
+    fn abandon_for(&self, owner: Owner) -> bool {
+        self.abandon_unresolved_for(owner).is_some()
+    }
     fn change(
         &self,
         expect: Expect,
@@ -206,6 +306,65 @@ fn apply_via(
             Err(error.into())
         }
     }
+}
+/// 終わった composition の後始末で送った 1 件の要求の結果（Issue #71）。
+#[derive(Debug, PartialEq, Eq)]
+enum FinishResult {
+    Applied,
+    Rejected(Reason),
+    /// 別の composition の結果不明の要求に阻まれ、送っていない。
+    BlockedByOther,
+    /// 送ったが応答を受け取れなかった。この composition の要求として断念した。
+    LostAndAbandoned,
+    /// 接続できず、送っていない（台帳に結果不明の要求は残っていない）。
+    NotSent(String),
+    Host(String),
+}
+/// アプリが終わらせた composition の、ホスト側の後始末（Issue #71）。
+///
+/// 手元にある既存の `Expect` に対して `BgReclaim` と、`reset_all` なら `ResetAll` を送る。
+/// 所有権は取り直さない（Restore は送らない）。別の composition がホストの所有者に
+/// なっていれば `OwnerMismatch` で拒否され、その composition の状態は変わらない。
+/// 結果不明の要求は、この composition のものだけを断念する（再送の機会はもう無い）。
+fn finish_via(
+    rpc: &impl CompositionRpc,
+    state: &RemoteComposition,
+    reset_all: bool,
+) -> Vec<(ChangeRequest, FinishResult)> {
+    // 送る前の、この composition の結果不明の要求（応答を失った打鍵・初回の Restore など）は
+    // 再送しない。世代の無い状態（初回の Restore の応答を失った）でも断念する
+    rpc.abandon_for(state.owner);
+    let Some(expect) = state.expect() else {
+        return Vec::new();
+    };
+    let mut requests = vec![ChangeRequest::BgReclaim];
+    if reset_all {
+        requests.push(ChangeRequest::ResetAll);
+    }
+    requests
+        .into_iter()
+        .map(|request| {
+            let result = match rpc.change(expect, request.clone()) {
+                Ok(ChangeReply::Changed(_)) => FinishResult::Applied,
+                Ok(ChangeReply::Rejected(reason)) => {
+                    // ResultUnavailable は結果不明として台帳に残るので、ここで断念する
+                    rpc.abandon_for(expect.owner);
+                    FinishResult::Rejected(reason)
+                }
+                Err(rakukan_engine_rpc::ChangeError::Unresolved(_)) => FinishResult::BlockedByOther,
+                // 接続の失敗は採番・送信の前にも起きる。台帳に残ったかで区別する
+                Err(rakukan_engine_rpc::ChangeError::Transport(error)) => {
+                    if rpc.abandon_for(expect.owner) {
+                        FinishResult::LostAndAbandoned
+                    } else {
+                        FinishResult::NotSent(error.to_string())
+                    }
+                }
+                Err(rakukan_engine_rpc::ChangeError::Host(error)) => FinishResult::Host(error),
+            };
+            (request, result)
+        })
+        .collect()
 }
 /// `recover_on_input` の結果。`bg` は、入口の読み取りで得た BG 状態（復元した場合は `None`）。
 pub struct InputEntry {
@@ -489,6 +648,24 @@ impl DynEngine {
         self.change_local(ChangeRequest::ForcePreedit { text })
             .map(|_| ())
     }
+    /// アプリが終わらせた composition（`take_terminated` / `take_current` で外した状態）の
+    /// ホスト側の後始末。所有権は取り直さない（Issue #71）。
+    pub fn finish_composition(&self, state: &RemoteComposition, reset_all: bool) {
+        let results = finish_via(&self.0, state, reset_all);
+        if results.is_empty() {
+            tracing::debug!(
+                "composition finish: nothing sent (no ownership) owner={:?}",
+                state.owner
+            );
+        }
+        for (request, result) in results {
+            tracing::debug!(
+                "composition finish: {:?} -> {result:?} owner={:?}",
+                request.kind(),
+                state.owner
+            );
+        }
+    }
     pub fn bg_reclaim(&self) {
         // 所有権を持つ composition が無ければ、回収する相手も無い。送らずに戻る。
         if snapshot().and_then(|state| state.expect()).is_none() {
@@ -541,8 +718,19 @@ mod tests {
         sent: RefCell<Vec<Sent>>,
         changes: RefCell<VecDeque<Result<ChangeReply, rakukan_engine_rpc::ChangeError>>>,
         restores: RefCell<VecDeque<Result<RestoreReply, rakukan_engine_rpc::ChangeError>>>,
+        /// 断念を試みた owner。
+        abandoned: RefCell<Vec<Owner>>,
+        /// 断念の結果の台本（尽きたら `false` = 台帳に該当なし）。
+        abandon_results: RefCell<VecDeque<bool>>,
     }
     impl CompositionRpc for FakeRpc {
+        fn abandon_for(&self, owner: Owner) -> bool {
+            self.abandoned.borrow_mut().push(owner);
+            self.abandon_results
+                .borrow_mut()
+                .pop_front()
+                .unwrap_or(false)
+        }
         fn change(
             &self,
             expect: Expect,
@@ -590,7 +778,265 @@ mod tests {
             sent: RefCell::new(vec![]),
             changes: RefCell::new(changes.into()),
             restores: RefCell::new(restores.into()),
+            abandoned: RefCell::new(vec![]),
+            abandon_results: RefCell::new(VecDeque::new()),
         }
+    }
+    fn owned_state() -> RemoteComposition {
+        let mut state = RemoteComposition::new();
+        state.generation = Some(generation());
+        state.edit = edit();
+        state
+    }
+    fn unit() -> Result<ChangeReply, rakukan_engine_rpc::ChangeError> {
+        Ok(ChangeReply::Changed(ChangeOutcome::Unit {
+            edit: EditState::default(),
+        }))
+    }
+    #[test]
+    fn finish_sends_reclaim_and_reset_all_with_the_existing_expect_and_never_restores() {
+        let fake = rpc(vec![unit(), unit()], vec![]);
+        let state = owned_state();
+        let results = finish_via(&fake, &state, true);
+        assert_eq!(
+            results,
+            vec![
+                (ChangeRequest::BgReclaim, FinishResult::Applied),
+                (ChangeRequest::ResetAll, FinishResult::Applied),
+            ]
+        );
+        let sent = fake.sent.borrow();
+        assert_eq!(sent.len(), 2);
+        for s in sent.iter() {
+            assert!(
+                matches!(s, Sent::Change(expect, _) if expect.owner == state.owner && expect.engine_gen == generation())
+            );
+        }
+        // 送る前に、この composition の結果不明の要求だけを断念する
+        assert_eq!(fake.abandoned.borrow().first(), Some(&state.owner));
+    }
+    #[test]
+    fn finish_on_deactivate_sends_only_reclaim() {
+        let fake = rpc(vec![unit()], vec![]);
+        let results = finish_via(&fake, &owned_state(), false);
+        assert_eq!(
+            results,
+            vec![(ChangeRequest::BgReclaim, FinishResult::Applied)]
+        );
+    }
+    #[test]
+    fn finish_without_ownership_sends_nothing_but_abandons_its_lost_restore() {
+        // 初回の Restore の応答を失った composition は世代を持たない。何も送らないが、
+        // 台帳に残ったその Restore は断念する
+        let fake = rpc(vec![], vec![]);
+        let state = RemoteComposition::new();
+        assert!(finish_via(&fake, &state, true).is_empty());
+        assert!(fake.sent.borrow().is_empty());
+        assert_eq!(*fake.abandoned.borrow(), vec![state.owner]);
+    }
+    #[test]
+    fn finish_rejected_by_another_owner_does_not_restore() {
+        // 別の composition が所有者なら拒否される。所有権を取り直さない
+        let fake = rpc(
+            vec![
+                Ok(ChangeReply::Rejected(Reason::OwnerMismatch)),
+                Ok(ChangeReply::Rejected(Reason::OwnerMismatch)),
+            ],
+            vec![],
+        );
+        let results = finish_via(&fake, &owned_state(), true);
+        assert_eq!(
+            results,
+            vec![
+                (
+                    ChangeRequest::BgReclaim,
+                    FinishResult::Rejected(Reason::OwnerMismatch)
+                ),
+                (
+                    ChangeRequest::ResetAll,
+                    FinishResult::Rejected(Reason::OwnerMismatch)
+                ),
+            ]
+        );
+        assert!(
+            fake.sent
+                .borrow()
+                .iter()
+                .all(|s| matches!(s, Sent::Change(..)))
+        );
+    }
+    #[test]
+    fn finish_after_lost_reclaim_reply_abandons_it_and_still_sends_reset_all() {
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "disconnected"
+                ))),
+                unit(),
+            ],
+            vec![],
+        );
+        // 送る前は台帳に該当なし、応答を失った後は該当あり
+        *fake.abandon_results.borrow_mut() = VecDeque::from([false, true]);
+        let state = owned_state();
+        let results = finish_via(&fake, &state, true);
+        assert_eq!(
+            results,
+            vec![
+                (ChangeRequest::BgReclaim, FinishResult::LostAndAbandoned),
+                (ChangeRequest::ResetAll, FinishResult::Applied),
+            ]
+        );
+        // 送る前・応答を失った後の 2 回、この composition の分だけを断念する
+        assert_eq!(*fake.abandoned.borrow(), vec![state.owner, state.owner]);
+    }
+    #[test]
+    fn finish_distinguishes_not_sent_from_lost_reply() {
+        // 接続できず送っていない場合は、台帳に何も残っていない
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "connect failed"
+                ))),
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "connect failed"
+                ))),
+            ],
+            vec![],
+        );
+        let results = finish_via(&fake, &owned_state(), true);
+        assert!(
+            results.iter().all(
+                |(_, r)| matches!(r, FinishResult::NotSent(e) if e.contains("connect failed"))
+            )
+        );
+    }
+    #[test]
+    fn finish_after_lost_reset_all_or_result_unavailable_abandons_it() {
+        let fake = rpc(
+            vec![
+                Ok(ChangeReply::Rejected(Reason::ResultUnavailable)),
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "disconnected"
+                ))),
+            ],
+            vec![],
+        );
+        // 送る前: なし、ResultUnavailable の後: あり、ResetAll の応答消失の後: あり
+        *fake.abandon_results.borrow_mut() = VecDeque::from([false, true, true]);
+        let state = owned_state();
+        let results = finish_via(&fake, &state, true);
+        assert_eq!(
+            results,
+            vec![
+                (
+                    ChangeRequest::BgReclaim,
+                    FinishResult::Rejected(Reason::ResultUnavailable)
+                ),
+                (ChangeRequest::ResetAll, FinishResult::LostAndAbandoned),
+            ]
+        );
+        assert_eq!(fake.abandoned.borrow().len(), 3);
+    }
+    #[test]
+    fn finish_blocked_by_another_unresolved_request_keeps_it() {
+        let other = RemoteComposition::new();
+        let unresolved = rakukan_engine_rpc::Unresolved {
+            seq: 9,
+            kind: rakukan_engine_rpc::ChangeKind::PushChar,
+            owner: other.owner,
+            engine_gen: generation(),
+        };
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Unresolved(unresolved)),
+                Err(rakukan_engine_rpc::ChangeError::Unresolved(unresolved)),
+            ],
+            vec![],
+        );
+        let state = owned_state();
+        let results = finish_via(&fake, &state, true);
+        assert!(
+            results
+                .iter()
+                .all(|(_, r)| *r == FinishResult::BlockedByOther)
+        );
+        // 断念を試みるのは、終わった composition の分だけ
+        assert!(
+            fake.abandoned
+                .borrow()
+                .iter()
+                .all(|owner| *owner == state.owner)
+        );
+    }
+    /// (DM, 結び付いた composition, 作ったときに保持していた composition)
+    fn states_with(entries: &[(usize, usize, usize)]) -> HashMap<usize, RemoteComposition> {
+        entries
+            .iter()
+            .map(|&(dm, tsf_comp, created_under)| {
+                let mut state = owned_state();
+                state.tsf_comp = tsf_comp;
+                state.created_under = created_under;
+                (dm, state)
+            })
+            .collect()
+    }
+    #[test]
+    fn terminated_state_is_found_by_its_composition_even_after_focus_moved() {
+        // A（DM 0xA、composition 0x1）の通知が、B（DM 0xB）にフォーカスが移った後に届く
+        let mut states = states_with(&[(0xA, 0x1, 0), (0xB, 0x2, 0)]);
+        let taken = take_terminated_from(&mut states, 0x1, false);
+        assert_eq!(taken.len(), 1);
+        assert_eq!(taken[0].tsf_comp, 0x1);
+        assert!(states.contains_key(&0xB), "B の状態を消さない");
+        assert!(!states.contains_key(&0xA));
+    }
+    #[test]
+    fn late_notification_for_an_unknown_composition_changes_nothing() {
+        // 同じ DM で新しい composition（0x3）が始まった後に、古い通知（0x1）が届く
+        let mut states = states_with(&[(0xA, 0x3, 0x1)]);
+        assert!(take_terminated_from(&mut states, 0x1, false).is_empty());
+        assert!(states.contains_key(&0xA));
+    }
+    #[test]
+    fn unbound_state_created_under_the_composition_is_taken_unless_replacing() {
+        // 0x1 を保持している間に作った、まだ表示していない状態（表示の前に失敗した等）
+        let mut states = states_with(&[(0xA, 0, 0x1)]);
+        // 部分確定で置き換え中: 新しい composition のための状態なので外さない
+        assert!(take_terminated_from(&mut states, 0x1, true).is_empty());
+        assert!(states.contains_key(&0xA));
+        // 置き換え中でなければ、終わった composition の続きとして外す
+        assert_eq!(take_terminated_from(&mut states, 0x1, false).len(), 1);
+        assert!(states.is_empty());
+    }
+    #[test]
+    fn unbound_state_created_without_a_composition_is_never_taken() {
+        // 最初の打鍵（composition が無い間）に作った状態は、どの終了通知でも外さない
+        let mut states = states_with(&[(0xA, 0, 0)]);
+        assert!(take_terminated_from(&mut states, 0x1, false).is_empty());
+        assert!(take_terminated_from(&mut states, 0, false).is_empty());
+        assert!(states.contains_key(&0xA));
+    }
+    #[test]
+    fn binding_uses_the_dm_and_owner_captured_at_request_time() {
+        let mut states = states_with(&[(0xA, 0, 0), (0xB, 0, 0)]);
+        let target_a = BindTarget {
+            dm: 0xA,
+            owner: states[&0xA].owner,
+        };
+        // 共有の composition が別の文書（B）のものなら結び付けない
+        bind_in(&mut states, target_a, 0x1, 0xB);
+        assert_eq!(states[&0xA].tsf_comp, 0);
+        // 実行時にフォーカスが B に移っていても、要求の時点の A に結び付ける
+        bind_in(&mut states, target_a, 0x1, 0xA);
+        assert_eq!(states[&0xA].tsf_comp, 0x1);
+        assert_eq!(states[&0xB].tsf_comp, 0);
+        // 同じ DM の状態が別の所有者に替わっていれば結び付けない
+        let mut replaced = owned_state();
+        replaced.tsf_comp = 0;
+        states.insert(0xA, replaced);
+        bind_in(&mut states, target_a, 0x2, 0xA);
+        assert_eq!(states[&0xA].tsf_comp, 0);
     }
     #[test]
     fn first_change_restores_then_later_change_uses_restored_generation() {

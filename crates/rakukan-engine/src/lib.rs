@@ -1542,6 +1542,24 @@ mod context_echo_risk_tests {
         e.commit("紀田順一郎氏は、");
         assert_eq!(e.committed_text(), "今日は晴れ。紀田順一郎氏は、");
     }
+
+    #[test]
+    fn reset_preedit_keeps_context_and_reset_all_clears_it() {
+        // フォーカスの移動では ResetAll で文脈まで消す（Issue #71、DESIGN.md）。
+        // 次の入力の Restore が使う reset_preedit は文脈を残す
+        let mut e = RakunEngine::new(crate::EngineConfig::default());
+        e.commit("今日は晴れ。");
+        e.push_char('k');
+        e.push_char('a');
+        e.reset_preedit();
+        assert_eq!(e.committed_text(), "今日は晴れ。");
+        assert_eq!(e.hiragana_text(), "");
+        e.push_char('k');
+        e.push_char('a');
+        e.reset_all();
+        assert_eq!(e.committed_text(), "");
+        assert!(e.preedit_is_empty());
+    }
 }
 
 #[cfg(test)]

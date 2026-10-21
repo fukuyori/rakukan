@@ -638,11 +638,14 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
             inner.openclose_comp = None;
         }
         let _ = composition_set(None);
-        crate::engine::rpc_composition::close();
-        if let Ok(mut g) = engine_get()
+        // 手元の状態を外す前に Expect を控え、それで BG の回収を送る。外した後の
+        // bg_reclaim() は所有権が無く、何も送らずに戻っていた（Issue #71）。
+        let finished = crate::engine::rpc_composition::take_current();
+        if let Some(state) = finished
+            && let Ok(mut g) = engine_get()
             && let Some(e) = g.as_mut()
         {
-            e.bg_reclaim();
+            e.finish_composition(&state, false);
         }
         candidate_window::destroy();
         candidate_window::stop_live_timer();
@@ -664,30 +667,49 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
     fn OnCompositionTerminated(
         &self,
         _: u32,
-        _: Option<&ITfComposition>,
+        composition: Option<&ITfComposition>,
     ) -> windows::core::Result<()> {
-        let _ = composition_set(None);
-        crate::engine::rpc_composition::close();
-        // 候補ウィンドウと選択状態をクリア
-        candidate_window::hide();
-        candidate_window::stop_live_timer(); // LiveConv タイマーも停止
-        if let Ok(mut sess) = session_get() {
-            sess.set_idle();
+        // 終わった composition を照合してから後始末する（Issue #71）。遅れて届いた
+        // 通知で、今フォーカスのある別の composition（RPC の状態・候補・タイマー・
+        // セッション）を壊さない。通知に composition が無い場合は、従来どおり今の
+        // composition が終わったものとして扱う。
+        let identity = composition.map(crate::engine::state::composition_identity);
+        let is_current = composition.is_none_or(crate::engine::state::composition_is_current);
+        // 部分確定などで、この composition を新しいものへ置き換える EditSession を要求済み。
+        // セッション・候補・タイマーと、まだ結び付いていない状態は新しい composition の
+        // ものなので残す。composition の参照だけを外す（EditSession は直接挿入で確定する）。
+        let replacing = identity.is_some_and(crate::engine::state::is_pending_replacement);
+        if is_current {
+            let _ = composition_set(None);
+            if !replacing {
+                // 候補ウィンドウと選択状態をクリア
+                candidate_window::hide();
+                candidate_window::stop_live_timer(); // LiveConv タイマーも停止
+                if let Ok(mut sess) = session_get() {
+                    sess.set_idle();
+                }
+            }
         }
-        // BG 変換の converter を先に回収してから（その後 reset_all で状態をクリア）
-        // bg_reclaim は reset_all の前に呼ぶ
-        // アプリが composition を強制終了した場合（例: メモ帳の最大 composition 長超過）、
-        // composition テキストはアプリ側で確定済み。エンジンの hiragana_buf 等は
-        // 不要になるため、converter の回収有無に関わらず必ず reset_all() を呼ぶ。
-        // ※ 以前は conv が Some の場合に return していたため hiragana_buf が残り、
-        //    次のキー入力で古いひらがなが末尾に追加される「途中切れ」バグがあった。
-        if let Ok(mut g) = engine_get()
+        // アプリが composition を強制終了した場合（例: メモ帳の最大 composition 長超過、
+        // フォーカスの移動）、composition テキストはアプリ側で確定済み。ホストのエンジンの
+        // 読み・打鍵ログと、LLM に渡す文脈 committed を ResetAll で消す（DESIGN.md）。
+        // BG 変換の converter は ResetAll の前に回収する。
+        // 手元の状態を外してから、控えた Expect で送る。所有権は取り直さない。
+        // 外すのは、この composition の状態だけ（`take_terminated` の説明を参照）。
+        let finished =
+            crate::engine::rpc_composition::take_terminated(identity.unwrap_or(0), replacing);
+        let states = finished.len();
+        if !finished.is_empty()
+            && let Ok(mut g) = engine_get()
             && let Some(e) = g.as_mut()
         {
-            e.bg_reclaim();
-            e.reset_all();
+            for state in &finished {
+                e.finish_composition(state, true);
+            }
         }
-        tracing::debug!("OnCompositionTerminated");
+        tracing::debug!(
+            "OnCompositionTerminated current={is_current} replacing={replacing} states={states}"
+        );
         Ok(())
     }
 }
