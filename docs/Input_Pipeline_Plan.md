@@ -1,0 +1,813 @@
+# 入力処理の見直し（#69 / #70）設計書 第 9 版
+
+作成: 2026-10-21（第 9 版: 第 8 版に対する 8 回目のレビューの残り 1 件（Y4。composition が無い場合の挿入位置）を受け、composition が無い場合は挿入せず記録と通知にした（4.2 の救済の表、試験 38）。8 回目のレビューの結果: Y1〜Y3 は解消、Y4 は一部解消で中 1 件、新たな二重書き込み・通知なしの欠落は見つからない。第 8 版の経緯: 第 7 版に対する Codex CLI の 7 回目のレビュー「修正してから進める」（Y1〜Y4。救済の再試行）を受け、回復できない場合の救済を 3 つの原則で簡素化した（4.2）。第 5 版までの変更は 0 節と 10 節。段 1 は A 節のとおり作業ツリーに実装済み・未コミット。A 節は中身を変えず、注記だけを足した）
+対象: [October_Plan.md](October_Plan.md) 3 節（フェーズ 2）の B-1 定義・B-2 設計・B-3 実装順。
+前提:
+- 行番号は main `eee267e`（#71・ログの絞り込みをコミットした状態）で読み直したもの。
+- 実機では確かめていない。コードからの推定・未検証の API の挙動は ※推測 と書く。
+- 決定済み（利用者）: フェーズ 1 を土台にする。RPC protocol は v7 に上げる。回復できないホストでは、保留した文字キーを打った文字のまま文書へ入れ、文字以外のキーは捨て、回復まで直接入力にして表示を出す。未確認のキーは仮に表示し（例「かんじa」）、Enter は表示どおりに確定する。未確認の操作はすべての種類を仮表示に反映する。
+- 決定済み（2026-10-21）: (1) フェーズ 2 はフェーズ 3 と同じリリースにする（engine ABI の変更は 1 回。protocol v7 は古いホストを止めるインストーラーと一緒に出す）。(2) 保留中にフォーカスが別の文書へ移ったら、元の文書が生きていれば文字キーを打った文字のまま入れ、文字以外は捨てる。生きていなければ捨てて WARN。(3) 正確に復元できたときは Space で通常どおり変換する（T2-1b の期待値が変わる）。(4) Enter で末尾の未確定 `n` は `ん` にして確定する（「表示どおり」の承認済みの例外。今の挙動）。
+
+## A. 実装の段 1 の仕様（すぐ実装できる形）
+
+目的: 今の挙動を変えずに、キーの解決と「食べるか」の判定を、試験できる関数に取り出す。以後の段の差分が、どの挙動を変えたかを試験で見えるようにする。
+
+**対象のファイル**（これ以外は変えない）:
+- `crates/rakukan-tsf/src/engine/keymap.rs`
+- `crates/rakukan-tsf/src/tsf/factory.rs`
+
+`dispatch.rs`・`on_*.rs`・`edit_ops.rs`・`state.rs`・`rpc_composition.rs` は変えない（dispatch.rs:27 のエンジンの取得と、その後の復元・初期化の順序をそのまま残す）。
+
+**1. keymap.rs: キーの状態を読む口を取り出す**
+- `trait KeyStateSource` を足す。メソッドと、今のコードで呼んでいる場所:
+  - `modifiers(&self) -> Modifiers` … 今の `Modifiers::current()`（keymap.rs:181-204）をそのまま呼ぶ。中で左右のキーを読み、左右とも押されていない場合だけ汎用のキーを読む（keymap.rs:188-195）。この条件付きの読み方を作り直さない
+  - `space_down(&self) -> bool` … `GetKeyState(0x20)`（keymap.rs:440）
+  - `selecting(&self) -> bool` … `session_is_selecting_fast()`（keymap.rs:465）
+  - `to_unicode(&self, vk: u16) -> Option<(i32, [u16; 2])>` … `GetKeyboardState` と `ToUnicode`（keymap.rs:493-500）。`GetKeyboardState` が失敗したら `None`（今の `?` と同じく、`resolve_action` 全体が `None` を返す。④ の Tab にも進まない）。
+- 本番用の `Win32KeyState` は、上の Win32 API を今と同じ引数で呼ぶだけ。
+- `pub fn resolve_action(&self, vk: u16) -> Option<UserAction>` は `self.resolve_action_with(vk, &Win32KeyState)` を返すだけにする。
+- `resolve_action_with` の本体は今の `resolve_action`（keymap.rs:435-522）と同じ順序・同じ分岐にする: `modifiers()` → `space_down()` → `normalize_key_event` → `masked` → ① `resolve_mods` → ①.5 `essential_fallback_action` → ② `!ctrl && !alt` のときだけ `selecting()` → ② テンキー記号 → ③ `to_unicode()` → ④ Tab。各メソッドは今の API 呼び出しの位置でだけ呼ぶ（`ToUnicode` を前に動かさない。今は ① 〜 ② で戻る場合に `GetKeyboardState` / `ToUnicode` を呼ばない: keymap.rs:451-491）。
+
+**2. factory.rs: 判定を関数に取り出す**（呼び出し側は今の位置のまま関数を呼ぶ）
+- `fn is_ime_mode_action(action: &UserAction) -> bool` … `ImeToggle | ImeOn | ImeOff`。`OnTestKeyDown`（factory.rs:753-759）と `OnKeyDown`（factory.rs:857-870）の 2 か所の `matches!` を置き換える。
+- `fn test_resolve(resolved: Option<UserAction>, vk: u16) -> Option<UserAction>` … `resolved.or_else(|| essential_fallback_action(vk))`。今の `OnTestKeyDown` は、keymap の借用に失敗した場合も `resolve_action` が `None` を返した場合も fallback に進む（factory.rs:730-745）。この両方を `resolved = None` として写す。
+- `fn test_key_eat(action: &UserAction, ime_on: bool, has_preedit: impl FnOnce() -> bool, is_selecting: impl FnOnce() -> bool) -> bool`:
+  - `ime_on` が false なら `is_ime_mode_action(action)` を返し、2 つの関数を呼ばない（今は IME オフで `engine_try_get_or_create` を呼ばない: factory.rs:753-759）。
+  - true なら `has_preedit()` を呼び、次に `is_selecting()` を呼び（今の順: factory.rs:761-773）、`key_should_eat(action, hp || sel)` を返す。両方を必ず 1 回ずつ呼んでから組み合わせる（今は両方を計算してから `||` している）。
+  - `OnTestKeyDown` は今の `has_preedit` の式（`engine_try_get_or_create` → `preedit_is_empty` → 失敗時は `composition_clone`: factory.rs:761-768）をそのままクロージャにして渡す。
+- `fn keydown_ime_off_ignores(action: &UserAction, ime_on: bool) -> bool` … `!ime_on && !is_ime_mode_action(action)`。factory.rs:857-870 の条件を置き換える（`diag::event` とログはそのまま）。
+- `fn keydown_return(result: &anyhow::Result<bool>) -> bool` … `Ok(ate)` は `ate`、`Err` は false（factory.rs:871-887）。`diag::event` と `tracing::warn!` の文言・順序はそのまま残す。
+- `normalize_key_event_vk`（factory.rs:916-925。`GetKeyState` を 4 回読む）は、両方の入口で今の位置のまま先に呼ぶ。
+- `OnKeyDown` の「keymap が取れなければ unmapped で FALSE」（factory.rs:806-827）は変えない。fallback を揃えるのは段 2。
+
+**3. 変えてはいけないこと**
+- Win32 API の呼び出しの有無・順序・引数、`engine_try_get_or_create` の呼び出しの有無と順序、ログ・`diag::event` の文言と順序、返す TRUE / FALSE。
+- `key_should_eat`（factory.rs:1077-1110）の中身。
+
+**4. 今の挙動を固定する試験**（`cargo test -p rakukan-tsf --lib` を PowerShell から実行）
+- keymap.rs（偽の `KeyStateSource` が呼ばれたメソッドを順に記録する）:
+  - 前提: 1・2・4〜9 は、対象のキーに割り当ての無い keymap（`Keymap::placeholder()`: keymap.rs:531。割り当てが空）で試す。プリセットを含む keymap では ① の割り当て（keymap.rs:452）が先に効き、`to_unicode` まで届かないことがある。
+  1. 割り当ての無い Enter（vk 0x0D）→ `CommitRaw`。`selecting` と `to_unicode` は呼ばれない。
+  2. Ctrl+Enter（割り当て無し）→ `CommitRaw`（①.5 は修飾キーを見ない）。
+  3. 割り当てのあるキー（既存の試験 keymap.rs:995 と同じ作り方の keymap）→ その操作。①.5 以降のメソッドは呼ばれない。
+  4. `1`（0x31）、修飾キー無し、`selecting = true` → `CandidateSelect(1)`、`to_unicode` は呼ばれない。`selecting = false` → `to_unicode` が呼ばれ `Input('1')`。Ctrl+`1` では `selecting` を呼ばない。
+  5. テンキー 0x6F → `InputRaw('/')`、`to_unicode` は呼ばれない。
+  6. Shift+A（`to_unicode` が `A`）→ `Input('A')`。
+  7. `to_unicode` が制御文字・0 文字 → vk 0x09 は `Tab`、それ以外は `None`。
+  8. `to_unicode` が `None`（`GetKeyboardState` の失敗）→ vk 0x09 でも `None`。
+  9. 呼び出しの順序が `modifiers` → `space_down` →（必要なら）`selecting` → `to_unicode` であること。
+- factory.rs:
+  10. `key_should_eat` の表: `UserAction`（user_action.rs:4 の全 variant）× `has_preedit` の全組み合わせを、今の `match` を写した期待値の表と比べる（既存の `key_should_eat_tests`: factory.rs:1512-1541 に足す）。
+  11. `test_key_eat`: `ime_on = false` で 2 つのクロージャが呼ばれず、モードキーだけ true。`ime_on = true` で `has_preedit` → `is_selecting` の順に 1 回ずつ呼ばれる。
+  12. `test_resolve(None, 0x0D) == Some(CommitRaw)`、`test_resolve(None, 0x41) == None`、`test_resolve(Some(x), _) == Some(x)`。KeyDown は `None` で unmapped（fallback 無し）のまま、という今の相違をこの試験の名前と注記で固定する（段 2 で期待値を変える）。
+  13. `keydown_ime_off_ignores` と `keydown_return` の表。
+
+**5. 完了の条件**: 上の試験が通る。`cargo make check` が通る。差分が 2 つのファイルに収まり、呼び出しの順序の比較（変更前後の関数を並べて読む）で、API・エンジン取得・ログの順序が同じと確かめられる。試験 12 は関数だけを確かめるので、実際の借用の失敗と KeyDown の unmapped の分岐は差分のレビューで確かめる: factory.rs:730-745（`OnTestKeyDown` の `try_borrow` の範囲と fallback への分岐）と factory.rs:807-824（`OnKeyDown` の `try_borrow` の範囲・unmapped の早期 return・`tracing::debug!` と `diag::event` の文言と順序）が変更前と同じであること。規模の目安は試験を含めて 250〜450 行（※推測）。
+
+## 0. 版ごとの主な変更
+
+第 4 版（第 3 版から。3 回目のレビュー N1〜N6）:
+
+| 項目 | 第 3 版 | 第 4 版 |
+|---|---|---|
+| 時間切れの要求（N1） | 時間切れ後に遅れて実行されたら文書の確定だけ行う | 要求ごとの状態の箱（`ReqCell`）を、EditSession の先頭と時間切れの処理が 1 回ずつ読み書きし、「実行開始」と「失効」のどちらが先かを一意に決める。失効した要求は文書に触れない。実行した要求の結果は必ず回収する。`InsertTxn`・表示の要求も同じ（4.6） |
+| 宛先の違うキー（N2） | 所有スレッドに列が 1 本 | 宛先（文脈 + `focus_epoch`）ごとの列を、着いた順に並べる。先頭の列だけを実行し、後の列は待つ。A → B → A は 3 本の列（4.2） |
+| Full 確定（N3） | 「SetText は要らない」 | 「表示どおり」と「指定の置き換えの後に確定」（末尾の `ん`・CycleKana のカタカナ）を分け、置き換えの SetText が失敗したら今と同じく表示どおりに確定する（4.6） |
+| 読みの長さの自動確定（N4） | 表示どおりに確定 | 自動の確定には「表示どおり」を適用しない。表示の要求の完了を待ち、範囲の文字列が計画と一致したときだけ確定する（4.6 の確定の理由） |
+| 確定の理由（N5） | ― | `CommitReason` を記録し、理由ごとに文字列の決め方・失敗時の処置・終わり方を決める。回復できない場合は最初の確定が失敗しても有限の手順で直接入力に入る（4.2, 4.6） |
+| 段 1・段 4（N6） | 段 1 で入口に `KeyEvent` を作る、段 4 で上限を有効化 | 段 1 は今の評価順と副作用をそのまま残す（A 節）。各段に「追加」と「有効化」を分けて書き、上限・縮約の有効化は依存する段の後に移す（7 節） |
+| 代替期間の F | 「F は今より悪くならない」 | 縮約を有効にするのは ABI の段（段 7）の後。それまで代替の `SeedPreedit` を使うのは Rebased のときだけで、そのときの F の制限を明記（4.8） |
+| 付記 | ― | `HostLink` は通知を受けたら最新の状態を読み直してから直接入力を外す。`INPUT_OWNER` は Deactivate・終了通知・各タイマーにも適用する。写しを作らない経路は `push_char` の早期 return を含む全 `current_preedit()` を外す |
+| 事実 | `ensure_connected` が最大 5 s | 5 s は spawn 後のパイプ接続待ち 1 回の上限。`ensure_connected` と `call_with_retry_inner` が再試行するので、全体の上限は 5 s ではない（1 節） |
+
+第 3 版（第 2 版から。R1〜R10）: 今のキーの未実行の部分（`KeyTask`）、確定待ちのキーの引き継ぎ、直接挿入のトランザクション、範囲選択中のログの保持、`EngineAccess` と `HostLink` の分離、Enter と表示の修復の順、写しを作らない経路と上限、実装順、保留したモードキーの破棄、所有スレッド、`checkpoint_edit` / `final_edit`、再開のタイマー。
+
+第 2 版（草案から）: 照合点と末尾の常時適用、確定トランザクション、表示の要求値・成功値、保留キーの受け付けと実行の分離、`SeedPreedit` / `RetainRange`、Codex の順の実装計画。
+
+## 1. 現状の要点（コード上の事実）
+
+キーの入口
+- `handle_action` は冒頭で `engine_try_get_or_create()?` を呼ぶ（dispatch.rs:27）。エンジンが無ければ初期化を始めて Err、ロックが取れなければ `engine busy` の Err（state.rs:379-392）。IME のオン/オフのキーもここで Err になる。この関数が確かめるのは、ロックが取れることと手元のエンジンの口（`RpcEngine`）があることだけで、ホストとの接続は確かめない。
+- 背景の初期化は、エンジンの口が既にあれば何もしない（state.rs:302-304）。
+- `OnKeyDown` は `handle_action` の Err を常に FALSE（アプリへ渡す）にする（factory.rs:880-887）。
+- keymap が取れないとき、`OnTestKeyDown` は `essential_fallback_action(vk)` を使い（factory.rs:737-745）、`OnKeyDown` は unmapped として FALSE を返す（factory.rs:806-827）。今は Test と KeyDown で扱いが違う。
+- `OnTestKeyDown` の `has_preedit` は、エンジンが取れないと false（factory.rs:761-768）。RPC を送るのは、IME オンで、割り当てがあり、エンジンが取れ、手元に編集状態がある場合だけ（rpc_composition.rs:521-524）。
+- `essential_fallback_action` は修飾キーを見ない（keymap.rs:977-988）。`resolve_action` の ①.5 も同じ関数を使う（keymap.rs:455-461）。候補番号は `session_is_selecting_fast()` に依存（keymap.rs:465）。修飾キーと文字は解決時に `GetKeyState` / `GetKeyboardState` / `ToUnicode` で読む（keymap.rs:435-447, 493-500。関数全体は keymap.rs:435-522）。
+
+手元の復元元・台帳
+- `RemoteComposition { owner, generation, edit, pending, bg_reading, tsf_comp, created_under }`（rpc_composition.rs:28-41）。鍵は DM のポインタだけ（rpc_composition.rs:64-68）。
+- `pending` は 1 件で、`apply_via`（rpc_composition.rs:268-309）の 278, 292, 297, 304 行で上書き。未解決に阻まれた変更は保存しない（303-305 行）。`reset_preedit` は `close()` で手元の状態を消す（rpc_composition.rs:681-685）。
+- 結果不明の要求はプロセスで 1 件（client.rs:164, 1034）。`Restore` は未解決があっても送れ、`Restored` で台帳を空にする（client.rs:1084, 1101）。
+- `engine_health` は失敗を `ok` に置き換える（client.rs:910-913）。接続の確認には使えない。
+
+ホスト
+- `Restore` は保存済み応答の照合を先に行う（server.rs:984）。適用は `reset_preedit` → `force_preedit` → `push_char` → BG 回収 → `bg_owner = None` → `owner` の変更 → `then`（server.rs:996-1007）。過去の打鍵ログは消える（lib.rs:696-697）が、`push_char` と `then` で新しいログは作られる。
+- `apply_change` は各操作の結果に `preedit_display`・`hiragana_text`・`EditState` の写しを作る（server.rs:1113 以降）。
+- 照合の順は「世代 → 番号 → 所有者」。同じ番号の再送には、所有者が替わっていても当時の応答を返す（server.rs:222-241）。記録は TSF の ID ごと（server.rs:75-79）。
+
+エンジン
+- `push_char` は毎回 `current_preedit()`（読みと未確定ローマ字の写し）を返す（lib.rs:809, 1118-1122）。FFI はその戻り値を捨てるが、写しは作られる（ffi.rs:293-299）。
+- `force_preedit` は表示を置き換え、ログは残し、`log_detached_at` をログの長さにする（lib.rs:832-837）。`hiragana_from_romaji_log` / `romaji_log_str` はログ全体を連結する（lib.rs:1130-1142）。`on_latin_convert` は表示がログ由来のかなで始まらないと、頭を除いたローマ字を作る（edit_ops.rs:129-134）。
+- かな → 綴りの逆引き `spellings_for`（romaji/rules.rs:403）。engine ABI は 11（rakukan-engine-abi/src/lib.rs:23、rakukan-engine/src/ffi.rs:20）。
+
+表示と確定
+- `update_composition` は `COMPOSITION_APPLY_LOCK` が取れないと SetText を飛ばし（on_compose.rs:201-208）、`RequestEditSession` の結果を捨てる（on_compose.rs:267-270）。
+- `commit_then_start_composition` は EditSession の冒頭で composition を取り出し（on_compose.rs:325）、確定部分の末尾の位置を `insert_after_commit` に控え（on_compose.rs:351-366）、縮める SetText の失敗は WARN だけで EndComposition に進む（on_compose.rs:355-362, 372-374）。要求の結果は `TF_S_ASYNC` などを見て印を消すだけ（on_compose.rs:474-490）。
+- `end_composition` も冒頭で取り出し（on_compose.rs:769）、EndComposition の失敗は `?` で抜ける（on_compose.rs:831-837）。取り出した composition は戻さない。
+- Enter の各経路は、ホストの `commit` と `reset_preedit` を文書の確定より先に送る（on_convert.rs:1880-1893, 1939-1942）。
+- Backspace で空になると `end_composition("")` で閉じるが、手元の編集状態は閉じない（on_convert.rs:2047-2068）。
+
+状態の置き場所
+- プロセス共通: `SESSION_STATE`（state.rs:1620）、`COMPOSITION`（state.rs:1211。`dm_ptr` 付き）、`COMPOSITIONS`（rpc_composition.rs:25）、`RAKUKAN_ENGINE`。
+- スレッドローカル: 候補ウィンドウの HWND（candidate_window.rs:157-159）、今の DM（candidate_window.rs:184）、DM の台帳（dm_registry.rs:253）、フォーカスの遅延処理の列など。TSF の TIP はスレッドごとに Activate される（factory.rs:379）。※推測: 1 つのプロセスで複数のスレッドが TSF を使うと、スレッドローカルの値とプロセス共通の composition・セッションが食い違う。今のコードに、1 つのスレッドだけが使うことを保証する仕組みは見当たらない。
+- `Preedit{text}` の中身は経路で違う（通常の入力は読みだけ: on_input.rs:329-331、復元は読み + 未確定ローマ字: dispatch.rs:63-66）。
+- `PENDING_KEYS`（state.rs:231-266）に積むのは engine=None の分岐だけ（on_input.rs:93-112, 363-374）。dispatcher が先に Err で抜けるので届かない。
+- フォーカス通知は遅延処理に送る（factory.rs:1362-1399 → candidate_window.rs:1015, 1052）。`OnPushContext` / `OnPopContext` は何もしない（factory.rs:1401-1406）。
+- 範囲変換は、エンジンの読みを選択部分に縮める（on_convert.rs:395）。取消では全体の読みに戻す（on_convert.rs:289-305）。ログは縮めない。
+- ロックを長く持つ処理: 初期化のスレッド（state.rs:300-313。spawn 後のパイプ接続待ちは 1 回あたり最大 5 s: client.rs:43。`ensure_connected` は失敗すると 200 ms 後にもう 1 回試し: client.rs:1186-1207、`call_with_retry_inner` も 2 回試す: client.rs:1144-1170 ので、全体の上限は 5 s ではない）、`engine_reload_impl`（state.rs:742, 785, 788）。
+
+## 2. B-1 定義
+
+### 2.1 キーの段階と、1 打鍵に含まれる複数の操作
+
+キーの段階はキーに付け、編集要求・表示・確定はそれぞれ別の記録で持つ。1 打鍵は「以前の分の復元」「表示の修復」「今のキーの編集要求（0〜n 件）」「表示の要求」「確定トランザクション（0〜1 件）」「ホストの副作用」を含みうる。
+
+| 段階 | 意味 | 持ち主 |
+|---|---|---|
+| K0 受け取った | `KeyEvent` を作り（4.1）、食べるかを決めた | 受け付け |
+| K1 保留した | 実行を待っている | 入力の列（4.2） |
+| K1' 続きを待っている | 実行を始めたが、未実行の部分（`KeyTask`）を残して止まった | 入力の列の先頭（4.1） |
+| K2 記録した | 編集要求を journal に入れた。ホストの適用は未確認 | journal の末尾（4.3） |
+| K3 確かめた | そのキーの編集要求がすべて確認済みの接頭部に入った | journal |
+| K4 文書操作を頼んだ | 表示か確定の EditSession を要求した | 表示の記録・確定トランザクション |
+| K5 文書操作が終わった | EditSession の結果が記録された | 同上 |
+
+規則:
+- 列から取り出すことと、journal への追加は TSF のスレッドの同じ処理の中で行う。同じ編集要求が列と journal の両方にあることはない。
+- 列へ戻すのは `KeyTask`（未実行の部分）だけ。実行済みの部分（journal に入れた編集要求・要求した EditSession）は戻さない。
+- 文字を生むキー（4.1 の定義）は、文書が編集を受け付けない場合（4.6）を除き、捨てない。
+
+### 2.2 読み・未確定ローマ字・表示
+
+| 値 | 正の置き場所 | 手元の写し |
+|---|---|---|
+| 読み・未確定ローマ字 | journal。ホストの状態はその適用結果 | 照合点の `EditState`（`checkpoint_edit`） |
+| 打鍵ログ | ホストのエンジン。journal を最初から適用すると同じものができる | 持たない |
+| 表示要求値 `requested` | 最後に頼んだ表示（表示要求 ID 付き） | 入力セッション |
+| 表示成功値 `shown` | EditSession の中で SetText が成功した文字列（ID 付き） | 入力セッション |
+| 仮表示 | 照合点の状態に未確認の末尾を手元で当てた文字列（4.5） | 計算 |
+| 範囲の元の文字列 `original_text` / 確定した文字列 `committed_text` | 確定の EditSession の中で `GetText` で読んだ範囲全体の文字列（照合・元に戻す用）と、実際に文書に確定した文字列（学習・文脈に使う）（4.6） | 確定トランザクション |
+
+### 2.3 アプリへの確定の段階
+
+確定トランザクション（4.6）・直接挿入トランザクション（4.2）・表示の要求に共通の段階:
+
+| 段階 | 状態 |
+|---|---|
+| T0 計画した | 手元で決めた。ホストにも文書にも何もしていない |
+| T1 要求した | `RequestEditSession` を受け付け、まだ実行されていない（`ReqCell = Pending`） |
+| T2 実行中 | EditSession の先頭で `ReqCell` を `Pending` → `Running` にした |
+| T3 文書の結果あり | 結果（下）を記録し、`ReqCell = Done(結果)` にした |
+| T4 ホストの処理済み | 副作用・新しい composition の状態を送った（成否は副作用ごと） |
+| T5 閉じた | 結び付いたキーを次の入力世代へ渡した、または再試行・破棄を決めた |
+| TV 失効した | T1 のまま 2 s 経ち、時間切れの処理が `ReqCell` を `Pending` → `Void` にした。以後この要求が実行されても文書に触れない |
+
+文書の結果: `Committed`（C2）/ `CommittedNoNew`（C1）/ `Aborted`（C0）/ `AbortedChanged`（C0'。文字列が計画と違うまま残った）/ `NotRun`（要求の失敗・拒否・古い要求・失効）。直接挿入は `Inserted` / `NotInserted`。
+
+## 3. 識別子
+
+| 識別子 | 内容 | 進める契機 |
+|---|---|---|
+| `DmRef` | DM のポインタ + 世代（dm_registry.rs:34-40） | 既存 |
+| 文脈の識別 | `ITfContext` の `IUnknown` のポインタ値。列は `ITfContext` の参照も持つ | ― |
+| `focus_epoch` | スレッドローカルの `u64` | `OnSetFocus`（ThreadMgr）・`OnPushContext` / `OnPopContext`・`OnSetThreadFocus` / `OnKillThreadFocus`・`OnUninitDocumentMgr`・Deactivate の中で、同期で +1（加算だけ。msctf に再入しない） |
+| `input_gen` | 入力セッションごとの `u64` | 入力セッションの開始 |
+| 入力の系列 `lineage` | 同じ文脈で、確定をまたいで続く入力のまとまり。`focus_epoch` と文脈が同じ間は同じ値 | 文脈が替わったとき |
+| 確定・挿入トランザクション ID | `u64` | 計画ごと |
+| 表示要求 ID と表示の失効番号 `display_epoch` | 要求ごとの ID と、入力セッションの `u64` | `display_epoch` は確定トランザクションを作るとき・入力セッションを閉じるときに +1 |
+
+失効と世代の更新を分ける:
+- 失効（キーを元の宛先へ届けない）: `focus_epoch`・`DmRef`・文脈のどれかが違う。
+- 世代の更新（正常な確定で新しい入力セッションになる）: `input_gen` が進むだけで、`lineage` は同じ。キーは確定トランザクションを通して新しい世代へ渡す（4.6）。`input_gen` が違うことだけでは失効にしない。
+
+## 4. 設計
+
+### 4.1 受け付け・食べる判定・`KeyTask`
+
+**`KeyEvent`**（段 5 から。段 1 では今の評価順のまま: A 節）: 入口で vk、左右込みの修飾キー、Space の押下、`ToUnicode` の文字（制御文字を除く）、時刻、宛先（`DmRef`・文脈・`focus_epoch`・`lineage`）を固定する。解決時に `GetKeyState` 等を読み直さない。
+
+**文字を生むキー**: `KeyEvent` に文字があり、Ctrl / Alt が無いもの（Space を含む）。
+
+**解決**（この形は段 5 から。段 1 は A 節の `resolve_action_with` と `test_resolve` の抽出だけ）: `resolve(event, keymap: Option<&Keymap>, logical: LogicalState) -> Option<UserAction>`（純関数）。今の `resolve_action`（keymap.rs:435）はこれを呼ぶだけにする。keymap が取れないときの扱いは、7 節の 1 では今の相違（Test は `essential_fallback_action`、KeyDown は unmapped）をそのまま `resolve_test` / `resolve_keydown` の 2 つで写す。7 節の 2 で、両方を ①.5 と同じ扱い（修飾キーを見ない `essential_fallback_action`）に揃える。
+
+**判定 `decide_eat(event, action, view) -> bool`**（純関数）。`view` は所有スレッド（4.4）のスレッドローカルの写し `InputView`。
+
+| `InputView` | 意味 |
+|---|---|
+| `ime_on` | 実行済みのモード（アトミック） |
+| `has_input` | その文脈の入力セッションに今の入力がある: composition を保持（stale でない）、`requested` か `shown` が空でない、仮表示が空でない、セッションが Idle でない、のどれか。journal の有無は使わない。入力セッションの DM が今の DM と違えば false |
+| `selecting` | 同じ入力セッションの変換状態 |
+| `queue_nonempty` / `commit_pending` / `replaying` | 4.2・4.6 |
+| `direct_fallback` | 4.2 |
+| `owner_here` | このスレッドがプロセス共通の状態を持っているか（4.4） |
+
+| 条件 | 判定 |
+|---|---|
+| `owner_here` でない | 4.4 の規則（引き継げなければ食べない） |
+| `direct_fallback` | IME のモードキーだけ食べる |
+| IME オフ | モードキーだけ食べる（今と同じ） |
+| 列・確定待ち・再生中 | アプリ用のショートカット（Ctrl / Alt 付きで、IME の割り当ても文字も無い）以外は食べる |
+| 上以外 | `key_should_eat(action, has_input \|\| selecting)`（factory.rs:1077-1110）と、各ハンドラーが今 `Ok(false)` を返す条件 |
+
+ロック: `InputView` は所有スレッドだけが読み書きし、ロックを使わない。状態を変える処理は直後に写しを更新する。
+
+**`KeyOutcome`**: `Applied` / `Retained`（末尾が未確認）/ `DocPending`（確定トランザクションが T1）/ `DisplayStale` / `NoEffect{reason}` / `Suspended(KeyTask)`（未実行の部分を残して止まった）。食べると決めたキーは、どの結果でも TRUE を返す（7 節の 6 で有効にする）。
+
+**`KeyTask`（未実行の部分）と続きの規則**（R1）:
+- `KeyTask { event, action, step }`。`step` は「どこから続けるか」: `Start`（何もしていない）/ `AfterRepair`（入口の復元と表示の修復が済んだ）/ `AfterCommit{txn}`（確定の後の入力が残っている）。
+- 入口の復元が Rebased（4.7）: セッションと表示を修復し、`step = AfterRepair` で同じキーを続ける。
+  - 文字を生むキー（`Input` / `InputRaw` / `FullWidthSpace` / `Punctuate`）: 修復後の状態で 1 回だけ実行する（例: 「かんじ」+ `a` →「かんじあ」）。
+  - 見えていた表示に依存する操作（`Convert`・候補の操作・F キー・Backspace・Esc・カーソル）: 修復だけで終える（`NoEffect(restored)`）。押した時点の表示がもう無いため。Enter は入口の復元を通らない（4.5）。
+- 確定の後に入力が続くキー（CommitThenInput: 変換中の文字・BlockSelecting 中の文字）: 確定が `Aborted` / `AbortedChanged` / `NotRun` なら、`step = AfterCommit` の `KeyTask` を列の先頭に残す。表示を作り直してから、確定を新しいトランザクションで再試行する（4.6 の再試行）。確定が成功したら新しい文字を 1 回だけ実行する。
+- 続きは 1 回だけ: `KeyTask` は列の先頭にしか置かず、実行を始めた時点で取り出す。止まった場合は、未実行の部分だけを持つ新しい `KeyTask` を置く。
+
+### 4.2 保留キー・自動再開・回復できない場合（#70）
+
+**エンジンとホストの状態を分ける**（R5）:
+- `EngineAccess`（UI のスレッドで、待たずに分かる値）: `Ready(guard)`（ロックが取れ、エンジンの口がある）/ `Starting` / `Busy` / `NoEngine(reason)`（初期化が失敗した。`reason` は 4.9 の `ConnectError`）。
+- `HostLink`（プロセス共通）: `{ state: Connected | Disconnected{kind, since}, link_epoch: u64 }`。RPC の成功・失敗（`ensure_connected` の結果を含む）で更新し、更新のたびに `link_epoch` を進める。`kind` は 4.9 の `ConnectError` の分類（`VersionMismatch` を区別）。
+- `Ready` でも `HostLink` が `Disconnected` のことがある（口はあるが繋がっていない）。
+
+**宛先ごとの列**（N2）:
+- 宛先 `Dest = { dm: DmRef, ctx, focus_epoch }`。`focus_epoch` が違えば、同じ文脈でも別の宛先。
+- `InputQueues`（所有スレッドに 1 つ）: `VecDeque<DestQueue>` を着いた順に並べる。`DestQueue = { dest, lineage, keys: VecDeque<KeyEvent | KeyTask>, bound_txn: Option<txn_id>, first_at, reason }`。1 本の列の中のキーは同じ宛先を持つ。
+- 実行するのは先頭の列だけ。後ろの列は、先頭の列が空になり、先頭の列に結び付いたトランザクションが閉じるまで待つ。
+- 新しい宛先のキーは、最後の列の宛先と違えば、新しい列を末尾に足して積む。古い列の処理を待たずに置き場所がある。
+- 先頭の列の宛先が今のフォーカスと違う（`focus_epoch` が今の値と違う）とき、その列は前提の決定 2 で処理する: 元の文書が生きていれば、列の文字キーを直接挿入トランザクションで元の文脈へ打った文字のまま入れ、文字以外は捨てる。生きていなければ捨てて WARN。結び付いたトランザクションが T1 なら、その完了か失効を先に待つ。
+- 例 A → B → A（`focus_epoch` 1 → 2 → 3）: 列は `[A@1, B@2, A@3]`。A@1 は元の文書 A へ文字を挿入（決定 2）、B@2 も今のフォーカスではないので同じく B へ挿入、A@3 は通常どおり実行する。A@1 と A@3 は同じ文書でも混ぜない。
+
+**受け付け `accept` と実行 `execute` を分ける**:
+- `accept`: `decide_eat` が false → アプリへ渡す。true → 列がある・確定待ち・再生中・エンジンが `Ready` でない、のどれかなら、宛先の列に積む。それ以外は列を先に実行し、このキーを `execute` する。
+- `execute`: 列の判定をしない。実行時の `LogicalState` で `resolve` してハンドラーを呼ぶ。再生でも同じ `execute` を使う。
+- 再生中は `replaying` を立て、届いたキーは列に積む。
+
+**固定と解決**: vk・修飾キー・文字・宛先は受け取り時に固定（段 5 から。段 1 では今の評価順のまま: A 節）。`UserAction` は実行時に解決。
+
+**モードキー**: 列があれば積む。積んだ時点ではモードを変えない。実行時に IME オフになっていた文字キーは、直接挿入トランザクションで文書へ入れる。実行時に意味を失った文字以外のキーは捨てて WARN。列が無くエンジンも無いときのモードキーは、エンジンを取らずに実行する。
+
+**アプリ用のショートカット**は積まずにすぐ渡す。保留中の文字より先にアプリに届く（6 節の試験で固定する）。
+
+**宛先の照合**（実行の直前）: `focus_epoch`・`GetFocus` の DM（生存）・文脈が同じ。`input_gen` は使わない（3 節）。違えば上の決定 2 の処理。
+
+**再生の契機（必須）**:
+1. `accept` の入口。
+2. 再開のタイマー: 列があるか、トランザクションか表示の要求が T1 の間だけ動かす。間隔 50 ms。毎回、宛先の照合・上限・トランザクションの時間切れと完了の確認（通知の取りこぼしの補い）・`EngineAccess` の取得を行い、条件がそろえば再生する。
+3. 初期化の完了・確定の完了・接続の回復の通知（`PostMessage`）。届かなくても 2 で拾う。
+- タイマーの窓: Activate の中で `ensure_hwnd`（candidate_window.rs:881）を呼び、最初の候補表示より前に HWND を作る。HWND かタイマーを作れなかった場合は、列を使わない（キーは今と同じくアプリへ渡す。WARN を残し、次の Activate で作り直す）。Deactivate ではタイマーを止め、列は決定 2 の扱い（Deactivate の中では文書へ書けないので、捨てて WARN）。
+- タイマーからの再生は「フォーカス中の文脈へのキー入力の続き」で、宛先の照合が通ったときだけ所有権を取り直す（rpc_composition.rs:1-2 の方針は、キーを伴わない読み取り・変更にだけ適用）。
+- タイマーの処理は所有スレッドでだけ動く（4.4）。
+
+**再生の途中**: 先頭の列のキーを 1 つずつ `execute` する。`Suspended` が返ったら止める（`KeyTask` は先頭）。それ以外の結果のキーは列から外す。`DocPending` の後は、そのトランザクションが閉じるまで止める。
+
+**上限**: 列全体で 256 キー、または最初のキーから 30 s（根拠: spawn の抑止が 30 s: client.rs:39。毎秒 8 キー程度の打鍵で 30 s 分が約 240 キー）。`HostLink` が `Disconnected{VersionMismatch}` なら待たない。稼働中の切断（口はあるがホストが応えない）では、キーは実行されて journal の末尾が伸びる。末尾が 30 s 以上未確認、または 256 件を超えたら、同じく回復できない場合に進む（有効にするのは段 6）。
+
+**回復できない場合の処置（救済）**（R3・N5・V1・V2・W1〜W3・W5。第 8 版で簡素化）:
+
+救済はまれな経路なので、再試行の分岐を増やさず、次の 3 つの原則で決める（第 8 版の設計判断）:
+- **二重にしない**: 同じ文字を文書に 2 回書く可能性のある操作をしない。
+- **確かめられない位置に入れない**: 文字を入れる位置は composition の範囲そのものか、締め切りの後に利用者が何も操作していないと分かる選択位置だけ。
+- **結果が不確かな書き込みを再試行しない**: 再試行してよいのは、前の試行が文書を変えていないと分かる場合（要求が実行されなかった `Void`、または SetText の失敗の後に範囲を読み直して元のままと確かめた場合）だけ。
+
+結果が不確か、または位置を確かめられないときは、その文字について救済をやめる: それ以上書かず、救済できなかった文字列を記録し（WARN に文字数と本文。今のログも確定する本文を出している: on_compose.rs:334-338 など）、`mode_indicator` に「入力の一部を文書へ入れられませんでした」を出す。利用者の決定（保留した文字キーを打った文字のまま入れる）は、結果の確かな通常の経路で守る。
+
+入口の条件: 回復できない状態（上の上限、または `VersionMismatch`）になったとき、所有スレッドに「受理したが確定していない入力」があること。対象は (a) 入力セッションの journal から作る未確定の文字列 `pending_text`（照合点の状態に未確認の末尾を当てた仮表示。変換の状態ならセッションの表示）と、(b) 列の文字キー。composition に表示があるかどうかは条件にしない（表示の要求が未実行・失敗で、composition が無い・空のこともある: on_compose.rs:193 で保持した後、201-212 で SetText が省略・失敗しうる）。どちらも無ければ、救済はせず手順 6 に進む。
+
+救済の進み具合 `RescueState`（W2）: `Idle` / `Active` / `Finishing`。接続の状態 `HostLink` とは別に持つ。`direct_fallback` を外せるのは `RescueState = Idle` のときだけ（下の「直接入力」）。
+
+1. **締め切り**（同期に行う。EditSession は使わない）:
+   - 対象を固定する: `target = pending_text ++ 列の文字キーの文字`。以後は増やさない。
+   - `shown_at_cutoff` を控える: その時点の表示成功値 `shown`（最後に SetText が成功した文字列。表示の要求が一度も成功していなければ空）。
+   - 未実行の表示の要求をすべて失効させる（W1）: `display_epoch` を進め、`Pending` の表示の `ReqCell` をすべて `Void` にする。以後、失効した表示の要求が実行されても composition を作らず、SetText もしない。
+   - 通常の再生と入口の表示の修復を止める: `RescueState = Active` の間、列の再生・`execute`・表示の修復・ライブ変換と待機のタイマーによる表示の更新を行わない。
+   - `passed_since_cutoff = 0` にする（締め切りの後にアプリへ渡したキーの数。手順 2 で数える。ログに残すための値で、挿入の可否の判断には使わない）。
+   - `direct_fallback` に入る。
+2. **締め切りの後のキー**: モードキー以外はアプリへ渡し、`passed_since_cutoff` を数える。救済の対象には加えない。
+3. 確定トランザクションが T1 なら、新しい要求を出さずに、その完了か失効（TV）を待つ（重複させない）。完了して確定済みの部分は対象と `shown_at_cutoff` から除く。
+4. **救済の要求 `RescueTxn`**（理由 `Unrecoverable`。ホストには何も送らない）。1 つの EditSession の中で、実行の時点の状態で 1 回だけ判断する。先頭で `ReqCell` が `Void` なら何もしない。結果は `RescueOutcome` として記録する。
+
+   | 実行の時点 | 処置 | 結果 `RescueOutcome` |
+   |---|---|---|
+   | composition を保持し、範囲の文字列が `shown_at_cutoff` と同じ | 範囲を `target` に SetText し（`Full(Overwrite)`）、EndComposition | 両方成功: `Rescued`（全部入った） |
+   | 同上で SetText が失敗 | 範囲を読み直す。`shown_at_cutoff` のままなら何も変わっていない | `Retryable`（予算の中で、新しい `RescueTxn` をもう一度要求する）。読めない・違う: `Stopped{ unrescued: target }`（composition には触れずに残す） |
+   | 同上で SetText は成功し EndComposition が失敗 | 元に戻さない。再試行もしない（EndComposition の結果が不確か） | `WrittenNotEnded`（`target` は composition の中にある。アプリがフォーカスの移動などで確定する。救済できなかった文字は無いが、確定していないことを WARN と通知に出す） |
+   | composition を保持し、範囲の文字列が `shown_at_cutoff` と違う（締め切りの後にアプリが範囲を編集した） | 上書きしない。EndComposition だけを行う（利用者の編集を残す） | `PartlyKept{ unrescued: target のうち表示に出ていなかった部分 }`（`shown_at_cutoff` が `target` の先頭なら `target[len(shown_at_cutoff)..]`、そうでなければ `target` 全体を「確かめられない」として記録）。EndComposition が失敗しても再試行しない（同じ記録） |
+   | composition を保持していない。締め切りの後に終了通知を受けた（アプリが確定した） | 書かない | `PartlyKept{ unrescued: 上と同じ計算 }` |
+   | composition を保持していない（もともと無かった） | 書かない。選択位置が締め切りの時点から変わっていないことを確かめる手段が無い（`passed_since_cutoff` はキーしか数えず、マウスでの移動を検出できない） | `Stopped{ unrescued: target }`（記録と通知） |
+
+   - 救済の `Overwrite` は、4.6 の共通の確定の「元に戻す」規則の対象外（4.6 の S1''・S4）。救済が書いた後に元に戻すことはない（Y1）。
+   - `Retryable` だけを再試行する。再試行は新しい `id` と `ReqCell` で同じ表の判断をやり直す（前の試行で文書が変わっていないので、二重にならない）。
+   - 挿入する位置は、composition の範囲そのものか、利用者が操作していないと分かる選択位置だけ。保存した範囲（`comp_end_anchor`）を使う挿入はしない（第 7 版の「確定済み・挿入待ち」と `anchor` は削除した。Y3）。
+5. **予算を使い切ったとき**（`Retryable` が 4 回続いたとき）: composition を保持し、範囲が `shown_at_cutoff` のままなら、EndComposition だけを最後の 1 回試す（`UnrecoverableAsDisplayed`。表示どおりの確定）。成功しても救済全体の成功ではない: 結果は `PartlyKept{ unrescued: target のうち表示に出ていなかった部分 }` で、残りを別の位置へ挿入はしない（記録と通知）。失敗したら `Stopped{ unrescued: target }`。composition が無ければ `Stopped{ unrescued: target }`（Y2）。
+6. `Rescued` 以外の結果は、救済できなかった文字列を記録し通知する（上）。列の文字以外のキーは、モードキーを含めて捨てる（件数を WARN）（R9）。対象・列・トランザクションを片づけ、`RescueState = Idle` にする。
+7. 直接入力のまま、回復の確認を待つ。救済の間に接続の回復の通知を受けていた場合は、ここで `HostLink` を読み直して判断する（下の「直接入力」）。
+
+**予算と時間**（V2・W5）: 救済の要求は「`Retryable` の 4 回 + 最後の 1 回（手順 5）」。これに手順 3 の既存の要求の待ちが 1 回加わる。各要求は `Pending` のまま 2 s で失効させる（4.6 の `ReqCell`。失効は文書を変えていないので `Retryable`）。`Pending` の待ち枠の合計の目安は (1 + 4 + 1) × 2 s ≒ 12 s。実際の所要時間には、これに `Running` の EditSession の実行時間と、タイマー（50 ms 間隔）・通知の処理の遅れが加わる。`Running` には時間の上限を設けない（TSF の呼び出しが戻ることを前提にする。戻らなければ所有スレッドごと止まっており、この設計では扱えない）。無条件の時間の保証はしない。
+
+**直接挿入トランザクション `InsertTxn`**（救済以外: 実行時に IME オフになっていた文字キー、前提の決定 2）: `{ id, dest, text, keys: その文字を出した列の範囲, position, req: ReqCell, stage, retries }`。
+- 挿入位置: その時点の選択位置。
+- 列の文字は `Inserted` が記録されるまで列から消さない。この間に届いたキーは列に積む（追い越さない）。
+- `NotInserted`・失効: 再開のタイマーで最大 3 回、新しい `InsertTxn`（新しい `id` と `ReqCell`）で再試行する。失効した前の要求は、後から実行されても文書に触れない（4.6 の `ReqCell`）。3 回とも失敗したら、文書が編集を受け付けないとみなし、その文字を捨てて WARN。
+- 宛先の照合に失敗したら、決定 2 の処理（元の文書が生きていれば元の文脈へ、生きていなければ捨てて WARN）。
+
+**直接入力 `direct_fallback`**:
+- モードキー以外は食べない。`mode_indicator` と言語バーのツールチップに「エンジン停止中（直接入力）」を出す。
+- 直接入力に入った後に新しく受けたモードキーは通常どおり処理する（モードの値は変わるが、`direct_fallback` の間は IME の入力はしない）。
+- 外す条件（R5）: 背景の接続確認の成功。確認用のスレッドが 5 s ごとに `RAKUKAN_ENGINE` を `try_lock` で取り（取れなければその回は飛ばす）、口が無ければ初期化を促し、口があれば失敗を返す確認の RPC（新しい `RpcEngine::probe()`: `EngineHealth` を送り、`Hello` の版の照合を含めて成否を返す。今の `engine_health` は失敗を隠す: client.rs:910-913）を送る。成功したら `HostLink` を `Connected` にし（`link_epoch` が進む）、その `link_epoch` を付けて UI のスレッドへ `PostMessage` する。
+- UI のスレッドは通知を受けたら、まず `RescueState` を見る。`Active` / `Finishing`（救済の途中）なら外さず、「回復の通知を受けた」印だけを残す（W2）。`Idle` なら `HostLink` を読み直し、`Connected` で `link_epoch` が通知の値と同じときだけ `direct_fallback` を外して表示を消す。違えば（その間に切断した）外さず、次の確認を待つ。
+- 救済が終わった時点（手順 7）で印があれば、そのときの `HostLink` を読み直し、`Connected` なら外す。印の時点の値は使わない。
+- UI のスレッドでは待たない。
+
+**届かないコードの削除**: on_input.rs:93-126, 363-387 の engine=None の分岐と drain、state.rs:222-266 の `PENDING_KEYS`。
+
+### 4.3 journal と復元
+
+**持つもの**（`RemoteComposition` に追加。`pending` は廃止）:
+- `journal: Vec<ChangeRequest>`: 編集要求（`InputChar`（`bg_start_n_cands` は `None` で記録。今の呼び出しはすべて `None`: on_input.rs:124, 148, 224, 291, 320, 384）・`PushChar`・`PushRaw`・`PushFullwidthAlpha`・`Backspace`・`FlushPendingN`・`ForcePreedit`・`SeedPreedit`・`RetainRange`）。
+- `checkpoint: (len, checkpoint_edit)`: journal の先頭 `len` 件を適用した状態として、ホストが確かめた値。
+- `generation`、副作用の記録 `effects`（4.7）、費用の合計 `cost`（下）。
+
+**送り方**:
+1. 上限を判定してから（下）、編集要求を journal の末尾に入れる（送る前）。
+2. 末尾が今の要求だけで、所有権があり、台帳に未解決が無ければ `Change`。`Changed` なら `checkpoint = (len, outcome.edit)`。
+3. それ以外は `RestoreJournal`。
+4. `Change` の失敗: 通信失敗・`ResultUnavailable` は結果不明、`OwnerMismatch` / `GenMismatch` は未適用、`Unresolved` は未送信。journal はそのまま、照合点も進めない。所有権を失った場合は同じキーの中で 3 を行う。
+
+**`RestoreJournal`**（ホスト、1 回のエンジンロックの中）:
+1. 番号の照合（`Restore` と同じ。同じ番号には保存した応答）。
+2. `pre_effects`（4.6）を順に適用。
+3. `reset_preedit`。
+4. `checkpoint = Some{len, checkpoint_edit}` なら先頭 `len` 件を適用し、`EditState` を `checkpoint_edit` と比べる。一致なら残りを適用（`Exact`）。不一致なら `reset_preedit` → `SeedPreedit(checkpoint_edit.reading)` → `checkpoint_edit.pending_romaji` の各文字を `push_char` → `journal[len..]` を適用（`Rebased`）。`None` なら全体を適用（`Exact`）。
+5. BG を回収し、`bg_owner = None`、`owner = owner`。
+6. `RestoredJournal { engine_gen, replay, final_edit, bg, effects }` を記録して返す。
+- エンジンの操作のエラー（BG の mutex の poison だけ。配布ビルドは `panic = "abort"`）: `reset_preedit`・`owner = None` にして `Error`。
+
+**TSF 側**:
+
+| 応答 | 照合点 | journal | 所有権 |
+|---|---|---|---|
+| `Exact` | `(journal の長さ, final_edit)` | そのまま | `generation = engine_gen` |
+| `Rebased` | 書き換えた journal の長さと `final_edit` | `[SeedPreedit(checkpoint_edit.reading), PushChar(checkpoint_edit の未確定ローマ字)…] + journal[len..]`（送った照合点の値で作る。`final_edit` で作ると末尾が二重になる） | 同上 |
+| `ResultUnavailable` / 通信失敗 | 進めない | そのまま | 不明（次は必ず `RestoreJournal`） |
+| その他の拒否 / `Error` | 進めない | そのまま | 無し |
+
+- 今のキーは journal の末尾（`then` は使わない）。
+- 照合点の不一致は、確定済みの表示を基点に末尾を当てる。主な原因は設定の変更と推定する（※推測）。
+
+**台帳との関係**:
+- 不変条件: 台帳に未解決として残りうる要求は、(a) どこかの composition の journal にある編集要求、(b) 副作用の記録で「結果不明」と記録済みの副作用・BG 操作、のどちらか。
+- この条件のもとで、`RestoredJournal` が台帳を空にしても失われない。同じプロセスの別の composition の未解決は、その composition の次のキーで流し直される。別プロセスの台帳は独立で、各プロセスの次のキーで流し直される。
+- 保存した応答の再送（client.rs:1144-1170 の 2 回目）で受けた `RestoredJournal` は「その時点で適用し所有者になった」ことの証拠で、今の所有権の証拠ではない。照合点は進め、所有権は楽観的に持ち、次の `Change` が `OwnerMismatch` なら全体を流し直す。
+- 副作用は journal に入れない（4.7）。
+
+**費用**（R7）:
+- エンジン内部に、写しを作らない操作の経路を作る。`push_char` の本体を戻り値なしの内部関数 `push_char_inner` に分け、今 `current_preedit()` を返している 5 か所（早期 return の lib.rs:744, 763, 775, 794 と末尾の 809）をすべて内部関数からは外す。公開の `push_char` は `push_char_inner` の後に `current_preedit()` を 1 回返す包みとして残す（既存の試験はこちらを使う）。FFI（ffi.rs:293-299）と流し直しは `push_char_inner` を呼ぶ。DLL 内部の変更で、engine ABI は変えない。
+- ホストの流し直しは `apply_edit`（操作だけを行い、結果を作らない）を使う。BG の確認は最初に 1 回。`EditState` を作るのは照合点と最後の 2 回。
+- 費用 `cost` は「処理する文字列の総量」で数える: 各操作の大きさ（`InputChar` 等は 1 文字、`ForcePreedit` / `SeedPreedit` は文字列のバイト数）に、その操作がエンジンで触る文字列の長さの上限（`Backspace` は打鍵ログの末尾の区間の長さ、`ForcePreedit` / `SeedPreedit` / `RetainRange` は結果の読みの長さ）を足したもの。通常の打鍵の写しをなくすことと、Backspace などを含む総費用を見積もることは分けて扱う。※推測: 1 回の復元の処理量は `cost` にほぼ比例する。試験で測る。
+
+**上限**（追加の前に判定する。有効にする段を右端に書く。それまでは判定して DEBUG に残すだけ）:
+
+| 上限 | 値 | 達したとき | 有効にする段 |
+|---|---|---|---|
+| 読みの長さ | 2,000 文字 | そのキーを `KeyTask`（`AfterCommit`）にして止め、理由 `LengthLimit` の確定を要求する（4.6。表示の要求の完了を待ち、範囲の文字列が計画どおりのときだけ確定する）。成功したら、そのキーを新しい入力セッションで実行する。受理した文字で表示に出ていないものは、確定せず次の入力に残す（4.6） | 5 |
+| 軟上限 | 512 件、または `cost` 32 KiB | 末尾が空なら、journal を `[SeedPreedit(読み), PushChar(未確定ローマ字)…]` に縮める（F は種の綴りになる: 4.8）。末尾が空でなければ縮めずに続ける | 7（engine ABI の `seed_preedit` と同時） |
+| 硬上限 | 1,024 件、または `cost` 128 KiB | 末尾が空なら縮めてから追加する（段 7 より前は縮めないので、そのまま追加する）。末尾が空でなければ、そのキーを `Suspended`（`JournalFull`）にする。ホストが応えない状態なので、4.2 の上限で回復できない場合に進む | 6 |
+| 1 件の大きさ | `ForcePreedit` / `SeedPreedit` の文字列は読みの長さの上限以下 | 超える要求は作らない（読みの長さの上限が先に効く） | 5 |
+
+- 読みの長さの上限があるので、縮めた journal（`SeedPreedit` 1 件）の `cost` も軟上限以下に収まる（2,000 文字 × 最大 4 バイト）。縮めても収まらない入力は、読みの長さの上限で先に確定されるので起きない。
+- 段 4〜6 の間は縮めないので、長い composition では journal が伸びる。同じリリース（前提の決定 1）の中の中間の状態で、配布はしない。
+- フレームの上限 8 MiB（codec.rs:15）より十分小さい。
+- 目安: ホストは流し直しの時間を測り、20 ms を超えたら WARN（判定には使わない）。
+- 所有権が毎打鍵入れ替わる場合（2 アプリが交互に打つ）は毎回全体を送り、累積は O(n²) になる。上限で抑える。
+- `Restore`（v6）は protocol から消さない。TSF は使わない。
+
+### 4.4 スレッドと入力セッション（R10）
+
+- プロセス共通の状態（`SESSION_STATE`・`COMPOSITION`・`COMPOSITIONS`・台帳）は、その時点で入力を持つ 1 つのスレッドが所有する。所有者はプロセス共通のアトミック `INPUT_OWNER: (thread_id, busy)`。`busy` は、そのスレッドに入力セッション・列・未完了のトランザクション・表示の要求のどれかがある間 true。
+- 所有の移動: 別のスレッドで食べるべきキーを受けたとき、所有者が `busy` でなければ、そのスレッドが所有者になる（比較交換）。前の所有者のスレッドローカルの値は、そのスレッドが次に動くときに「所有者でない」と分かり、写しを空にする。
+- 所有者が `busy` の間に別のスレッドで受けたキーは食べない（今の IME オフと同じ扱い）。WARN を 1 回残す。※推測: アプリはフォーカスの移動で composition を終わらせるので、通常は前の所有者が `busy` でなくなってからキーが届く。
+- 所有者の確認はキーの入口だけでなく、プロセス共通の状態に触るすべての入口で行う:
+  - Deactivate: 所有者でないスレッドの Deactivate は、自分のスレッドローカルの値（候補ウィンドウ・タイマー・列・トランザクションの表）だけを片づけ、プロセス共通の状態には触れない。今の Deactivate は `composition_set(None)`・`take_current`・`set_idle` を無条件に行う（factory.rs:640, 643, 657）。所有者のスレッドの Deactivate は今と同じ後始末を行い、所有者を空にする。
+  - 終了通知（`OnCompositionTerminated`: factory.rs:667-711）: 通知の composition が所有スレッドの保持しているものでなければ、プロセス共通の状態に触れない（今の `composition_is_current` の照合に加え、スレッドを確かめる）。
+  - タイマー（再開・ライブ変換・待機）と遅延処理（フォーカス・モード）: 所有スレッドでだけプロセス共通の状態に触る。
+- スレッドローカルの値（`InputView`・列・`focus_epoch`・候補ウィンドウ・タイマー・トランザクションの表）は所有スレッドの値だけを使う。
+- 入力セッションは所有スレッドに 1 つ。`RemoteComposition` の鍵を `DmRef` にする（rpc_composition.rs:64-68）。
+- 別の文脈へのキー（同じスレッド）: 4.2 の宛先ごとの列で扱う。新しい宛先の列は、古い宛先の列とそのトランザクションが終わるまで待つ。古い列の処理は:
+  - 確定トランザクションが T1 なら、その完了か失効を待つ。
+  - 確定待ちが無く、古い composition を保持していて古い文脈が生きていれば、理由 `ContextSwitch` で確定する（4.6）。その完了を待つ。
+  - 生きていなければ手元の状態を外し、#71 と同じ後始末（`finish_composition(…, true)`）を送る。
+  - その後、新しい宛先の列を先頭にし、新しい入力セッションを始める。
+- 規模に含める（7 節の 3）。
+
+### 4.5 仮表示と Enter（B）
+
+**仮表示**（照合点の状態に未確認の末尾を手元で当てる。ローマ字の変換は手元ではしない）:
+
+| 未確認の操作 | 仮表示への反映 |
+|---|---|
+| `InputChar{c, Char}` / `PushChar(c)` | 未確定部分の末尾に `c` を足す（「かんじ」+`a` →「かんじa」） |
+| `InputChar{c, FullwidthAlpha}` / `PushFullwidthAlpha(c)` | `c`（ASCII 大文字）を足す |
+| `InputChar{c, Raw}` / `PushRaw(c)` | `c` を足す |
+| `Backspace` | 末尾の 1 文字を消す（足した文字、無ければ確認済みの未確定ローマ字、無ければ読みの末尾） |
+| `FlushPendingN` | 未確定部分がちょうど `n` なら `ん` に置き換える |
+| `ForcePreedit{text}` / `SeedPreedit{text}` | 全体を `text` にし、未確定部分を空にする |
+| `RetainRange{start, end}` | 読みの `start..end` 文字を残し、未確定部分を空にする |
+
+- 確認できた時点で表示を作り直す。変換の状態の表示はセッションの候補から作る。LiveConv で今のキーが未確認になったら Preedit（仮表示）に戻し、ライブのタイマーと preview の列を止める。
+
+**表示要求の失効**（R6）:
+- 表示の EditSession は、要求時の表示要求 ID と `display_epoch` を持つ。実行時に `display_epoch` が進んでいれば SetText せずに終える（`shown` も変えない）。
+- 確定トランザクションを作るとき `display_epoch` を進める。確定より前に要求され、まだ実行されていない表示は、確定の後に適用されない。
+
+**Enter（`CommitRaw`）**（R6。利用者の決定「表示どおり」）:
+- Enter は入口の復元も表示の修復も行わない（今も入口の復元を通らない: dispatch.rs:46-48）。押した時点で見えている文字を確定する。
+- 計画は手元の値だけで作る（`flush_pending_n` も読み取りも送らない）。確定トランザクションを作り、`display_epoch` を進める。
+- EditSession の中で composition の範囲を `GetText` で読み、`original_text` として記録する。文書に確定した文字列は `committed_text`（4.6）として記録し、学習の判定（`committed_text` が計画の文字列と同じときだけ学習）と文脈（`Commit`）には `committed_text` だけを使う。
+- 末尾の未確定 `n`（承認済みの例外。前提の決定 4）: 計画の表示の未確定部分がちょうど `n`（照合点の `pending_romaji == "n"`、または仮表示で足した部分が `n` だけ）なら、確定の種類を `Full(Replace{ text: 末尾を ん にした文字列, rule: TrailingN })` にする（4.6）。範囲の文字列が計画の表示と同じなら、文書の文字列を `ん` に SetText してから確定する。今の `flush_pending_n`（on_convert.rs:1907）と同じ結果。確定・学習・文脈に使う実績値は置き換えの後の文字列。範囲の文字列が計画と違う場合と、置き換えの SetText が失敗した場合は、範囲の文字列のまま確定する（4.6）。
+- 範囲の文字列が `expected_display` と違う場合（表示の要求が省略・失効していた）: Full はそのまま `original_text` を確定する。Partial は分け方が分からないので確定せず（`Aborted`）、表示を作り直す。Enter は文字を生まないので、`KeyTask` は残さない（もう一度 Enter を押すと確定する）。
+- 入力の無い Enter は食べない。入力があって `original_text` が空なら、composition を閉じて食べる。
+
+**入口の表示の修復**: Enter 以外のキーは、実行の最初に「表示が古い」印（`requested != shown`・省略・失敗）を見て、セッションと journal から表示を作り直してから処理する。
+
+### 4.6 確定トランザクション（C）と部分確定（A）
+
+**順序**: 文書を先に確定し、ホストの副作用は文書の結果を見てから送る。EditSession の中では RPC を送らない。
+
+**記録**: `CommitTxn { id, reason: CommitReason, kind, dm, ctx, lineage, input_gen, old_comp, plan, req: ReqCell, stage, doc_result, original_text, committed_text, post_commit_range, effects, bound_keys, retries }`。所有スレッドの表に置き、EditSession は `id` と `ReqCell` を持つ。
+
+**種類 `kind`**（N3）:
+
+| 種類 | 文書への操作 | 今の関数 |
+|---|---|---|
+| `Full(AsDisplayed)` | 範囲の文字列をそのまま確定する（SetText しない） | `end_composition`（on_compose.rs:751） |
+| `Full(Replace{ text, rule })` | 範囲の文字列が `expected_display` と同じなら `text` に SetText してから確定する。`rule` は `TrailingN`（末尾の未確定 `n` を `ん`）と `Katakana`（CycleKana: edit_ops.rs:181 で `to_katakana`、今は on_compose.rs:795 で SetText してから確定） | 同上 |
+| `Full(Overwrite{ text, expect })` | 範囲の文字列が `expect`（`shown_at_cutoff`）と同じときだけ `text` に SetText してから確定する。救済だけで使う。失敗の扱いは 4.2 の救済の表で決め、共通の「元に戻す」規則の対象外 | 同上 |
+| `Partial` | 確定部分に縮めて確定し、残りで新しい composition を始める | `commit_then_start_composition`（on_compose.rs:280） |
+| `CommitThenInput` | 変換の全体を確定し、新しい文字で新しい composition を始める | 同上 |
+
+- `Replace` の SetText が失敗したとき（同じ EditSession で 1 回再試行しても失敗）: 今の `end_composition` と同じく、置き換えずに範囲の文字列のまま確定する（on_compose.rs:795-816 の「SetText できなくても EndComposition までは進める」）。結果は `Committed`、`committed_text` は確定した文字列（置き換え前）、`replace_failed = true` を記録し WARN。学習は `committed_text` が計画どおりのときだけなので、この場合は学習しない。`Overwrite`（救済だけで使う）の失敗の扱いは 4.2 の救済の表だけで決め、この節の共通の規則（元に戻す・`Aborted` / `AbortedChanged`）は適用しない。
+- `Replace` の SetText が成功し、EndComposition が失敗したとき（V3）: 同じ EditSession で範囲を `original_text` に戻す SetText を試す。戻せたら `Aborted`（文書は元のまま）。戻せなければ `AbortedChanged`（文書は置き換え後の文字列のまま composition に残る。`shown` を置き換え後の文字列にし、表示が古い印を立てる）。
+- `Replace` で範囲の文字列が `expected_display` と違うとき: 置き換えない。`rule = TrailingN` は `AsDisplayed` と同じに確定する（Enter は表示どおりが基本。見えている `n` が未確定のものか分からない）。`rule = Katakana` は確定しない（`Aborted`。表示を作り直す。CycleKana は文字を生まないので再試行しない）。
+
+**確定の理由 `CommitReason`**（N4・N5）:
+
+| 理由 | 起点 | 種類 | 範囲の文字列が計画と違う・表示が古い場合 | 失敗したとき |
+|---|---|---|---|---|
+| `Enter` | 利用者 | `Full(AsDisplayed)` / `Full(Replace{TrailingN})` / `Partial` | Full は見えている文字を確定（利用者の決定）。Partial は `Aborted` | 再試行しない（Enter は文字を生まない） |
+| `CycleKana` | 利用者 | `Full(Replace{Katakana})` | `Aborted` | 再試行しない |
+| `ImeSwitch`（`commit_visible_composition`: edit_ops.rs:469） | 利用者 | `Full(AsDisplayed)` | 見えている文字を確定 | 再試行しない |
+| `CommitThenInput` | 利用者の文字キー | `CommitThenInput` | `Aborted` | 表示を作り直してから最大 3 回（R1）。その後は「文書が編集を受け付けない」 |
+| `LengthLimit`（4.3） | 自動 | `Full(AsDisplayed)` | 確定しない（下の「自動の確定」） | 最大 3 回。その後は「文書が編集を受け付けない」 |
+| `ContextSwitch`（4.4） | 自動 | `Full(AsDisplayed)` | 確定しない | 最大 3 回。その後は範囲の文字列をそのまま確定（`ContextSwitchAsDisplayed`、表示に出ていない部分の件数を WARN）。それも失敗したら手元の状態を外す |
+| `Unrecoverable`（4.2） | 自動 | `RescueTxn`（実行の時点で composition があり範囲が締め切りの時点の表示と同じなら `Full(Overwrite)`。無ければ、利用者が操作していないときだけ挿入） | 表示の完了は待たない。範囲が違えば上書きしない（W3） | 4.2 の救済の表。再試行は文書が変わっていないと分かる `Retryable` だけ、4 回 + 最後の 1 回。結果が不確かなら救済をやめて記録と通知 |
+
+**自動の確定**（`LengthLimit` / `ContextSwitch`。`Unrecoverable` は 4.2 の手順）: Enter の「見えている文字を確定」は適用しない（N4）。
+1. 表示が古ければ表示の要求を出し、その完了（`ReqCell = Done` で SetText 成功、`shown == requested`）を待つ。表示の要求が失効・失敗したら作り直して待つ（最大 3 回。その後は「失敗したとき」の列）。
+2. 確定トランザクションの `expected_display` を、その時点の `requested`（受理したすべての操作を反映した表示）にする。
+3. EditSession の中で範囲の文字列が `expected_display` と同じときだけ確定する。違えば `Aborted`（受理した文字が表示に出ていないので、確定しない）。
+4. 成功したら、確定した文字列に対応しない受理済みの操作（確定トランザクションを作った後に届いたキー）は、`bound_keys` として次の入力に残す。journal は確定した読みまでで閉じ、残りは新しい入力世代の journal へ引き継ぐ。
+
+**`ReqCell`（要求の状態の箱）**（N1）:
+- 確定・直接挿入・表示の EditSession ごとに `Rc<Cell<ReqState>>` を作る。`ReqState = Pending | Running | Done(結果) | Void`。所有スレッドの値で、EditSession も時間切れの処理も同じスレッドで動くので、読みと書きは 1 回の処理の中で終わる。
+- EditSession の先頭: `Pending` なら `Running` にして続ける。`Void` なら文書にも手元にも触れずにすぐ戻る（`composition_take` もしない）。それ以外はありえない（WARN）。
+- 時間切れの処理（再開のタイマー、T1 のまま 2 s）: `Pending` なら `Void` にし、トランザクションを `NotRun(timeout)` にする。`Running` / `Done` なら失効させない（実行済みの結果を使う）。
+- 再試行は、前の要求が `Void` か `Done` になってからだけ、新しい `id` と `ReqCell` で要求する。同じ composition に 2 つの確定の要求が同時に `Pending` になることはない。
+- 実行した要求の結果は必ず回収する: EditSession の最後で `Done(結果)` にし、`PostMessage(WM_APP_COMMIT_DONE, id)` を送る。通知が届かなくても、再開のタイマーが表の `Done` を拾う。
+- 終了通知: 自分の EditSession の EndComposition（`Running` の間）に届いた `OnCompositionTerminated`（factory.rs:667）は、その確定トランザクションのものとして扱い、セッションの片づけをしない（#71 の `set_pending_replacement`: on_compose.rs:308 を、`ReqCell` が `Running` の間だけ有効な印に広げる）。※推測: TIP 自身の EndComposition では通知は来ない。来た場合もこの規則で二重に片づけない。`Void` の要求は文書に触れないので、遅れた実行が終了通知を起こすことはない。
+
+**EditSession の手順と結果**:
+- 先頭で `ReqCell` を確かめた後、`COMPOSITION` の composition が `old_comp` と同じかを確かめる。違えば `NotRun(stale)`。
+- 取り出した composition は、確定しなかった結果で必ず `composition_set_with_dm` で戻す（今は戻さない: on_compose.rs:325, 769）。
+
+| 手順 | 失敗したとき | 結果 |
+|---|---|---|
+| S1 範囲の取得・`GetText` → `original_text`（照合と元に戻す用） | 何もしない | `Aborted` |
+| S1' `original_text` と `expected_display` の照合（Partial / CommitThenInput / `Replace` / 自動の確定） | 4.6 の種類と理由の表のとおり | `Aborted` など |
+| S1'' `Replace` / `Overwrite` の SetText（`Replace` は 1 回再試行） | `Replace` は置き換えずに進む（`replace_failed`）。`Overwrite` は 4.2 の救済の表（読み直して元のままなら `Retryable`、そうでなければ救済をやめる） | ― / 4.2 |
+| S2 範囲を `commit_text` に縮める（Partial / CommitThenInput。1 回再試行） | 何もしない | `Aborted` |
+| S2' 縮めた範囲を `GetText` で読み直し、`commit_text` と比べる（W4） | 読めない: 範囲を `original_text` に戻す SetText を試す。戻せたら `Aborted`。戻せなければ `AbortedChanged` で、範囲の今の文字列が分からないので `shown` を「不明」にする（確定値として更新しない。次の入口で表示を全体から作り直す）。違う: `original_text` に戻す SetText を試す。戻せたら `Aborted`、戻せなければ `AbortedChanged` で `shown` を読めた文字列にする | `Aborted` / `AbortedChanged` |
+| S3 確定部分の末尾の範囲を控える（`post_commit_range`。今の `insert_after_commit`: on_compose.rs:351-367） | 元の文字列に戻す。戻せなければ `AbortedChanged` | `Aborted` / `AbortedChanged` |
+| S4 EndComposition | 範囲を `original_text` に戻す（Partial は縮める前、`Replace` は置き換える前の文字列）。戻せなければ composition は縮めた・置き換えた文字列のまま。救済の `Overwrite` は元に戻さない（4.2 の救済の表の `WrittenNotEnded`） | `Aborted` / `AbortedChanged` / 4.2 |
+| S5 新しい composition の開始（`post_commit_range`） | ― | `CommittedNoNew` |
+| S6 新しい composition の範囲の取得 | composition の保持と結び付けは S5 の直後に済ませる | `CommittedNoNew` |
+| S7 残り（または新しい文字の仮表示）の SetText | 同上 | `CommittedNoNew` |
+| S8 属性・選択位置・キャレット矩形 | 無視（WARN） | 影響なし |
+
+- Full は S1・S1'・S1''・S3・S4 だけを通る（S3 は直接挿入の位置に使う）。
+- 値を 2 つに分ける（V4）: `original_text` は S1 で読んだ範囲全体の文字列で、照合と元に戻すことにだけ使う。`committed_text` は文書に確定した文字列で、Full は `original_text`（`Replace` / `Overwrite` の SetText が成功した場合は置き換え後）、Partial / CommitThenInput は S2 で縮めた確定部分（S2' で読み直して `commit_text` と同じことを確かめた値）。学習の判定と文脈（`Commit` / `CommitContext`）には `committed_text` だけを使う。例: 全体「漢字かな」で確定部分「漢字」なら、`original_text` =「漢字かな」、`committed_text` =「漢字」、学習・文脈は「漢字」だけ。
+- `AbortedChanged`: 表示が古い印を立てる。入力セッション・journal・セッションはそのまま。
+- `CommittedNoNew`: 残りを、`post_commit_range` から始める新しい composition に表示するよう 1 回だけ要求する（`update_composition` に開始位置を渡す形を足す。空の composition があればそれを使う）。※推測: TSF の範囲は文書の変更に追随するので、確定直後の位置として使える。範囲が使えなければ今の選択位置から始め、WARN を残す。それも失敗したら表示が古い印（次のキーの入口で作り直す）。
+- 確定した部分は再送しない。
+
+**後続のキーと入力世代**（R2）:
+- `commit_pending` の間のキーは、その宛先の列に積み、`bound_txn = id` にする。
+- 成功（`Committed` / `CommittedNoNew`）: T4 の後、新しい入力世代を作り、列の `bound_txn` を外して再生する。`lineage` は同じなので宛先の照合は通る。
+- 失敗: 結び付いたキーは古い入力世代のまま列に残す。CommitThenInput の `KeyTask` は先頭。再試行は理由の表のとおり。
+- 「文書が編集を受け付けない」: 入力セッションは残し、列の文字キーは 4.2 の上限まで保持し、上限で捨てて WARN（ホストは正常なので `direct_fallback` には入らない。`mode_indicator` に「文書へ書き込めません」）。
+- フォーカスの移動（`focus_epoch` の変化）は失効として扱い、前提の決定 2 に従う（4.2）。
+- 古い完了: 完了の処理は `id` がその入力セッションの今のトランザクションで、`lineage` が同じときだけ状態を変える。違えば WARN だけ。
+
+**ホストの処理（T4）**:
+
+| 結果 | Full | Partial / CommitThenInput |
+|---|---|---|
+| 成功 | 学習（`committed_text` が計画どおりのときだけ）→ `Commit(committed_text)` → 古い journal を閉じる | `RestoreJournal(new_owner, pre_effects=[学習（`committed_text` が計画の確定部分と同じときだけ）, CommitContext(committed_text)], journal=引き継ぎ)` を 1 回。古い journal を閉じる |
+| 失敗 | 何も送らない | 何も送らない。新しい journal は作らない |
+
+- 理由が `Unrecoverable` / `UnrecoverableAsDisplayed` のときはホストに何も送らない（断念として記録）。
+- Full の副作用: 所有権があり末尾が空なら `Change(Learn)`・`Change(Commit)`。そうでなければ `RestoreJournal(自分, pre_effects, journal=[])`。
+- `engine.commit` は読みと打鍵ログを消す（lib.rs:1075-1110）ので、Partial / CommitThenInput の文脈は、新しい composition の状態を作る要求の `pre_effects` として同じロックの中で先に適用する。
+
+**新しい composition の journal（引き継ぎ）**:
+- Partial: `old_journal + [ForcePreedit(全体の読み), RetainRange(確定した読みの文字数, 全体の文字数)]`。照合点は、古い journal の末尾が空なら `(len(old_journal), old.checkpoint_edit)`。
+- CommitThenInput: 空から。新しい文字は `KeyTask` の続きとして、新しい入力世代で 1 回実行する。表示は S7 で仮表示（例 `a`）を書き、確認後に作り直す（例 `あ`）。
+- 今のエンジンの取り直し（on_input.rs:214, 279, 465）はやめる。
+- 末尾の未確定 `n` は Selecting に入る前の `flush_pending_n`（on_convert.rs:326）で閉じている（今と同じ）。RangeSelect の部分確定（on_convert.rs:1757-1793）、番号キーの部分確定（edit_ops.rs:356-370）も同じ計画を通す。
+
+### 4.7 副作用と、復元で戻るもの・戻らないもの
+
+`Exact` が戻すもの: 読み・未確定ローマ字・ローマ字変換器の状態・打鍵ログ・`log_detached_at`。
+
+| 対象 | 復元後 | TSF の処置 |
+|---|---|---|
+| BG 変換の所有者 | ホストが消す（server.rs:1002 と同じ） | ライブ・待機のタイマーを止め、preview の列を空にし、変換の世代を進め、モデル待ちを消す。Preedit / LiveConv なら `start_live_bg_if_ready` で開始し直す |
+| LiveConv の preview | TSF 側の値 | Exact なら保つ。Rebased なら Preedit に戻す |
+| Selecting の `llm_pending` | ― | false。候補はそのまま |
+| 文脈 `committed` | `reset_preedit` は残す。ホストが入れ替われば空 | 戻さない |
+| 学習履歴 | ホストのファイル | ― |
+
+副作用の記録: 学習・文脈・BG の開始・候補の取り出しを `Pending` / `Applied` / `Unknown` / `Abandoned` / `Skipped` で記録する。`Unknown` は再送しない。文書の確定とは別に記録する。影響は「次の変換の文脈が短くなる」「その確定が学習されない」で、入力の文字は失わない。
+
+**復元直後の処置**（入口の復元の後。Enter は通らない）:
+
+| 結果 | セッション | 処置 |
+|---|---|---|
+| Exact | Preedit / LiveConv | BG の処置。表示を `final_edit`（と preview）で作り直す。今のキーは通常どおり |
+| Exact | Selecting / BlockSelecting / RangeSelect | セッションと候補ウィンドウを保つ。`llm_pending=false`。今のキーは通常どおり（↓ は次の候補へ） |
+| Exact | Waiting | Preedit に戻し、候補ウィンドウを隠す。今のキーは通常どおり |
+| Rebased | どれでも | セッションが持つ全体の読みでセッションを Preedit にし、候補ウィンドウを隠し、表示を作り直す。今のキーは 4.1 の `AfterRepair` の規則（文字なら続ける、表示に依存する操作なら修復だけ） |
+
+- **復元直後の Space（決定済み。前提の決定 3）**: Exact なら通常どおり変換する。Rebased なら修復だけ（4.1）。V6_Test_Procedure.md の T2-1b の「見る点」を「3 で変換され、候補ウィンドウが出る。4 の Space は次の候補へ移る」に改める（実装の 7 で、試験手順の文書も直す）。
+
+### 4.8 F: F9 / F10 と打鍵ログの対応（R4）
+
+**原則**: 変換中のエンジンの読み（範囲変換の選択部分・記号を除いた本体・ブロックの読み）は一時的な値で、打鍵ログは常に composition 全体の打鍵を保つ。ログを永久に切るのは、確定の引き継ぎの `RetainRange` と、ログに無い文字列を入れる `SeedPreedit` だけ。範囲選択の間に `RetainRange` は使わない。
+
+**すべての呼び出し箇所の分類**（`eee267e`）:
+
+| 箇所 | 今 | 第 3 版以降 | 理由 |
+|---|---|---|---|
+| edit_ops.rs:73, 148（F6〜F10） | `ForcePreedit` | そのまま | 表示だけを替え、ログを保つ |
+| edit_ops.rs:568（BlockSelecting 中の記号） | `ForcePreedit(全体)` + `PushRaw` | そのまま | 全体に戻してから記号の Raw 項目を足すので、ログは正しい |
+| edit_ops.rs:605（Selecting 中の記号） | `ForcePreedit(記号入りの読み)` | `SeedPreedit(記号入りの読み)` | 記号が途中に入ると打鍵ログと対応しない。F は種の綴り。末尾に足す場合にログを保つ方法は、未確定ローマ字の接尾辞（edit_ops.rs:590-592 のコメント）を確かめてから決める（実装時の課題） |
+| edit_ops.rs:751, 893（RangeSelect に入る） | `ForcePreedit(全体)` | そのまま | 全体に戻す |
+| on_convert.rs:303（Selecting から戻る） | `ForcePreedit(全体)` | そのまま | 同上 |
+| on_convert.rs:395（範囲変換） | `ForcePreedit(選択部分)` | そのまま | 一時的な値。取消で全体に戻る（on_convert.rs:289-305）。ログは全体を保つ |
+| on_convert.rs:892（記号を除いた本体の変換） | `ForcePreedit(本体)` | そのまま | 一時的な値 |
+| on_convert.rs:952, 969（ブロックの読み） | `ForcePreedit` | そのまま | 一時的な値 |
+| on_convert.rs:2022, 2107（BlockSelecting から戻る） | `ForcePreedit(全体)` | そのまま | 全体に戻す |
+| on_input.rs:190（RangeSelect の取消） | `ForcePreedit(全体)` | そのまま | 同上 |
+| 部分確定の残り（on_convert.rs:1782, 1883、edit_ops.rs:361、on_input.rs:470, 481） | `reset_preedit` + `push_raw` の列 | 4.6 の引き継ぎ（`ForcePreedit(全体)` + `RetainRange`） | 確定で永久に切る |
+| 変換中の F6〜F10（edit_ops.rs:49-51, 110-111） | エンジンの今の読み（一時的な値のことがある）で変換 | 先に `ForcePreedit(全体の読み)` で全体に戻してから変換 | 一時的な値のまま F キーを使うと、選択部分だけが変換される |
+
+**エンジンに足すもの（engine ABI 11 → 12）**:
+- この設計書の「ABI 12」は「次の engine ABI の版」を指す。前提の決定 1 によりフェーズ 3（#75）の変更と同じ 1 回の版上げに含めるので、実際の番号は #75 と合わせて決める。
+- `engine_seed_preedit(text)`: 読み・未確定・ログを消し、`text` を種の項目（`InputKind::Seeded`）で入れる。かなは `spellings_for` の最長一致で分け、`typed` に綴り、`output` にかな。逆引きの無い文字は `typed = output` の Raw 項目。綴りの選び方: 優先表（し=shi, ち=chi, つ=tsu, ふ=fu, じ=ji, しゃ=sha, しゅ=shu, しょ=sho, ちゃ=cha, ちゅ=chu, ちょ=cho, じゃ=ja, じゅ=ju, じょ=jo, を=wo）にあればそれ、無ければ最短、同じ長さなら辞書順の先頭。`っ` は次の綴りが子音で始まればその子音を重ね、それ以外は `xtu`。`ん` は次の綴りが母音・`y`・`n` で始まれば `nn`、それ以外は `n`。
+- `engine_retain_range(start, end) -> bool`: 読みの `start..end` 文字を残し、未確定を消す。ログの出力の連結が読みと一致していれば、区間に入る項目を残し、境界にかかる項目は残る部分を種にして `true`。一致していなければ `seed_preedit(残す文字列)` と同じにして `false`。
+- 既存の関数の意味は変えない。版は 2 か所で同時に上げる（rakukan-engine-abi/src/lib.rs:23、rakukan-engine/src/ffi.rs:20）。
+- protocol v7 の `SeedPreedit` / `RetainRange` は、ABI 12 の前（7 節の 4〜6 の間）はホストが `reset_preedit` + 各文字の `push_raw` で代える。代替期間の制限: (a) 部分確定の残りは今と同じ結果（F10 で「かん」のまま）。(b) 照合点の不一致（Rebased）で作り直した部分は、打鍵ログが Raw のかなになり、F9 / F10 でかなのまま残る（今の `Restore` の後はログが空で頭が消えるので、消えない分だけ違う）。(c) 軟上限の縮約は段 7 まで有効にしないので、通常の入力のログは変わらない。この中間の状態は配布しない（前提の決定 1）。
+
+**期待する文字列**（F9 は 小 → 大 → 先頭大 と回り、F10 は大文字・小文字の状態を保って幅を替える: V6_Test_Procedure.md T1-4）:
+
+| # | 操作 | 期待 |
+|---|---|---|
+| F-1 | `kanji` → ホストを止める → `a`（Exact）→ F9 → F9 → F9 → F10 → F6 | 「かんじあ」→「ｋａｎｊｉａ」→「ＫＡＮＪＩＡ」→「Ｋａｎｊｉａ」→「Kanjia」→「かんじあ」（止めない場合と同じ） |
+| F-2 | `kanjik` → ホストを止める → `a` → F10 | 「かんじか」→「kanjika」 |
+| F-3 | `sikan`（「しかん」）→ Shift+← を 2 回（「し」を選択）→ Space → Esc（全体に戻る）→ F10 → F9 → F6 | 「sikan」→「ｓｉｋａｎ」→「しかん」。第 2 版の `RetainRange` だと「siかん」になる経路（R4 の例） |
+| F-4 | `sikan` → Shift+← を 2 回 → Space →（「し」の候補を選んで）Enter → 残り「かん」で F10 → F6（ABI 12） | 「kan」→「かん」。ABI 12 の前は F10 で「かん」のまま（0.12.0 と同じ） |
+| F-5 | `sikan` → Shift+← を 2 回 → Enter（「し」をひらがなで確定）→ F10（ABI 12） | 「kan」 |
+| F-6 | `sikan` → Shift+← を 2 回 → Space → F10（範囲変換の候補表示中） | 「sikan」（全体に戻してから変換する） |
+| F-7 | `kyouhaiitenki` → Space → 先頭の文節だけを選んで Enter。残りが「いいてんき」の場合 → F10 → F9 → F6（ABI 12） | 「iitenki」→「ｉｉｔｅｎｋｉ」→「いいてんき」（文節の切れ目はモデル次第） |
+| F-8 | エンジンの単体: `seed_preedit("か")` → `s` → `a` | `romaji_log_str` = `"kasa"`、`hiragana_from_romaji_log` = `"かさ"`。TSF の F9 で「ｋａｓａ」、F6 で「かさ」 |
+| F-9 | Rebased・縮めた journal: 打鍵 `sinbun` の「しんぶん」→ F10 | 「shinbun」（種の綴り。打鍵の `sinbun` には戻らない） |
+| F-10 | エンジンの単体: 打鍵 `kyo` の「きょ」に `retain_range(1, 2)` | 読み「ょ」、戻り値 true、ログは種の項目 1 つ（綴りは実装時に `spellings_for("ょ")` で確かめる） |
+| F-11 | `kanji` → F9 → `a` → F9 | 「ｋａｎｊｉ」→「ｋａｎｊｉあ」→「ｋａｎｊｉａ」（今と同じ） |
+
+試験は流し直しの前後が同じことだけでなく、この表の文字列を比べる。
+
+### 4.9 拡張: #66 との関係と、接続の失敗の型
+
+- 接続の失敗を型で返す: `ConnectError { stage: AttemptStage, kind: Transport | Suppressed | VersionMismatch{server} | HelloError | CreateError }`（今は `anyhow` の文字列: client.rs:555-560, 1363）。`HostLink` と `EngineAccess::NoEngine` はこれを使う。必要な部分（`kind` の分類と `HostLink` の更新、`probe()`）は 7 節の 3 で入れる。
+- `Reason` に `ConfigStale` / `ConfigUnusable` を v7 で末尾に足す。意味は #66 で決め、v7 のホストは送らない。TSF は `_` を使わない `match` で、両方とも「結果不明」（通信失敗と同じ）として扱う。
+
+## 5. RPC protocol v7 と engine ABI 12
+
+| 追加 | 位置 | 内容 |
+|---|---|---|
+| `ChangeRequest::SeedPreedit { text }` / `RetainRange { start: u32, end: u32 }` | `ChangeRequest` の末尾。`ChangeKind` にも同名 | 4.8 |
+| `SideEffect { Learn{reading, surface}, LearnForce{reading, surface}, CommitContext{text} }` | 新しい型 | 4.6 |
+| `Request::RestoreJournal { owner, seq, pre_effects, journal, checkpoint: Option<Checkpoint{ len: u32, checkpoint_edit: EditState }>, config_version }` | `Request` の末尾 | 4.3 |
+| `Response::RestoredJournal { engine_gen, replay: Exact \| Rebased, final_edit: EditState, bg: BgView, effects: Vec<EffectResult> }` | `Response` の末尾 | 4.3。途中結果は含めない |
+| `Reason::ConfigStale` / `ConfigUnusable` | `Reason` の末尾 | 4.9 |
+
+- `PROTOCOL_VERSION` を 7 にする（protocol.rs:22）。Hello で照合する（server.rs:697-700、client.rs:1361-1363）。v7 の TSF と v6 のホストは繋がらない（逆も同じ）。古いホストが動いている間は `HostLink = Disconnected{VersionMismatch}` で、4.2 の回復できない場合（直接入力）になる。フェーズ 3 のインストーラー（古いホストを止める）と同じリリースで出す（前提の決定 1）ので、利用者にサインアウトを別に案内する必要は無い。開発中に v7 を試すときは、古いホストを止めてから入れる。
+- 台帳: `RestoreJournal` は未解決があっても送れ、`RestoredJournal` で台帳を空にする。`pre_effects` を含む要求の結果不明は、副作用を `Unknown` とし、再送しない（次の `RestoreJournal` には `pre_effects` を入れない）。
+- engine ABI 12（4.8 の 2 関数。番号はフェーズ 3 の #75 と同じ 1 回の版上げで決める）は 7 節の 7 で入れる。写しを作らない操作の経路（4.3）は DLL 内部の変更で ABI を変えない。
+- `Restore`（v6）は残す。
+
+## 6. 試験の表
+
+COM の部分を `DocOps`（EditSession の各手順の成否・`GetText` の結果を返す口）、`CompositionRpc`（FakeHost: 2 つの TSF ID と所有者を持ち、本物の `RakunEngine` を使う）、`EngineAccess` / `HostLink` の台本、時計、スレッドの ID の外に出す。各試験は、キーが抜けない・二重にならない・別の文書に届かないことに加え、表示・確定した文字列（`committed_text`）・確定の回数・確定の段階を確かめる。
+
+| # | 境界 | 起こす故障 | 期待 |
+|---|---|---|---|
+| 1 | 受け取り | 判定の表（IME × 割り当て × 修飾キー × keymap の取得失敗 × `has_input` × 列 × `direct_fallback`） | 7 節の 1 では今の動作と一致（Test と KeyDown の今の相違を含む）。7 節の 2 の後は両方が同じ |
+| 2 | K0→K1 | 起動中（`Starting` 5 キー → `Ready`）に `kanji` | アプリへ渡るキー 0。「かんじ」。確定 0 回 |
+| 3 | K1 再生 | `Ready` 2 キー → `Busy` | 残り 3 キーが順に残り、`Ready` で「かんじ」 |
+| 4 | K1 自動再開 | 起動中に `ka` で手を止める | 次のキーなしで「か」。HWND を作れない場合はキーがアプリへ渡る（今と同じ） |
+| 5 | K1 解決 | 保留中に Space → `1` | Space の実行後に選択中なら候補番号、でなければ文字 |
+| 6 | K1 モード | 保留中に `k` `a` → IME オフ → `x` | 「か」の確定（IME オフの既存の処理）の後、`x` を直接挿入。アプリへ渡したキー 0 |
+| 7 | K1 宛先 | 再生前に `focus_epoch` を進める（A → B → A）/ 元の文書を閉じる | 新しい宛先へは入らない。元の文書が生きていれば文字キーだけが元の文書に 1 回入る / 閉じていれば捨てて WARN |
+| 8 | 回復できない | 257 キー目 / 30 s / `VersionMismatch` / 稼働中の切断で末尾 30 s | 締め切りと同時に直接入力に入る。確定待ちがあれば重複させずに待つ。composition があれば `target`（journal の未確定の文字列 + 列の文字）で 1 回上書きして確定、無ければ 1 回挿入。Enter・Backspace・モードキーは入らない。締め切りの後のキーはアプリへ渡る |
+| 9 | 挿入の失敗 | `InsertTxn` が 2 回失敗して 3 回目に成功 / 3 回とも失敗 | 文字は 1 回だけ入る / 捨てて WARN |
+| 10 | 回復 | 口はあるが `probe()` が失敗 → 成功 | 失敗の間は直接入力のまま。成功で外れる |
+| 11 | K2 応答消失 | `k` は確認、`a` の応答を失う → `n` | 仮表示「ka」→「かn」。`a` が抜けない |
+| 12 | K2 Enter | 11 の「ka」で Enter（ホスト不通） | 「ka」が 1 回確定 |
+| 13 | K2 交錯（同じプロセス・別プロセス） | 未解決・保存応答の再送・所有権の移動 | 各読みが打鍵どおり。二重にならない |
+| 14 | 照合点の不一致 | 設定を変えた偽のエンジン | `Rebased`。確認済みの表示＋末尾。書き換えは `checkpoint_edit` で作り、末尾は 1 回だけ |
+| 15 | R1 Rebased | Rebased の入口で `a` / ↓ / Space | `a` は修復後に 1 回入る。↓・Space は修復だけ |
+| 16 | 上限 | 軟上限 / 硬上限（末尾あり）/ 読み 2,000 文字 / 大きな `ForcePreedit` | 縮めても読みは同じ / `Suspended` / 表示どおり確定してから続ける（文字は抜けない） / 作らない |
+| 17 | 費用 | 長い読みでの流し直し | `cost` と時間がほぼ比例（測定） |
+| 18 | 表示の省略・失効 | 表示の要求を省略 / 非同期の表示の前に Enter | Enter は見えている文字（`original_text` = `committed_text`）を確定。失効した表示は確定の後に適用されない |
+| 19 | 部分確定 | S1〜S7 の失敗 | 2.3 の結果。確定は 0 か 1 回。`CommittedNoNew` は `post_commit_range` から 1 回だけ表示 |
+| 20 | CommitThenInput の失敗 | 変換中に `a`、確定が `Aborted` 2 回 → 成功 | `a` は捨てられず、成功後の新しい composition に 1 回だけ「あ」 |
+| 21 | 確定の非同期 | `TF_S_ASYNC` → 完了前に `a` | `a` はトランザクションに結び付き、成功後に新しい入力世代で「あ」 |
+| 22 | 古い完了・失効 | 完了の前に終了通知 / 失効（`Void`）の後に実行 | 新しい journal・セッション・列に触れない / 文書に触れない（試験 32） |
+| 23 | 文脈の切り替え | 古い文脈の確定が `TF_S_ASYNC` のまま新しい文脈で打つ | 新しい文脈のキーは完了（または時間切れ）まで列に残り、その後に新しい入力セッションで入る |
+| 24 | 副作用 | 文書は確定、`RestoreJournal` の応答を失う | 文脈・学習は `Unknown`。再送しない。`Commit` には `committed_text` |
+| 25 | Enter の `n` | `kan` → Enter / F10 の後の「kan」→ Enter / 仮表示「かn」→ Enter / 表示の省略で範囲が計画と違う状態の「かn」→ Enter | 「かん」/「kan」/「かん」/「かn」（置き換えない） |
+| 26 | T2-3 | Selecting / BlockSelecting / Waiting で入れ替わり（Exact・Rebased） | 4.7 の表。見えている候補と確定する文字が一致 |
+| 27 | F | 4.8 の F-1〜F-11 | 表の文字列 |
+| 28 | スレッド | スレッド 2 で打つ（スレッド 1 が `busy` / `busy` でない） | 食べない（WARN）/ 所有者が移る |
+| 29 | 1 スレッドの 2 文脈 | 文脈 1 の composition を保持したまま文脈 2 で打つ | 文脈 1 は表示どおりに 1 回確定し、完了後に文脈 2 の入力 |
+| 30 | 実機 | V6_Test_Procedure.md の T1・T2（T2-1b は 4.7 の新しい期待値）、再起動直後に打鍵する補助の試験。フェーズ 3 と合わせた配布物での統合試験 | 計画書の完了条件 |
+| 31 | スレッド（N1 付記） | 所有者でないスレッドの Deactivate | 所有スレッドの composition・セッション・`COMPOSITIONS` が残る |
+| 32 | 時間切れ（N1） | 確定の要求が T1 のまま 2 s → `Void` → 再試行の要求 → 古い要求が後から実行 | 古い要求は文書に触れない。確定は再試行の 1 回だけ。`InsertTxn` も同じ |
+| 33 | 宛先ごとの列（N2） | A の確定が `TF_S_ASYNC` のまま B へ移って `a` → A へ戻って `b` | 列は `[A@1, B@2, A@3]`。B の `a` は B へ 1 回（決定 2）、A の `b` は A で通常どおり |
+| 34 | Full の置き換え（N3・V3） | `kan` → Enter で置き換えの SetText が失敗 / CycleKana で範囲が計画と違う / 置き換えの SetText は成功し EndComposition が失敗、元に戻す SetText が成功 / 同じで元に戻す SetText も失敗 | 「かn」を確定（`replace_failed`、学習しない）/ 確定しない / `Aborted`・文書は「かn」の composition / `AbortedChanged`・文書は「かん」の composition、`shown` =「かん」、表示が古い印 |
+| 35 | 自動の確定（N4） | 読み 1,999 文字で表示の要求が未完了のまま 2,000 文字目 | 表示の完了を待ってから確定。受理した文字は失われず、2,000 文字目は新しい入力に入る |
+| 36 | 回復できない場合の確定の失敗（N5・V2・W5・Y2） | `RescueTxn` が 4 回とも `Retryable`（失効、または SetText の失敗で範囲が元のまま）/ 表示「a」、対象「abc」で 4 回失敗の後、最後の EndComposition が成功 | 最後の 1 回の表示どおりの確定 → 直接入力のまま。救済の要求は 4 回 + 最後の 1 回 / 「a」が確定し、結果は `PartlyKept{ unrescued: "bc" }`。「bc」は挿入せず記録と通知。救済全体の成功として扱わない |
+| 37 | 回復の通知（付記・W2） | `probe()` 成功の通知の後、UI が受ける前に切断 / 救済の途中で成功の通知 | 直接入力を外さない / 救済の途中は外さず、救済の終わりに最新の `HostLink` を読み直して外す。救済の途中に受けたキーはアプリへ渡っており、列には入らない |
+| 38 | 回復できない場合の入口（V1・W1・Y4） | 最初の文字を journal に入れた後、表示の要求が未実行のまま回復できない状態になる（composition 無し / 空の composition）/ 失効させた古い表示の要求を `RescueTxn` の前に実行 / 後に実行 / composition 無しで救済の要求が遅れる・失敗する → その間に利用者がカーソルを動かす（キー / マウス） → 再試行 | 受理した文字が挿入で 1 回入る / `Overwrite` で 1 回確定する / 古い要求は composition を作らず、`RescueTxn` が挿入で 1 回入れる / 古い要求は何もしない。どの順でも二重にならない / composition が無いので挿入せず、`Stopped` として記録と通知（キーで動かした場合もマウスで動かした場合も同じ）。今の選択位置には入れない |
+| 39 | 締め切り（V2・W3） | 救済の途中で `xyz` と打つ / composition の中の文字をアプリが編集・削除する / アプリが composition を終わらせる | `xyz` はアプリへ渡り、対象は増えない（並び順は実機で確かめる）/ 範囲が `shown_at_cutoff` と違うので上書きせずに確定し、表示に出ていなかった残りは挿入せず記録と通知（`PartlyKept`）/ 確定はアプリに任せ、残りは挿入せず記録と通知 |
+| 40 | 部分確定の実績値（V4） | 全体「漢字かな」で「漢字」を部分確定 | `committed_text` =「漢字」。学習と `CommitContext` は「漢字」だけ。残り「かな」は新しい composition |
+| 41 | 救済の書き込みの後の失敗（X1・Y1） | `shown_at_cutoff` =「a」、`target` =「abc」。SetText「abc」は成功、EndComposition が失敗 | 元に戻さない（4.6 の共通の元に戻す処理を通らないことを確かめる）。再試行もしない。結果は `WrittenNotEnded`、文書の composition は「abc」が 1 回。「abcbc」にも「a」にもならない |
+| 42 | 不確かな書き込み（第 8 版の原則） | SetText「abc」が失敗し、読み直した範囲が「a」と違う / 読めない | `Stopped{ unrescued: "abc" }`。再試行しない。composition には触れない。記録と通知 |
+| 43 | 終了の後の位置（X3・Y3） | アプリが composition を終わらせる → 利用者がカーソルを別の場所へ動かす → 救済が実行される | 書かない。表示に出ていなかった残りを記録と通知（`PartlyKept`）。カーソルの位置にも保存した範囲にも入れない（保存した範囲による挿入は第 8 版で削除。Clone・Collapse・SetGravity・GetText の失敗を扱う必要も無くなった） |
+
+## 7. B-3 実装の順序と規模
+
+規模は「追加・変更した行（試験を含む。移動だけの行は数えない）」で見積もる。各段で「追加」（コードと試験を入れるが、今の経路からは使わない、または判定してログに残すだけ）と「有効化」（今の経路の動作を変える）を分ける。
+
+| # | コミット | 追加 | 有効化（動作の変化） | 規模の目安 |
+|---|---|---|---|---|
+| 1 | 抽出（A 節） | `KeyStateSource`・`resolve_action_with`・`test_resolve`・`test_key_eat`・`keydown_ime_off_ignores`・`keydown_return` と試験 | なし。今の経路が実際に取り出した関数を通る。評価順・副作用・Test と KeyDown の相違はそのまま | 250〜450 行 |
+| 2 | fallback を揃える | ― | KeyDown の keymap 取得失敗時に `essential_fallback_action` を使う（試験 12 の期待値を変える） | 50〜150 行 |
+| 3 | 識別・記録・接続の型・所有スレッド | `focus_epoch`、`lineage` / `input_gen`、表示要求 ID と `display_epoch`、`ReqCell`、確定トランザクションの記録、`ConnectError` の必要部分・`HostLink`・`probe()`、`INPUT_OWNER` | `DmRef` の鍵。確定の失敗時に composition を戻す。失効した表示を適用しない。所有者でないスレッドの Deactivate・終了通知・タイマーがプロセス共通の状態に触れない | 1,000〜1,700 行 |
+| 4 | journal と protocol v7 | `RestoreJournal`、照合点、FakeHost、`SeedPreedit` / `RetainRange` の代替（`push_raw`）、`apply_edit`、エンジン内部の写しを作らない経路、`cost` の計算と上限の判定（DEBUG に残すだけ） | `pending` を journal に置き換え、復元で末尾が落ちなくなる。代替の `SeedPreedit` を使うのは Rebased のときだけ（4.8 の代替期間の制限） | 1,300〜2,200 行 |
+| 5 | 確定トランザクションと列の核（A・B・C） | `CommitReason`、`Full(AsDisplayed / Replace)`、`KeyTask`、`accept` / `execute`、宛先ごとの列、再開のタイマー、副作用の記録 | 文書を先にする順序、`GetText` の実績値、手順ごとの結果、時間切れ・再試行、確定待ちのキーの保留と引き継ぎ、部分確定の引き継ぎ、4.4 の切り替え。読みの長さの上限と 1 件の大きさの上限 | 1,400〜2,400 行 |
+| 6 | 保留キーと回復できない場合 | `InsertTxn`、`RescueTxn` と `RescueState`、`direct_fallback`、回復の確認 | エンジンの未準備・ロック競合での保留、列の上限、硬上限（`JournalFull`）、回復できない場合の手順。最後に「受理したキーをアプリへ戻さない」（`KeyOutcome`） | 800〜1,400 行 |
+| 7 | F と T2-3 | engine ABI の 2 関数（4.8） | `SeedPreedit` / `RetainRange` を engine の関数に切り替え、軟上限の縮約、edit_ops.rs:605 の置き換え、変換中の F キー、復元後の処置の表、復元直後の Space、V6_Test_Procedure.md の T2-1b の改訂 | 600〜1,000 行 |
+| 8 | 拡張 | `Reason` の追加と処置、`ConnectError` の残り | 分類だけ | 150〜300 行 |
+
+- 実装時の変更（2026-10-21、段 1〜3 の実装と Codex のレビューを受けて）: 段 3 では、`RemoteComposition` の鍵を `DmRef` にし、Deactivate で失効させた DM の編集状態を外すようにした。所有スレッド（`INPUT_OWNER`、4.4）は、所有の移譲と処理への入場の競合・遅れたフォーカス通知・スレッドの終了の判定にレビューで問題が残り、そもそも 1 つのプロセスで複数のスレッドが TSF を使うことが確かめられていない（1 節の ※推測）ので、入れなかった。代わりに、2 つ目のスレッドが Activate したら WARN を残す記録を入れた。このログで複数スレッドが確かめられたら、4.4 を設計し直す。「確定の失敗時に composition を戻す」と「失効した表示を適用しない」（`display_epoch`）は、エンジン・セッションとの整合と最新の表示の再要求が要るので、確定トランザクションと一緒に段 5 で入れる。「追加」の列（`focus_epoch`・`lineage` / `input_gen`・`ReqCell`・確定の記録・`ConnectError` / `HostLink` / `probe()`）も、使う段（5・6）で入れる。
+- 規模は ※推測。1・2 は今のコードの写しなので比較的確か。3〜6 は非同期・再入・宛先・スレッドの組み合わせで幅が大きく、合計（5,550〜9,600 行）は上限として信用できる値ではない。
+- 前提の決定 1 により、フェーズ 2 はフェーズ 3 と同じリリースで出す。engine ABI はフェーズ 3（#75）の変更と合わせて 1 回だけ上げる（版の番号は #75 と合わせて決め、2 か所を同時に直す）。1〜3 は動作の修正として先に main に入れてよい。4〜7 の間の中間の状態（縮約が無い・代替の `SeedPreedit`）は配布しない。
+- 依存: 5 は 3（記録・`ReqCell`）と 4（引き継ぎの journal）に依存する。6 は 3（`HostLink`・`probe()`）と 5（確定の理由・列の核）に依存する。7 は 4（`SeedPreedit` / `RetainRange` の protocol）に依存する。前の段が後の段の機能を使うことはない（上限は判定だけを 4 で入れ、有効化はそれぞれ 5・6・7）。
+
+## 8. 範囲外
+
+- ホストへの再接続の間に UI のスレッドが待つこと。spawn 後のパイプ接続待ちは 1 回あたり最大 5 s（client.rs:43）だが、`ensure_connected` は失敗すると 200 ms 待ってもう 1 回試し（client.rs:1186-1207）、`call_with_retry_inner` も 2 回試す（client.rs:1144-1170）。さらに、各試行の書き込みと読み取りは同期の I/O で、読み取り（client.rs:1160 の `read_frame`）には期限を付けていないので、ホストが応答しないまま接続が切れなければ待ち続ける。このため 1 回の RPC の待ちに全体の上限は無い。稼働中の切断では、キーごとにこの待ちが起きうる。
+- #66 の本体。
+- 4.8 の表に無い F6〜F10 の制限（例: F9 の後に Backspace で消した場合のログの扱い）。
+
+## 9. 利用者（プロジェクトの持ち主）の決定
+
+2026-10-21 に次の 4 項目が決まった（前提にも記載）。設計に残っている、利用者の判断が要る事項は無い。
+
+| # | 事項 | 決定 | 反映した節 |
+|---|---|---|---|
+| 1 | リリースのまとめ方 | フェーズ 3 と同じリリース。engine ABI の変更は 1 回。protocol v7 は古いホストを止めるインストーラーと一緒に出す | 5、7 |
+| 2 | 保留中にフォーカスが移った場合のキー | 元の文書が生きていれば、文字キーを打った文字のまま入れ、文字以外は捨てる（回復できない場合と同じ）。生きていなければ捨てて WARN | 4.2、4.6、6 の 7 |
+| 3 | T2-1b | 正確に復元できたときは Space で通常どおり変換する。V6_Test_Procedure.md の T2-1b の期待値を改める | 4.7、6 の 30、7 の 7 |
+| 4 | Enter の末尾の未確定 `n` | `ん` にして確定する（今の挙動）。「表示どおり」の承認済みの例外 | 4.5、6 の 25 |
+
+## 10. Codex の指摘との対応
+
+1 回目のレビュー（第 2 版で対応、第 3・4 版で更新）:
+
+| 指摘 | 内容 | 対応する節 |
+|---|---|---|
+| 1 | 未確認キーの消失・今のキーの位置・確認件数 | 4.3、2.1、4.1（R1） |
+| 2 | 台帳・別プロセス・保存応答と所有権・同一プロセスの 2 DM | 4.3（台帳との関係）、4.4 |
+| 3 | F | 4.8 |
+| 4 | 非同期確定・複合失敗・要求 ID・古い完了・確定待ちのキー・`end_composition` | 2.3、4.6 |
+| 5 | 表示要求値と成功値・未確認の全種類 | 2.2、4.5 |
+| 6 | 保留キーの解決時期・受付と実行 | 4.1、4.2 |
+| 7 | 宛先の照合 | 3、4.2 |
+| 8 | 履歴と現在の入力・ロック・修飾キー | 4.1 |
+| 9 | 復元の範囲・副作用 | 4.7 |
+| 10 | 上限とコスト | 4.3（R7） |
+| 11 | 自動再開は必須 | 4.2 |
+| 12 | 事実の誤り | 1 |
+| B-1 | 1 キーに複数の操作 | 2.1 |
+| 順序 | 安全な分割 | 7 |
+| v6 のまま進める案 | 採らない（利用者が v7 を決定。過去のログが戻らない） | 4.3 |
+
+2 回目のレビュー:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| R1 | 受理した文字を捨てる経路 | 4.1（`KeyTask`）、4.6（再試行）、4.7 | 未実行の部分を残し、修復・再試行の後に 1 回だけ続ける。捨てるのは文書が編集を受け付けない場合だけ |
+| R2 | 確定待ちのキーと入力世代 | 3（失効と世代の更新）、4.6（完了・失効・再試行）、4.4 | トランザクションへの結び付けと成功時の引き継ぎ。文脈の切り替えは完了か時間切れを待つ |
+| R3 | 回復できない場合の挿入 | 4.2（処置・`InsertTxn`）、4.6（`post_commit_range`） | 要求 ID・位置・結果・再試行。完了まで列から消さない。確定待ちと重複させない |
+| R4 | 範囲選択と `RetainRange` | 4.8 | 一時的な値と永久の切り取りを分け、全箇所を分類。`sikan` の期待値 |
+| R5 | ホストの回復の確認 | 4.2（`EngineAccess` と `HostLink`）、4.9 | 背景の `probe()` の成功で直接入力を外す。稼働中の切断・版の不一致を含む |
+| R6 | Enter と表示の修復 | 4.5 | Enter は修復しない。`display_epoch` で失効。`GetText` の結果を実績値に（第 5 版で `original_text` / `committed_text` に分けた: V4） |
+| R7 | 費用と上限 | 4.3（費用・上限） | エンジン内部の写しを作らない経路、文字列の総量、追加前の判定、読みの長さの上限 |
+| R8 | 実装順 | 7 | 1 は動作不変・実際に経路を通す。fallback は 2。接続の型と確定の完了管理を先に |
+| R9 | モードキー | 4.2 | 保留したモードキーも捨てる。直接入力の後のモードキーは別扱い |
+| R10 | スレッド | 1、4.4、7 の 3 | 候補ウィンドウはスレッドローカル。所有スレッド `INPUT_OWNER` |
+| 付記 | 照合点の名前 | 4.3、5 | `checkpoint_edit` / `final_edit`。書き換えは照合点の値 |
+| 付記 | タイマー | 4.2（再生の契機） | Activate で `ensure_hwnd`、作れない場合・Deactivate |
+| 付記 | 末尾の `n` | 4.5、9 節 | 承認済みの例外として `ん` にする（利用者の決定 4） |
+| 付記 | 設計側で決める事項 | 3、4.1〜4.6 | 世代の引き継ぎ（4.6）、拒否・時間切れ・通知の取りこぼし（4.6, 4.2）、今のキーの未実行の部分（4.1）、範囲選択中のログ（4.8）、ホストの回復の条件（4.2）、Enter と修復の順（4.5）、上限を超える入力（4.3）、共通とスレッドローカルの所有（4.4） |
+| 付記 | 規模の数え方 | 7 | 追加・変更した行（移動は数えない） |
+
+3 回目のレビュー:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| N1 | 時間切れの要求の遅れた実行 | 2.3（TV）、4.6（`ReqCell`）、4.2（`InsertTxn`） | 実行開始と失効のどちらが先かを `ReqCell` で一意に決める。失効した要求は文書に触れない。実行した結果は必ず回収。自分の EndComposition の間の終了通知はそのトランザクションのもの |
+| N2 | 宛先の違うキーの置き場所 | 4.2（宛先ごとの列）、4.4 | 宛先（文脈 + `focus_epoch`）ごとの列を着いた順に並べる。A → B → A は 3 本 |
+| N3 | Full の置き換え | 4.6（種類）、4.5 | `AsDisplayed` と `Replace{TrailingN / Katakana}`。置き換えの失敗は今と同じく表示どおりに確定 |
+| N4 | 自動確定と未表示の文字 | 4.6（自動の確定）、4.3（上限） | 自動の確定には「表示どおり」を適用しない。表示の完了を待ち、範囲の文字列が計画と同じときだけ確定。後から届いた分は次の入力へ |
+| N5 | 回復できない場合の最初の確定の失敗 | 4.2（処置の手順 2・5）、4.6（確定の理由） | `CommitReason` を記録。最大 3 回 → 表示どおり 1 回 → 手元の状態を外す、の後に挿入と直接入力。（第 5 版で V1・V2 により手順を改め、時間の保証は条件付きにした） |
+| N6 | 段 1 の評価順・段 4 の前方参照 | A 節、7 節 | 段 1 は API・エンジン取得・ログの順序を変えない（`ToUnicode` を前に動かさない、dispatch.rs:27 に触れない）。各段の追加と有効化を分け、上限の有効化を 5・6・7 へ |
+| 付記 | 代替期間の F | 4.8 | 縮約は段 7。代替の `SeedPreedit` は Rebased のときだけで、そのときの F の制限を明記 |
+| 付記 | `HostLink` の通知 | 4.2（直接入力） | 通知を受けたら最新の状態と `link_epoch` を照合してから外す |
+| 付記 | `INPUT_OWNER` の適用範囲 | 4.4、6 の 31 | Deactivate（factory.rs:640, 643, 657）・終了通知・タイマーにも適用。所有者でないスレッドの Deactivate の試験 |
+| 付記 | 写しを作らない経路 | 4.3（費用） | 早期 return を含む 5 か所の `current_preedit()` を内部関数から外す |
+| 事実 | `ensure_connected` の 5 s | 1、8 | 5 s は接続待ち 1 回の上限。再試行と、期限の無い同期の読み取り（client.rs:1160）のため全体の上限は無い（第 5 版で根拠を追加） |
+| 付記 | 段 1 の仕様 | A 節 | ファイル・関数・変えてはいけないこと・試験・完了の条件 |
+
+4 回目のレビュー:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| V1 | 表示が空・composition が無い場合の受理済みの入力 | 4.2（回復できない場合の処置の入口・手順 4）、4.6（`Overwrite`）、6 の 38 | 入口の条件を「受理したが確定していない入力がある」（journal と列）にした。composition があれば `Overwrite`、無ければ `InsertTxn`。予算を使い切った場合まで定義 |
+| V2 | 有限時間の保証 | 4.2（締め切り・締め切りの後のキー・再試行の予算と時間）、6 の 36・39 | 入口で対象を締め切り、以後のキーは直接入力でアプリへ。表示・確定・挿入で予算 4 回を共有。`Running` に上限が無いことと前提を明記し、無条件の時間の保証は外した |
+| V3 | `Replace` の SetText 成功後の EndComposition の失敗 | 4.6（種類の注記・S4）、6 の 34 | 元に戻せたら `Aborted`、戻せなければ `AbortedChanged`（`shown` を更新し表示が古い印） |
+| V4 | 部分確定の実績値 | 4.6（`original_text` / `committed_text`、T4）、6 の 40 | 照合と元に戻す用の値と、確定した値を分けた。学習・文脈は確定部分だけ |
+| 低 | A 節の注記 | A 節、4.1 | 割り当ての無い keymap で試す、`Modifiers::current()` をそのまま呼ぶ、4.1 の形は段 5 から、差分のレビューで factory.rs:730-745・807-824 を確かめる。A 節の中身は変えていない |
+| 低 | 行番号 | A 節、1 | `resolve_action` は keymap.rs:435-522 |
+| 低 | 全体の上限が無い根拠 | 8 | 期限の無い同期の読み取り（client.rs:1160）を追加 |
+
+5 回目のレビュー:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| W1 | 古い表示の要求と挿入の二重 | 4.2（救済の手順 1・4）、6 の 38 | 締め切りで未実行の表示の要求をすべて失効させ、通常の再生と表示の修復を止める。composition の有無は救済の EditSession の実行の時点で見る |
+| W2 | 救済の途中の回復の通知 | 4.2（`RescueState`・直接入力・手順 7）、6 の 37 | 接続の状態と救済の進み具合を分け、救済が終わるまで直接入力を外さない。終わりに最新の状態を読み直す |
+| W3 | 締め切りの後のアプリの編集と `Overwrite` | 4.2（手順 4）、4.6（`Overwrite` の種類）、6 の 39 | 範囲を `shown_at_cutoff` と比べ、違えば上書きしない。表示に出ていない残りだけを入れる。終了通知の後も同じ |
+| W4 | S2 の後の読み直しの失敗 | 4.6（S2'） | 独立の手順にし、読めない・違う・元に戻せない場合を `Aborted` / `AbortedChanged` に分けた。読めない場合は `shown` を「不明」にする |
+| W5 | 12 s の意味と回数の表現 | 4.2（予算と時間）、4.6 の理由の表、6 の 36 | 12 s は `Pending` の待ち枠の合計の目安。回数は「4 回 + 最後の 1 回」に揃えた |
+| W6 | 試験 8 | 6 の 8 | 締め切りで直接入力、`Overwrite` / 挿入の経路に合わせた |
+
+6 回目のレビュー:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| W3（残り） | 再試行で自分の書き込みとアプリの編集を区別できない | 4.2（`RescueRecord`・状態の表） | X1 と同じ（第 8 版で Y1〜Y4 として置き換え） |
+| X1 | 上書きの後の再試行で末尾が二重になる | 4.2（`written` と `Written` の状態。救済は元に戻さない）、6 の 41 | 再試行は締め切りの時点の表示ではなく、救済が書いた `written` と比べる。`Written` からは EndComposition だけをやり直す |
+| X2 | 確定済み・挿入待ちの途中結果 | 4.2（`Committed` の状態）、6 の 42 | `committed`・`remaining`・`anchor` を次の試行へ引き継ぎ、挿入だけをやり直す。確定した部分は書かない（第 8 版で削除: Y3） |
+| X3 | 終了の後の挿入の位置 | 4.2（挿入の位置 `anchor`・`comp_end_anchor`・位置の確認）、6 の 43 | 今の選択位置に頼らず、表示と確定のたびに控える composition の末尾の範囲を使う。確かめられなければ入れずに WARN と通知（第 8 版で削除: Y3） |
+
+7 回目のレビュー（第 8 版で救済を簡素化して対応）:
+
+| 指摘 | 内容 | 対応する節 | 対応 |
+|---|---|---|---|
+| Y1 | 救済の「元に戻さない」と共通の確定の「元に戻す」の矛盾 | 4.2（救済の表）、4.6（`Overwrite` の種類・S1''・S4・理由の表）、6 の 41 | 救済の `Overwrite` を共通の元に戻す規則から外した。SetText の成功の後の EndComposition の失敗は `WrittenNotEnded` で、元に戻さず再試行もしない |
+| Y2 | 最後の表示どおりの確定の後の残り | 4.2（手順 5）、6 の 36 | 最後の試行も結果の表の遷移にした。成功しても救済全体の成功ではなく、残りは挿入せず記録と通知 |
+| Y3 | 保存した範囲の確かめ方 | 4.2（救済の表の注記）、6 の 43 | 保存した範囲（`comp_end_anchor`）による挿入をやめた。位置を確かめられない文字は記録と通知 |
+| Y4 | composition が最初から無い場合の位置 | 4.2（救済の表）、6 の 38 | 第 9 版: composition が無い場合は挿入しない（選択位置の継続を確かめられないため。マウスでの移動はキーの数に出ない）。`Stopped` として記録と通知 |
+| 第 7 版の X2・X3 | 「確定済み・挿入待ち」と `anchor` | 4.2 | 第 8 版で削除した（不確かな位置への挿入と、結果の不確かな再試行をしない原則のため）。X1 の二重は、救済が書いた後に再試行しないことで防ぐ |
