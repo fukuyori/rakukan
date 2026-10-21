@@ -284,7 +284,7 @@ pub(super) fn update_composition(
 /// 確定部分に縮めた後の範囲を読み直し、それが `commit_text` と同じときだけ学習する。
 /// 文脈・編集状態を閉じる処理・残りの読みの引き継ぎは、今までどおり呼び出し側が
 /// 先に送る（新しい composition にホストの表示を書くため）。EditSession が後で実行
-/// される場合は、学習もその場で先に送る（5a と同じ）。
+/// される場合は、結果が出てから学習を送る（その間のキーは key_queue が保留する）。
 pub(super) fn commit_then_start_composition(
     ctx: ITfContext,
     tid: u32,
@@ -328,6 +328,7 @@ pub(super) fn commit_then_start_composition(
         .map(|dm| dm.as_raw() as usize)
         .unwrap_or(0);
     let replacement = crate::engine::state::set_pending_replacement(ctx_dm);
+    crate::tsf::commit_txn::mark_partial(&cell, replacement);
     let ctx_req = ctx.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
@@ -540,9 +541,12 @@ pub(super) fn commit_then_start_composition(
             }
         }
     }
-    // 後で実行される場合は学習をここで先に送る。同期で実行されていれば、結果を見て送る
-    crate::tsf::commit_txn::send_early_if_pending(&cell);
+    // 同期で実行されていれば、結果を見て学習を送る。後で実行される場合は、結果が出て
+    // から送る（WM_APP_COMMIT_DONE。その間のキーは key_queue が保留する）
     crate::tsf::commit_txn::finish_completed();
+    if crate::tsf::commit_txn::commit_pending() {
+        crate::tsf::candidate_window::start_key_queue_timer();
+    }
     Ok(crate::tsf::commit_txn::take_bg_started())
 }
 
@@ -848,8 +852,8 @@ unsafe fn range_text(
 ///   確定に失敗したとき・確定した文字列が分からないときは、学習と文脈を送らない
 ///   （composition は今までどおり手放し、BG の回収と編集状態を閉じる処理は送る）。
 ///
-/// EditSession が後で実行される場合は、後処理をその場で送る（commit_txn の
-/// `send_early_if_pending`。確定を待つ間のキーを保留する仕組みが入るまでの扱い）。
+/// EditSession が後で実行される場合は、結果が出てから後処理を送る（`WM_APP_COMMIT_DONE`。
+/// その間に届いたキーは key_queue が保留する）。
 pub(super) fn commit_full(
     ctx: ITfContext,
     tid: u32,
@@ -969,10 +973,12 @@ pub(super) fn commit_full(
             }
         }
     }
-    // 後で実行される場合は、後処理をここで先に送る（結果は WM_APP_COMMIT_DONE で記録だけ）
-    crate::tsf::commit_txn::send_early_if_pending(&cell);
-    // 同期で実行されていれば、ここで後処理する
+    // 同期で実行されていれば、ここで後処理する（後で実行される場合は WM_APP_COMMIT_DONE と
+    // 再生のタイマー。その間のキーは key_queue が保留する）
     crate::tsf::commit_txn::finish_completed();
+    if crate::tsf::commit_txn::commit_pending() {
+        crate::tsf::candidate_window::start_key_queue_timer();
+    }
     Ok(())
 }
 

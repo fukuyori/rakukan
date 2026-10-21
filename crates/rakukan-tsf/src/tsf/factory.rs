@@ -597,6 +597,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
 
     fn Deactivate(&self) -> windows::core::Result<()> {
         diag::event(DiagEvent::Deactivate);
+        // 保留したキーは、Deactivate の中では文書へ書けないので捨てる（設計書 4.2）
+        crate::tsf::key_queue::discard_all("deactivate");
         let inner = self
             .inner
             .try_borrow()
@@ -741,6 +743,15 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         let Some(action) = key_resolve(resolved, vk) else {
             return Ok(FALSE);
         };
+        // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
+        // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
+        // その場でアプリへ渡す
+        if crate::engine::state::ime_mode_get_atomic().is_on()
+            && crate::tsf::key_queue::should_hold()
+        {
+            let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
+            return Ok(if eat { TRUE } else { FALSE });
+        }
 
         // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
         // コンパートメントは内部状態から導出して書く「通知」であり、真の状態ではない。
@@ -776,6 +787,9 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         wparam: WPARAM,
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
+        // 届いた順の通し番号を取り、受け付けを終えるまで後のキーの再生を止める（入口の処理
+        // の途中で別のキーが割り込んでも、追い越させない。入力処理の見直しの段 5 の 5c）
+        let mut entry = crate::tsf::key_queue::enter();
         // バックエンド初期化完了フラグを確認して言語バー表示を更新
         if crate::engine::state::langbar_update_take() {
             self.notify_langbar_update();
@@ -856,7 +870,50 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             return Ok(FALSE);
         }
 
-        let result = self.handle_action(action.clone(), ctx, tid, sink);
+        // 確定の結果待ちの間に届いたキーは保留し、結果の後処理の後で届いた順に実行する
+        // （入力処理の見直しの段 5 の 5c）。確定の後の状態で IME が食べないキー（全体の
+        // 確定の後の Home など）は、保留せずその場でアプリへ渡す（OnTestKeyDown と同じ判定）
+        let admitted = crate::tsf::key_queue::admit(
+            &mut entry,
+            |input_after| key_should_eat(&action, input_after),
+            || {
+                use windows::core::Interface;
+                use windows_core::IUnknownImpl;
+                let dm = unsafe { ctx.GetDocumentMgr() }
+                    .map(|d| d.as_raw() as usize)
+                    .unwrap_or(0);
+                crate::tsf::key_queue::HeldKey {
+                    factory: self.to_object(),
+                    action: action.clone(),
+                    vk,
+                    ctx: ctx.clone(),
+                    tid,
+                    sink: sink.clone(),
+                    dm,
+                    at: std::time::Instant::now(),
+                }
+            },
+        );
+        match admitted {
+            crate::tsf::key_queue::Admit::Direct => {}
+            crate::tsf::key_queue::Admit::PassToApp => return Ok(FALSE),
+            crate::tsf::key_queue::Admit::Held(seq) => {
+                // 今のキーまで実行できたら、その結果（IME がオフだった・IME が使わなかった）
+                // でアプリへ渡すかを決める。実行できなければ列に残り、食べたものとして後で
+                // 実行する
+                crate::tsf::key_queue::pump();
+                let ate = seq
+                    .and_then(crate::tsf::key_queue::take_outcome)
+                    .unwrap_or(true);
+                return Ok(if ate { TRUE } else { FALSE });
+            }
+        }
+
+        let result = crate::tsf::key_queue::run_exclusive(|| {
+            self.handle_action(action.clone(), ctx, tid, sink)
+        });
+        // 処理の途中で割り込んで保留されたキーがあれば、続けて実行する
+        crate::tsf::key_queue::pump();
         match &result {
             Ok(ate) => {
                 diag::event(DiagEvent::KeyHandled {
@@ -1082,6 +1139,67 @@ fn is_ime_mode_action(action: &UserAction) -> bool {
 
 /// `OnTestKeyDown` と `OnKeyDown` のキーの解決。keymap の借用に失敗した場合と、keymap で
 /// 解決できなかった場合（どちらも `resolved = None`）は、重要キーの fallback を使う。
+impl TextServiceFactory_Impl {
+    /// 保留したキーを実行する（`key_queue::pump`）。食べたかを返す。届いた文書にフォーカスが
+    /// 無いキーは捨てて WARN。IME がオフになっていたキー・IME が使わなかったキーは `false`
+    /// （今のキーならアプリへ渡す。前に保留したキーは渡せないので WARN。打った文字を
+    /// 元の文書へ入れる扱いは段 6）。
+    pub(crate) fn replay_key(
+        &self,
+        action: UserAction,
+        vk: u16,
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        dm: usize,
+    ) -> bool {
+        use windows::core::Interface;
+        let focused = self
+            .inner
+            .try_borrow()
+            .ok()
+            .and_then(|g| g.thread_mgr.clone())
+            .and_then(|tm| unsafe { tm.GetFocus() }.ok())
+            .map(|d| d.as_raw() as usize);
+        if dm == 0 || focused != Some(dm) {
+            tracing::warn!(
+                "key_queue: held key dropped; focus moved vk={vk:#04x} action={action:?}"
+            );
+            diag::event(DiagEvent::KeyIgnored {
+                vk,
+                reason: "held_focus_moved",
+            });
+            return true;
+        }
+        if keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on()) {
+            tracing::debug!(
+                "key_queue: held key not handled; IME is off vk={vk:#04x} action={action:?}"
+            );
+            diag::event(DiagEvent::KeyIgnored {
+                vk,
+                reason: "held_ime_off",
+            });
+            return false;
+        }
+        let result = self.handle_action(action.clone(), ctx, tid, sink);
+        match &result {
+            Ok(ate) => diag::event(DiagEvent::KeyHandled {
+                vk,
+                action: action_name(&action),
+                ate: *ate,
+            }),
+            Err(e) => {
+                diag::event(DiagEvent::Error {
+                    site: "handle_action",
+                    msg: e.to_string(),
+                });
+                tracing::warn!("handle_action (held key): {e}");
+            }
+        }
+        keydown_return(&result)
+    }
+}
+
 fn key_resolve(resolved: Option<UserAction>, vk: u16) -> Option<UserAction> {
     resolved.or_else(|| crate::engine::keymap::essential_fallback_action(vk))
 }

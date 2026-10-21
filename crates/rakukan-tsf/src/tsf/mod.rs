@@ -6,6 +6,7 @@ pub(crate) mod candidate_window;
 pub(crate) mod commit_txn;
 pub(crate) mod display_attr;
 pub(crate) mod ime_sync;
+pub(crate) mod key_queue;
 pub(crate) mod language_bar;
 pub(crate) mod live_session;
 pub(crate) mod mode_indicator;

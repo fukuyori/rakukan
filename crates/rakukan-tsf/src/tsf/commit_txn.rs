@@ -8,21 +8,24 @@
 //! 要求した側も、要求の直後に [`finish_completed`] を呼ぶ（同期で実行されていれば
 //! そこで後処理する）。後処理は 1 回だけ行う。
 //!
+//! 結果を待つ間（[`commit_pending`]）に届いたキーは、`key_queue` が保留し、後処理の後で
+//! 実行する（段 5 の 5c）。要求が [`COMMIT_TIMEOUT`] たっても実行されなければ失効させ
+//! （[`expire_overdue`]）、実行されなかったものとして扱う。
+//!
 //! 確定に失敗した（文書が確定されたか分からない）ときの文書の扱いは今までと同じ
 //! （composition は手放す）。ホストには BG の回収と編集状態を閉じる処理だけを送り、
 //! 学習と文脈は送らない。composition を保持し直してホストの読みを残す扱いは、
 //! セッションの状態（候補・選択・句読点の保留）を戻す仕組みと一緒に後の段で入れる。
-//!
-//! EditSession が後で実行される（要求の直後に結果が無い）場合は、後処理をその場で
-//! 先に送る（[`send_early_if_pending`]。今までと同じ順）。確定を待つ間に打ったキーを
-//! 保留する仕組み（段 5 の後の部分）が無い間に、遅れた後処理が後続のキーの編集状態を
-//! 閉じないため。この場合は、後で文書の確定に失敗しても取り消せない（ログに残す）。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
+use std::time::{Duration, Instant};
 
 use crate::engine::state::LearnAction;
+
+/// 確定の要求が実行されるのを待つ時間。過ぎたら失効させる（設計書 4.6 の `ReqCell`）。
+pub(crate) const COMMIT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// 確定の後に送る学習。
 #[derive(Debug, Clone, PartialEq)]
@@ -57,7 +60,7 @@ pub(crate) enum DocResult {
     CommittedUnknown,
     /// 確定の操作に失敗した。composition は手放した（今までと同じ）。
     Failed(&'static str),
-    /// 実行されなかった（要求の失敗・拒否）。
+    /// 実行されなかった（要求の失敗・拒否・時間切れ）。
     NotRun(&'static str),
 }
 
@@ -76,8 +79,13 @@ struct PendingCommit {
     /// 計画の文字列（学習を送るかの判定に使う）。
     planned: String,
     effects: CommitEffects,
-    /// 結果を待たずに後処理を送った（EditSession が後で実行される場合）。
-    sent_early: bool,
+    /// 要求した時刻（失効の判定に使う）。
+    at: Instant,
+    /// 部分確定（確定の後に新しい composition の入力が残る）。キーを保留するかの判定に使う。
+    leaves_input: bool,
+    /// 部分確定の「composition の置き換え待ち」の印（`set_pending_replacement`）。失効させる
+    /// ときに消す。
+    replacement: Option<u64>,
 }
 
 thread_local! {
@@ -100,7 +108,9 @@ pub(crate) fn begin(planned: String, effects: CommitEffects) -> ReqCell {
                 cell: cell.clone(),
                 planned,
                 effects,
-                sent_early: false,
+                at: Instant::now(),
+                leaves_input: false,
+                replacement: None,
             },
         )
     });
@@ -115,50 +125,75 @@ pub(crate) fn mark_not_run(cell: &ReqCell, why: &'static str) {
     }
 }
 
-/// EditSession が要求の直後に実行されなかった（後で実行される）場合に呼ぶ。計画の文字列で
-/// 確定したものとして、後処理をその場で送る。
-pub(crate) fn send_early_if_pending(cell: &ReqCell) {
-    if *cell.borrow() != ReqState::Pending {
-        return;
-    }
-    let early = PENDING.with(|p| {
-        let mut p = p.borrow_mut();
-        let (id, commit) = p.iter_mut().find(|(_, c)| Rc::ptr_eq(&c.cell, cell))?;
-        commit.sent_early = true;
-        Some((
-            *id,
-            plan_effects(&commit.effects, &commit.planned, &commit.planned),
-        ))
+/// 部分確定として記録する（確定の後に入力が残る。失効させるときに置き換え待ちの印を消す）。
+pub(crate) fn mark_partial(cell: &ReqCell, replacement: Option<u64>) {
+    PENDING.with(|p| {
+        if let Some(commit) = p
+            .borrow_mut()
+            .values_mut()
+            .find(|c| Rc::ptr_eq(&c.cell, cell))
+        {
+            commit.leaves_input = true;
+            commit.replacement = replacement;
+        }
     });
-    if let Some((id, plan)) = early {
-        tracing::debug!("commit {id}: edit session deferred; host effects sent before the result");
-        send_effects(id, &plan);
-    }
+}
+
+/// 結果を待っている最後の確定が、確定の後に入力を残すか（部分確定か）。結果を待って
+/// いる確定が無ければ `None`。
+pub(crate) fn pending_leaves_input() -> Option<bool> {
+    PENDING.with(|p| {
+        p.borrow()
+            .values()
+            .rev()
+            .find(|c| !matches!(*c.cell.borrow(), ReqState::Done(_)))
+            .map(|c| c.leaves_input)
+    })
+}
+
+/// 結果を待っている確定がある（後で実行される EditSession が、まだ終わっていない）。
+pub(crate) fn commit_pending() -> bool {
+    PENDING.with(|p| {
+        p.borrow()
+            .values()
+            .any(|c| !matches!(*c.cell.borrow(), ReqState::Done(_)))
+    })
+}
+
+/// `timeout` を過ぎてもまだ実行されていない確定の要求を失効させる（実行されなかった
+/// ものとして扱う）。失効した要求の EditSession が後で実行されても、文書には触れずに
+/// 戻る（`Pending` でないため）。実行中（`Running`）のものは失効させない。
+pub(crate) fn expire_overdue(now: Instant, timeout: Duration) {
+    PENDING.with(|p| {
+        for (id, commit) in p.borrow().iter() {
+            let mut state = commit.cell.borrow_mut();
+            if *state == ReqState::Pending && now.duration_since(commit.at) >= timeout {
+                tracing::warn!(
+                    "commit {id}: edit session not run within {timeout:?}; expired planned={:?}",
+                    commit.planned
+                );
+                *state = ReqState::Done(DocResult::NotRun("timeout"));
+                // 置き換えはもう行わないので、終了通知の片づけを止める印を消す
+                crate::engine::state::clear_pending_replacement(commit.replacement);
+            }
+        }
+    });
 }
 
 /// 結果が出た確定の後処理を、要求した順に行う。結果の無い要求があれば、そこで止める
-/// （後の要求の後処理が先の要求を追い越さない）。後処理を送り済みの要求は、結果が
-/// 無くても後の要求を止めない（後処理の順はすでに守られている）。
+/// （後の要求の後処理が先の要求を追い越さない）。
 pub(crate) fn finish_completed() {
     let done: Vec<(u64, PendingCommit, DocResult)> = PENDING.with(|p| {
         let mut p = p.borrow_mut();
-        let mut ids = Vec::new();
-        for (&id, commit) in p.iter() {
-            if matches!(*commit.cell.borrow(), ReqState::Done(_)) {
-                ids.push(id);
-            } else if !commit.sent_early {
+        let mut done = Vec::new();
+        while let Some((&id, commit)) = p.iter().next() {
+            let ReqState::Done(result) = commit.cell.borrow().clone() else {
                 break;
-            }
+            };
+            let commit = p.remove(&id).expect("present");
+            done.push((id, commit, result));
         }
-        ids.into_iter()
-            .filter_map(|id| {
-                let commit = p.remove(&id)?;
-                let ReqState::Done(result) = commit.cell.borrow().clone() else {
-                    return None;
-                };
-                Some((id, commit, result))
-            })
-            .collect()
+        done
     });
     for (id, commit, result) in done {
         finish_one(id, &commit, &result);
@@ -166,20 +201,6 @@ pub(crate) fn finish_completed() {
 }
 
 fn finish_one(id: u64, commit: &PendingCommit, result: &DocResult) {
-    if commit.sent_early {
-        // 後処理は送り済み。計画どおりに確定できなかった場合は、取り消せないので残すだけ
-        if *result
-            != (DocResult::Committed {
-                text: commit.planned.clone(),
-            })
-        {
-            tracing::warn!(
-                "commit {id}: effects were sent before the result, but the document result was {result:?} planned={:?}",
-                commit.planned
-            );
-        }
-        return;
-    }
     if !matches!(result, DocResult::Committed { .. }) {
         tracing::warn!(
             "commit {id}: document result {result:?}; learning and context skipped planned={:?}",
@@ -400,32 +421,49 @@ mod tests {
     }
 
     #[test]
-    fn a_commit_whose_effects_were_sent_early_is_not_processed_again() {
-        // 送り済みの印だけを確かめる（効果の送信はエンジンを使うため、ここでは
-        // 後処理の無い CommitEffects::default() を使う）
-        let a = begin("a".into(), CommitEffects::default());
-        send_early_if_pending(&a);
-        assert!(PENDING.with(|p| p.borrow().values().all(|c| c.sent_early)));
-        // 結果が出ても、後処理は 2 回目を送らずに外れる
-        *a.borrow_mut() = ReqState::Done(DocResult::Committed { text: "a".into() });
+    fn a_deferred_commit_waits_for_its_result_and_expires_after_the_timeout() {
+        // 後で実行される要求は、結果が出るまで後処理を送らず、結果待ちとして残る
+        delivered_learns();
+        let a = begin("漢字".into(), learn_only());
+        assert!(commit_pending());
         finish_completed();
+        assert!(delivered_learns().is_empty());
+        // 時間内なら失効しない
+        let now = Instant::now();
+        expire_overdue(now, COMMIT_TIMEOUT);
+        assert_eq!(*a.borrow(), ReqState::Pending);
+        // 時間を過ぎたら、実行されなかったものとして後処理する（学習は送らない）
+        expire_overdue(now + COMMIT_TIMEOUT, COMMIT_TIMEOUT);
+        assert_eq!(*a.borrow(), ReqState::Done(DocResult::NotRun("timeout")));
+        assert!(!commit_pending());
+        finish_completed();
+        assert!(delivered_learns().is_empty());
         assert!(remaining().is_empty());
-        // 送り済みで結果待ちの要求は、後の要求を止めない
-        let c = begin("c".into(), CommitEffects::default());
-        send_early_if_pending(&c);
-        let d = begin("d".into(), CommitEffects::default());
-        *d.borrow_mut() = ReqState::Done(DocResult::Failed("test"));
-        finish_completed();
-        assert_eq!(remaining(), vec!["c".to_string()]);
-        mark_not_run(&c, "request failed");
-        finish_completed();
-        assert!(remaining().is_empty());
-        // 結果の出た要求は送り直さない
+        // 実行中の要求は失効させない
         let b = begin("b".into(), CommitEffects::default());
+        *b.borrow_mut() = ReqState::Running;
+        expire_overdue(now + COMMIT_TIMEOUT * 10, COMMIT_TIMEOUT);
+        assert_eq!(*b.borrow(), ReqState::Running);
+        assert!(commit_pending());
         *b.borrow_mut() = ReqState::Done(DocResult::Failed("test"));
-        send_early_if_pending(&b);
-        assert!(PENDING.with(|p| p.borrow().values().all(|c| !c.sent_early)));
         finish_completed();
+    }
+
+    #[test]
+    fn the_last_pending_commit_tells_whether_input_remains() {
+        assert_eq!(pending_leaves_input(), None);
+        let full = begin("全体".into(), CommitEffects::default());
+        assert_eq!(pending_leaves_input(), Some(false));
+        let partial = begin("部分".into(), CommitEffects::default());
+        mark_partial(&partial, None);
+        assert_eq!(pending_leaves_input(), Some(true));
+        // 結果の出た要求は数えない
+        *partial.borrow_mut() = ReqState::Done(DocResult::Failed("test"));
+        assert_eq!(pending_leaves_input(), Some(false));
+        mark_not_run(&full, "request failed");
+        assert_eq!(pending_leaves_input(), None);
+        finish_completed();
+        assert!(remaining().is_empty());
     }
 
     #[test]
@@ -491,15 +529,16 @@ mod tests {
         mark_not_run(&c, "edit session refused");
         finish_completed();
         assert!(delivered_learns().is_empty());
-        // 後で実行される: その場で 1 回送り、結果の後では送らない
+        // 後で実行される: 結果が出るまで送らず、結果の後で 1 回
         let d = begin("漢字".into(), learn_only());
-        send_early_if_pending(&d);
-        assert_eq!(delivered_learns(), vec![Some("漢字".to_string())]);
+        finish_completed();
+        assert!(delivered_learns().is_empty());
         *d.borrow_mut() = ReqState::Done(DocResult::Committed {
             text: "漢字".into(),
         });
         finish_completed();
-        assert!(delivered_learns().is_empty());
+        finish_completed();
+        assert_eq!(delivered_learns(), vec![Some("漢字".to_string())]);
         assert!(remaining().is_empty());
     }
 
@@ -601,9 +640,10 @@ mod tests {
         *b.borrow_mut() = ReqState::Done(DocResult::Failed("EndComposition"));
         finish_completed();
         assert_eq!(bg_starts(), once(None));
-        // 後で実行される: その場で 1 回送り、結果の後では送らない
+        // 後で実行される: 結果の後で 1 回
         let c = begin("漢字".into(), partial());
-        send_early_if_pending(&c);
+        finish_completed();
+        assert!(bg_starts().is_empty());
         *c.borrow_mut() = ReqState::Done(DocResult::Committed {
             text: "漢字".into(),
         });

@@ -313,6 +313,10 @@ unsafe extern "system" fn wnd_proc(
             if wparam.0 == LIVE_TIMER_ID {
                 crate::tsf::candidate_window::on_live_timer();
             }
+            // 確定待ちのキーの再生（入力処理の見直しの段 5 の 5c）
+            if wparam.0 == KEY_QUEUE_TIMER_ID {
+                crate::tsf::key_queue::pump();
+            }
             LRESULT(0)
         }
         // OnSetFocus 遅延処理: msctf コールバックから抜けた後にここで処理する
@@ -326,8 +330,9 @@ unsafe extern "system" fn wnd_proc(
             LRESULT(0)
         }
         // 確定の EditSession の完了: ホストへの後処理を行う（入力処理の見直しの段 5）
+        // 確定の EditSession の完了: ホストへの後処理を行い、保留したキーを再生する
         m if m == WM_APP_COMMIT_DONE => {
-            crate::tsf::commit_txn::finish_completed();
+            crate::tsf::key_queue::pump();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -1350,6 +1355,35 @@ const LIVE_POLL_MS: u32 = 50; // 50ms ごとにポーリング
 /// config.live_conversion.debounce_ms の実行時コピー（live_input_notify がセット）。
 /// 設定値なので thread_local には移さず static のまま (spec 通り)。
 static LIVE_DEBOUNCE_CFG_MS: AtomicU64 = AtomicU64::new(80);
+
+/// 確定待ちのキーを再生するタイマー（入力処理の見直しの段 5 の 5c）。
+const KEY_QUEUE_TIMER_ID: usize = 0x1236;
+
+/// 保留したキーか確定の結果待ちがある間、`key_queue::pump` を定期的に呼ぶ。
+pub(crate) fn start_key_queue_timer() {
+    let hwnd = ensure_hwnd();
+    if is_valid(hwnd) {
+        unsafe {
+            SetTimer(
+                hwnd,
+                KEY_QUEUE_TIMER_ID,
+                crate::tsf::key_queue::TICK_MS,
+                None,
+            );
+        }
+    } else {
+        tracing::warn!("key_queue: no window for the replay timer");
+    }
+}
+
+pub(crate) fn stop_key_queue_timer() {
+    let hwnd = get_hwnd();
+    if is_valid(hwnd) {
+        unsafe {
+            let _ = KillTimer(hwnd, KEY_QUEUE_TIMER_ID);
+        }
+    }
+}
 
 /// Waiting状態に入った時に呼ぶ。LLM完了を80msごとに監視するタイマーを起動する。
 pub fn start_waiting_timer() {
