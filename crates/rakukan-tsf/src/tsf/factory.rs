@@ -909,9 +909,31 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             }
         }
 
+        // 止まった場合（読みの長さの上限で確定し、その結果を待つ）に列へ戻すための写し
+        let (ctx_resume, sink_resume) = (ctx.clone(), sink.clone());
         let result = crate::tsf::key_queue::run_exclusive(|| {
             self.handle_action(action.clone(), ctx, tid, sink)
         });
+        if crate::tsf::key_queue::take_suspended() {
+            use windows::core::Interface;
+            use windows_core::IUnknownImpl;
+            let dm = unsafe { ctx_resume.GetDocumentMgr() }
+                .map(|d| d.as_raw() as usize)
+                .unwrap_or(0);
+            crate::tsf::key_queue::put_back(
+                entry.seq(),
+                crate::tsf::key_queue::HeldKey {
+                    factory: self.to_object(),
+                    action: action.clone(),
+                    vk,
+                    ctx: ctx_resume,
+                    tid,
+                    sink: sink_resume,
+                    dm,
+                    at: std::time::Instant::now(),
+                },
+            );
+        }
         // 処理の途中で割り込んで保留されたキーがあれば、続けて実行する
         crate::tsf::key_queue::pump();
         match &result {

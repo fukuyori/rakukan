@@ -27,7 +27,17 @@ impl super::TextServiceFactory_Impl {
         // 結果が出たまま後処理されていない確定があれば、先に後処理する（入力処理の見直しの
         // 段 5。通常は WM_APP_COMMIT_DONE で済んでいる。メッセージを送れなかった場合の保険）
         crate::tsf::commit_txn::finish_completed();
-        let mut guard = engine_try_get_or_create()?;
+        let mut guard = match engine_try_get_or_create() {
+            Ok(guard) => guard,
+            // 保留したキーの再生でエンジンを取れなければ、捨てずに止めて列に戻す
+            // （入力処理の見直しの段 5 の 5c。直接のキーは今までどおり）
+            Err(_) if crate::tsf::key_queue::in_replay() => {
+                tracing::debug!("held key: engine busy; retried later");
+                crate::tsf::key_queue::suspend_current();
+                return Ok(true);
+            }
+            Err(e) => return Err(e),
+        };
         // 所有権を復元してよいのは、フォーカス中の生存している文脈へのキー入力だけ。
         let focused_dm = (|| {
             use windows::core::Interface;
@@ -43,6 +53,48 @@ impl super::TextServiceFactory_Impl {
         let focused_context = focused_dm.is_some();
         if let Some(dm) = focused_dm {
             candidate_window::bind_input_focus(dm, super::foreground_root_hwnd());
+        }
+        // 読みの長さの上限（入力処理の見直しの段 5 の 5d、設計書 4.3）: 上限に達した読みに
+        // 文字を足すキーは、先に今の composition を確定してから実行する。確定が後で実行
+        // される場合は、このキーを保留の列に戻し、結果の後で実行する
+        // 判定はキーの文書へ結び付けた後で、その文書の読みに対して行う
+        if focused_context
+            && is_text_input(&action)
+            && !crate::engine::state::session_is_selecting_fast()
+            && let Some(len) = reading_at_limit()
+        {
+            tracing::info!(
+                "length limit: committing a reading of {len} chars before {}",
+                action_name(&action)
+            );
+            // 確定はエンジンを取り直すので、ここで放す
+            drop(guard);
+            let committed =
+                self.handle_action(UserAction::CommitRaw, ctx.clone(), tid, sink.clone());
+            // 再生の中で確定がエンジンを取れなかった場合の止まった印は、確定のものなので消す
+            let commit_not_run = crate::tsf::key_queue::take_suspended();
+            match committed {
+                // 確定できなかった（エンジンを取れなかったなど）: 上限を少し超えるが、この
+                // キーは今までどおり実行する（次の文字キーでもう一度確定を試す）
+                Err(e) => tracing::warn!("length limit: commit failed; key handled as is: {e}"),
+                Ok(_) if commit_not_run => {
+                    tracing::warn!("length limit: commit not run (engine busy); key handled as is")
+                }
+                Ok(_) if crate::tsf::commit_txn::commit_pending() => {
+                    crate::tsf::key_queue::suspend_current();
+                    return Ok(true);
+                }
+                Ok(_) => {}
+            }
+            // エンジンを取り直せなければ、このキーを止めて列に戻し、後で実行する
+            guard = match engine_try_get_or_create() {
+                Ok(guard) => guard,
+                Err(e) => {
+                    tracing::warn!("length limit: engine busy after the commit; key held: {e}");
+                    crate::tsf::key_queue::suspend_current();
+                    return Ok(true);
+                }
+            };
         }
         let _input_scope = crate::engine::rpc_composition::InputScope::enter(focused_context);
         // アプリ側の確定は、復元も状態の確認も通さない。
@@ -517,5 +569,43 @@ impl super::TextServiceFactory_Impl {
             }
             _ => Ok(false),
         }
+    }
+}
+
+/// 読みの長さの上限（文字数。設計書 4.3）。
+const READING_LIMIT: usize = 2_000;
+
+/// 文字を生む（読みを伸ばす）キーか。
+fn is_text_input(action: &UserAction) -> bool {
+    matches!(
+        action,
+        UserAction::Input(_)
+            | UserAction::InputRaw(_)
+            | UserAction::FullWidthSpace
+            | UserAction::Punctuate(_)
+    )
+}
+
+/// 今の読みが上限に達していれば、その文字数を返す。
+fn reading_at_limit() -> Option<usize> {
+    at_limit(crate::engine::rpc_composition::local_reading_len()?)
+}
+
+fn at_limit(len: usize) -> Option<usize> {
+    (len >= READING_LIMIT).then_some(len)
+}
+
+#[cfg(test)]
+mod length_limit_tests {
+    use super::*;
+
+    #[test]
+    fn only_text_input_at_the_limit_commits_first() {
+        assert_eq!(at_limit(READING_LIMIT - 1), None);
+        assert_eq!(at_limit(READING_LIMIT), Some(READING_LIMIT));
+        assert!(is_text_input(&UserAction::Input('a')));
+        assert!(is_text_input(&UserAction::Punctuate('。')));
+        assert!(!is_text_input(&UserAction::Backspace));
+        assert!(!is_text_input(&UserAction::CommitRaw));
     }
 }

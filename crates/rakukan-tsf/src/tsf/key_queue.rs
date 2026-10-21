@@ -34,6 +34,7 @@ const MAX_KEYS: usize = 256;
 const MAX_AGE: Duration = Duration::from_secs(30);
 
 /// 保留したキー。
+#[derive(Clone)]
 pub(crate) struct HeldKey {
     pub factory: ComObject<TextServiceFactory>,
     pub action: UserAction,
@@ -60,6 +61,37 @@ thread_local! {
     static NEXT_SEQ: Cell<u64> = const { Cell::new(1) };
     /// 直前の `pump` で実行したキーの結果（通し番号と、食べたか）。
     static OUTCOMES: RefCell<Vec<(u64, bool)>> = const { RefCell::new(Vec::new()) };
+    /// 処理中のキーが、確定の結果を待つために止まった（[`suspend_current`]）。
+    static SUSPENDED: Cell<bool> = const { Cell::new(false) };
+    /// 保留したキーを再生している（[`pump`] の中で `replay_key` を呼んでいる間）。
+    static IN_REPLAY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// 保留したキーを再生している最中か。再生したキーがエンジンを取れないときは、捨てずに
+/// 止めて（[`suspend_current`]）列に戻すために使う。
+pub(crate) fn in_replay() -> bool {
+    IN_REPLAY.with(|r| r.get())
+}
+
+/// 処理中のキーを、確定の結果を待つために止める（読みの長さの上限で確定した場合など）。
+/// キーを処理した側（OnKeyDown・[`pump`]）が、そのキーを列に戻し、結果の後で実行する。
+pub(crate) fn suspend_current() {
+    SUSPENDED.with(|s| s.set(true));
+}
+
+/// 処理したキーが止まったかを返し、印を消す。
+pub(crate) fn take_suspended() -> bool {
+    SUSPENDED.with(|s| s.replace(false))
+}
+
+/// 止まったキーを、通し番号の順の位置に戻す（上限は数えない）。
+pub(crate) fn put_back(seq: u64, key: HeldKey) {
+    QUEUE.with(|q| {
+        let mut q = q.borrow_mut();
+        let at = insert_position(q.iter().map(|e| e.seq), seq);
+        q.insert(at, Queued { seq, key });
+    });
+    crate::tsf::candidate_window::start_key_queue_timer();
 }
 
 /// 確定の結果待ちの間に届いたキーで、確定の後に入力が残ると見なすか。キーの処理中か、
@@ -102,6 +134,13 @@ impl Drop for Entry {
         if self.open {
             ADMITTING.with(|a| a.set(a.get().saturating_sub(1)));
         }
+    }
+}
+
+impl Entry {
+    /// 届いた順の通し番号。
+    pub(crate) fn seq(&self) -> u64 {
+        self.seq
     }
 }
 
@@ -233,6 +272,7 @@ pub(crate) fn pump() {
         let Some(Queued { seq, key }) = QUEUE.with(|q| q.borrow_mut().pop_front()) else {
             break;
         };
+        let kept = key.clone();
         let HeldKey {
             factory,
             action,
@@ -243,7 +283,22 @@ pub(crate) fn pump() {
             dm,
             ..
         } = key;
+        IN_REPLAY.with(|r| r.set(true));
         let ate = factory.replay_key(action, vk, ctx, tid, sink, dm);
+        IN_REPLAY.with(|r| r.set(false));
+        if take_suspended() {
+            if kept.at.elapsed() >= MAX_AGE {
+                // 保持の上限を過ぎても実行できない: 捨てて後のキーへ進む
+                tracing::warn!(
+                    "key_queue: held key could not run within {MAX_AGE:?}; dropped seq={seq} vk={vk:#04x}"
+                );
+                continue;
+            }
+            // 止まった（確定の結果待ち・エンジンを取れない）: 先頭に戻し、この回の再生は
+            // ここでやめる（結果の通知かタイマーで続ける）
+            put_back(seq, kept);
+            break;
+        }
         if !ate {
             // 今のキー（OnKeyDown の中）ならアプリへ渡す。前に保留したキーは渡せない
             tracing::info!("key_queue: replayed key not used by the IME seq={seq} vk={vk:#04x}");

@@ -97,6 +97,12 @@ fn snapshot() -> Option<RemoteComposition> {
 pub fn local_edit() -> Option<EditState> {
     snapshot().map(|c| c.edit)
 }
+/// 今の文脈の読みの文字数（写しを作らない。読みの長さの上限の判定に使う）。
+pub fn local_reading_len() -> Option<usize> {
+    lock_states()
+        .get(&dm_key())
+        .map(|c| c.edit.reading.chars().count())
+}
 pub fn close() {
     crate::tsf::candidate_window::reset_worker_busy_clock();
     lock_states().remove(&dm_key());
