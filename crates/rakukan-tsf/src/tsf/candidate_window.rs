@@ -220,6 +220,9 @@ const WM_APP_FOCUS_CHANGED: u32 = WM_APP + 1;
 /// KEYBOARD_OPENCLOSE コンパートメントが外部（アプリの ImmSetOpenStatus /
 /// CtfImm）から変えられたときの遅延処理
 const WM_APP_OPENCLOSE_CHANGED: u32 = WM_APP + 2;
+/// 確定の EditSession が終わった（入力処理の見直しの段 5）。ホストへの後処理を、
+/// EditSession の外（このメッセージの処理）で行う。
+const WM_APP_COMMIT_DONE: u32 = WM_APP + 3;
 
 #[derive(Default, Clone)]
 struct CandData {
@@ -320,6 +323,11 @@ unsafe extern "system" fn wnd_proc(
         // ITfCompartmentEventSink::OnChange 遅延処理
         m if m == WM_APP_OPENCLOSE_CHANGED => {
             process_openclose_change();
+            LRESULT(0)
+        }
+        // 確定の EditSession の完了: ホストへの後処理を行う（入力処理の見直しの段 5）
+        m if m == WM_APP_COMMIT_DONE => {
+            crate::tsf::commit_txn::finish_completed();
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -959,6 +967,17 @@ pub fn invalidate_live_context_for_dm(dm_ptr: usize) {
 
     if matched {
         tracing::debug!("[Live] invalidate_live_context_for_dm: marked stale dm={dm_ptr:#x}");
+    }
+}
+
+/// 確定の EditSession の最後から呼ぶ（入力処理の見直しの段 5）。EditSession の中では
+/// ホストへの要求を送らないので、後処理を WM_APP_COMMIT_DONE で後に回す。
+pub(crate) fn post_commit_done() {
+    let hwnd = ensure_hwnd();
+    if is_valid(hwnd) {
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_APP_COMMIT_DONE, WPARAM(0), LPARAM(0));
+        }
     }
 }
 

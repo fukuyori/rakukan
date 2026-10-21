@@ -14,9 +14,10 @@ use crate::tsf::candidate_window;
 use crate::tsf::ime_sync;
 
 use super::{
-    CandidateDir, commit_then_start_composition, end_composition, update_composition,
+    CandidateDir, commit_full, commit_then_start_composition, update_composition,
     update_composition_candidate_parts, update_composition_range_select,
 };
+use crate::tsf::commit_txn::{CommitEffects, LearnPlan};
 
 fn is_numeric_digit(c: char) -> bool {
     c.is_ascii_digit() || ('０'..='９').contains(&c)
@@ -177,12 +178,19 @@ impl super::TextServiceFactory_Impl {
         if p.is_empty() {
             return Ok(false);
         }
-        engine.bg_reclaim();
         let t = text_util::to_katakana(&p);
-        engine.commit(&t);
-        engine.reset_preedit();
         drop(guard);
-        end_composition(ctx, tid, t)?;
+        commit_full(
+            ctx,
+            tid,
+            t,
+            CommitEffects {
+                bg_reclaim: true,
+                learn: None,
+                context: true,
+                reset_preedit: true,
+            },
+        )?;
         Ok(true)
     }
 
@@ -346,15 +354,19 @@ impl super::TextServiceFactory_Impl {
             text.clone()
         };
         // 番号キーで選んだ候補は、それが読みそのものでも明示選択として扱う
-        match crate::engine::state::learn_action(&reading, &text, candidate_source, true) {
-            crate::engine::state::LearnAction::LearnForce => engine.learn_force(&reading, &text),
-            crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
-            crate::engine::state::LearnAction::Skip => {}
-        }
+        let action = crate::engine::state::learn_action(&reading, &text, candidate_source, true);
         candidate_window::hide();
         let confirmed = format!("{prefix}{commit_text}");
         if !remainder_reading.is_empty() {
             // remainder がある → 確定部分を commit し、残りで LiveConv 再開
+            // （部分確定は段 5 の後の段で確定トランザクションに移す。それまでは今の順）
+            match action {
+                crate::engine::state::LearnAction::LearnForce => {
+                    engine.learn_force(&reading, &text)
+                }
+                crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
+                crate::engine::state::LearnAction::Skip => {}
+            }
             engine.commit(&confirmed);
             engine.reset_preedit();
             for c in remainder_reading.chars() {
@@ -375,10 +387,22 @@ impl super::TextServiceFactory_Impl {
                 kanji_ready: true,
                 result: full_text.clone(),
             });
-            engine.commit(&full_text);
-            engine.reset_preedit();
             drop(guard);
-            end_composition(ctx, tid, full_text)?;
+            commit_full(
+                ctx,
+                tid,
+                full_text,
+                CommitEffects {
+                    learn: Some(LearnPlan {
+                        reading,
+                        surface: text,
+                        action,
+                    }),
+                    context: true,
+                    reset_preedit: true,
+                    ..Default::default()
+                },
+            )?;
         }
         Ok(true)
     }
@@ -441,16 +465,23 @@ impl super::TextServiceFactory_Impl {
             preedit,
             from_session
         );
-        engine.bg_reclaim();
-        engine.commit(&preedit.clone());
-        engine.reset_preedit();
         drop(guard);
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
         }
         candidate_window::hide();
         candidate_window::stop_live_timer();
-        end_composition(ctx.clone(), tid, preedit)
+        commit_full(
+            ctx.clone(),
+            tid,
+            preedit,
+            CommitEffects {
+                bg_reclaim: true,
+                learn: None,
+                context: true,
+                reset_preedit: true,
+            },
+        )
     }
 
     /// IME オン/オフ切替の共通経路（キー操作・言語バーメニュー）。

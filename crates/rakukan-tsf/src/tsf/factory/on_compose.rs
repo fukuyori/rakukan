@@ -748,6 +748,179 @@ pub(super) fn update_caret_rect(ctx: ITfContext, tid: u32) {
     }
 }
 
+/// range の文字列を読む（入力処理の見直しの段 5）。読めなければ `None`。
+///
+/// 確定に失敗したときに元の文字列へ戻すため、書き換える前に読んでおく。
+unsafe fn range_text(
+    ec: u32,
+    range: &windows::Win32::UI::TextServices::ITfRange,
+) -> Option<String> {
+    let range = unsafe { range.Clone() }.ok()?;
+    let mut text: Vec<u16> = Vec::new();
+    let mut buf = [0u16; 256];
+    loop {
+        let mut got: u32 = 0;
+        // TF_TF_MOVESTART: 読んだ分だけ（複製した）range の先頭を進める
+        unsafe {
+            range
+                .GetText(
+                    ec,
+                    windows::Win32::UI::TextServices::TF_TF_MOVESTART,
+                    &mut buf,
+                    &mut got,
+                )
+                .ok()?
+        };
+        if got == 0 {
+            break;
+        }
+        text.extend_from_slice(&buf[..got as usize]);
+        if (got as usize) < buf.len() {
+            break;
+        }
+    }
+    String::from_utf16(&text).ok()
+}
+
+/// composition 全体を `text` で確定し、文書の結果を見てからホストへの後処理を送る
+/// （入力処理の見直しの段 5、設計書 4.6）。
+///
+/// 文書の操作は `end_composition` と同じ（`text` に SetText してから EndComposition）。
+/// 違いは次の 2 点:
+/// - ホストへの後処理（`effects`: BG の回収・学習・文脈・編集状態を閉じる）は、
+///   EditSession の後で送る。呼び出し側は、これらを先に送らない。
+/// - 確定した文字列を記録し、文脈にはそれを使う。学習は、それが `text` と同じときだけ。
+///   確定に失敗したとき・確定した文字列が分からないときは、学習と文脈を送らない
+///   （composition は今までどおり手放し、BG の回収と編集状態を閉じる処理は送る）。
+///
+/// EditSession が後で実行される場合は、後処理をその場で送る（commit_txn の
+/// `send_early_if_pending`。確定を待つ間のキーを保留する仕組みが入るまでの扱い）。
+pub(super) fn commit_full(
+    ctx: ITfContext,
+    tid: u32,
+    text: String,
+    effects: crate::tsf::commit_txn::CommitEffects,
+) -> Result<()> {
+    use crate::tsf::commit_txn::{DocResult, ReqState};
+    use windows::Win32::Foundation::E_FAIL;
+    use windows::Win32::UI::TextServices::{
+        TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
+    };
+    crate::tsf::live_session::conv_gen_bump();
+    let cell = crate::tsf::commit_txn::begin(text.clone(), effects);
+    let session_cell = cell.clone();
+    let ctx2 = ctx.clone();
+    let session = EditSession::new(move |ec| unsafe {
+        {
+            let mut state = session_cell.borrow_mut();
+            if *state != ReqState::Pending {
+                return Ok(());
+            }
+            *state = ReqState::Running;
+        }
+        let finish = |result: DocResult| {
+            *session_cell.borrow_mut() = ReqState::Done(result);
+            crate::tsf::candidate_window::post_commit_done();
+        };
+        let _apply_guard = crate::engine::state::COMPOSITION_APPLY_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let comp = composition_take().unwrap_or(None);
+        let text_w: Vec<u16> = text.encode_utf16().collect();
+        let Some(comp) = comp else {
+            tracing::debug!("commit_full: no composition, inserting text directly");
+            if text.is_empty() {
+                finish(DocResult::Committed {
+                    text: String::new(),
+                });
+                return Ok(());
+            }
+            let inserted = get_insert_range_or_end(&ctx2, ec, "commit_full direct insert")
+                .and_then(|insert| insert.SetText(ec, 0, &text_w));
+            match inserted {
+                Ok(()) => finish(DocResult::Committed { text: text.clone() }),
+                Err(e) => {
+                    tracing::warn!("commit_full: direct insert failed text={text:?}: {e}");
+                    finish(DocResult::Failed("direct insert"));
+                }
+            }
+            return Ok(());
+        };
+        tracing::debug!("commit_full[session]: text={:?}", text);
+        let range = match comp.GetRange() {
+            Ok(range) => range,
+            Err(e) => {
+                tracing::warn!("commit_full: GetRange failed text={text:?}: {e}");
+                finish(DocResult::Failed("GetRange"));
+                return Err(windows::core::Error::new(E_FAIL, format!("GetRange: {e}")));
+            }
+        };
+        // 置き換えに失敗したときに確定する文字列（表示中の文字列）を知るため、先に読む
+        let original = range_text(ec, &range);
+        let mut committed = Some(text.clone());
+        if let Err(e) = range.SetText(ec, 0, &text_w) {
+            // 0x80040209 は TS_E_READONLY（end_composition と同じ。1 回だけ再試行）
+            if let Err(e2) = range.SetText(ec, 0, &text_w) {
+                let app = std::env::current_exe()
+                    .ok()
+                    .and_then(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .unwrap_or_default();
+                tracing::warn!(
+                    "commit_full: SetText failed text={text:?} app={app:?}: {e} / retry: {e2}"
+                );
+                // 置き換えられなくても EndComposition まで進め、表示中の文字列を確定する
+                // （end_composition と同じ）。確定した文字列は読めた元の文字列（読めて
+                // いなければ分からない）
+                committed = original.clone();
+            }
+        }
+        if let Ok(cursor) = range.Clone() {
+            let _ = cursor.Collapse(ec, TF_ANCHOR_END);
+            let sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(cursor)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            };
+            let _ = ctx2.SetSelection(ec, &[sel]);
+        }
+        if let Err(e) = comp.EndComposition(ec) {
+            tracing::warn!("commit_full: EndComposition failed text={text:?}: {e}");
+            // composition は今までどおり手放す
+            finish(DocResult::Failed("EndComposition"));
+            return Err(windows::core::Error::new(
+                E_FAIL,
+                format!("EndComposition: {e}"),
+            ));
+        }
+        finish(match committed {
+            Some(text) => DocResult::Committed { text },
+            None => DocResult::CommittedUnknown,
+        });
+        Ok(())
+    });
+    unsafe {
+        match ctx.RequestEditSession(tid, &session, TF_ES_READWRITE) {
+            Ok(hr) if hr == windows::Win32::UI::TextServices::TF_S_ASYNC => {}
+            Ok(hr) if hr.is_err() => {
+                tracing::warn!("commit_full: edit session failed hr={hr:?}");
+                crate::tsf::commit_txn::mark_not_run(&cell, "edit session refused");
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!("commit_full: RequestEditSession failed: {e}");
+                crate::tsf::commit_txn::mark_not_run(&cell, "request failed");
+            }
+        }
+    }
+    // 後で実行される場合は、後処理をここで先に送る（結果は WM_APP_COMMIT_DONE で記録だけ）
+    crate::tsf::commit_txn::send_early_if_pending(&cell);
+    // 同期で実行されていれば、ここで後処理する
+    crate::tsf::commit_txn::finish_completed();
+    Ok(())
+}
+
 pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result<()> {
     use windows::Win32::Foundation::E_FAIL;
     use windows::Win32::UI::TextServices::{

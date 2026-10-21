@@ -93,9 +93,9 @@ mod on_compose;
 mod on_convert;
 mod on_input;
 use on_compose::{
-    commit_text, commit_then_start_composition, end_composition, get_caret_pos_from_context,
-    update_caret_rect, update_composition, update_composition_candidate_parts,
-    update_composition_range_select,
+    commit_full, commit_text, commit_then_start_composition, end_composition,
+    get_caret_pos_from_context, update_caret_rect, update_composition,
+    update_composition_candidate_parts, update_composition_range_select,
 };
 
 const ID_MENU_IME_ON: u32 = 1;
@@ -1014,11 +1014,7 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
             .as_mut()
             .ok_or_else(|| anyhow::anyhow!("engine_commit_hiragana: engine is None"))?;
         let p = engine.preedit_display()?;
-        if !p.is_empty() {
-            engine.bg_reclaim();
-            engine.commit(&p);
-            engine.reset_preedit();
-        }
+        // BG の回収・文脈・編集状態を閉じるのは、文書を確定できてから（commit_full。段 5）
         // 選択待機状態もクリア
         if let Ok(mut sess) = session_get()
             && (sess.is_waiting() || sess.is_selecting())
@@ -1031,7 +1027,17 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
         return Ok(());
     }
     tracing::debug!("engine_commit_hiragana: committing preedit={preedit:?}");
-    end_composition(ctx, tid, preedit)
+    commit_full(
+        ctx,
+        tid,
+        preedit,
+        crate::tsf::commit_txn::CommitEffects {
+            bg_reclaim: true,
+            learn: None,
+            context: true,
+            reset_preedit: true,
+        },
+    )
 }
 
 /// 同期変換 + 辞書マージ。

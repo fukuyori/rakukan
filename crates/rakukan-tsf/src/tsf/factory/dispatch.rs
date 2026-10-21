@@ -24,6 +24,9 @@ impl super::TextServiceFactory_Impl {
         tid: u32,
         sink: ITfCompositionSink,
     ) -> Result<bool> {
+        // 結果が出たまま後処理されていない確定があれば、先に後処理する（入力処理の見直しの
+        // 段 5。通常は WM_APP_COMMIT_DONE で済んでいる。メッセージを送れなかった場合の保険）
+        crate::tsf::commit_txn::finish_completed();
         let mut guard = engine_try_get_or_create()?;
         // 所有権を復元してよいのは、フォーカス中の生存している文脈へのキー入力だけ。
         let focused_dm = (|| {

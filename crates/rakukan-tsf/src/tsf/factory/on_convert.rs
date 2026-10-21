@@ -14,9 +14,11 @@ use crate::engine::state::{
 use crate::tsf::candidate_window;
 
 use super::{
-    commit_text, commit_then_start_composition, end_composition, engine_convert_sync_multi,
-    update_caret_rect, update_composition, update_composition_candidate_parts,
+    commit_full, commit_text, commit_then_start_composition, end_composition,
+    engine_convert_sync_multi, update_caret_rect, update_composition,
+    update_composition_candidate_parts,
 };
+use crate::tsf::commit_txn::{CommitEffects, LearnPlan};
 
 /// Convert 1 回ぶんの RPC 回数と合計時間を、どの経路で抜けても 1 行残す
 /// （Step 13-2、Issue #39）。
@@ -1737,21 +1739,29 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 let (preview, unconverged) = catch_up_live_preview(engine, &reading, preview);
-                match crate::engine::state::learn_live_action(&reading, &preview, unconverged) {
-                    crate::engine::state::LearnAction::Learn => engine.learn(&reading, &preview),
-                    crate::engine::state::LearnAction::LearnForce => {
-                        engine.learn_force(&reading, &preview)
-                    }
-                    crate::engine::state::LearnAction::Skip => {}
-                }
-                engine.commit(&preview);
-                engine.reset_preedit();
+                let action =
+                    crate::engine::state::learn_live_action(&reading, &preview, unconverged);
                 drop(guard);
                 tracing::info!("[Live] on_commit_raw[LiveConv]: commit {:?}", preview);
                 diag::event(DiagEvent::CommitRaw {
                     preedit: preview.clone(),
                 });
-                end_composition(ctx, tid, preview)?;
+                // 学習・文脈・編集状態を閉じるのは、文書を確定できてから（段 5）
+                commit_full(
+                    ctx,
+                    tid,
+                    preview.clone(),
+                    CommitEffects {
+                        bg_reclaim: false,
+                        learn: Some(LearnPlan {
+                            reading,
+                            surface: preview,
+                            action,
+                        }),
+                        context: true,
+                        reset_preedit: true,
+                    },
+                )?;
                 return Ok(true);
             }
             // ── RangeSelect: 選択範囲をひらがなのまま確定、残りで LiveConv 再開 ──
@@ -1765,10 +1775,17 @@ impl super::TextServiceFactory_Impl {
                     sess.set_idle();
                     drop(sess);
                     candidate_window::hide();
-                    engine.commit(&selected);
-                    engine.reset_preedit();
                     drop(guard);
-                    end_composition(ctx, tid, selected)?;
+                    commit_full(
+                        ctx,
+                        tid,
+                        selected,
+                        CommitEffects {
+                            context: true,
+                            reset_preedit: true,
+                            ..Default::default()
+                        },
+                    )?;
                     return Ok(true);
                 }
                 // 部分確定 → 残りで LiveConv 再開
@@ -1809,20 +1826,30 @@ impl super::TextServiceFactory_Impl {
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
-                if crate::engine::state::is_auto_learn_enabled()
+                let learn = (crate::engine::state::is_auto_learn_enabled()
                     && full_text != full_reading
-                    && !full_reading.is_empty()
-                {
-                    engine.learn(&full_reading, &full_text);
-                }
-                engine.commit(&full_text);
-                engine.reset_preedit();
+                    && !full_reading.is_empty())
+                .then(|| LearnPlan {
+                    reading: full_reading,
+                    surface: full_text.clone(),
+                    action: crate::engine::state::LearnAction::Learn,
+                });
                 drop(guard);
                 tracing::info!("on_commit_raw[BlockSelecting]: commit full={:?}", full_text);
                 diag::event(DiagEvent::CommitRaw {
                     preedit: full_text.clone(),
                 });
-                end_composition(ctx, tid, full_text)?;
+                commit_full(
+                    ctx,
+                    tid,
+                    full_text,
+                    CommitEffects {
+                        learn,
+                        context: true,
+                        reset_preedit: true,
+                        ..Default::default()
+                    },
+                )?;
                 return Ok(true);
             }
             // ── Waiting（⏳変換中）: ひらがなのままコミット ──
@@ -1831,12 +1858,19 @@ impl super::TextServiceFactory_Impl {
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
-                engine.bg_reclaim();
-                engine.commit(&text);
-                engine.reset_preedit();
                 drop(guard);
                 tracing::info!("on_commit_raw[Waiting]: commit {:?}", text);
-                end_composition(ctx, tid, text)?;
+                commit_full(
+                    ctx,
+                    tid,
+                    text,
+                    CommitEffects {
+                        bg_reclaim: true,
+                        learn: None,
+                        context: true,
+                        reset_preedit: true,
+                    },
+                )?;
                 return Ok(true);
             }
             // ── Selecting ──
@@ -1860,23 +1894,25 @@ impl super::TextServiceFactory_Impl {
                 } else {
                     text.clone()
                 };
-                match crate::engine::state::learn_action(
+                let action = crate::engine::state::learn_action(
                     &reading,
                     &text,
                     candidate_source,
                     explicit_pick,
-                ) {
-                    crate::engine::state::LearnAction::LearnForce => {
-                        engine.learn_force(&reading, &text)
-                    }
-                    crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
-                    crate::engine::state::LearnAction::Skip => {}
-                }
+                );
                 candidate_window::hide();
                 candidate_window::stop_live_timer();
                 let confirmed = format!("{prefix}{commit_text}");
                 if !remainder_reading.is_empty() {
                     // remainder がある → 確定部分を commit し、残りで LiveConv 再開
+                    // （部分確定は段 5 の後の段で確定トランザクションに移す。それまでは今の順）
+                    match action {
+                        crate::engine::state::LearnAction::LearnForce => {
+                            engine.learn_force(&reading, &text)
+                        }
+                        crate::engine::state::LearnAction::Learn => engine.learn(&reading, &text),
+                        crate::engine::state::LearnAction::Skip => {}
+                    }
                     engine.commit(&confirmed);
                     engine.reset_preedit();
                     for c in remainder_reading.chars() {
@@ -1893,13 +1929,26 @@ impl super::TextServiceFactory_Impl {
                     commit_then_start_composition(ctx, tid, sink, confirmed, preedit)?;
                 } else {
                     let full_text = format!("{confirmed}{remainder}");
-                    engine.commit(&full_text);
-                    engine.reset_preedit();
                     drop(guard);
                     diag::event(DiagEvent::CommitRaw {
                         preedit: full_text.clone(),
                     });
-                    end_composition(ctx, tid, full_text)?;
+                    // 学習は、確定した文字列が計画どおり（候補・句読点・残りを含む全体）のときだけ
+                    commit_full(
+                        ctx,
+                        tid,
+                        full_text,
+                        CommitEffects {
+                            learn: Some(LearnPlan {
+                                reading,
+                                surface: text,
+                                action,
+                            }),
+                            context: true,
+                            reset_preedit: true,
+                            ..Default::default()
+                        },
+                    )?;
                 }
                 return Ok(true);
             }
@@ -1935,11 +1984,18 @@ impl super::TextServiceFactory_Impl {
         diag::event(DiagEvent::CommitRaw {
             preedit: preedit.clone(),
         });
-        engine.bg_reclaim();
-        engine.commit(&preedit.clone());
-        engine.reset_preedit();
         drop(guard);
-        end_composition(ctx, tid, preedit)?;
+        commit_full(
+            ctx,
+            tid,
+            preedit,
+            CommitEffects {
+                bg_reclaim: true,
+                learn: None,
+                context: true,
+                reset_preedit: true,
+            },
+        )?;
         Ok(true)
     }
 

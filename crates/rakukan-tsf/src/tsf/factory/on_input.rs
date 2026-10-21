@@ -15,7 +15,7 @@ use crate::engine::text_util;
 use crate::tsf::candidate_window;
 
 use super::{
-    commit_text, commit_then_start_composition, end_composition, loading_indicator_symbol,
+    commit_full, commit_text, commit_then_start_composition, loading_indicator_symbol,
     update_composition,
 };
 
@@ -509,10 +509,17 @@ impl super::TextServiceFactory_Impl {
         };
         let preedit = engine.preedit_display()?;
         if !preedit.is_empty() {
-            engine.commit(&preedit.clone());
-            engine.reset_preedit();
             drop(guard);
-            end_composition(ctx.clone(), tid, preedit)?;
+            commit_full(
+                ctx.clone(),
+                tid,
+                preedit,
+                crate::tsf::commit_txn::CommitEffects {
+                    context: true,
+                    reset_preedit: true,
+                    ..Default::default()
+                },
+            )?;
         } else {
             drop(guard);
         }

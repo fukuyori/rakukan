@@ -3,6 +3,7 @@ pub mod factory;
 pub mod registration;
 
 pub(crate) mod candidate_window;
+pub(crate) mod commit_txn;
 pub(crate) mod display_attr;
 pub(crate) mod ime_sync;
 pub(crate) mod language_bar;
