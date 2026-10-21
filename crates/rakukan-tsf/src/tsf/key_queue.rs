@@ -82,6 +82,10 @@ thread_local! {
     static RESCUE_EXTRA: RefCell<Vec<ExtraChar>> = const { RefCell::new(Vec::new()) };
     /// 文字を入れる要求の失効の世代（Deactivate で進める）。取り出し中の要求にも届く。
     static RESCUE_EPOCH: Cell<u64> = const { Cell::new(0) };
+    /// 接続の確認（`host_probe`）への登録の番号（0 なら未登録）。
+    static WATCH_TOKEN: Cell<u64> = const { Cell::new(0) };
+    /// 処置の途中に接続の回復の通知を受けた（処置の終わりに読み直す。設計書 4.2 の W2）。
+    static LINK_UP_NOTED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// 処理中のキーを、確定の結果を待つために止める（読みの長さの上限で確定した場合など）。
@@ -299,13 +303,20 @@ pub(crate) fn pump() {
         let ate = factory.replay_key(action, vk, ctx, tid, sink, dm);
         IN_REPLAY.with(|r| r.set(false));
         if take_suspended() {
+            // ホストの版が違う（古いホストが動いている）なら、待っても回復しない
+            let version_mismatch = matches!(
+                rakukan_engine_rpc::host_link().state,
+                rakukan_engine_rpc::LinkState::Disconnected(
+                    rakukan_engine_rpc::DisconnectKind::VersionMismatch
+                )
+            );
+            if (kept.at.elapsed() >= MAX_AGE || version_mismatch) && engine_unavailable() {
+                // エンジンが使えないまま保持の上限を過ぎた（版の違いなら待たずに）: 回復
+                // できない場合の処置（列の文字キーを打った文字のまま入れ、直接入力に切り替える）
+                give_up(kept);
+                break;
+            }
             if kept.at.elapsed() >= MAX_AGE {
-                if engine_unavailable() {
-                    // エンジンが使えないまま保持の上限を過ぎた: 回復できない場合の処置
-                    // （列の文字キーを打った文字のまま入れ、直接入力に切り替える）
-                    give_up(kept);
-                    break;
-                }
                 // 保持の上限を過ぎても実行できない: 捨てて後のキーへ進む
                 tracing::warn!(
                     "key_queue: held key could not run within {MAX_AGE:?}; dropped seq={seq} vk={vk:#04x}"
@@ -373,7 +384,7 @@ const RESCUE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 回復できない場合の処置（入力処理の見直しの段 6、前提の決定 3-B）: 先頭の `first` と
 /// 列のキーのうち、文字キーを打った文字のまま、そのキーが届いた文書の選択位置へ入れる
 /// （同じ文書へ続く文字は 1 回で。届いた文書が破棄されていれば入れない。前提の決定 2）。
-/// 文字以外のキーは捨てる。その後、入れ終わり、エンジンが使えるようになるまで直接入力に
+/// 文字以外のキーは捨てる。その後、入れ終わり、接続の確認が成功するまで直接入力に
 /// する（[`direct_fallback`]）。入れた結果は [`pump`] で確かめる（[`check_rescues`]）。
 fn give_up(first: HeldKey) {
     let mut keys = vec![first];
@@ -399,6 +410,7 @@ fn give_up(first: HeldKey) {
     RESCUE_ACTIVE.with(|a| a.set(true));
     crate::tsf::factory::show_engine_waiting();
     crate::tsf::candidate_window::start_key_queue_timer();
+    watch_link();
     let epoch = RESCUE_EPOCH.with(|e| e.get());
     for (dm, ctx, tid, text) in batches {
         request_rescue(new_rescue(dm, ctx, tid, text), epoch);
@@ -550,12 +562,117 @@ fn check_rescues() {
         }
         if RESCUES.with(|r| r.borrow().is_empty()) && RESCUE_EXTRA.with(|e| e.borrow().is_empty()) {
             RESCUE_ACTIVE.with(|a| a.set(false));
+            rescue_finished();
         }
     }
 }
 
+/// 処置を終えた。途中で接続の回復の通知を受けていたら、今の接続の状態を読み直して
+/// 直接入力を外すか決める（通知の時点の値は使わない。設計書 4.2 の W2）。
+fn rescue_finished() {
+    if LINK_UP_NOTED.with(|n| n.replace(false))
+        && link_up_action(
+            DIRECT_FALLBACK.with(|d| d.get()),
+            false,
+            rakukan_engine_rpc::host_link(),
+            None,
+        ) == LinkUp::Release
+    {
+        end_direct_fallback();
+    }
+}
+
+/// 接続の回復の通知を受けたときの扱い。
+#[derive(Debug, PartialEq, Eq)]
+enum LinkUp {
+    /// 直接入力ではない（何もしない）。
+    Ignore,
+    /// 処置の途中: 外さず、通知を受けた印だけ残す。
+    Note,
+    /// 直接入力を外す。
+    Release,
+    /// 外さない（その間に切断した）。次の確認を待つ。
+    Keep,
+}
+
+/// `notified` は通知に付いていた接続の世代（処置の終わりに読み直すときは `None`）。
+/// 繋がっていて、通知の後に状態が変わっていない（世代が同じ）ときだけ外す。
+fn link_up_action(
+    fallback: bool,
+    rescuing: bool,
+    link: rakukan_engine_rpc::HostLink,
+    notified: Option<u64>,
+) -> LinkUp {
+    if !fallback {
+        LinkUp::Ignore
+    } else if rescuing {
+        LinkUp::Note
+    } else if link.state == rakukan_engine_rpc::LinkState::Connected
+        && notified.is_none_or(|e| e == link.epoch)
+    {
+        LinkUp::Release
+    } else {
+        LinkUp::Keep
+    }
+}
+
+/// 接続の確認が成功した（`WM_APP_LINK_UP`。`epoch` は確認の時点の接続の世代、`token` は
+/// 通知の宛先の登録の番号）。今の登録への通知でなければ捨てる。
+pub(crate) fn on_link_up(epoch: u64, token: u64) {
+    if token == 0 || WATCH_TOKEN.with(|w| w.get()) != token {
+        tracing::debug!("key_queue: link-up notice for another registration ({token}); ignored");
+        return;
+    }
+    match link_up_action(
+        DIRECT_FALLBACK.with(|d| d.get()),
+        rescue_active(),
+        rakukan_engine_rpc::host_link(),
+        Some(epoch),
+    ) {
+        LinkUp::Ignore => unwatch_link(),
+        LinkUp::Note => LINK_UP_NOTED.with(|n| n.set(true)),
+        LinkUp::Release => end_direct_fallback(),
+        LinkUp::Keep => {
+            tracing::debug!(
+                "key_queue: link-up notice is stale (epoch {epoch}); still direct input"
+            );
+        }
+    }
+}
+
+/// このスレッドの窓を接続の確認に登録する。登録できなければ `false`。
+fn watch_link() -> bool {
+    if WATCH_TOKEN.with(|w| w.get()) != 0 {
+        return true;
+    }
+    let hwnd = crate::tsf::candidate_window::link_notify_hwnd();
+    if hwnd == 0 {
+        return false;
+    }
+    let Some(token) = crate::engine::host_probe::watch(hwnd) else {
+        return false;
+    };
+    WATCH_TOKEN.with(|w| w.set(token));
+    true
+}
+
+fn unwatch_link() {
+    let token = WATCH_TOKEN.with(|w| w.replace(0));
+    if token != 0 {
+        crate::engine::host_probe::unwatch(token);
+    }
+}
+
+fn end_direct_fallback() {
+    DIRECT_FALLBACK.with(|d| d.set(false));
+    LINK_UP_NOTED.with(|n| n.set(false));
+    unwatch_link();
+    crate::tsf::mode_indicator::hide();
+    tracing::info!("key_queue: host is back; direct input ended");
+}
+
 /// 直接入力（回復できない場合の処置の後）。IME のモードキー以外はアプリへ渡す。文字を
-/// 入れ終わり、エンジンが使えるようになったら外す（キーの入口で確かめる）。直接入力の
+/// 入れ終わり、接続の確認（`host_probe`）が成功したら外す（[`on_link_up`]）。直接入力の
 /// 間なら `true`。
 pub(crate) fn direct_fallback() -> bool {
     if !DIRECT_FALLBACK.with(|d| d.get()) {
@@ -564,10 +681,14 @@ pub(crate) fn direct_fallback() -> bool {
     if rescue_active() {
         return true;
     }
-    // エンジンを取れれば外す（取れなければ、初期化をもう一度促す）
+    // 確認に登録する（Deactivate で外した後の Activate でも、ここで登録し直す）
+    if watch_link() {
+        return true;
+    }
+    // 確認を使えない（窓・スレッドを作れない）: キーの入口でエンジンを取れれば外す
+    // （取れなければ、初期化をもう一度促す）
     if crate::engine::state::engine_try_get_or_create().is_ok() {
-        DIRECT_FALLBACK.with(|d| d.set(false));
-        tracing::info!("key_queue: engine is back; direct input ended");
+        end_direct_fallback();
         return false;
     }
     true
@@ -597,6 +718,9 @@ pub(crate) fn discard_all(reason: &str) -> usize {
         unrescued(&text, reason);
     }
     RESCUE_ACTIVE.with(|a| a.set(false));
+    rescue_finished();
+    // 窓はこの後に壊すので、確認の登録を外す（直接入力のままなら、次のキーで登録し直す）
+    unwatch_link();
     let dropped = QUEUE.with(|q| q.borrow_mut().drain(..).count());
     if dropped > 0 {
         tracing::warn!("key_queue: {dropped} held key(s) dropped ({reason})");
@@ -672,6 +796,32 @@ mod tests {
             .map(|(dm, _, _, text)| (dm, text))
             .collect();
         assert_eq!(batches, vec![(1, "abc".to_string()), (2, "x".to_string())]);
+    }
+
+    fn link(state: rakukan_engine_rpc::LinkState, epoch: u64) -> rakukan_engine_rpc::HostLink {
+        rakukan_engine_rpc::HostLink { state, epoch }
+    }
+
+    #[test]
+    fn direct_input_ends_only_on_a_current_link_up_after_the_rescue() {
+        use rakukan_engine_rpc::{DisconnectKind, LinkState};
+        let up = link(LinkState::Connected, 4);
+        let down = link(LinkState::Disconnected(DisconnectKind::Other), 5);
+        // 直接入力でなければ何もしない
+        assert_eq!(link_up_action(false, false, up, Some(4)), LinkUp::Ignore);
+        // 処置の途中: 外さず印を残す（W2）
+        assert_eq!(link_up_action(true, true, up, Some(4)), LinkUp::Note);
+        // 通知の世代のまま繋がっている: 外す
+        assert_eq!(link_up_action(true, false, up, Some(4)), LinkUp::Release);
+        // 通知の後に切断した（または繋ぎ直した）: 外さない
+        assert_eq!(link_up_action(true, false, down, Some(4)), LinkUp::Keep);
+        assert_eq!(
+            link_up_action(true, false, link(LinkState::Connected, 6), Some(4)),
+            LinkUp::Keep
+        );
+        // 処置の終わりに読み直す: そのときの状態だけで決める
+        assert_eq!(link_up_action(true, false, up, None), LinkUp::Release);
+        assert_eq!(link_up_action(true, false, down, None), LinkUp::Keep);
     }
 
     #[test]

@@ -3,6 +3,7 @@ pub(super) mod composition;
 pub(crate) mod config;
 pub(super) mod config_watch;
 pub(crate) mod dm_registry;
+pub(crate) mod host_probe;
 pub(super) mod ime_mode;
 pub(super) mod keymap;
 pub(super) mod state;

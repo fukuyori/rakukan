@@ -170,6 +170,114 @@ pub fn tsf_id() -> TsfId {
     REQUEST_LEDGER.tsf_id
 }
 
+/// TSF プロセスで 1 つのホストとの接続の状態（入力処理の見直しの段 6、設計書 4.2 の
+/// `HostLink`）。`RpcEngine` は作り直されるので、プロセスの static に置く。
+static HOST_LINK: LazyLock<Arc<LinkCell>> = LazyLock::new(|| Arc::new(LinkCell::default()));
+
+/// ホストとの接続の状態（[`host_link`]）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkState {
+    /// まだ繋いでいない。
+    Unknown,
+    /// 直近の接続・RPC が成功した。
+    Connected,
+    /// 直近の接続・RPC が失敗した。
+    Disconnected(DisconnectKind),
+}
+
+/// 接続の失敗の分類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisconnectKind {
+    /// ホストのプロトコルの版が違う（古いホストが動いている）。待っても回復しない。
+    VersionMismatch,
+    /// それ以外（接続・起動・応答の失敗）。
+    Other,
+}
+
+/// ホストとの接続の状態と、その世代。世代は状態が変わるたびに進む。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostLink {
+    pub state: LinkState,
+    pub epoch: u64,
+}
+
+/// 今のホストとの接続の状態（入力処理の見直しの段 6）。接続と RPC の成否で更新される。
+pub fn host_link() -> HostLink {
+    HOST_LINK.get()
+}
+
+#[derive(Debug)]
+pub(crate) struct LinkCell(Mutex<HostLink>);
+
+impl Default for LinkCell {
+    fn default() -> Self {
+        Self(Mutex::new(HostLink {
+            state: LinkState::Unknown,
+            epoch: 0,
+        }))
+    }
+}
+
+impl LinkCell {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HostLink> {
+        match self.0.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    pub(crate) fn get(&self) -> HostLink {
+        *self.lock()
+    }
+
+    /// 接続・RPC の結果を記録する。状態が変わったときだけ世代を進める。
+    fn note(&self, result: std::result::Result<(), &anyhow::Error>) {
+        self.set(match result {
+            Ok(()) => LinkState::Connected,
+            Err(e) if is_version_mismatch(e) => {
+                LinkState::Disconnected(DisconnectKind::VersionMismatch)
+            }
+            Err(_) => LinkState::Disconnected(DisconnectKind::Other),
+        });
+    }
+
+    /// 接続を捨てた（通信の失敗・ホストの終了）。
+    fn note_lost(&self) {
+        self.set(LinkState::Disconnected(DisconnectKind::Other));
+    }
+
+    fn set(&self, state: LinkState) {
+        let mut link = self.lock();
+        if link.state != state {
+            tracing::info!(
+                "host link: {:?} -> {state:?} (epoch {})",
+                link.state,
+                link.epoch + 1
+            );
+            link.state = state;
+            link.epoch += 1;
+        }
+    }
+}
+
+/// `Hello` でホストのプロトコルの版が違った。
+#[derive(Debug)]
+pub(crate) struct ProtocolMismatch {
+    server: u32,
+}
+
+impl std::fmt::Display for ProtocolMismatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "protocol version mismatch: server={}", self.server)
+    }
+}
+
+impl std::error::Error for ProtocolMismatch {}
+
+fn is_version_mismatch(e: &anyhow::Error) -> bool {
+    e.chain().any(|c| c.is::<ProtocolMismatch>())
+}
+
 pub struct RpcEngine {
     inner: Mutex<Connection<PipeTransport>>,
 }
@@ -471,6 +579,8 @@ struct Connection<T: HostTransport> {
     host_id: Option<HostId>,
     /// 直近に知ったエンジンの世代（`Hello` か `Restored`）。
     engine_gen: Option<EngineGen>,
+    /// ホストとの接続の状態。本番はプロセスで 1 つ（`HOST_LINK`）、テストは個別。
+    link: Arc<LinkCell>,
 }
 
 /// `Hello` の応答から取り出す値。
@@ -600,6 +710,7 @@ impl RpcEngine {
             config_json,
             HOST_SPAWN_GUARD.clone(),
             REQUEST_LEDGER.clone(),
+            HOST_LINK.clone(),
         );
         conn.ensure_connected()?;
         Ok(Self {
@@ -615,6 +726,7 @@ impl RpcEngine {
             None,
             HOST_SPAWN_GUARD.clone(),
             REQUEST_LEDGER.clone(),
+            HOST_LINK.clone(),
         );
         conn.config_source = Some(source);
         conn.ensure_connected()?;
@@ -946,6 +1058,13 @@ impl RpcEngine {
             .unwrap_or_else(|_| crate::health::Health::Ok.as_str().to_string())
     }
 
+    /// 接続の確認（入力処理の見直しの段 6、設計書 4.2 の `probe()`）。`EngineHealth` を送り、
+    /// 応答を受け取れたら成功（ホストの健全性の値を返す）。`engine_health` と違い、通信の
+    /// 失敗（`Hello` の版の照合を含む）を隠さない。結果は [`host_link`] にも残る。
+    pub fn probe(&self) -> Result<String> {
+        self.call_string(Request::EngineHealth)
+    }
+
     pub fn dict_status(&self) -> String {
         self.call_string(Request::DictStatus).unwrap_or_default()
     }
@@ -957,6 +1076,7 @@ impl<T: HostTransport> Connection<T> {
         config_json: Option<String>,
         guard: Arc<Mutex<HostSpawnGuard>>,
         ledger: Arc<RequestLedger>,
+        link: Arc<LinkCell>,
     ) -> Self {
         Self {
             transport,
@@ -968,6 +1088,7 @@ impl<T: HostTransport> Connection<T> {
             ledger,
             host_id: None,
             engine_gen: None,
+            link,
         }
     }
 
@@ -991,7 +1112,7 @@ impl<T: HostTransport> Connection<T> {
         match result {
             Ok(Response::ShutdownAccepted) => {
                 // サーバは応答後に exit する。既存接続はもう使えない。
-                self.stream = None;
+                self.drop_stream();
                 tracing::info!("rpc: Shutdown acknowledged by host");
                 Ok(ShutdownOutcome::Acknowledged)
             }
@@ -1002,17 +1123,17 @@ impl<T: HostTransport> Connection<T> {
                 Ok(ShutdownOutcome::Skipped)
             }
             Ok(Response::Error(e)) => {
-                self.stream = None;
+                self.drop_stream();
                 bail!("shutdown error: {e}")
             }
             Ok(other) => {
-                self.stream = None;
+                self.drop_stream();
                 bail!("unexpected shutdown response: {:?}", other)
             }
             Err(e) => {
                 // 応答を読む前に相手が exit した可能性が高い。警告にとどめ、エラーにはしない。
                 // ただし「終了応答を受けた」とは区別する。
-                self.stream = None;
+                self.drop_stream();
                 tracing::warn!("rpc: shutdown call failed (likely host exited early): {e}");
                 Ok(ShutdownOutcome::NoResponse)
             }
@@ -1036,7 +1157,7 @@ impl<T: HostTransport> Connection<T> {
         match result {
             Ok(Response::Bool(true)) => {
                 // ホストは応答後に exit する。既存接続はもう使えない。
-                self.stream = None;
+                self.drop_stream();
                 tracing::info!("rpc: ShutdownIfConfigDiffers: host restarting (config differs)");
                 Ok(ConditionalShutdown::Restarting)
             }
@@ -1054,7 +1175,7 @@ impl<T: HostTransport> Connection<T> {
             ),
             Err(e) => {
                 // 旧ホスト（variant 未知でデコード失敗→切断）や half-dead ホスト。
-                self.stream = None;
+                self.drop_stream();
                 Err(e)
             }
         }
@@ -1237,6 +1358,7 @@ impl<T: HostTransport> Connection<T> {
         let label = crate::server::request_label(&req);
         let started = Instant::now();
         let result = self.call_with_retry_inner(req);
+        self.link.note(result.as_ref().map(|_| ()));
         let elapsed_us = started.elapsed().as_micros() as u64;
         rpc_stats_record(elapsed_us);
         if let Some(threshold) = rpc_slow_threshold_ms(label)
@@ -1260,14 +1382,14 @@ impl<T: HostTransport> Connection<T> {
             let stream = self.stream.as_mut().expect("just ensured");
             if let Err(e) = write_frame(stream, &req) {
                 tracing::debug!("rpc write failed, reconnecting: {e}");
-                self.stream = None;
+                self.drop_stream();
                 continue;
             }
             match read_frame::<_, Response>(stream) {
                 Ok(r) => return Ok(r),
                 Err(e) => {
                     tracing::debug!("rpc read failed, reconnecting: {e}");
-                    self.stream = None;
+                    self.drop_stream();
                     continue;
                 }
             }
@@ -1289,10 +1411,25 @@ impl<T: HostTransport> Connection<T> {
     /// ただし、既に 2 回の失敗が窓の中に記録されていれば、この 1 回で閾値に達して
     /// 抑止に入る（その場合も 2 回目は抑止中の接続として既存ホストを試すので、
     /// ホストが起動していれば回復し、抑止も解ける）。
+    /// 接続を捨てる（通信の失敗・ホストの終了）。繋がっていた接続を捨てたときは、その
+    /// 時点で切断として記録する（再接続を待つ間も `Connected` のまま残さない。入力処理の
+    /// 見直しの段 6）。接続が無ければ記録しない（接続の試行が記録した理由を上書きしない）。
+    fn drop_stream(&mut self) {
+        if self.stream.take().is_some() {
+            self.link.note_lost();
+        }
+    }
+
     fn ensure_connected(&mut self) -> Result<()> {
         if self.stream.is_some() {
             return Ok(());
         }
+        let result = self.connect_with_one_retry();
+        self.link.note(result.as_ref().copied());
+        result
+    }
+
+    fn connect_with_one_retry(&mut self) -> Result<()> {
         if let Err(first_err) = self.try_connect_once() {
             tracing::warn!(
                 "ensure_connected: handshake failed ({first_err}); retrying after {RECONNECT_RETRY_DELAY_MS}ms"
@@ -1465,9 +1602,10 @@ impl<T: HostTransport> Connection<T> {
             }),
             Response::Hello {
                 protocol_version, ..
-            } => {
-                bail!("protocol version mismatch: server={protocol_version}")
+            } => Err(ProtocolMismatch {
+                server: protocol_version,
             }
+            .into()),
             Response::Error(e) => bail!("hello error: {e}"),
             other => bail!("unexpected hello response: {:?}", other),
         }
@@ -1951,6 +2089,7 @@ mod tests {
             None,
             Arc::new(Mutex::new(HostSpawnGuard::default())),
             Arc::new(RequestLedger::new(TsfId(0x75F))),
+            Arc::new(LinkCell::default()),
         )
     }
 
@@ -2123,6 +2262,104 @@ mod tests {
         assert!(conn.try_connect_once().is_ok());
         assert_eq!(guard_state(&conn), (0, None), "失敗を数えず、リセットする");
         assert!(conn.stream.is_some());
+    }
+
+    fn hello_with_version(protocol_version: u32) -> Response {
+        Response::Hello {
+            protocol_version,
+            host_id: HostId::default(),
+            engine_gen: None,
+            record_found: false,
+        }
+    }
+
+    #[test]
+    fn the_host_link_tells_a_version_mismatch_from_other_failures() {
+        let old = PROTOCOL_VERSION - 1;
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                // 古いホスト（再試行でも同じ）
+                Ok(stream_with(&[hello_with_version(old)])),
+                Ok(stream_with(&[hello_with_version(old)])),
+                // ホストが応えない（再試行でも同じ）
+                Err("no host"),
+                Err("no host"),
+                Err("no host"),
+                Err("no host"),
+                // 繋がる
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        assert_eq!(conn.link.get().state, LinkState::Unknown);
+
+        let err = conn.ensure_connected().expect_err("old host");
+        assert!(is_version_mismatch(&err), "{err:#}");
+        let first = conn.link.get();
+        assert_eq!(
+            first.state,
+            LinkState::Disconnected(DisconnectKind::VersionMismatch)
+        );
+        assert_eq!(first.epoch, 1);
+
+        conn.ensure_connected().expect_err("no host");
+        let second = conn.link.get();
+        assert_eq!(second.state, LinkState::Disconnected(DisconnectKind::Other));
+        assert_eq!(second.epoch, 2, "状態が変われば世代が進む");
+
+        conn.ensure_connected().expect("connects");
+        let third = conn.link.get();
+        assert_eq!(third.state, LinkState::Connected);
+        assert_eq!(third.epoch, 3);
+    }
+
+    #[test]
+    fn the_host_link_epoch_moves_only_when_the_state_changes() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[
+                hello_ok(),
+                Response::Unit,
+                Response::String("ok".into()),
+            ]))]),
+            ..Default::default()
+        });
+        conn.ensure_connected().expect("connects");
+        let connected = conn.link.get();
+        assert_eq!(connected.state, LinkState::Connected);
+        // 繋がったままの RPC の成功では進まない（通知の世代と照合できるように）
+        conn.call_with_retry(Request::EngineHealth).expect("health");
+        assert_eq!(conn.link.get(), connected);
+        // 応答が切れた（台本の終わり）: 再接続も失敗して切断になる
+        conn.call_with_retry(Request::EngineHealth)
+            .expect_err("no more responses");
+        let lost = conn.link.get();
+        assert_eq!(lost.state, LinkState::Disconnected(DisconnectKind::Other));
+        assert_eq!(lost.epoch, connected.epoch + 1);
+    }
+
+    #[test]
+    fn a_lost_stream_moves_the_epoch_even_when_the_retry_reconnects() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                // 繋がるが、最初の RPC の応答の前に切れる
+                Ok(stream_with(&[hello_ok(), Response::Unit])),
+                // 再接続して再送が成功する
+                Ok(stream_with(&[
+                    hello_ok(),
+                    Response::Unit,
+                    Response::String("ok".into()),
+                ])),
+            ]),
+            ..Default::default()
+        });
+        conn.ensure_connected().expect("connects");
+        let before = conn.link.get();
+        conn.call_with_retry(Request::EngineHealth)
+            .expect("retry succeeds");
+        let after = conn.link.get();
+        assert_eq!(after.state, LinkState::Connected);
+        // 切断（+1）と再接続（+1）を挟んだので、前の世代の通知とは照合しない
+        assert_eq!(after.epoch, before.epoch + 2);
     }
 
     #[test]
@@ -2732,6 +2969,34 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, ChangeError::Host(_)), "{err}");
         assert_eq!(conn.ledger.unresolved(), Some(pending));
+    }
+
+    #[test]
+    fn a_failed_shutdown_keeps_the_version_mismatch_found_while_connecting() {
+        let old = PROTOCOL_VERSION - 1;
+        let old_host = || FakeTransport {
+            connects: VecDeque::from([
+                Ok(stream_with(&[hello_with_version(old)])),
+                Ok(stream_with(&[hello_with_version(old)])),
+                Ok(stream_with(&[hello_with_version(old)])),
+                Ok(stream_with(&[hello_with_version(old)])),
+            ]),
+            ..Default::default()
+        };
+        let mismatch = LinkState::Disconnected(DisconnectKind::VersionMismatch);
+
+        let mut conn = connection(old_host());
+        // 接続できないので応答なし（エラーにはしない）
+        assert_eq!(conn.shutdown(None).unwrap(), ShutdownOutcome::NoResponse);
+        assert_eq!(conn.link.get().state, mismatch, "shutdown");
+
+        let mut conn = connection(old_host());
+        assert!(conn.shutdown_if_config_differs(None).is_err());
+        assert_eq!(
+            conn.link.get().state,
+            mismatch,
+            "shutdown_if_config_differs"
+        );
     }
 
     #[test]
