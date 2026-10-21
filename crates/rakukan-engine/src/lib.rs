@@ -724,6 +724,16 @@ impl RakunEngine {
     }
 
     pub fn push_char(&mut self, c: char) -> PreeditState {
+        self.push_char_inner(c);
+        self.current_preedit()
+    }
+
+    /// [`push_char`](Self::push_char) の本体。結果の写し（`current_preedit()`）を作らない。
+    ///
+    /// FFI とホストの journal の流し直しはこちらを使う（入力処理の見直し、設計書 4.3）。
+    /// 流し直しでは 1 回の要求で多数の文字を適用するので、文字ごとに読みと未確定ローマ字の
+    /// 写しを作ると処理量が読みの長さの 2 乗に比例する。
+    pub(crate) fn push_char_inner(&mut self, c: char) {
         // 数字と trie 外の ASCII 記号は pending を閉じてから経路 3・4 で扱う。
         // `,./[]\-` と英字は trie に委ねる（pending と結合しうるため）。
         if !self.pending_romaji_buf.is_empty() && !is_trie_input_char(c) {
@@ -741,7 +751,7 @@ impl RakunEngine {
             self.hiragana_buf.push(separator);
             self.log_push(c, separator, InputKind::Separator);
             trace!("engine::push: numeric separator {:?} → {:?}", c, separator);
-            return self.current_preedit();
+            return;
         }
 
         // 英字・記号後の `,` / `.` を Western 句読点 (， / ． or , / .) へ自動置換
@@ -760,7 +770,7 @@ impl RakunEngine {
                 "engine::push: alpha/symbol separator {:?} → {:?}",
                 c, separator
             );
-            return self.current_preedit();
+            return;
         }
 
         // 数字 0–9（pending_romaji がない場合のみ）
@@ -772,7 +782,7 @@ impl RakunEngine {
             self.hiragana_buf.push(out);
             self.log_push(c, out, InputKind::Digit);
             trace!("engine::push: digit {:?} → {:?}", c, out);
-            return self.current_preedit();
+            return;
         }
 
         // ASCII 記号の処理（pending_romaji がない場合のみ）
@@ -791,7 +801,7 @@ impl RakunEngine {
                 self.hiragana_buf.push(out);
                 self.log_push(c, out, InputKind::Symbol);
                 trace!("engine::push: symbol {:?} → {:?}", c, out);
-                return self.current_preedit();
+                return;
             }
         }
 
@@ -806,7 +816,6 @@ impl RakunEngine {
             trace!("engine::push: romaji {:?} → {:?}", entry, added);
             self.log_push(entry, added, InputKind::Romaji);
         }
-        self.current_preedit()
     }
 
     /// 末尾の未確定 "n" を「ん」として確定する（Convert / CommitRaw 前に呼ぶ）

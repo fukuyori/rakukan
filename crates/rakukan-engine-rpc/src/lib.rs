@@ -19,12 +19,13 @@ pub mod server;
 
 pub use client::{
     ChangeError, ChangeReply, ConditionalShutdown, ConfigSource, CreateConfig, ReadError,
-    RestoreReply, RpcEngine, ShutdownOutcome, rpc_stats_reset, rpc_stats_snapshot,
-    set_host_log_level, tsf_id,
+    RestoreJournalReply, RestoreReply, RpcEngine, ShutdownOutcome, rpc_stats_reset,
+    rpc_stats_snapshot, set_host_log_level, tsf_id,
 };
 pub use protocol::{
-    BgStartOutcome, BgTakeOutcome, BgView, ChangeKind, ChangeOutcome, ChangeRequest, ConfigVersion,
-    EditState, EngineGen, Expect, HostId, InputCharKind, Owner, PIPE_BASE_NAME, ReadRequest,
-    Reason, Request, RequestSeq, Response, TsfId, Unresolved,
+    BgStartOutcome, BgTakeOutcome, BgView, ChangeKind, ChangeOutcome, ChangeRequest, Checkpoint,
+    ConfigVersion, EditState, EffectResult, EngineGen, Expect, HostId, InputCharKind, Owner,
+    PIPE_BASE_NAME, ReadRequest, Reason, Replay, Request, RequestSeq, Response, SideEffect, TsfId,
+    Unresolved,
 };
 pub use rakukan_engine_abi::{Candidate, CandidateSource, Segment, Segments};

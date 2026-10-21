@@ -293,7 +293,7 @@ pub extern "C" fn engine_push_fullwidth_alpha(handle: *mut c_void, codepoint: u3
 pub extern "C" fn engine_push_char(handle: *mut c_void, codepoint: u32) -> u8 {
     let engine = unsafe { &mut *(handle as *mut RakunEngine) };
     if let Some(c) = char::from_u32(codepoint) {
-        engine.push_char(c);
+        engine.push_char_inner(c);
     }
     0
 }

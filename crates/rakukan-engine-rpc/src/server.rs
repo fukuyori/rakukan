@@ -13,7 +13,10 @@
 //! セッション間の hiragana_buf 等の汚染は TSF 側が既に `ResetAll` を
 //! フォーカス変化で呼ぶ前提でカバーする。
 
-use crate::protocol::{BgStartOutcome, BgTakeOutcome, BgView, EditState, ReadRequest};
+use crate::protocol::{
+    BgStartOutcome, BgTakeOutcome, BgView, Checkpoint, EditState, EffectResult, ReadRequest,
+    Replay, SideEffect,
+};
 use rakukan_engine_abi::BgSlot;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -683,6 +686,7 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         Change { .. } => "Change",
         Restore { .. } => "Restore",
         Read { .. } => "Read",
+        RestoreJournal { .. } => "RestoreJournal",
     }
 }
 
@@ -760,6 +764,22 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
             then,
             config_version: _,
         } => dispatch_restore(engine, session, owner, seq, reading, pending_romaji, then),
+        Request::RestoreJournal {
+            owner,
+            seq,
+            pre_effects,
+            journal,
+            checkpoint,
+            config_version: _,
+        } => dispatch_restore_journal(
+            engine,
+            session,
+            owner,
+            seq,
+            pre_effects,
+            journal,
+            checkpoint,
+        ),
         Request::Read { expect, request } => dispatch_read(engine, session, expect, request),
         // host_id はホストの不変フィールドなので、engine ロックを取らずに答えられる
         // （変換中でも応答できる）。
@@ -1020,6 +1040,246 @@ fn edit_state(eng: &DynEngine) -> EditState {
         pending_romaji: eng.pending_romaji(),
     }
 }
+
+// ─── v7: journal の流し直し（docs/Input_Pipeline_Plan.md 4.3）──────────────────
+
+/// journal の流し直しでエンジンに求める操作。試験で偽のエンジンに替えるために切り出す。
+trait JournalEngine {
+    fn reset_preedit(&mut self);
+    fn push_char(&mut self, c: char);
+    fn push_raw(&mut self, c: char);
+    fn push_fullwidth_alpha(&mut self, c: char);
+    fn backspace(&mut self);
+    fn flush_pending_n(&mut self);
+    fn force_preedit(&mut self, text: String);
+    fn reading(&self) -> String;
+    fn edit(&self) -> EditState;
+}
+
+impl JournalEngine for DynEngine {
+    fn reset_preedit(&mut self) {
+        DynEngine::reset_preedit(self);
+    }
+    fn push_char(&mut self, c: char) {
+        DynEngine::push_char(self, c);
+    }
+    fn push_raw(&mut self, c: char) {
+        DynEngine::push_raw(self, c);
+    }
+    fn push_fullwidth_alpha(&mut self, c: char) {
+        DynEngine::push_fullwidth_alpha(self, c);
+    }
+    fn backspace(&mut self) {
+        DynEngine::backspace(self);
+    }
+    fn flush_pending_n(&mut self) {
+        DynEngine::flush_pending_n(self);
+    }
+    fn force_preedit(&mut self, text: String) {
+        DynEngine::force_preedit(self, text);
+    }
+    fn reading(&self) -> String {
+        self.hiragana_text()
+    }
+    fn edit(&self) -> EditState {
+        edit_state(self)
+    }
+}
+
+/// `SeedPreedit` の代替（engine ABI の次の版の前）: 読み・未確定ローマ字・打鍵ログを消し、
+/// 各文字を Raw の項目として入れる。打鍵ログは Raw のかなになる（設計書 4.8 の代替期間の制限）。
+fn seed_preedit(eng: &mut impl JournalEngine, text: &str) {
+    eng.reset_preedit();
+    for c in text.chars() {
+        eng.push_raw(c);
+    }
+}
+
+/// `RetainRange` の代替（engine ABI の次の版の前）: 読みの `start..end` 文字を、
+/// `seed_preedit` と同じ方法で入れ直す。
+fn retain_range(eng: &mut impl JournalEngine, start: u32, end: u32) {
+    let kept: String = eng
+        .reading()
+        .chars()
+        .skip(start as usize)
+        .take(end.saturating_sub(start) as usize)
+        .collect();
+    seed_preedit(eng, &kept);
+}
+
+/// journal の 1 件を適用する。結果は作らない（設計書 4.3 の費用）。journal に入らない種類の
+/// 要求は `Err`。
+fn apply_edit(eng: &mut impl JournalEngine, request: &ChangeRequest) -> Result<(), String> {
+    let ch = |c: u32| char::from_u32(c);
+    match request {
+        ChangeRequest::InputChar { c, kind, .. } => {
+            if let Some(c) = ch(*c) {
+                match kind {
+                    InputCharKind::Char => eng.push_char(c),
+                    InputCharKind::Raw => eng.push_raw(c),
+                    InputCharKind::FullwidthAlpha => eng.push_fullwidth_alpha(c),
+                }
+            }
+        }
+        ChangeRequest::PushChar(c) => {
+            if let Some(c) = ch(*c) {
+                eng.push_char(c);
+            }
+        }
+        ChangeRequest::PushRaw(c) => {
+            if let Some(c) = ch(*c) {
+                eng.push_raw(c);
+            }
+        }
+        ChangeRequest::PushFullwidthAlpha(c) => {
+            if let Some(c) = ch(*c) {
+                eng.push_fullwidth_alpha(c);
+            }
+        }
+        ChangeRequest::Backspace => eng.backspace(),
+        ChangeRequest::FlushPendingN => eng.flush_pending_n(),
+        ChangeRequest::ForcePreedit { text } => eng.force_preedit(text.clone()),
+        ChangeRequest::SeedPreedit { text } => seed_preedit(eng, text),
+        ChangeRequest::RetainRange { start, end } => retain_range(eng, *start, *end),
+        other => return Err(format!("not a journal request: {:?}", other.kind())),
+    }
+    Ok(())
+}
+
+/// `reset_preedit` の後に journal を流し直す。
+///
+/// 照合点があれば、先頭 `len` 件を適用した状態を `checkpoint_edit` と比べる。一致すれば
+/// 残りを適用する（`Exact`）。一致しなければ、照合点の値を種にして（読みを `SeedPreedit`、
+/// 未確定ローマ字を `push_char`）残りを適用する（`Rebased`）。照合点が無ければ全体を適用する。
+fn replay_journal(
+    eng: &mut impl JournalEngine,
+    journal: &[ChangeRequest],
+    checkpoint: Option<&Checkpoint>,
+) -> Result<Replay, String> {
+    eng.reset_preedit();
+    let Some(checkpoint) = checkpoint else {
+        for request in journal {
+            apply_edit(eng, request)?;
+        }
+        return Ok(Replay::Exact);
+    };
+    let len = (checkpoint.len as usize).min(journal.len());
+    let prefix_ok = checkpoint.len as usize <= journal.len();
+    if prefix_ok {
+        for request in &journal[..len] {
+            apply_edit(eng, request)?;
+        }
+    }
+    let replay = if prefix_ok && eng.edit() == checkpoint.checkpoint_edit {
+        Replay::Exact
+    } else {
+        seed_preedit(eng, &checkpoint.checkpoint_edit.reading);
+        for c in checkpoint.checkpoint_edit.pending_romaji.chars() {
+            eng.push_char(c);
+        }
+        Replay::Rebased
+    };
+    for request in &journal[len..] {
+        apply_edit(eng, request)?;
+    }
+    Ok(replay)
+}
+
+/// 副作用を 1 つ適用する。
+///
+/// 学習は、辞書が無いとエンジンが何もしないので `Failed` を返す（判定できる失敗）。
+fn apply_effect(eng: &mut DynEngine, effect: &SideEffect) -> EffectResult {
+    match effect {
+        SideEffect::Learn { reading, surface } => {
+            if !eng.is_dict_ready() {
+                warn_if_dict_missing(eng, "Learn", reading);
+                return EffectResult::Failed;
+            }
+            eng.learn(reading, surface);
+        }
+        SideEffect::LearnForce { reading, surface } => {
+            if !eng.is_dict_ready() {
+                warn_if_dict_missing(eng, "LearnForce", reading);
+                return EffectResult::Failed;
+            }
+            eng.learn_force(reading, surface);
+        }
+        // 文脈への追加。`commit` は読みも消すが、この後の `reset_preedit` と流し直しで
+        // 作り直すので影響しない
+        SideEffect::CommitContext { text } => eng.commit(text),
+    }
+    EffectResult::Applied
+}
+
+/// 流し直しにかかった時間がこれを超えたら WARN（判定には使わない。設計書 4.3）。
+const RESTORE_JOURNAL_SLOW_MS: u128 = 20;
+
+/// `pre_effects` を適用し、journal を流し直して所有権を移す（v7、設計書 4.3）。
+///
+/// 番号・保存した応答の扱いは `dispatch_restore` と同じ。エンジンの操作が失敗したら
+/// （BG の mutex の poison だけ）`reset_preedit`・所有者なしにして `Error` を返す。
+fn dispatch_restore_journal(
+    engine: &SharedEngine,
+    session: &Session,
+    owner: Owner,
+    seq: RequestSeq,
+    pre_effects: Vec<SideEffect>,
+    journal: Vec<ChangeRequest>,
+    checkpoint: Option<Checkpoint>,
+) -> Response {
+    let tsf = match session_tsf(session, &owner) {
+        Ok(t) => t,
+        Err(resp) => return resp,
+    };
+    let mut g = lock_engine(engine);
+    match engine.lock_records().check(tsf, seq) {
+        SeqCheck::Replay(resp) => return resp,
+        SeqCheck::Unavailable => return Response::Rejected(Reason::ResultUnavailable),
+        SeqCheck::New => {}
+    }
+    let state = &mut *g;
+    let (Some(eng), Some(engine_gen)) = (state.engine.as_mut(), state.engine_gen) else {
+        return Response::Error("engine not created".into());
+    };
+    inject_ready(eng);
+    let started = std::time::Instant::now();
+    let resp = match eng.bg_slot().map_err(|e| e.to_string()).and_then(|_| {
+        let effects: Vec<EffectResult> = pre_effects.iter().map(|e| apply_effect(eng, e)).collect();
+        replay_journal(eng, &journal, checkpoint.as_ref()).map(|replay| (replay, effects))
+    }) {
+        Ok((replay, effects)) => {
+            eng.bg_reclaim();
+            state.bg_owner = None;
+            state.owner = Some(owner);
+            let bg = match eng.bg_slot() {
+                Ok(slot) => bg_view(None, owner, slot),
+                Err(_) => BgView::Idle,
+            };
+            Response::RestoredJournal {
+                engine_gen,
+                replay,
+                final_edit: edit_state(eng),
+                bg,
+                effects,
+            }
+        }
+        Err(error) => {
+            eng.reset_preedit();
+            state.owner = None;
+            Response::Error(error)
+        }
+    };
+    let elapsed = started.elapsed().as_millis();
+    if elapsed > RESTORE_JOURNAL_SLOW_MS {
+        tracing::warn!(
+            "rpc: RestoreJournal took {elapsed} ms for {} request(s)",
+            journal.len()
+        );
+    }
+    apply_health_action(engine, eng);
+    engine.lock_records().store(tsf, seq, &resp);
+    resp
+}
 /// `(bg_owner, BgSlot)` からの純粋な判定。`Restore` は bg_owner を消すので、
 /// 同じ所有者が復元し直した後は、自分の実行中の変換も `WorkerBusy` になる（意図した挙動）。
 fn bg_view(bg_owner: Option<Owner>, owner: Owner, slot: BgSlot) -> BgView {
@@ -1200,6 +1460,8 @@ fn apply_change(
                     warn_if_dict_missing(eng, "LearnForce", &reading);
                     eng.learn_force(&reading, &surface);
                 }
+                ChangeRequest::SeedPreedit { text } => seed_preedit(eng, &text),
+                ChangeRequest::RetainRange { start, end } => retain_range(eng, start, end),
                 _ => unreachable!(),
             }
             ChangeOutcome::Unit {
@@ -1589,7 +1851,8 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         | ShutdownIfConfigDiffers { .. }
         | Change { .. }
         | Restore { .. }
-        | Read { .. } => Response::Unit, // handled upstream
+        | Read { .. }
+        | RestoreJournal { .. } => Response::Unit, // handled upstream
 
         _ReservedPushChar(_)
         | _ReservedPushRaw(_)
@@ -2126,6 +2389,163 @@ mod record_tests {
         );
         assert!(matches!(resp, Response::Error(_)));
         assert_eq!(shared.lock_records().records[&A].last_seq, None);
+    }
+}
+
+/// journal の流し直し（v7、設計書 4.3）の試験。偽のエンジンは、`k` + 母音だけをかなにし、
+/// それ以外の文字は未確定ローマ字として持つ簡単なもの。
+#[cfg(test)]
+mod journal_replay_tests {
+    use super::*;
+
+    #[derive(Default)]
+    struct FakeEngine {
+        reading: String,
+        pending: String,
+        calls: usize,
+    }
+    impl JournalEngine for FakeEngine {
+        fn reset_preedit(&mut self) {
+            self.reading.clear();
+            self.pending.clear();
+        }
+        fn push_char(&mut self, c: char) {
+            self.calls += 1;
+            self.pending.push(c);
+            let kana = match self.pending.as_str() {
+                "ka" => Some("か"),
+                "ki" => Some("き"),
+                "a" => Some("あ"),
+                "i" => Some("い"),
+                _ => None,
+            };
+            if let Some(kana) = kana {
+                self.reading.push_str(kana);
+                self.pending.clear();
+            }
+        }
+        fn push_raw(&mut self, c: char) {
+            self.calls += 1;
+            self.reading.push(c);
+        }
+        fn push_fullwidth_alpha(&mut self, c: char) {
+            self.push_raw(c);
+        }
+        fn backspace(&mut self) {
+            if self.pending.pop().is_none() {
+                self.reading.pop();
+            }
+        }
+        fn flush_pending_n(&mut self) {
+            if self.pending == "n" {
+                self.reading.push('ん');
+                self.pending.clear();
+            }
+        }
+        fn force_preedit(&mut self, text: String) {
+            self.reading = text;
+            self.pending.clear();
+        }
+        fn reading(&self) -> String {
+            self.reading.clone()
+        }
+        fn edit(&self) -> EditState {
+            EditState {
+                reading: self.reading.clone(),
+                pending_romaji: self.pending.clone(),
+            }
+        }
+    }
+    fn chars(s: &str) -> Vec<ChangeRequest> {
+        s.chars()
+            .map(|c| ChangeRequest::PushChar(c as u32))
+            .collect()
+    }
+    fn edit(reading: &str, pending: &str) -> EditState {
+        EditState {
+            reading: reading.into(),
+            pending_romaji: pending.into(),
+        }
+    }
+
+    #[test]
+    fn whole_journal_is_replayed_without_a_checkpoint() {
+        let mut eng = FakeEngine {
+            reading: "前の読み".into(),
+            ..Default::default()
+        };
+        let replay = replay_journal(&mut eng, &chars("kaki"), None).unwrap();
+        assert_eq!(replay, Replay::Exact);
+        assert_eq!(eng.edit(), edit("かき", ""));
+    }
+
+    #[test]
+    fn matching_checkpoint_replays_the_unconfirmed_tail_exactly() {
+        // 確認済みが `k`、続く `a` の応答を失った: 照合点は (1, 未確定 "k")
+        let mut eng = FakeEngine::default();
+        let checkpoint = Checkpoint {
+            len: 1,
+            checkpoint_edit: edit("", "k"),
+        };
+        let replay = replay_journal(&mut eng, &chars("ka"), Some(&checkpoint)).unwrap();
+        assert_eq!(replay, Replay::Exact);
+        // 未確認の `a` も落ちずに適用される
+        assert_eq!(eng.edit(), edit("か", ""));
+    }
+
+    #[test]
+    fn mismatching_checkpoint_rebases_on_the_checkpoint_value_and_applies_the_tail() {
+        // 照合点の状態が再現できない（設定の変更など）: 照合点の値を種にして末尾を当てる
+        let mut eng = FakeEngine::default();
+        let checkpoint = Checkpoint {
+            len: 2,
+            checkpoint_edit: edit("カ", "k"),
+        };
+        let replay = replay_journal(&mut eng, &chars("kaki"), Some(&checkpoint)).unwrap();
+        assert_eq!(replay, Replay::Rebased);
+        // 種「カ」+ 未確定 `k` + 末尾 `ki`（偽のエンジンの簡単な規則では「kki」は未確定のまま）
+        assert_eq!(eng.edit().reading, "カ");
+        assert_eq!(eng.edit().pending_romaji, "kki");
+    }
+
+    #[test]
+    fn checkpoint_longer_than_the_journal_is_rebased() {
+        let mut eng = FakeEngine::default();
+        let checkpoint = Checkpoint {
+            len: 5,
+            checkpoint_edit: edit("か", ""),
+        };
+        // 照合点が journal より長い（食い違い）: 照合点の値を種にし、適用する末尾は無い
+        let replay = replay_journal(&mut eng, &chars("i"), Some(&checkpoint)).unwrap();
+        assert_eq!(replay, Replay::Rebased);
+        assert_eq!(eng.edit(), edit("か", ""));
+    }
+
+    #[test]
+    fn seed_and_retain_substitutes_rebuild_the_reading_with_raw_entries() {
+        let mut eng = FakeEngine::default();
+        apply_edit(
+            &mut eng,
+            &ChangeRequest::SeedPreedit {
+                text: "かんじ".into(),
+            },
+        )
+        .unwrap();
+        assert_eq!(eng.edit(), edit("かんじ", ""));
+        apply_edit(&mut eng, &ChangeRequest::RetainRange { start: 1, end: 3 }).unwrap();
+        assert_eq!(eng.edit(), edit("んじ", ""));
+    }
+
+    #[test]
+    fn non_journal_requests_are_refused() {
+        let mut eng = FakeEngine::default();
+        for request in [
+            ChangeRequest::Commit { text: "x".into() },
+            ChangeRequest::BgReclaim,
+            ChangeRequest::ResetAll,
+        ] {
+            assert!(apply_edit(&mut eng, &request).is_err(), "{request:?}");
+        }
     }
 }
 

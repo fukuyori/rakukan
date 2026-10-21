@@ -1,9 +1,9 @@
 //! composition ごとの所有者と復元元（Issue #56）。`RpcEngine` の再接続をまたいで保持する。
 //! タイマーからの読み取り・変更では所有権を取り返さない。復元は、フォーカス中の文脈へのキー入力からだけ行う。
 use rakukan_engine_rpc::{
-    BgStartOutcome, BgTakeOutcome, BgView, ChangeOutcome, ChangeReply, ChangeRequest, EditState,
-    EngineGen, Expect, InputCharKind, Owner, ReadError, ReadRequest, Reason, Response,
-    RestoreReply, RpcEngine,
+    BgStartOutcome, BgTakeOutcome, BgView, ChangeOutcome, ChangeReply, ChangeRequest, Checkpoint,
+    EditState, EngineGen, Expect, InputCharKind, Owner, ReadError, ReadRequest, Reason, Replay,
+    Response, RestoreJournalReply, RpcEngine,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -38,8 +38,13 @@ static COMPOSITIONS: LazyLock<Mutex<HashMap<DmKey, RemoteComposition>>> =
 pub struct RemoteComposition {
     owner: Owner,
     generation: Option<EngineGen>,
+    /// ホストが確かめた最新の編集状態。
     edit: EditState,
-    pending: Option<ChangeRequest>,
+    /// composition の開始から送った編集要求（入力処理の見直しの段 4、設計書 4.3）。
+    /// 再送できる要求の置き場所はここだけ。ホストの適用を確かめていない末尾を含む。
+    journal: Vec<ChangeRequest>,
+    /// journal の先頭 `.0` 件を適用した状態として、ホストが確かめた値（照合点）。
+    checkpoint: Option<(usize, EditState)>,
     bg_reading: Option<String>,
     /// この編集状態を表示している TSF の composition（`composition_identity`）。
     /// 0 = まだ結び付いていない。終了の通知の照合に使う（Issue #71）。
@@ -57,7 +62,8 @@ impl RemoteComposition {
             },
             generation: None,
             edit: EditState::default(),
-            pending: None,
+            journal: Vec::new(),
+            checkpoint: None,
             bg_reading: None,
             tsf_comp: 0,
             created_under: crate::engine::state::current_composition_identity_for(dm_key().ptr),
@@ -68,6 +74,10 @@ impl RemoteComposition {
             engine_gen,
             owner: self.owner,
         })
+    }
+    /// ホストの適用を確かめた journal の件数。
+    fn confirmed_len(&self) -> usize {
+        self.checkpoint.as_ref().map_or(0, |(len, _)| *len)
     }
 }
 fn dm_key() -> DmKey {
@@ -189,7 +199,8 @@ pub fn take_current() -> Option<RemoteComposition> {
 fn save(c: RemoteComposition) {
     lock_states().insert(dm_key(), c);
 }
-fn replayable(request: &ChangeRequest) -> bool {
+/// journal に入れる編集要求か（設計書 4.3）。
+fn is_journal_request(request: &ChangeRequest) -> bool {
     matches!(
         request,
         ChangeRequest::InputChar { .. }
@@ -199,17 +210,67 @@ fn replayable(request: &ChangeRequest) -> bool {
             | ChangeRequest::Backspace
             | ChangeRequest::FlushPendingN
             | ChangeRequest::ForcePreedit { .. }
-            | ChangeRequest::ResetPreedit
-            | ChangeRequest::ResetAll
+            | ChangeRequest::SeedPreedit { .. }
+            | ChangeRequest::RetainRange { .. }
     )
+}
+/// 所有権を取り直してでも送る要求か（キー入力の中だけ）。journal の編集要求と、
+/// composition を閉じるリセット。
+fn may_acquire_ownership(request: &ChangeRequest) -> bool {
+    is_journal_request(request)
+        || matches!(
+            request,
+            ChangeRequest::ResetPreedit | ChangeRequest::ResetAll
+        )
+}
+/// journal に記録する形。BG の開始は流し直さない（`bg_start_n_cands` は `None`）。
+fn journal_entry(request: &ChangeRequest) -> ChangeRequest {
+    match request {
+        ChangeRequest::InputChar { c, kind, .. } => ChangeRequest::InputChar {
+            c: *c,
+            kind: *kind,
+            bg_start_n_cands: None,
+        },
+        other => other.clone(),
+    }
+}
+/// journal の費用（設計書 4.3 の `cost`）の近似: 文字の要求は 1、文字列の要求はそのバイト数。
+fn journal_cost(journal: &[ChangeRequest]) -> usize {
+    journal
+        .iter()
+        .map(|request| match request {
+            ChangeRequest::ForcePreedit { text } | ChangeRequest::SeedPreedit { text } => {
+                text.len().max(1)
+            }
+            _ => 1,
+        })
+        .sum()
+}
+/// journal の上限（設計書 4.3）。段 4 では判定して DEBUG に残すだけで、有効にしない。
+const JOURNAL_SOFT_COUNT: usize = 512;
+const JOURNAL_SOFT_COST: usize = 32 * 1024;
+const JOURNAL_HARD_COUNT: usize = 1024;
+const JOURNAL_HARD_COST: usize = 128 * 1024;
+fn note_journal_limits(journal: &[ChangeRequest]) {
+    let count = journal.len();
+    let cost = journal_cost(journal);
+    if count >= JOURNAL_HARD_COUNT || cost >= JOURNAL_HARD_COST {
+        tracing::debug!(
+            "journal over the hard limit (not enforced yet): count={count} cost={cost}"
+        );
+    } else if count >= JOURNAL_SOFT_COUNT || cost >= JOURNAL_SOFT_COST {
+        tracing::debug!(
+            "journal over the soft limit (not enforced yet): count={count} cost={cost}"
+        );
+    }
 }
 /// 変更の後に、手元の状態を保存するかどうか。
 ///
 /// 新しい composition の最初の変更が、何も送らないまま失敗した場合（`Commit` などの
-/// 再送できない要求は所有権を取れない）は保存しない。世代の無い状態を残すと、次の復元まで
-/// 読み取りが `NoComposition` で失敗し続ける。送った後の失敗は、再送用の要求を残すために保存する。
+/// journal に入らない要求は所有権を取れない）は保存しない。世代の無い状態を残すと、次の復元まで
+/// 読み取りが `NoComposition` で失敗し続ける。journal に入れた要求は、再送のために保存する。
 fn keep_after_change(fresh: bool, state: &RemoteComposition, ok: bool) -> bool {
-    ok || !fresh || state.generation.is_some() || state.pending.is_some()
+    ok || !fresh || state.generation.is_some() || !state.journal.is_empty()
 }
 pub fn note_read_error(error: &ReadError) {
     tracing::warn!("composition read failed: {error}");
@@ -225,13 +286,12 @@ trait CompositionRpc {
         expect: Expect,
         request: ChangeRequest,
     ) -> Result<ChangeReply, rakukan_engine_rpc::ChangeError>;
-    fn restore(
+    fn restore_journal(
         &self,
         owner: Owner,
-        reading: String,
-        pending: String,
-        then: Option<ChangeRequest>,
-    ) -> Result<RestoreReply, rakukan_engine_rpc::ChangeError>;
+        journal: Vec<ChangeRequest>,
+        checkpoint: Option<Checkpoint>,
+    ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>;
     /// `owner` の結果不明の要求を断念する。断念したら `true`。
     fn abandon_for(&self, owner: Owner) -> bool;
 }
@@ -246,78 +306,141 @@ impl CompositionRpc for RpcEngine {
     ) -> Result<ChangeReply, rakukan_engine_rpc::ChangeError> {
         self.change(expect, request)
     }
-    fn restore(
+    fn restore_journal(
         &self,
         owner: Owner,
-        reading: String,
-        pending: String,
-        then: Option<ChangeRequest>,
-    ) -> Result<RestoreReply, rakukan_engine_rpc::ChangeError> {
-        self.restore(owner, reading, pending, then)
+        journal: Vec<ChangeRequest>,
+        checkpoint: Option<Checkpoint>,
+    ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError> {
+        self.restore_journal(owner, Vec::new(), journal, checkpoint)
     }
 }
-fn restore_via(
+/// journal の先頭 `upto` 件をホストで流し直し、所有権を取る（設計書 4.3）。
+///
+/// 照合点が `upto` 以内なら送る。`Exact` なら照合点を `upto` 件に進める。`Rebased` なら、
+/// 送った照合点の値を種にした形（`SeedPreedit` + 未確定ローマ字の `PushChar`）に journal の
+/// 先頭を書き換える（応答の最終値で作ると末尾が二重になる）。失敗したら何も変えない。
+fn restore_journal_via(
     rpc: &impl CompositionRpc,
     state: &mut RemoteComposition,
-    then: Option<ChangeRequest>,
-) -> anyhow::Result<Option<ChangeOutcome>> {
-    match rpc.restore(
+    upto: usize,
+) -> anyhow::Result<()> {
+    let sent_checkpoint = state
+        .checkpoint
+        .as_ref()
+        .filter(|(len, _)| *len <= upto)
+        .map(|(len, edit)| Checkpoint {
+            len: *len as u32,
+            checkpoint_edit: edit.clone(),
+        });
+    match rpc.restore_journal(
         state.owner,
-        state.edit.reading.clone(),
-        state.edit.pending_romaji.clone(),
-        then,
+        state.journal[..upto].to_vec(),
+        sent_checkpoint.clone(),
     )? {
-        RestoreReply::Restored { engine_gen, then } => {
+        RestoreJournalReply::Restored {
+            engine_gen,
+            replay,
+            final_edit,
+            ..
+        } => {
+            let confirmed = match (replay, sent_checkpoint) {
+                (Replay::Rebased, Some(checkpoint)) => {
+                    let base = checkpoint.checkpoint_edit;
+                    let mut rebased = vec![ChangeRequest::SeedPreedit { text: base.reading }];
+                    rebased.extend(
+                        base.pending_romaji
+                            .chars()
+                            .map(|c| ChangeRequest::PushChar(c as u32)),
+                    );
+                    let tail_start = checkpoint.len as usize;
+                    rebased.extend(state.journal[tail_start..upto].iter().cloned());
+                    let len = rebased.len();
+                    rebased.extend(state.journal[upto..].iter().cloned());
+                    tracing::info!(
+                        "journal rebased on the checkpoint: {} -> {} request(s)",
+                        state.journal.len(),
+                        rebased.len()
+                    );
+                    state.journal = rebased;
+                    len
+                }
+                _ => upto,
+            };
             state.generation = Some(engine_gen);
             state.bg_reading = None;
-            if let Some(outcome) = &then {
-                state.edit = outcome.edit().clone();
-            }
-            state.pending = None;
-            Ok(then)
+            state.checkpoint = Some((confirmed, final_edit.clone()));
+            state.edit = final_edit;
+            Ok(())
         }
-        RestoreReply::Rejected(reason) => anyhow::bail!("restore rejected: {reason:?}"),
+        RestoreJournalReply::Rejected(reason) => anyhow::bail!("restore rejected: {reason:?}"),
     }
 }
+/// 変更要求を送る（設計書 4.3 の送り方）。
+///
+/// journal の編集要求は、送る前に journal の末尾に入れる。所有権が無い、または確かめていない
+/// 末尾が前にある場合は、キー入力の中でだけ、それまでの journal を `RestoreJournal` で流し直して
+/// から、この要求を `Change` で送る（結果を呼び出し側へ返すため）。失敗しても journal は
+/// そのまま（次のキーで流し直す）。
 fn apply_via(
     rpc: &impl CompositionRpc,
     state: &mut RemoteComposition,
     request: ChangeRequest,
     foreground: bool,
 ) -> anyhow::Result<ChangeOutcome> {
-    let Some(expect) = state.expect() else {
-        if !foreground || !replayable(&request) {
+    let journal_request = is_journal_request(&request);
+    if journal_request {
+        state.journal.push(journal_entry(&request));
+        note_journal_limits(&state.journal);
+    }
+    // この要求より前の journal の件数
+    let prior = if journal_request {
+        state.journal.len() - 1
+    } else {
+        state.journal.len()
+    };
+    let mut restored = false;
+    if state.expect().is_none() || state.confirmed_len() < prior {
+        if !foreground || !may_acquire_ownership(&request) {
             anyhow::bail!("timer or irreversible request cannot acquire ownership");
         }
-        state.pending = Some(request.clone());
-        return restore_via(rpc, state, Some(request))?
-            .ok_or_else(|| anyhow::anyhow!("missing Restore.then"));
-    };
-    match rpc.change(expect, request.clone()) {
-        Ok(ChangeReply::Changed(outcome)) => {
-            state.edit = outcome.edit().clone();
-            state.pending = None;
-            Ok(outcome)
-        }
-        Ok(ChangeReply::Rejected(reason)) => {
-            let error = ReadError::Rejected(reason);
-            note_read_error(&error);
-            if error.ownership_lost() && replayable(&request) && foreground {
-                state.pending = Some(request.clone());
-                return restore_via(rpc, state, Some(request))?
-                    .ok_or_else(|| anyhow::anyhow!("missing Restore.then"));
+        restore_journal_via(rpc, state, prior)?;
+        restored = true;
+    }
+    loop {
+        let expect = state
+            .expect()
+            .ok_or_else(|| anyhow::anyhow!("no ownership after restore"))?;
+        match rpc.change(expect, request.clone()) {
+            Ok(ChangeReply::Changed(outcome)) => {
+                if journal_request {
+                    state.checkpoint = Some((state.journal.len(), outcome.edit().clone()));
+                }
+                state.edit = outcome.edit().clone();
+                return Ok(outcome);
             }
-            if reason == Reason::ResultUnavailable {
-                state.pending = Some(request);
+            Ok(ChangeReply::Rejected(reason)) => {
+                let error = ReadError::Rejected(reason);
+                note_read_error(&error);
+                // 所有権を失った: キー入力の中なら、それまでの journal を流し直して 1 回だけ送り直す
+                if error.ownership_lost()
+                    && foreground
+                    && may_acquire_ownership(&request)
+                    && !restored
+                {
+                    let prior = if journal_request {
+                        state.journal.len() - 1
+                    } else {
+                        state.journal.len()
+                    };
+                    restore_journal_via(rpc, state, prior)?;
+                    restored = true;
+                    continue;
+                }
+                return Err(error.into());
             }
-            Err(error.into())
-        }
-        Err(error) => {
-            // 未解決の要求に阻まれた変更は送っていないので、再送用の要求を置き換えない。
-            if matches!(error, rakukan_engine_rpc::ChangeError::Transport(_)) {
-                state.pending = Some(request);
-            }
-            Err(error.into())
+            // 通信失敗・未解決に阻まれた: journal に残した要求は、次のキーで流し直す
+            Err(error) => return Err(error.into()),
         }
     }
 }
@@ -416,15 +539,6 @@ impl DynEngine {
             other => Err(ReadError::Host(format!("unexpected conversion: {other:?}"))),
         }
     }
-    fn restore_state(
-        &self,
-        state: &mut RemoteComposition,
-        then: Option<ChangeRequest>,
-    ) -> anyhow::Result<Option<ChangeOutcome>> {
-        let result = restore_via(&self.0, state, then);
-        save(state.clone());
-        result
-    }
 
     /// フォーカス中の有効な文脈へのキー入力からだけ呼ぶ。
     ///
@@ -455,17 +569,21 @@ impl DynEngine {
             },
             None => true,
         };
-        if !lost && self.0.unresolved().is_none() {
+        let unconfirmed = state.confirmed_len() < state.journal.len();
+        if !lost && !unconfirmed && self.0.unresolved().is_none() {
             return Ok(InputEntry {
                 restored: false,
                 bg,
             });
         }
-        let pending = state.pending.clone().filter(replayable);
-        if self.0.unresolved().is_some() && pending.is_none() {
-            self.0.abandon_unresolved();
-        }
-        self.restore_state(&mut state, pending)?;
+        // journal 全体を流し直す。台帳の未解決のうち編集要求は、どこかの composition の journal に
+        // 確かめていない末尾として残っているので、`RestoredJournal` で台帳が空になっても失われない
+        // （その composition の次のキーで流し直す）。副作用（BG・確定・学習）の結果不明の記録は
+        // 段 5 で入れる。それまでは commit / learn / reset が今までどおり台帳全体を断念する
+        let upto = state.journal.len();
+        let result = restore_journal_via(&self.0, &mut state, upto);
+        save(state);
+        result?;
         // 復元の後の BG 状態は読んでいない。
         Ok(InputEntry {
             restored: true,
@@ -725,13 +843,13 @@ mod tests {
     use std::collections::VecDeque;
     #[derive(Debug)]
     enum Sent {
-        Restore(Owner, String, String, Option<ChangeRequest>),
+        Restore(Owner, Vec<ChangeRequest>, Option<Checkpoint>),
         Change(Expect, ChangeRequest),
     }
     struct FakeRpc {
         sent: RefCell<Vec<Sent>>,
         changes: RefCell<VecDeque<Result<ChangeReply, rakukan_engine_rpc::ChangeError>>>,
-        restores: RefCell<VecDeque<Result<RestoreReply, rakukan_engine_rpc::ChangeError>>>,
+        restores: RefCell<VecDeque<Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>>>,
         /// 断念を試みた owner。
         abandoned: RefCell<Vec<Owner>>,
         /// 断念の結果の台本（尽きたら `false` = 台帳に該当なし）。
@@ -756,16 +874,15 @@ mod tests {
                 .pop_front()
                 .expect("change script")
         }
-        fn restore(
+        fn restore_journal(
             &self,
             owner: Owner,
-            reading: String,
-            pending: String,
-            then: Option<ChangeRequest>,
-        ) -> Result<RestoreReply, rakukan_engine_rpc::ChangeError> {
+            journal: Vec<ChangeRequest>,
+            checkpoint: Option<Checkpoint>,
+        ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError> {
             self.sent
                 .borrow_mut()
-                .push(Sent::Restore(owner, reading, pending, then));
+                .push(Sent::Restore(owner, journal, checkpoint));
             self.restores
                 .borrow_mut()
                 .pop_front()
@@ -784,9 +901,27 @@ mod tests {
             pending_romaji: "t".into(),
         }
     }
+    fn restored(replay: Replay, final_edit: EditState) -> RestoreJournalReply {
+        RestoreJournalReply::Restored {
+            engine_gen: generation(),
+            replay,
+            final_edit,
+            bg: BgView::Idle,
+            effects: vec![],
+        }
+    }
+    fn reading(reading: &str, pending: &str) -> EditState {
+        EditState {
+            reading: reading.into(),
+            pending_romaji: pending.into(),
+        }
+    }
+    fn changed(edit: EditState) -> Result<ChangeReply, rakukan_engine_rpc::ChangeError> {
+        Ok(ChangeReply::Changed(ChangeOutcome::Unit { edit }))
+    }
     fn rpc(
         changes: Vec<Result<ChangeReply, rakukan_engine_rpc::ChangeError>>,
-        restores: Vec<Result<RestoreReply, rakukan_engine_rpc::ChangeError>>,
+        restores: Vec<Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>>,
     ) -> FakeRpc {
         FakeRpc {
             sent: RefCell::new(vec![]),
@@ -1078,25 +1213,28 @@ mod tests {
         assert!(!states.contains_key(&new));
     }
     #[test]
-    fn first_change_restores_then_later_change_uses_restored_generation() {
-        let outcome = ChangeOutcome::Unit { edit: edit() };
-        let rpc = rpc(
-            vec![Ok(ChangeReply::Changed(outcome.clone()))],
-            vec![Ok(RestoreReply::Restored {
-                engine_gen: generation(),
-                then: Some(outcome),
-            })],
+    fn first_key_acquires_ownership_with_an_empty_journal_then_sends_the_key_as_a_change() {
+        // 最初の打鍵: それまでの journal（空）を流し直して所有権を取り、打鍵は Change で送る
+        let fake = rpc(
+            vec![changed(reading("", "t")), changed(reading("", ""))],
+            vec![Ok(restored(Replay::Exact, reading("", "")))],
         );
         let mut state = RemoteComposition::new();
-        apply_via(&rpc, &mut state, ChangeRequest::PushChar(116), true).unwrap();
-        assert_eq!(state.edit, edit());
-        apply_via(&rpc, &mut state, ChangeRequest::Backspace, true).unwrap();
-        let sent = rpc.sent.borrow();
+        apply_via(&fake, &mut state, ChangeRequest::PushChar(116), true).unwrap();
+        assert_eq!(state.journal, vec![ChangeRequest::PushChar(116)]);
+        assert_eq!(state.checkpoint, Some((1, reading("", "t"))));
+        apply_via(&fake, &mut state, ChangeRequest::Backspace, true).unwrap();
+        assert_eq!(state.checkpoint, Some((2, reading("", ""))));
+        let sent = fake.sent.borrow();
         assert!(
-            matches!(&sent[0], Sent::Restore(owner, reading, pending, Some(ChangeRequest::PushChar(116))) if *owner==state.owner && reading.is_empty() && pending.is_empty())
+            matches!(&sent[0], Sent::Restore(owner, journal, None) if *owner == state.owner && journal.is_empty())
         );
+        assert!(matches!(
+            &sent[1],
+            Sent::Change(_, ChangeRequest::PushChar(116))
+        ));
         assert!(
-            matches!(&sent[1], Sent::Change(expect, ChangeRequest::Backspace) if expect.engine_gen == generation() && expect.owner==state.owner)
+            matches!(&sent[2], Sent::Change(expect, ChangeRequest::Backspace) if expect.engine_gen == generation())
         );
     }
     #[test]
@@ -1122,38 +1260,100 @@ mod tests {
         assert!(matches!(rpc.sent.borrow()[0], Sent::Change(_, _)));
     }
     #[test]
-    fn foreground_rejection_restores_exact_reading_and_pending_then_applies_key() {
-        let outcome = ChangeOutcome::Bool {
-            value: true,
-            edit: EditState {
-                reading: "reading".into(),
-                pending_romaji: "".into(),
-            },
-        };
-        let rpc = rpc(
-            vec![Ok(ChangeReply::Rejected(Reason::GenMismatch))],
-            vec![Ok(RestoreReply::Restored {
-                engine_gen: generation(),
-                then: Some(outcome.clone()),
-            })],
+    fn lost_reply_keeps_the_key_in_the_journal_and_the_next_key_replays_it() {
+        // `a` の応答を失った: journal に残り、照合点は進まない
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "disconnected"
+                ))),
+                changed(reading("かk", "")),
+            ],
+            vec![Ok(restored(Replay::Exact, reading("か", "")))],
         );
         let mut state = RemoteComposition::new();
         state.generation = Some(generation());
-        state.edit = edit();
-        assert_eq!(
-            apply_via(&rpc, &mut state, ChangeRequest::Backspace, true).unwrap(),
-            outcome
-        );
-        assert!(
-            matches!(&rpc.sent.borrow()[1], Sent::Restore(_, reading, pending, Some(ChangeRequest::Backspace)) if reading=="reading" && pending=="t")
-        );
+        state.journal = vec![ChangeRequest::PushChar('k' as u32)];
+        state.checkpoint = Some((1, reading("", "k")));
+        assert!(apply_via(&fake, &mut state, ChangeRequest::PushChar('a' as u32), true).is_err());
+        assert_eq!(state.journal.len(), 2);
+        assert_eq!(state.confirmed_len(), 1);
+        // 次の打鍵 `k`: 確かめていない `a` までを照合点つきで流し直し、`k` を Change で送る
+        apply_via(&fake, &mut state, ChangeRequest::PushChar('k' as u32), true).unwrap();
+        let sent = fake.sent.borrow();
+        assert!(matches!(
+            &sent[1],
+            Sent::Restore(_, journal, Some(cp)) if journal.len() == 2 && cp.len == 1 && cp.checkpoint_edit == reading("", "k")
+        ));
+        assert!(matches!(
+            &sent[2],
+            Sent::Change(_, ChangeRequest::PushChar(107))
+        ));
+        assert_eq!(state.journal.len(), 3);
+        assert_eq!(state.checkpoint, Some((3, reading("かk", ""))));
     }
     #[test]
-    fn unresolved_block_does_not_overwrite_the_original_pending_key() {
+    fn rebased_restore_rewrites_the_journal_head_from_the_sent_checkpoint() {
+        let fake = rpc(
+            vec![changed(reading("カき", ""))],
+            vec![Ok(restored(Replay::Rebased, reading("カ", "k")))],
+        );
+        let mut state = RemoteComposition::new();
+        state.generation = None;
+        state.journal = vec![
+            ChangeRequest::PushChar('k' as u32),
+            ChangeRequest::PushChar('a' as u32),
+            ChangeRequest::PushChar('k' as u32),
+        ];
+        state.checkpoint = Some((2, reading("カ", "")));
+        apply_via(&fake, &mut state, ChangeRequest::PushChar('i' as u32), true).unwrap();
+        // 先頭 2 件が照合点の値（「カ」、未確定なし）を種にした形になり、確かめていない `k` と
+        // 今の `i` が後ろに続く。応答の最終値（未確定 `k`）では作らない（末尾が二重になる）
+        assert_eq!(
+            state.journal,
+            vec![
+                ChangeRequest::SeedPreedit { text: "カ".into() },
+                ChangeRequest::PushChar('k' as u32),
+                ChangeRequest::PushChar('i' as u32),
+            ]
+        );
+        assert_eq!(state.checkpoint, Some((3, reading("カき", ""))));
+    }
+    #[test]
+    fn foreground_ownership_loss_replays_the_journal_and_resends_the_key_once() {
+        let fake = rpc(
+            vec![
+                Ok(ChangeReply::Rejected(Reason::GenMismatch)),
+                Ok(ChangeReply::Changed(ChangeOutcome::Bool {
+                    value: true,
+                    edit: reading("", ""),
+                })),
+            ],
+            vec![Ok(restored(Replay::Exact, reading("", "t")))],
+        );
         let mut state = RemoteComposition::new();
         state.generation = Some(generation());
-        state.edit = edit();
-        state.pending = Some(ChangeRequest::PushChar(116));
+        state.journal = vec![ChangeRequest::PushChar(116)];
+        state.checkpoint = Some((1, reading("", "t")));
+        apply_via(&fake, &mut state, ChangeRequest::Backspace, true).unwrap();
+        let sent = fake.sent.borrow();
+        assert!(matches!(
+            &sent[0],
+            Sent::Change(_, ChangeRequest::Backspace)
+        ));
+        assert!(matches!(&sent[1], Sent::Restore(_, journal, Some(_)) if journal.len() == 1));
+        assert!(matches!(
+            &sent[2],
+            Sent::Change(_, ChangeRequest::Backspace)
+        ));
+        assert_eq!(state.checkpoint, Some((2, reading("", ""))));
+    }
+    #[test]
+    fn unresolved_block_keeps_the_key_in_the_journal() {
+        let mut state = RemoteComposition::new();
+        state.generation = Some(generation());
+        state.journal = vec![ChangeRequest::PushChar(116)];
+        state.checkpoint = Some((1, edit()));
         let unresolved = rakukan_engine_rpc::Unresolved {
             seq: 5,
             kind: rakukan_engine_rpc::ChangeKind::PushChar,
@@ -1165,11 +1365,15 @@ mod tests {
             vec![],
         );
         assert!(apply_via(&rpc, &mut state, ChangeRequest::PushChar(97), true).is_err());
-        assert_eq!(state.pending, Some(ChangeRequest::PushChar(116)));
-        assert_eq!(state.edit, edit());
+        assert_eq!(
+            state.journal,
+            vec![ChangeRequest::PushChar(116), ChangeRequest::PushChar(97)]
+        );
+        assert_eq!(state.confirmed_len(), 1);
+        assert_eq!(state.edit, EditState::default());
     }
     #[test]
-    fn bg_timer_cannot_create_ownership_and_irreversible_requests_are_not_replayed() {
+    fn bg_timer_cannot_create_ownership_and_irreversible_requests_are_not_journaled() {
         let rpc = rpc(vec![], vec![]);
         let mut state = RemoteComposition::new();
         assert!(
@@ -1192,12 +1396,147 @@ mod tests {
             },
             ChangeRequest::BgTakeCandidates { key: "r".into() },
         ] {
-            assert!(!replayable(&request));
+            assert!(!may_acquire_ownership(&request));
+            assert!(!is_journal_request(&request));
         }
     }
     #[test]
+    fn key_lost_after_a_rebase_is_applied_exactly_once_by_the_next_recovery() {
+        // 流し直しは Rebased で成功し、続く今のキー（`i`）の Change の応答を失う
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "disconnected"
+                ))),
+                changed(reading("カきあ", "")),
+            ],
+            vec![
+                Ok(restored(Replay::Rebased, reading("カ", "k"))),
+                Ok(restored(Replay::Exact, reading("カき", ""))),
+            ],
+        );
+        let mut state = RemoteComposition::new();
+        state.journal = vec![
+            ChangeRequest::PushChar('k' as u32),
+            ChangeRequest::PushChar('a' as u32),
+            ChangeRequest::PushChar('k' as u32),
+        ];
+        state.checkpoint = Some((2, reading("カ", "")));
+        assert!(apply_via(&fake, &mut state, ChangeRequest::PushChar('i' as u32), true).is_err());
+        // 書き換えた先頭（種 + 確かめていない `k`）までが確認済み、`i` は未確認
+        assert_eq!(state.confirmed_len(), 2);
+        assert_eq!(state.journal.len(), 3);
+        // 次のキー `a`: `i` までを流し直し、`a` を Change で送る。`i` は 1 回だけ流し直される
+        apply_via(&fake, &mut state, ChangeRequest::PushChar('a' as u32), true).unwrap();
+        let sent = fake.sent.borrow();
+        let Sent::Restore(_, journal, Some(cp)) = &sent[2] else {
+            panic!("second restore: {:?}", sent[2]);
+        };
+        assert_eq!(
+            journal,
+            &vec![
+                ChangeRequest::SeedPreedit { text: "カ".into() },
+                ChangeRequest::PushChar('k' as u32),
+                ChangeRequest::PushChar('i' as u32),
+            ]
+        );
+        assert_eq!(cp.len, 2);
+        assert_eq!(
+            journal
+                .iter()
+                .filter(|r| **r == ChangeRequest::PushChar('i' as u32))
+                .count(),
+            1
+        );
+        assert_eq!(state.checkpoint, Some((4, reading("カきあ", ""))));
+    }
+    #[test]
+    fn after_a_full_recovery_the_next_key_is_a_plain_change() {
+        let fake = rpc(
+            vec![changed(reading("かき", ""))],
+            vec![Ok(restored(Replay::Exact, reading("か", "k")))],
+        );
+        let mut state = RemoteComposition::new();
+        state.journal = vec![
+            ChangeRequest::PushChar('k' as u32),
+            ChangeRequest::PushChar('a' as u32),
+            ChangeRequest::PushChar('k' as u32),
+        ];
+        state.checkpoint = Some((1, reading("", "k")));
+        // recover_on_input と同じく journal 全体を流し直す
+        let upto = state.journal.len();
+        restore_journal_via(&fake, &mut state, upto).unwrap();
+        assert_eq!(state.confirmed_len(), 3);
+        // 次のキーは流し直さない
+        apply_via(&fake, &mut state, ChangeRequest::PushChar('i' as u32), true).unwrap();
+        let sent = fake.sent.borrow();
+        assert_eq!(sent.len(), 2);
+        assert!(matches!(
+            &sent[1],
+            Sent::Change(_, ChangeRequest::PushChar(105))
+        ));
+    }
+    #[test]
+    fn composition_a_recovers_its_tail_after_b_cleared_the_ledger() {
+        // A の `a` は応答を失って未確認。B のキーが流し直しで台帳を空にした後、A に戻ると
+        // A の次のキーが `a` を流し直す（台帳を消しても A の journal に残っている）
+        let fake = rpc(
+            vec![
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "disconnected"
+                ))),
+                changed(reading("", "s")),
+                changed(reading("かk", "")),
+            ],
+            vec![
+                Ok(restored(Replay::Exact, reading("", ""))),
+                Ok(restored(Replay::Exact, reading("か", ""))),
+            ],
+        );
+        let mut a = RemoteComposition::new();
+        a.generation = Some(generation());
+        a.journal = vec![ChangeRequest::PushChar('k' as u32)];
+        a.checkpoint = Some((1, reading("", "k")));
+        let mut b = RemoteComposition::new();
+        assert!(apply_via(&fake, &mut a, ChangeRequest::PushChar('a' as u32), true).is_err());
+        apply_via(&fake, &mut b, ChangeRequest::PushChar('s' as u32), true).unwrap();
+        // A に戻る: A は所有権を失っている（B が所有者）ので、確かめていない `a` までを流し直す
+        a.generation = None;
+        apply_via(&fake, &mut a, ChangeRequest::PushChar('k' as u32), true).unwrap();
+        let sent = fake.sent.borrow();
+        assert!(matches!(
+            &sent[3],
+            Sent::Restore(owner, journal, Some(_)) if *owner == a.owner && journal.len() == 2
+        ));
+        assert_eq!(a.checkpoint, Some((3, reading("かk", ""))));
+    }
+    #[test]
+    fn journal_cost_counts_text_bytes_below_the_count_limit() {
+        // 件数が少なくても、文字列の大きさで費用が上限を超えうる
+        let journal = vec![ChangeRequest::ForcePreedit {
+            text: "あ".repeat(20_000),
+        }];
+        assert!(journal_cost(&journal) >= JOURNAL_SOFT_COST);
+    }
+    #[test]
+    fn journal_records_input_without_starting_bg_conversion() {
+        let entry = journal_entry(&ChangeRequest::InputChar {
+            c: 'a' as u32,
+            kind: InputCharKind::Char,
+            bg_start_n_cands: Some(4),
+        });
+        assert_eq!(
+            entry,
+            ChangeRequest::InputChar {
+                c: 'a' as u32,
+                kind: InputCharKind::Char,
+                bg_start_n_cands: None,
+            }
+        );
+    }
+    #[test]
     fn first_change_that_sends_nothing_is_not_saved() {
-        // 再送できない最初の要求: 何も送らずに失敗し、状態も残さない。
+        // journal に入らない最初の要求: 何も送らずに失敗し、状態も残さない。
         let fake = rpc(vec![], vec![]);
         let mut state = RemoteComposition::new();
         let request = ChangeRequest::Commit {
@@ -1206,7 +1545,7 @@ mod tests {
         assert!(apply_via(&fake, &mut state, request, true).is_err());
         assert!(fake.sent.borrow().is_empty());
         assert!(!keep_after_change(true, &state, false));
-        // 送った後の失敗: 再送用の要求を残す。
+        // journal に入れた要求は、送れなくても保存する（次のキーで流し直す）。
         let fake = rpc(
             vec![],
             vec![Err(rakukan_engine_rpc::ChangeError::Transport(
@@ -1215,6 +1554,7 @@ mod tests {
         );
         let mut state = RemoteComposition::new();
         assert!(apply_via(&fake, &mut state, ChangeRequest::PushChar(116), true).is_err());
+        assert_eq!(state.journal, vec![ChangeRequest::PushChar(116)]);
         assert!(keep_after_change(true, &state, false));
         // 既存の composition は、失敗しても保存する。
         assert!(keep_after_change(false, &RemoteComposition::new(), false));

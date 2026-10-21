@@ -22,8 +22,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    BgView, ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, Owner, PIPE_BASE_NAME,
-    PROTOCOL_VERSION, ReadRequest, Reason, Request, RequestSeq, Response, TsfId, Unresolved,
+    BgView, ChangeOutcome, ChangeRequest, Checkpoint, EditState, EffectResult, EngineGen, Expect,
+    HostId, Owner, PIPE_BASE_NAME, PROTOCOL_VERSION, ReadRequest, Reason, Replay, Request,
+    RequestSeq, Response, SideEffect, TsfId, Unresolved,
 };
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
@@ -214,6 +215,20 @@ pub enum RestoreReply {
         then: Option<ChangeOutcome>,
     },
     /// 適用されなかった（番号の記録を失っていて答えられない、など）。
+    Rejected(Reason),
+}
+
+/// `restore_journal` の結果（v7）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RestoreJournalReply {
+    Restored {
+        engine_gen: EngineGen,
+        replay: Replay,
+        final_edit: EditState,
+        bg: BgView,
+        effects: Vec<EffectResult>,
+    },
+    /// 適用されなかった。
     Rejected(Reason),
 }
 
@@ -711,6 +726,25 @@ impl RpcEngine {
         guard.send_restore(owner, reading, pending_romaji, then)
     }
 
+    /// journal を流し直し、`owner` へ所有権を移す（v7、docs/Input_Pipeline_Plan.md 4.3）。
+    ///
+    /// 結果不明の要求があっても送れる（それを解決するための要求）。`Restored` を受け取れば
+    /// 未解決は消える。応答を失った・`ResultUnavailable` の場合は、この要求が結果不明として残る
+    /// （次の変更は `Change` を送れず、もう一度 `restore_journal` になる）。
+    pub fn restore_journal(
+        &self,
+        owner: Owner,
+        pre_effects: Vec<SideEffect>,
+        journal: Vec<ChangeRequest>,
+        checkpoint: Option<Checkpoint>,
+    ) -> std::result::Result<RestoreJournalReply, ChangeError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| ChangeError::Host("RpcEngine mutex poisoned".into()))?;
+        guard.send_restore_journal(owner, pre_effects, journal, checkpoint)
+    }
+
     /// 結果不明の要求（プロセスで 1 件まで）。
     pub fn unresolved(&self) -> Option<Unresolved> {
         REQUEST_LEDGER.unresolved()
@@ -1120,6 +1154,78 @@ impl<T: HostTransport> Connection<T> {
                 self.ledger.set_unresolved(prev);
                 Err(ChangeError::Host(format!(
                     "unexpected restore response: {other:?}"
+                )))
+            }
+        }
+    }
+
+    fn send_restore_journal(
+        &mut self,
+        owner: Owner,
+        pre_effects: Vec<SideEffect>,
+        journal: Vec<ChangeRequest>,
+        checkpoint: Option<Checkpoint>,
+    ) -> std::result::Result<RestoreJournalReply, ChangeError> {
+        // 採番の前に繋いでおく（send_change と同じ理由）
+        self.ensure_connected().map_err(ChangeError::Transport)?;
+        let known_gen = self.engine_gen.unwrap_or_default();
+        // 送っている間は、この要求を結果不明として記録する。種類は末尾の編集要求
+        // （記録用。無ければ ForcePreedit）
+        let kind_of = journal
+            .last()
+            .cloned()
+            .unwrap_or(ChangeRequest::ForcePreedit {
+                text: String::new(),
+            });
+        let (seq, prev) = self.ledger.begin_restore(owner, known_gen, Some(&kind_of));
+        let result = self.call_with_retry(Request::RestoreJournal {
+            owner,
+            seq,
+            pre_effects,
+            journal,
+            checkpoint,
+            config_version: None,
+        });
+        let resp = match result {
+            Ok(r) => r,
+            // この要求を結果不明として残す
+            Err(e) => return Err(ChangeError::Transport(e)),
+        };
+        match resp {
+            Response::RestoredJournal {
+                engine_gen,
+                replay,
+                final_edit,
+                bg,
+                effects,
+            } => {
+                // 読みを丸ごと作り直したので、それまでの未解決もここで解決する
+                self.ledger.set_unresolved(None);
+                self.engine_gen = Some(engine_gen);
+                Ok(RestoreJournalReply::Restored {
+                    engine_gen,
+                    replay,
+                    final_edit,
+                    bg,
+                    effects,
+                })
+            }
+            // `ResultUnavailable` は適用済みの可能性があるので、結果不明のまま残す
+            Response::Rejected(reason) => {
+                if reason != Reason::ResultUnavailable {
+                    self.ledger.set_unresolved(prev);
+                }
+                tracing::debug!("rpc: RestoreJournal seq={seq} rejected: {reason:?}");
+                Ok(RestoreJournalReply::Rejected(reason))
+            }
+            Response::Error(e) => {
+                self.ledger.set_unresolved(prev);
+                Err(ChangeError::Host(e))
+            }
+            other => {
+                self.ledger.set_unresolved(prev);
+                Err(ChangeError::Host(format!(
+                    "unexpected restore-journal response: {other:?}"
                 )))
             }
         }
@@ -2491,6 +2597,73 @@ mod tests {
         let reqs = sent(&log);
         assert!(matches!(reqs[2], Request::Restore { seq: 8, .. }));
         assert!(matches!(reqs[3], Request::Restore { seq: 9, .. }));
+    }
+
+    #[test]
+    fn restore_journal_resolves_the_ledger_and_a_lost_one_stays_unresolved() {
+        let restored = Response::RestoredJournal {
+            engine_gen: gen1(),
+            replay: Replay::Exact,
+            final_edit: EditState {
+                reading: "か".into(),
+                pending_romaji: String::new(),
+            },
+            bg: crate::protocol::BgView::Idle,
+            effects: vec![],
+        };
+        let (s, log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Rejected(Reason::ResultUnavailable),
+            restored,
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        // 別の composition（owner2）の結果不明の打鍵を抱えている
+        let owner2 = Owner {
+            tsf_id: owner1().tsf_id,
+            composition: owner1().composition + 1,
+        };
+        conn.ledger.set_unresolved(Some(Unresolved {
+            seq: 7,
+            kind: ChangeKind::InputChar,
+            owner: owner2,
+            engine_gen: gen1(),
+        }));
+        conn.ledger.lock().last_seq = 7;
+        let journal = vec![
+            ChangeRequest::PushChar('k' as u32),
+            ChangeRequest::PushChar('a' as u32),
+        ];
+
+        // 答えられない: 適用済みかもしれないので、この要求を結果不明として残す
+        let r = conn
+            .send_restore_journal(owner1(), vec![], journal.clone(), None)
+            .unwrap();
+        assert_eq!(r, RestoreJournalReply::Rejected(Reason::ResultUnavailable));
+        let u = conn.ledger.unresolved().expect("stays unresolved");
+        assert_eq!(
+            (u.seq, u.kind, u.owner),
+            (8, ChangeKind::PushChar, owner1())
+        );
+
+        // 未解決があっても送れる。受理されれば未解決は消え、世代を覚える
+        let r = conn
+            .send_restore_journal(owner1(), vec![], journal, None)
+            .unwrap();
+        assert!(matches!(
+            r,
+            RestoreJournalReply::Restored { engine_gen, replay: Replay::Exact, .. } if engine_gen == gen1()
+        ));
+        // owner2 の未解決も消える。その打鍵は owner2 の journal に残っていて、owner2 の
+        // 次のキーで流し直される（設計書 4.3 の不変条件。TSF 側の試験で確かめる）
+        assert_eq!(conn.ledger.unresolved(), None);
+        assert_eq!(conn.engine_gen, Some(gen1()));
+        let reqs = sent(&log);
+        assert!(matches!(reqs[2], Request::RestoreJournal { seq: 8, .. }));
+        assert!(matches!(reqs[3], Request::RestoreJournal { seq: 9, .. }));
     }
 
     #[test]

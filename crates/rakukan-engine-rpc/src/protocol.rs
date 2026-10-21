@@ -19,7 +19,11 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
 /// - v6: Issue #56 の host / engine / owner 識別子と変更要求・復元・終了応答の形を追加
 ///   （(b) で BG 系の応答型と編集状態の同梱、照合付きの読み取り `Read` を追加。v6 は未リリースなので版は上げない）
-pub const PROTOCOL_VERSION: u32 = 6;
+/// - v7: 入力処理の見直し（#69 / #70、docs/Input_Pipeline_Plan.md 5 節）。`RestoreJournal` /
+///   `RestoredJournal`、`ChangeRequest::SeedPreedit` / `RetainRange`、`SideEffect`、
+///   `Reason::ConfigStale` / `ConfigUnusable`（#66 用に予約。v7 のホストは返さない）を追加。
+///   v6（0.12.0）とは繋がらないので、古いホストを止めるインストーラー（フェーズ 3）と同じ版で出す
+pub const PROTOCOL_VERSION: u32 = 7;
 
 /// ホストプロセスの起動インスタンス識別子。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -107,6 +111,9 @@ pub enum ChangeKind {
     ResetAll,
     Learn,
     LearnForce,
+    // v7
+    SeedPreedit,
+    RetainRange,
 }
 
 /// 応答を受け取れず、適用済みか判断できない変更要求。
@@ -155,14 +162,31 @@ pub enum ChangeRequest {
         reading: String,
         surface: String,
     },
+    // ─── v7（docs/Input_Pipeline_Plan.md 4.8）──────────────
+    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を入れる。打鍵ログには種の項目として
+    /// 入れる（engine ABI の次の版で）。それまでのホストは `reset_preedit` と各文字の
+    /// `push_raw` で代える。
+    SeedPreedit {
+        text: String,
+    },
+    /// 読みの `start..end` 文字を残し、未確定ローマ字を消す（確定の引き継ぎ）。
+    /// engine ABI の次の版の前は、残す文字列を `SeedPreedit` と同じ方法で入れ直す。
+    RetainRange {
+        start: u32,
+        end: u32,
+    },
 }
 
-/// 要求を適用しなかった理由。#66 の理由は同じ enum に後から追加する。
+/// 要求を適用しなかった理由。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Reason {
     GenMismatch,
     OwnerMismatch,
     ResultUnavailable,
+    /// #66 用に予約（v7）。v7 のホストは返さない。TSF は結果不明として扱う。
+    ConfigStale,
+    /// #66 用に予約（v7）。v7 のホストは返さない。TSF は結果不明として扱う。
+    ConfigUnusable,
 }
 
 impl ChangeRequest {
@@ -185,8 +209,50 @@ impl ChangeRequest {
             Self::ResetAll => ChangeKind::ResetAll,
             Self::Learn { .. } => ChangeKind::Learn,
             Self::LearnForce { .. } => ChangeKind::LearnForce,
+            Self::SeedPreedit { .. } => ChangeKind::SeedPreedit,
+            Self::RetainRange { .. } => ChangeKind::RetainRange,
         }
     }
+}
+
+/// `RestoreJournal` で、journal の流し直しより前に同じロックの中で適用する副作用（v7）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum SideEffect {
+    Learn {
+        reading: String,
+        surface: String,
+    },
+    LearnForce {
+        reading: String,
+        surface: String,
+    },
+    /// LLM に渡す文脈に、確定した文字列を足す（`commit` の文脈の部分だけ）。
+    CommitContext {
+        text: String,
+    },
+}
+
+/// 副作用の結果（v7）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum EffectResult {
+    Applied,
+    Failed,
+}
+
+/// journal の先頭 `len` 件を適用した状態として、ホストが確かめた値（v7）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Checkpoint {
+    pub len: u32,
+    pub checkpoint_edit: EditState,
+}
+
+/// `RestoreJournal` で、照合点までが一致したか（v7）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum Replay {
+    /// 照合点までが一致し（または照合点が無く）、journal をそのまま適用した。
+    Exact,
+    /// 照合点が一致しなかったので、照合点の値を種にして末尾だけを適用した。
+    Rebased,
 }
 
 /// 変更が成功した直後の読みと未確定ローマ字。TSF が復元元として保持する。
@@ -542,6 +608,19 @@ pub enum Request {
         expect: Expect,
         request: ReadRequest,
     },
+
+    // ─── v7: journal の流し直し（docs/Input_Pipeline_Plan.md 4.3）─────
+    /// `pre_effects` を適用し、`reset_preedit` の後に journal を流し直して、所有権を移す。
+    /// 番号・保存した応答の扱いは `Restore` と同じ。
+    RestoreJournal {
+        owner: Owner,
+        seq: RequestSeq,
+        pre_effects: Vec<SideEffect>,
+        journal: Vec<ChangeRequest>,
+        checkpoint: Option<Checkpoint>,
+        /// #66 まで常に `None`。
+        config_version: Option<ConfigVersion>,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -591,4 +670,12 @@ pub enum Response {
     },
     Bg(BgView),
     OptionalString(Option<String>),
+    /// `RestoreJournal` の結果（v7）。途中の結果は含めない。
+    RestoredJournal {
+        engine_gen: EngineGen,
+        replay: Replay,
+        final_edit: EditState,
+        bg: BgView,
+        effects: Vec<EffectResult>,
+    },
 }
