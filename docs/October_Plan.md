@@ -12,6 +12,7 @@
 
 | フェーズ | 段 | Issue | 内容 | 重要度 | 作業負荷 | リリース |
 |---|---|---|---|---|---|---|
+| 1 | A | （Issue なし） | engine DLL のログに外部ライブラリの TRACE が出て膨らむ | 中 | 小 | 段 A と合わせる |
 | 1 | A | #71 | フォーカス移動で文脈が残る | 高 | 中 | 単独で出せる形にする |
 | 2 | B | #69 / #70 | 入力の消失・素通り | 高 | 大 | 設計の後に決める |
 | 3 | C | #33（#73〜#76） | インストーラーとログの見直し | 中〜高 | 大 | 1 つの版として出す |
@@ -24,6 +25,7 @@
 
 | フェーズ | 段 | Issue | 内容 | 理由 | リリース |
 |---|---|---|---|---|---|
+| 1 | A | （Issue なし） | `config.toml` の `log_level` をホストへ `RAKUKAN_LOG` として渡すとき、値をそのまま渡しているため、engine DLL では外部ライブラリ（`tokenizers::tokenizer::normalizer`）まで TRACE で出る | `log_level = "trace"` で engine DLL のログが 1 日 200〜460 MB になり、行の 98.5% をこの TRACE が占める（2026-10-15〜21 のログ）。調査に使わない内容で、rakukan 自身の TRACE が埋もれる。段 A の作業 7（DEBUG の記録）の前に片づける | 段 A に含める |
 | 1 | A | #71 | フォーカス移動で `ResetAll` が送られず、LLM の文脈が残る | 配布中の 0.12.0 にある。PR #68 で入った意図しない変化で、DESIGN.md の設計から外れている。直し方は Issue に記録済み（Codex CLI のレビュー済み） | 検証が終わった時点で、段 A だけの修正版を出せる形にしておく。出すか、フェーズ 2 と合わせるかは完了時に決める |
 | 2 | B | #69 / #70 | ホストとの通信失敗・エンジンの未準備・ロック競合のときに、打鍵や確定する文字列が失われる・アプリへ素通りする | 入力が失われる・誤った文字が確定される。0.12.0 の実機試験で見えた: T2-3（候補選択中のホスト交換で、表示は変換後のまま状態は変換前に戻り、Enter でひらがなが確定）、T2-4（言語バーのエンジン再起動の直後、2026-10-10 02:57:26〜27 UTC の TSF ログに `handle_action: engine not ready: bg init triggered` 1 回と `engine busy` 2 回。T2-4 自体は合格）。個別に直すと穴が残るので、定義から設計する | RPC protocol に要求を足す場合は protocol の版を上げる。単独で出すか、フェーズ 3 と合わせるかを、B-2 の設計の後に決める |
 | 3 | C | #33（#73〜#76） | インストーラーの見直し（再起動で完了、`%ProgramFiles%`、経路の一本化、winget）とログの見直しの段 2〜5 | 計画は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) と [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。**C の更新中の検証（文字・キーを失わない）は B の修正に依存する**ので B の後に行う。規模も大きい | #75 で engine ABI の版を上げる（2 か所で定義）。インストーラーの方式も変わるので、1 つの版として出す想定。Step ごとに分けるかは着手時に決める |
@@ -33,7 +35,27 @@
 - フェーズ 1〜3 の詳細は 2〜4 節、フェーズ 4・5 は 5・6 節。フェーズに属さず並行して行う作業は 7 節。
 - 版を上げるフェーズを同じリリースにまとめる場合も、各フェーズの試験はフェーズごとに終える。そのうえで、**最終的に配布する組み合わせ（RPC・ABI・配置・ログが同時に変わった成果物）で統合試験を行う**。
 
-## 2. フェーズ 1（段 A）: #71
+## 2. フェーズ 1（段 A）: engine DLL のログの絞り込み・#71
+
+### 2.0 engine DLL のログの絞り込み（最初に行う）
+
+**現状**（2026-10-21 に確認）
+
+- TSF 側は `log_level` を `rakukan_tsf=<level>,rakukan_engine_rpc=<level>` の形にして、対象を rakukan のモジュールに限っている（`crates/rakukan-tsf/src/lib.rs` の `default_log_filter_spec`）。
+- ホストへは `log_level` の値をそのまま `RAKUKAN_LOG` に入れている（`crates/rakukan-engine-rpc/src/client.rs` の `spawn_log_env`）。engine DLL はこれで filter を作る（`crates/rakukan-engine/src/ffi.rs`）ので、`trace` では外部ライブラリを含むすべてが TRACE で出る。
+- 実測: `rakukan-engine-dll.log` は 10/15〜10/21 の 6 日で 1.5 GB。`.log.1` では 184 万行のうち 182 万行が `tokenizers::tokenizer::normalizer` の TRACE（1 文字ごとの正規化の途中経過）。この target の WARN / ERROR は 0 件。
+
+**作業**
+
+1. ホストへ渡す値を、対象を限った形にする（例: `info,rakukan_engine=<level>,rakukan_dict=<level>,rakukan_engine_abi=<level>`）。外部ライブラリは `info` のままにし、WARN 以上は残す。対象のモジュールは、engine DLL の中で TRACE を出しているものから決める（今のログで見えるのは `rakukan_engine`・`rakukan_engine::kanji::backend`・`rakukan_dict::store`・`rakukan_engine::conv_cache`・`rakukan_engine::digit_license`）。
+2. 手で `RAKUKAN_LOG` を設定したときはその値を優先する（今の `spawn_log_env` の決まりを変えない）。
+3. 単体の試験: `log_level` の各値で渡す filter の文字列、手で設定した `RAKUKAN_LOG` の優先。
+
+**完了条件**
+
+- `log_level = "trace"` でホストを起動し直したとき、`rakukan-engine-dll.log` に `tokenizers` の TRACE が出ず、rakukan のモジュールの TRACE は出る。
+
+### 2.1 #71
 
 **作業**（Issue #71 の「直し方の方向」に、レビューの指摘を加えた）
 
@@ -149,3 +171,4 @@ RPC protocol に要求を足す場合（#69 の A の案）は、protocol の版
 - 2026-10-11: #83 の計測と上位 k 件の部分選択を 6 節に、#82 と #83 の KV キャッシュの再利用を 7 節に追加。#79 を一度 段 B2 として B と C の間に入れたが、重要度を中〜低と見直して外した。7 節を「段 C の後に扱うもの（順序つき）」と「対象外」（7a 節）に分け、IPC の名前とパイプの設定を 7 節に加えた。各段の時期は決めないことにした
 - 2026-10-11（2 回目）: フェーズ 1〜5 に分けた。1 節をフェーズの表にし、旧 5 節（リリースの単位）を表の「リリース」欄に統合。旧 7 節を 5 節（フェーズ 4）と 6 節（フェーズ 5）に組み替え、並行作業を 7 節、対象外を 8 節にした。段 A〜C の呼び方は残す
 - 2026-10-11（3 回目）: 1 節に、重要度と作業負荷の見積もりを入れた概要の表を加えた
+- 2026-10-21: 9〜10 月のログの確認で見つかった、engine DLL のログの絞り込みを、フェーズ 1 の最初の作業として加えた（1 節の表、2.0 節）。#71 の作業は 2.1 節に移した
