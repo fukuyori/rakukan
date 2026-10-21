@@ -34,6 +34,22 @@ fn numeric_separator_after_digit(reading: &str, c: char) -> Option<char> {
     }
 }
 
+/// 変換中なら、エンジンの読みを composition 全体の読みに戻す（F6〜F10 の前。範囲変換の
+/// 選択部分などの一時的な値のまま変換すると、その部分だけが変換される。入力処理の見直しの
+/// 段 7、設計書 4.8）。打鍵ログは全体を保っているので、F9 / F10 は全体の打鍵で変換する。
+fn restore_full_reading_for_f_keys(engine: &crate::engine::state::DynEngine) -> Result<()> {
+    let full = session_get()
+        .ok()
+        .and_then(|sess| sess.conversion_full_reading());
+    if let Some(full) = full
+        && !full.is_empty()
+        && engine.hiragana_text()? != full
+    {
+        engine.force_preedit(full)?;
+    }
+    Ok(())
+}
+
 impl super::TextServiceFactory_Impl {
     pub(super) fn on_kana_convert(
         &self,
@@ -48,6 +64,7 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
         engine.flush_pending_n()?;
+        restore_full_reading_for_f_keys(engine)?;
         let p = engine.preedit_display()?;
         if p.is_empty() {
             return Ok(false);
@@ -109,6 +126,7 @@ impl super::TextServiceFactory_Impl {
             None => return Ok(false),
         };
         engine.flush_pending_n()?;
+        restore_full_reading_for_f_keys(engine)?;
         let p = engine.preedit_display()?;
         if p.is_empty() {
             return Ok(false);
@@ -363,9 +381,8 @@ impl super::TextServiceFactory_Impl {
             // （学習は、文書に確定部分を確定できてから送る: commit_then_start_composition）
             engine.commit(&confirmed);
             engine.reset_preedit();
-            for c in remainder_reading.chars() {
-                engine.push_raw(c)?;
-            }
+            // 残りは種で入れる（F9 / F10 は種の綴り。入力処理の見直しの段 7、設計書 4.8）
+            engine.seed_preedit(remainder_reading.clone())?;
             let preedit = engine.preedit_display()?;
             {
                 let mut sess = session_get()?;
@@ -639,7 +656,9 @@ impl super::TextServiceFactory_Impl {
                     format!("{prefix_reading}{reading}{symbol}{remainder_reading}"),
                 )
             };
-            engine.force_preedit(next_reading.clone())?;
+            // 記号が読みの途中に入ると打鍵ログと対応しないので、種で入れ直す（F9 / F10 は
+            // 種の綴り。入力処理の見直しの段 7、設計書 4.8）
+            engine.seed_preedit(next_reading.clone())?;
             sess.set_live_conv(next_reading.clone(), display.clone(), next_reading);
             drop(sess);
             drop(guard);

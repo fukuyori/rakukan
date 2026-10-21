@@ -162,20 +162,67 @@ impl super::TextServiceFactory_Impl {
         } else {
             None
         };
-        if entry.as_ref().is_some_and(|entry| entry.restored) {
+        // 復元直後の処置（入力処理の見直しの段 7、設計書 4.7 の表）
+        if let Some(entry) = entry.as_ref().filter(|entry| entry.restored) {
+            // BG の処置（ホストが BG 変換の所有者を消している）: タイマーを止め、preview の列を
+            // 空にし、変換の世代を進め（遅れて届く前の preview を当てない）、モデル待ちを消す。
+            // セッションが持つ LiveConv の preview そのものは、Exact なら保つ（4.7 の表）
             candidate_window::stop_waiting_timer();
             candidate_window::stop_live_timer();
+            crate::tsf::live_session::queue_preview_clear();
+            crate::tsf::live_session::conv_gen_bump();
             candidate_window::clear_model_wait();
             if let Some(edit) = crate::engine::rpc_composition::local_edit() {
                 let display = format!("{}{}", edit.reading, edit.pending_romaji);
-                if let Ok(mut session) = session_get() {
-                    session.set_preedit(display.clone());
-                }
-                // 復元直後の Space は Preedit へ戻すだけ。変換は次の Space に任せる。
-                if matches!(action, UserAction::Convert) {
-                    drop(guard);
-                    update_composition(ctx, tid, sink, display)?;
-                    return Ok(true);
+                let plan = session_get()
+                    .map(|session| after_restore(entry.rebased, &session))
+                    .unwrap_or(AfterRestore::ToPreedit);
+                match plan {
+                    // Exact で変換中・ライブ変換: セッションと候補ウィンドウを保ち、今のキーは
+                    // 通常どおり（↓ は次の候補へ）
+                    AfterRestore::Keep => {
+                        if let Ok(mut session) = session_get() {
+                            session.clear_llm_pending();
+                        }
+                        if session_get().is_ok_and(|s| s.is_live_conv()) {
+                            let _ =
+                                crate::engine::state::start_live_bg_if_ready(engine, &edit.reading);
+                        }
+                    }
+                    // Exact で Preedit / Waiting: Preedit にして（Waiting なら候補ウィンドウを
+                    // 隠し）、今のキーは通常どおり（Space は変換する）
+                    AfterRestore::ToPreedit => {
+                        if let Ok(mut session) = session_get() {
+                            session.set_preedit(display.clone());
+                        }
+                        candidate_window::hide();
+                        let _ = crate::engine::state::start_live_bg_if_ready(engine, &edit.reading);
+                    }
+                    // Rebased: セッションの全体の読みで Preedit にし、表示を作り直す。文字を
+                    // 生むキーは続け、表示に依存する操作（Space・候補・F キー・Backspace・Esc・
+                    // カーソル）は修復だけで終える（押した時点の表示がもう無い。4.1 の AfterRepair）
+                    AfterRestore::Repair => {
+                        let full = session_get()
+                            .ok()
+                            .and_then(|session| session.conversion_full_reading())
+                            .filter(|full| !full.is_empty());
+                        let display = match full {
+                            Some(full) if full != edit.reading => {
+                                engine.force_preedit(full.clone())?;
+                                full
+                            }
+                            _ => display,
+                        };
+                        if let Ok(mut session) = session_get() {
+                            session.set_preedit(display.clone());
+                        }
+                        candidate_window::hide();
+                        if !continues_after_repair(&action) {
+                            drop(guard);
+                            update_composition(ctx, tid, sink, display)?;
+                            return Ok(true);
+                        }
+                    }
                 }
             }
         }
@@ -627,6 +674,35 @@ impl super::TextServiceFactory_Impl {
 const READING_LIMIT: usize = 2_000;
 
 /// 文字を生む（読みを伸ばす）キーか。
+/// 復元直後の処置（設計書 4.7 の表）。
+#[derive(Debug, PartialEq, Eq)]
+enum AfterRestore {
+    /// セッションと候補ウィンドウを保つ（Exact で変換中・ライブ変換）。
+    Keep,
+    /// Preedit にする（Exact で Preedit / Waiting / それ以外）。
+    ToPreedit,
+    /// 全体の読みで Preedit にし、表示を作り直す（Rebased）。
+    Repair,
+}
+
+fn after_restore(rebased: bool, session: &SessionState) -> AfterRestore {
+    if rebased {
+        return AfterRestore::Repair;
+    }
+    match session {
+        SessionState::Selecting { .. }
+        | SessionState::BlockSelecting { .. }
+        | SessionState::RangeSelect { .. }
+        | SessionState::LiveConv { .. } => AfterRestore::Keep,
+        _ => AfterRestore::ToPreedit,
+    }
+}
+
+/// Rebased の修復の後も、今のキーを続けて実行するか（文字を生むキーとモードキー）。
+fn continues_after_repair(action: &UserAction) -> bool {
+    is_text_input(action) || super::is_ime_mode_action(action)
+}
+
 fn is_text_input(action: &UserAction) -> bool {
     matches!(
         action,
@@ -658,5 +734,40 @@ mod length_limit_tests {
         assert!(is_text_input(&UserAction::Punctuate('。')));
         assert!(!is_text_input(&UserAction::Backspace));
         assert!(!is_text_input(&UserAction::CommitRaw));
+    }
+}
+
+#[cfg(test)]
+mod after_restore_tests {
+    use super::*;
+
+    #[test]
+    fn the_session_after_a_restore_follows_the_table() {
+        let preedit = SessionState::Preedit { text: "か".into() };
+        let range = SessionState::RangeSelect {
+            full_reading: "しかん".into(),
+            select_end: 1,
+            original_preview: String::new(),
+        };
+        // Exact: 変換中は保ち、Preedit・Idle は Preedit にする
+        assert_eq!(after_restore(false, &range), AfterRestore::Keep);
+        assert_eq!(after_restore(false, &preedit), AfterRestore::ToPreedit);
+        assert_eq!(
+            after_restore(false, &SessionState::Idle),
+            AfterRestore::ToPreedit
+        );
+        // Rebased: どれでも修復
+        assert_eq!(after_restore(true, &range), AfterRestore::Repair);
+        assert_eq!(after_restore(true, &preedit), AfterRestore::Repair);
+    }
+
+    #[test]
+    fn only_keys_that_make_text_continue_after_a_repair() {
+        assert!(continues_after_repair(&UserAction::Input('a')));
+        assert!(continues_after_repair(&UserAction::ImeToggle));
+        // 復元直後の Space（Rebased）は修復だけ
+        assert!(!continues_after_repair(&UserAction::Convert));
+        assert!(!continues_after_repair(&UserAction::Backspace));
+        assert!(!continues_after_repair(&UserAction::Cancel));
     }
 }

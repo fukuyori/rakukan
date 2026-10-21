@@ -2257,6 +2257,38 @@ impl SessionState {
     }
 
     #[allow(dead_code)]
+    /// 候補の LLM 待ちを外す（復元の後。設計書 4.7。候補はそのまま）。
+    pub fn clear_llm_pending(&mut self) {
+        if let SessionState::Selecting { llm_pending, .. } = self {
+            *llm_pending = false;
+        }
+    }
+
+    /// 変換中（Waiting / Selecting / BlockSelecting / RangeSelect）の composition 全体の読み。
+    /// 変換中のエンジンの読みは一時的な値（範囲変換の選択部分・ブロックの読みなど）のことが
+    /// あるので、F6〜F10 はこれに戻してから変換する（入力処理の見直しの段 7、設計書 4.8）。
+    /// 変換中でなければ `None`。
+    pub fn conversion_full_reading(&self) -> Option<String> {
+        match self {
+            SessionState::Waiting {
+                text,
+                remainder_reading,
+                ..
+            } => Some(format!("{text}{remainder_reading}")),
+            SessionState::Selecting {
+                original_preedit,
+                prefix_reading,
+                remainder_reading,
+                ..
+            } => Some(format!(
+                "{prefix_reading}{original_preedit}{remainder_reading}"
+            )),
+            SessionState::BlockSelecting { full_reading, .. }
+            | SessionState::RangeSelect { full_reading, .. } => Some(full_reading.clone()),
+            _ => None,
+        }
+    }
+
     pub fn selecting_prefix_reading_clone(&self) -> String {
         if let SessionState::Selecting { prefix_reading, .. } = self {
             prefix_reading.clone()
@@ -3598,5 +3630,45 @@ mod live_learning_failure_tests {
             super::learn_live_action("reading", "preview", true),
             super::LearnAction::Skip
         );
+    }
+}
+
+#[cfg(test)]
+mod conversion_full_reading_tests {
+    use super::SessionState;
+
+    #[test]
+    fn f_keys_restore_the_whole_reading_while_converting() {
+        // 範囲変換の候補表示中（F-6）: 選択部分「し」と残り「かん」で全体に戻す
+        let selecting = SessionState::Selecting {
+            original_preedit: "し".into(),
+            candidates: vec!["死".into()],
+            candidate_views: Vec::new(),
+            selected: 0,
+            page_size: 9,
+            llm_pending: false,
+            pos_x: 0,
+            pos_y: 0,
+            punct_pending: None,
+            prefix: String::new(),
+            prefix_reading: String::new(),
+            remainder: "かん".into(),
+            remainder_reading: "かん".into(),
+        };
+        assert_eq!(
+            selecting.conversion_full_reading().as_deref(),
+            Some("しかん")
+        );
+        let range = SessionState::RangeSelect {
+            full_reading: "しかん".into(),
+            select_end: 1,
+            original_preview: String::new(),
+        };
+        assert_eq!(range.conversion_full_reading().as_deref(), Some("しかん"));
+        // 変換中でなければ戻さない
+        let preedit = SessionState::Preedit {
+            text: "しかん".into(),
+        };
+        assert_eq!(preedit.conversion_full_reading(), None);
     }
 }

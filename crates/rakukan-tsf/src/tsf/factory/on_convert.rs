@@ -1795,10 +1795,9 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::hide();
                 engine.commit(&selected);
                 engine.reset_preedit();
-                // 残りを engine に設定して LiveConv 再開
-                for c in unselected.chars() {
-                    engine.push_raw(c)?;
-                }
+                // 残りを種で engine に設定して LiveConv 再開（F9 / F10 は種の綴り。
+                // 入力処理の見直しの段 7、設計書 4.8）
+                engine.seed_preedit(unselected.clone())?;
                 let _ = crate::engine::state::start_live_bg_if_ready(engine, &unselected);
                 let preedit = engine.preedit_display()?;
                 {
@@ -1910,9 +1909,8 @@ impl super::TextServiceFactory_Impl {
                     // （学習は、文書に確定部分を確定できてから送る: commit_then_start_composition）
                     engine.commit(&confirmed);
                     engine.reset_preedit();
-                    for c in remainder_reading.chars() {
-                        engine.push_raw(c)?;
-                    }
+                    // 残りは種で入れる（F9 / F10 は種の綴り。入力処理の見直しの段 7、設計書 4.8）
+                    engine.seed_preedit(remainder_reading.clone())?;
                     let preedit = engine.preedit_display()?;
                     {
                         let mut sess = session_get()?;

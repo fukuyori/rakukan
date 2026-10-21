@@ -350,7 +350,8 @@ fn journal_cost(journal: &[ChangeRequest]) -> usize {
         })
         .sum()
 }
-/// journal の上限（設計書 4.3）。段 4 では判定して DEBUG に残すだけで、有効にしない。
+/// journal の上限（設計書 4.3）。軟上限は末尾が空なら縮める（段 7、[`shrink_journal`]）。
+/// 硬上限は末尾があれば回復できない場合に進む（段 6、`journal_stuck`）。
 const JOURNAL_SOFT_COUNT: usize = 512;
 const JOURNAL_SOFT_COST: usize = 32 * 1024;
 const JOURNAL_HARD_COUNT: usize = 1024;
@@ -362,10 +363,46 @@ fn note_journal_limits(journal: &[ChangeRequest]) {
         // 末尾があれば、次のキーの入口で回復できない場合に進む（`journal_stuck`）
         tracing::debug!("journal over the hard limit: count={count} cost={cost}");
     } else if count >= JOURNAL_SOFT_COUNT || cost >= JOURNAL_SOFT_COST {
-        tracing::debug!(
-            "journal over the soft limit (not enforced yet): count={count} cost={cost}"
-        );
+        // 末尾が空なら、次の追加の前に縮める（`shrink_journal`）
+        tracing::debug!("journal over the soft limit: count={count} cost={cost}");
     }
+}
+/// 軟上限（または硬上限）を超えた journal を、末尾が空なら照合点の値の種に縮める（設計書
+/// 4.3 の軟上限、段 7）: `[SeedPreedit(読み), PushChar(未確定ローマ字)…]`。流し直した結果の
+/// 読みと未確定ローマ字は同じで、打鍵ログは種の綴りになる（4.8）。縮めたら `true`。
+fn shrink_journal(state: &mut RemoteComposition) -> bool {
+    let count = state.journal.len();
+    let cost = journal_cost(&state.journal);
+    if count < JOURNAL_SOFT_COUNT && cost < JOURNAL_SOFT_COST {
+        return false;
+    }
+    if state.confirmed_len() < count {
+        // 末尾があれば縮めずに続ける
+        return false;
+    }
+    let Some((_, edit)) = state.checkpoint.clone() else {
+        return false;
+    };
+    let shrunk = seeded_journal(&edit);
+    tracing::info!(
+        "journal shrunk on the soft limit: count={count} cost={cost} -> {} request(s)",
+        shrunk.len()
+    );
+    state.checkpoint = Some((shrunk.len(), edit));
+    state.journal = shrunk;
+    true
+}
+/// 編集状態 `edit` を作り直す journal（`SeedPreedit` と未確定ローマ字の `PushChar`）。
+fn seeded_journal(edit: &EditState) -> Vec<ChangeRequest> {
+    let mut journal = vec![ChangeRequest::SeedPreedit {
+        text: edit.reading.clone(),
+    }];
+    journal.extend(
+        edit.pending_romaji
+            .chars()
+            .map(|c| ChangeRequest::PushChar(c as u32)),
+    );
+    journal
 }
 /// 変更の後に、手元の状態を保存するかどうか。
 ///
@@ -427,7 +464,7 @@ fn restore_journal_via(
     rpc: &impl CompositionRpc,
     state: &mut RemoteComposition,
     upto: usize,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<Replay> {
     let sent_checkpoint = state
         .checkpoint
         .as_ref()
@@ -450,12 +487,7 @@ fn restore_journal_via(
             let confirmed = match (replay, sent_checkpoint) {
                 (Replay::Rebased, Some(checkpoint)) => {
                     let base = checkpoint.checkpoint_edit;
-                    let mut rebased = vec![ChangeRequest::SeedPreedit { text: base.reading }];
-                    rebased.extend(
-                        base.pending_romaji
-                            .chars()
-                            .map(|c| ChangeRequest::PushChar(c as u32)),
-                    );
+                    let mut rebased = seeded_journal(&base);
                     let tail_start = checkpoint.len as usize;
                     rebased.extend(state.journal[tail_start..upto].iter().cloned());
                     let len = rebased.len();
@@ -474,7 +506,7 @@ fn restore_journal_via(
             state.bg_reading = None;
             state.checkpoint = Some((confirmed, final_edit.clone()));
             state.edit = final_edit;
-            Ok(())
+            Ok(replay)
         }
         RestoreJournalReply::Rejected(reason) => anyhow::bail!("restore rejected: {reason:?}"),
     }
@@ -493,6 +525,7 @@ fn apply_via(
 ) -> anyhow::Result<ChangeOutcome> {
     let journal_request = is_journal_request(&request);
     if journal_request {
+        shrink_journal(state);
         state.journal.push(journal_entry(&request));
         note_journal_limits(&state.journal);
     }
@@ -609,6 +642,8 @@ fn finish_via(
 /// `recover_on_input` の結果。`bg` は、入口の読み取りで得た BG 状態（復元した場合は `None`）。
 pub struct InputEntry {
     pub restored: bool,
+    /// 復元で、照合点が一致せず照合点の値を種にして作り直した（`Replay::Rebased`）。
+    pub rebased: bool,
     pub bg: Option<BgView>,
 }
 pub struct DynEngine(RpcEngine);
@@ -651,6 +686,7 @@ impl DynEngine {
         let Some(mut state) = snapshot() else {
             return Ok(InputEntry {
                 restored: false,
+                rebased: false,
                 bg: Some(BgView::Idle),
             });
         };
@@ -676,6 +712,7 @@ impl DynEngine {
         if !lost && !unconfirmed && self.0.unresolved().is_none() {
             return Ok(InputEntry {
                 restored: false,
+                rebased: false,
                 bg,
             });
         }
@@ -686,10 +723,11 @@ impl DynEngine {
         let upto = state.journal.len();
         let result = restore_journal_via(&self.0, &mut state, upto);
         save(state);
-        result?;
+        let replay = result?;
         // 復元の後の BG 状態は読んでいない。
         Ok(InputEntry {
             restored: true,
+            rebased: replay == Replay::Rebased,
             bg: None,
         })
     }
@@ -878,6 +916,12 @@ impl DynEngine {
         self.change_local(ChangeRequest::PushRaw(c as u32))
             .map(|_| ())
     }
+    /// 読み・未確定ローマ字・打鍵ログを消し、`text` を種の項目で入れる（engine ABI 12。
+    /// F9 / F10 は種の綴りで変換する）。`push_raw` と同じく、失敗を返す。
+    pub fn seed_preedit(&self, text: String) -> anyhow::Result<()> {
+        self.change_local(ChangeRequest::SeedPreedit { text })
+            .map(|_| ())
+    }
     /// `push_raw` と同じく、失敗を返す。
     pub fn force_preedit(&self, text: String) -> anyhow::Result<()> {
         self.change_local(ChangeRequest::ForcePreedit { text })
@@ -944,6 +988,41 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    #[test]
+    fn a_journal_over_the_soft_limit_shrinks_only_without_a_tail() {
+        let reading = |r: &str, p: &str| EditState {
+            reading: r.into(),
+            pending_romaji: p.into(),
+        };
+        let long = || vec![ChangeRequest::PushChar('a' as u32); JOURNAL_SOFT_COUNT];
+        // 末尾が空: 照合点の値の種に縮める
+        let mut state = RemoteComposition::new();
+        state.journal = long();
+        state.checkpoint = Some((JOURNAL_SOFT_COUNT, reading("かか", "k")));
+        assert!(shrink_journal(&mut state));
+        assert_eq!(
+            state.journal,
+            vec![
+                ChangeRequest::SeedPreedit {
+                    text: "かか".into()
+                },
+                ChangeRequest::PushChar('k' as u32),
+            ]
+        );
+        assert_eq!(state.confirmed_len(), 2);
+        // 末尾がある: 縮めない
+        let mut state = RemoteComposition::new();
+        state.journal = long();
+        state.checkpoint = Some((JOURNAL_SOFT_COUNT - 1, reading("か", "")));
+        assert!(!shrink_journal(&mut state));
+        assert_eq!(state.journal.len(), JOURNAL_SOFT_COUNT);
+        // 上限に達していない: 縮めない
+        let mut state = RemoteComposition::new();
+        state.journal = vec![ChangeRequest::PushChar('a' as u32)];
+        state.checkpoint = Some((1, reading("あ", "")));
+        assert!(!shrink_journal(&mut state));
+    }
+
     #[test]
     fn an_unconfirmed_tail_that_is_too_old_long_or_full_is_stuck() {
         use std::time::Duration;
