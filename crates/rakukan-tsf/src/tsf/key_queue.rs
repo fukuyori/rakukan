@@ -67,8 +67,10 @@ thread_local! {
     static NEXT_SEQ: Cell<u64> = const { Cell::new(1) };
     /// 直前の `pump` で実行したキーの結果（通し番号と、食べたか）。
     static OUTCOMES: RefCell<Vec<(u64, bool)>> = const { RefCell::new(Vec::new()) };
-    /// 処理中のキーが、確定の結果を待つために止まった（[`suspend_current`]）。
-    static SUSPENDED: Cell<bool> = const { Cell::new(false) };
+    /// 処理中のキーが止まった（[`suspend_current`]・[`suspend_unrecoverable`]）。
+    static SUSPENDED: Cell<Option<Suspension>> = const { Cell::new(None) };
+    /// ホストが応えない間に、最後に保留したキーを再生した時刻（[`LINK_RETRY`] ごとに試す）。
+    static LAST_LINK_RETRY: Cell<Option<Instant>> = const { Cell::new(None) };
     /// 保留したキーを再生している（[`pump`] の中で `replay_key` を呼んでいる間）。
     static IN_REPLAY: Cell<bool> = const { Cell::new(false) };
     /// 回復できない場合の処置の後の直接入力（[`direct_fallback`]）。
@@ -93,15 +95,46 @@ thread_local! {
     static LINK_UP_NOTED: Cell<bool> = const { Cell::new(false) };
 }
 
+/// キーが止まった理由。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Suspension {
+    /// 後で実行できる（確定の結果待ち・エンジンを取れない・ホストが応えない）。
+    Wait,
+    /// 回復できない（journal の末尾が確かめられないまま上限を超えた）。すぐに処置する。
+    Unrecoverable,
+}
+
 /// 処理中のキーを、確定の結果を待つために止める（読みの長さの上限で確定した場合など）。
 /// キーを処理した側（OnKeyDown・[`pump`]）が、そのキーを列に戻し、結果の後で実行する。
 pub(crate) fn suspend_current() {
-    SUSPENDED.with(|s| s.set(true));
+    SUSPENDED.with(|s| s.set(Some(Suspension::Wait)));
+}
+
+/// 処理中のキーを止め、回復できない場合の処置に進ませる（入力処理の見直しの段 6。journal の
+/// 末尾が 30 s 以上・256 件を超えて確かめられない、または硬上限に達した）。
+pub(crate) fn suspend_unrecoverable() {
+    SUSPENDED.with(|s| s.set(Some(Suspension::Unrecoverable)));
 }
 
 /// 処理したキーが止まったかを返し、印を消す。
 pub(crate) fn take_suspended() -> bool {
-    SUSPENDED.with(|s| s.replace(false))
+    take_suspension().is_some()
+}
+
+fn take_suspension() -> Option<Suspension> {
+    SUSPENDED.with(|s| s.replace(None))
+}
+
+/// ホストが応えない間に、保留したキーの再生を試す間隔（再生のたびに再接続の待ちで UI の
+/// スレッドを止めないため）。
+const LINK_RETRY: Duration = Duration::from_secs(1);
+
+/// ホストとの接続が切れているか（直近の接続・RPC が失敗した）。
+fn link_down() -> bool {
+    matches!(
+        rakukan_engine_rpc::host_link().state,
+        rakukan_engine_rpc::LinkState::Disconnected(_)
+    )
 }
 
 /// 止まったキーを、通し番号の順の位置に戻す（上限は数えない）。
@@ -311,6 +344,16 @@ pub(crate) fn pump_for(current: Option<u64>) {
         if check_inserting() {
             break;
         }
+        // ホストが応えない間は、[`LINK_RETRY`] ごとに 1 回だけ試す
+        if link_down() {
+            if LAST_LINK_RETRY
+                .with(|t| t.get())
+                .is_some_and(|t| t.elapsed() < LINK_RETRY)
+            {
+                break;
+            }
+            LAST_LINK_RETRY.with(|t| t.set(Some(Instant::now())));
+        }
         let Some(Queued { seq, key }) = QUEUE.with(|q| q.borrow_mut().pop_front()) else {
             break;
         };
@@ -334,7 +377,7 @@ pub(crate) fn pump_for(current: Option<u64>) {
             OUTCOMES.with(|o| o.borrow_mut().push((seq, true)));
             continue;
         };
-        if take_suspended() {
+        if let Some(suspension) = take_suspension() {
             // ホストの版が違う（古いホストが動いている）なら、待っても回復しない
             let version_mismatch = matches!(
                 rakukan_engine_rpc::host_link().state,
@@ -342,9 +385,14 @@ pub(crate) fn pump_for(current: Option<u64>) {
                     rakukan_engine_rpc::DisconnectKind::VersionMismatch
                 )
             );
-            if (kept.at.elapsed() >= MAX_AGE || version_mismatch) && engine_unavailable() {
-                // エンジンが使えないまま保持の上限を過ぎた（版の違いなら待たずに）: 回復
-                // できない場合の処置（列の文字キーを打った文字のまま入れ、直接入力に切り替える）
+            let unavailable = engine_unavailable();
+            if suspension == Suspension::Unrecoverable
+                || (version_mismatch && unavailable)
+                || (kept.at.elapsed() >= MAX_AGE && (unavailable || link_down()))
+            {
+                // エンジンが使えない・ホストが応えないまま保持の上限を過ぎた（版の違い・
+                // journal の末尾が確かめられないまま上限を超えたなら待たずに）: 回復できない
+                // 場合の処置（列の文字キーを打った文字のまま入れ、直接入力に切り替える）
                 give_up(kept);
                 break;
             }
@@ -765,7 +813,23 @@ const COMP_RESCUE_ATTEMPTS: u32 = 4;
 /// 要求を失効させ、その時点の表示に、確かめていない末尾の文字と、その文書へ届いた列の
 /// 文字キーの文字（`keys` から取り除く）を続けた文字列を対象にする。
 fn cut_off_composition(keys: &mut Vec<HeldKey>, tid: u32) -> Option<CompRescue> {
-    let comp = crate::engine::state::composition_clone().ok().flatten()?;
+    let Some(comp) = crate::engine::state::composition_clone().ok().flatten() else {
+        // composition が無い: 確かめていない末尾の文字は入れる位置を確かめられないので、
+        // 書かずに記録し、その編集状態を外す（後で流し直して表示に出さない）
+        if let Some((tail, skipped)) = crate::engine::rpc_composition::take_unconfirmed_tail() {
+            if skipped > 0 {
+                tracing::warn!(
+                    "key_queue: {skipped} unconfirmed non-character request(s) dropped (no composition)"
+                );
+            }
+            if !tail.is_empty() {
+                unrescued(&tail, "no composition for the unconfirmed tail");
+            } else if skipped > 0 {
+                crate::tsf::mode_indicator::show("未入力", 0, 0);
+            }
+        }
+        return None;
+    };
     let identity = crate::engine::state::composition_identity(&comp);
     let dm_ptr = crate::engine::state::composition_dm();
     let shown = crate::tsf::factory::cut_off_display(identity);

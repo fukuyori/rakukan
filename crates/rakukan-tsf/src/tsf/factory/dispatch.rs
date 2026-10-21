@@ -130,7 +130,35 @@ impl super::TextServiceFactory_Impl {
         };
         // 入口の読み取りは 1 回。所有権の確認で得た BG 状態を、下の診断ログでも使う。
         let entry = if focused_context {
-            Some(engine.recover_on_input()?)
+            match engine.recover_on_input() {
+                Ok(entry) => Some(entry),
+                Err(e) => {
+                    // ホストが応えない（入力処理の見直しの段 6）: エンジンの準備中と同じく、
+                    // IME が食べるキーはアプリへ渡さず、止めて保留の列に入れる。journal の
+                    // 末尾が確かめられないまま上限を超えていれば、回復できない場合に進む
+                    let composing = crate::engine::state::composition_held().unwrap_or(true);
+                    if !crate::tsf::key_queue::in_replay()
+                        && !super::key_should_eat(
+                            &action,
+                            composing || crate::engine::state::session_is_selecting_fast(),
+                        )
+                    {
+                        return Ok(false);
+                    }
+                    if let Some(reason) = crate::engine::rpc_composition::journal_stuck() {
+                        tracing::warn!(
+                            "host not answering and {reason}; {} goes to the unrecoverable path: {e}",
+                            action_name(&action)
+                        );
+                        crate::tsf::key_queue::suspend_unrecoverable();
+                    } else {
+                        tracing::debug!("host not answering ({e}); {} held", action_name(&action));
+                        crate::tsf::key_queue::suspend_current();
+                    }
+                    super::show_engine_waiting();
+                    return Ok(true);
+                }
+            }
         } else {
             None
         };

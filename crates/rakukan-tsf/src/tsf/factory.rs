@@ -733,6 +733,9 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
         let vk = normalize_key_event_vk(wparam.0 as u16);
+        // 前のキーの判定を消す（最後の判定まで進んだときだけ残す。早期 return の経路で
+        // 古い判定を OnKeyDown に使わせない）
+        TEST_EAT.with(|t| t.set(None));
         // 回復できない場合の処置の途中: IME のオン・オフ、割り当ての有無にかかわらず、
         // すべて食べる（文字は後で文書へ入れ、それ以外は捨てる。OnKeyDown と同じ）
         if crate::tsf::key_queue::rescue_active() {
@@ -798,6 +801,8 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             // AtomicBool でロックなし高速チェック
             session_is_selecting_fast,
         );
+        // OnKeyDown で処理が失敗したときの判定に使う（`KeyOutcome`）
+        TEST_EAT.with(|t| t.set(Some((vk, eat))));
         Ok(if eat { TRUE } else { FALSE })
     }
 
@@ -816,6 +821,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         }
         let _t = diag::span("OnKeyDown");
         let vk = normalize_key_event_vk(wparam.0 as u16);
+        // 同じキーの OnTestKeyDown の判定（前のキーのものは捨てる）
+        let tested_eat = TEST_EAT
+            .with(|t| t.take())
+            .filter(|(tested_vk, _)| *tested_vk == vk)
+            .map(|(_, eat)| eat);
 
         tracing::trace!("OnKeyDown vk={:#04x}", vk);
 
@@ -977,6 +987,16 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
 
         // 止まった場合（読みの長さの上限で確定し、その結果を待つ）に列へ戻すための写し
         let (ctx_resume, sink_resume) = (ctx.clone(), sink.clone());
+        // IME が食べると決めたキーか。処理が失敗しても、食べると決めたキーはアプリへ渡さない
+        // （設計書 4.1 の `KeyOutcome`、入力処理の見直しの段 6）。同じキーの OnTestKeyDown の
+        // 判定を使い、無ければ（OnKeyDown だけが呼ばれた）composition の有無で判定する
+        let decided_eat = tested_eat.unwrap_or_else(|| {
+            key_should_eat(
+                &action,
+                crate::engine::state::composition_held().unwrap_or(true)
+                    || crate::engine::state::session_is_selecting_fast(),
+            )
+        });
         let result = crate::tsf::key_queue::run_exclusive(|| {
             self.handle_action(action.clone(), ctx, tid, sink)
         });
@@ -1018,7 +1038,11 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                 tracing::warn!("handle_action: {e}");
             }
         }
-        Ok(if keydown_return(&result) { TRUE } else { FALSE })
+        Ok(if keydown_outcome(&result, decided_eat) {
+            TRUE
+        } else {
+            FALSE
+        })
     }
 
     fn OnTestKeyUp(
@@ -1285,7 +1309,9 @@ impl TextServiceFactory_Impl {
                 tracing::warn!("handle_action (held key): {e}");
             }
         }
-        Some(keydown_return(&result))
+        // 保留したキーは食べたキー: 処理が失敗しても食べたものとする（文字を文書へ入れ直すと、
+        // journal に残った分と二重になりうる）
+        Some(keydown_outcome(&result, true))
     }
 }
 
@@ -1351,14 +1377,24 @@ fn test_key_eat(
     key_should_eat(action, has_preedit || is_selecting)
 }
 
+thread_local! {
+    /// 直前の OnTestKeyDown の判定（仮想キーと、食べるか）。OnKeyDown が取り出す。
+    static TEST_EAT: std::cell::Cell<Option<(u16, bool)>> = const { std::cell::Cell::new(None) };
+}
+
 /// `OnKeyDown` の IME オフガード: このキーを処理せずアプリへ渡すか。
 fn keydown_ime_off_ignores(action: &UserAction, ime_on: bool) -> bool {
     !ime_on && !is_ime_mode_action(action)
 }
 
 /// `OnKeyDown` が返す値。`handle_action` の `Err` はアプリへ渡す（FALSE）。
-fn keydown_return(result: &Result<bool>) -> bool {
-    matches!(result, Ok(true))
+/// OnKeyDown の戻り値: 処理したらその結果、失敗したら食べると決めていたか（`KeyOutcome`:
+/// 食べると決めたキーは、どの結果でもアプリへ渡さない）。
+fn keydown_outcome(result: &Result<bool>, decided_eat: bool) -> bool {
+    match result {
+        Ok(ate) => *ate,
+        Err(_) => decided_eat,
+    }
 }
 
 #[inline]
@@ -1800,7 +1836,7 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
 #[cfg(test)]
 mod key_should_eat_tests {
     use super::{
-        key_resolve, key_should_eat, keydown_ime_off_ignores, keydown_return, test_key_eat,
+        key_resolve, key_should_eat, keydown_ime_off_ignores, keydown_outcome, test_key_eat,
     };
     use crate::engine::user_action::UserAction;
     use std::cell::RefCell;
@@ -1940,9 +1976,17 @@ mod key_should_eat_tests {
             assert_eq!(keydown_ime_off_ignores(&action, false), !mode, "{action:?}");
             assert!(!keydown_ime_off_ignores(&action, true), "{action:?}");
         }
-        assert!(keydown_return(&Ok(true)));
-        assert!(!keydown_return(&Ok(false)));
-        assert!(!keydown_return(&Err(anyhow::anyhow!("engine busy"))));
+        assert!(keydown_outcome(&Ok(true), false));
+        assert!(!keydown_outcome(&Ok(false), true));
+        // 処理が失敗したら、食べると決めていたかで決める（食べると決めたキーはアプリへ渡さない）
+        assert!(keydown_outcome(
+            &Err(anyhow::anyhow!("host not answering")),
+            true
+        ));
+        assert!(!keydown_outcome(
+            &Err(anyhow::anyhow!("engine busy")),
+            false
+        ));
     }
 
     #[test]

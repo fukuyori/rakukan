@@ -52,6 +52,9 @@ pub struct RemoteComposition {
     /// この状態を作ったときに保持していた composition（0 = 無し）。まだ結び付いていない
     /// 状態が、どの composition の続きとして作られたかの照合に使う（Issue #71）。
     created_under: usize,
+    /// journal の末尾（ホストの適用を確かめていない部分）ができた時刻。末尾が無ければ
+    /// `None`（入力処理の見直しの段 6。末尾が確かめられないまま続くと回復できない場合に進む）。
+    unconfirmed_since: Option<std::time::Instant>,
 }
 impl RemoteComposition {
     fn new() -> Self {
@@ -67,6 +70,7 @@ impl RemoteComposition {
             bg_reading: None,
             tsf_comp: 0,
             created_under: crate::engine::state::current_composition_identity_for(dm_key().ptr),
+            unconfirmed_since: None,
         }
     }
     fn expect(&self) -> Option<Expect> {
@@ -216,6 +220,19 @@ pub fn unconfirmed_typed_text(tsf_comp: usize) -> (String, usize) {
     }
     (text, skipped)
 }
+/// 今の文脈の編集状態に確かめていない末尾があれば、その状態を外して、末尾の文字を打った
+/// 文字のまま返す（composition が無いときの救済。末尾が無ければ状態は残して `None`）。
+/// 返り値は（文字列, 反映できなかった要求の数）。
+pub fn take_unconfirmed_tail() -> Option<(String, usize)> {
+    let mut states = lock_states();
+    let key = dm_key();
+    let state = states.get(&key)?;
+    if state.confirmed_len() >= state.journal.len() {
+        return None;
+    }
+    let state = states.remove(&key)?;
+    Some(typed_tail(&state.journal[state.confirmed_len()..]))
+}
 fn typed_tail(tail: &[ChangeRequest]) -> (String, usize) {
     let mut text = String::new();
     let mut skipped = 0;
@@ -241,8 +258,50 @@ pub fn take_current() -> Option<RemoteComposition> {
     crate::tsf::candidate_window::reset_worker_busy_clock();
     lock_states().remove(&dm_key())
 }
-fn save(c: RemoteComposition) {
+fn save(mut c: RemoteComposition) {
+    // 末尾の時計: 末尾ができたときに始め、確かめ終えたら止める
+    if c.confirmed_len() < c.journal.len() {
+        c.unconfirmed_since
+            .get_or_insert_with(std::time::Instant::now);
+    } else {
+        c.unconfirmed_since = None;
+    }
     lock_states().insert(dm_key(), c);
+}
+/// journal の末尾がこれ以上の時間確かめられない、またはこの件数を超えたら、ホストが応えない
+/// ものとして回復できない場合に進む（設計書 4.2 の上限、段 6）。
+const TAIL_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+const TAIL_MAX_LEN: usize = 256;
+/// 今の文脈の journal の末尾が、回復できない場合に進む状態か（理由を返す）。末尾が無ければ
+/// `None`（入力処理の見直しの段 6、設計書 4.2 の上限と 4.3 の硬上限）。
+pub fn journal_stuck() -> Option<&'static str> {
+    let states = lock_states();
+    let state = states.get(&dm_key())?;
+    stuck_reason(
+        state.journal.len(),
+        state.confirmed_len(),
+        journal_cost(&state.journal),
+        state.unconfirmed_since.map(|t| t.elapsed()),
+    )
+}
+fn stuck_reason(
+    len: usize,
+    confirmed: usize,
+    cost: usize,
+    tail_age: Option<std::time::Duration>,
+) -> Option<&'static str> {
+    if confirmed >= len {
+        return None;
+    }
+    if len >= JOURNAL_HARD_COUNT || cost >= JOURNAL_HARD_COST {
+        Some("journal full")
+    } else if len - confirmed > TAIL_MAX_LEN {
+        Some("unconfirmed tail too long")
+    } else if tail_age.is_some_and(|age| age >= TAIL_MAX_AGE) {
+        Some("unconfirmed tail too old")
+    } else {
+        None
+    }
 }
 /// journal に入れる編集要求か（設計書 4.3）。
 fn is_journal_request(request: &ChangeRequest) -> bool {
@@ -300,9 +359,8 @@ fn note_journal_limits(journal: &[ChangeRequest]) {
     let count = journal.len();
     let cost = journal_cost(journal);
     if count >= JOURNAL_HARD_COUNT || cost >= JOURNAL_HARD_COST {
-        tracing::debug!(
-            "journal over the hard limit (not enforced yet): count={count} cost={cost}"
-        );
+        // 末尾があれば、次のキーの入口で回復できない場合に進む（`journal_stuck`）
+        tracing::debug!("journal over the hard limit: count={count} cost={cost}");
     } else if count >= JOURNAL_SOFT_COUNT || cost >= JOURNAL_SOFT_COST {
         tracing::debug!(
             "journal over the soft limit (not enforced yet): count={count} cost={cost}"
@@ -886,6 +944,31 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
     use std::collections::VecDeque;
+    #[test]
+    fn an_unconfirmed_tail_that_is_too_old_long_or_full_is_stuck() {
+        use std::time::Duration;
+        let young = Some(Duration::from_secs(1));
+        // 末尾が無ければ、上限を超えていても止まっていない（段 7 より前は縮めずに続ける）
+        assert_eq!(stuck_reason(2000, 2000, 2000, None), None);
+        assert_eq!(stuck_reason(10, 9, 10, young), None);
+        assert_eq!(
+            stuck_reason(10, 9, 10, Some(TAIL_MAX_AGE)),
+            Some("unconfirmed tail too old")
+        );
+        assert_eq!(
+            stuck_reason(300, 300 - TAIL_MAX_LEN - 1, 300, young),
+            Some("unconfirmed tail too long")
+        );
+        assert_eq!(
+            stuck_reason(JOURNAL_HARD_COUNT, JOURNAL_HARD_COUNT - 1, 10, young),
+            Some("journal full")
+        );
+        assert_eq!(
+            stuck_reason(10, 9, JOURNAL_HARD_COST, young),
+            Some("journal full")
+        );
+    }
+
     #[test]
     fn the_unconfirmed_tail_is_rescued_as_typed() {
         let input = |c: char| ChangeRequest::InputChar {
