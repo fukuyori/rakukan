@@ -154,7 +154,7 @@ pub(crate) fn outage_diag() -> Option<String> {
 /// 待っても戻らないと分かる切断か（版の違うホスト・起動できない・起動の失敗が続いて抑止に
 /// 入った）。保留したキーは保持の上限を待たずに回復できない場合の処置に進む（設計書 4.2 の
 /// 第 9 版の案）。一時的な切断もありうる分類（`Transport` など）は含めない。
-fn link_unrecoverable() -> bool {
+pub(crate) fn link_unrecoverable() -> bool {
     use rakukan_engine_rpc::{DisconnectKind, LinkState};
     matches!(
         rakukan_engine_rpc::host_link().state,

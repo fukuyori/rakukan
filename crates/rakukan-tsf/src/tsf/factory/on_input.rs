@@ -8,13 +8,13 @@ use anyhow::Result;
 use windows::Win32::UI::TextServices::{ITfCompositionSink, ITfContext};
 
 use crate::diagnostics::{self as diag, DiagEvent};
-use crate::engine::state::{
-    SessionState, engine_try_get_or_create, session_get, session_is_selecting_fast,
-};
+use crate::engine::state::{SessionState, session_get, session_is_selecting_fast};
 use crate::engine::text_util;
 use crate::tsf::candidate_window;
 
-use super::{commit_full, commit_text, commit_then_start_composition, update_composition};
+use super::{
+    PartialPlan, commit_full, commit_text, commit_then_start_composition, update_composition,
+};
 use crate::tsf::commit_txn::LearnPlan;
 
 /// LiveConv 中の追加入力で表示する文字列を決める。
@@ -179,39 +179,31 @@ impl super::TextServiceFactory_Impl {
                     surface: full_text.clone(),
                     action: crate::engine::state::LearnAction::Learn,
                 });
-                engine.commit(&full_text);
-                engine.reset_preedit();
                 drop(guard);
-                let mut guard2 = engine_try_get_or_create()?;
-                let engine2 = match guard2.as_mut() {
-                    Some(e) => e,
-                    None => return Ok(true),
-                };
                 let kind = if c.is_ascii_uppercase() {
                     crate::engine::state::InputCharKind::FullwidthAlpha
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                let (preedit2, new_reading2, _) = engine2.input_char(c, kind, None)?;
-                if let Ok(mut sess2) = session_get() {
-                    sess2.set_preedit(new_reading2.clone());
-                }
-                drop(guard2);
-                let ctx_live = ctx.clone();
-                // 確定テキスト + 新規入力プリエディットを表示
-                use super::commit_then_start_composition;
-                // BG 変換は学習の後に始まる（commit_then_start_composition）
-                if commit_then_start_composition(
+                // 文脈・読みのリセット・新しい文字・学習は、文書に確定できてから 1 回で送る
+                // （commit_then_start_composition。5c-3）。BG 変換はその後
+                commit_then_start_composition(
                     ctx,
                     tid,
                     sink,
-                    full_text,
-                    preedit2,
-                    learn,
-                    Some(new_reading2),
-                )? {
-                    candidate_window::live_input_notify(&ctx_live, tid);
-                }
+                    PartialPlan {
+                        commit_text: full_text,
+                        learn,
+                        then: rakukan_engine_rpc::ChangeRequest::InputChar {
+                            c: c as u32,
+                            kind,
+                            bg_start_n_cands: None,
+                        },
+                        set_preedit: true,
+                        bg_start: true,
+                        live_notify: true,
+                    },
+                )?;
                 return Ok(true);
             }
             if sess.is_selecting() {
@@ -247,36 +239,35 @@ impl super::TextServiceFactory_Impl {
                     reading,
                     surface: selected_text,
                 });
-                engine.commit(&full_text);
-                engine.reset_preedit();
                 drop(guard);
-
-                let mut guard2 = engine_try_get_or_create()?;
-                let engine2 = match guard2.as_mut() {
-                    Some(e) => e,
-                    None => return Ok(true),
-                };
                 let kind = if c.is_ascii_uppercase() {
                     crate::engine::state::InputCharKind::FullwidthAlpha
                 } else {
                     crate::engine::state::InputCharKind::Char
                 };
-                // 打鍵時の prefetch はライブプレビュー用なので、読みが十分長い場合だけ
-                // 後段で live_conv_beam_size を使って起動する。
-                let (preedit, hiragana, _bg) = engine2.input_char(c, kind, None)?;
+                // 新しい文字の後の表示は、文書に確定してホストへ引き継いだ後に分かる
                 diag::event(DiagEvent::InputChar {
                     ch: c,
-                    preedit_after: preedit.clone(),
+                    preedit_after: String::new(),
                 });
-                drop(guard2);
+                // 文脈・読みのリセット・新しい文字・学習は、文書に確定できてから 1 回で送る
+                // （commit_then_start_composition。5c-3）。BG 変換はその後
                 commit_then_start_composition(
                     ctx,
                     tid,
                     sink,
-                    full_text,
-                    preedit,
-                    learn,
-                    Some(hiragana),
+                    PartialPlan {
+                        commit_text: full_text,
+                        learn,
+                        then: rakukan_engine_rpc::ChangeRequest::InputChar {
+                            c: c as u32,
+                            kind,
+                            bg_start_n_cands: None,
+                        },
+                        set_preedit: false,
+                        bg_start: true,
+                        live_notify: false,
+                    },
                 )?;
                 return Ok(true);
             }
@@ -414,29 +405,22 @@ impl super::TextServiceFactory_Impl {
                     reading,
                     surface: selected_text,
                 });
-                engine.commit(&full_text);
-                engine.reset_preedit();
                 drop(guard);
-
-                let mut guard2 = engine_try_get_or_create()?;
-                let engine2 = match guard2.as_mut() {
-                    Some(e) => e,
-                    None => return Ok(true),
-                };
-                engine2.push_raw(c)?;
-                let preedit = engine2.preedit_display()?;
-                // ライブプレビュー用の prefetch は、3文字以上になった場合だけ開始する。
-                // Space 押下時は別途 bg_reclaim + bg_start(num_candidates) で fresh に変換する。
-                let reading = engine2.hiragana_text()?;
-                drop(guard2);
+                // 文脈・読みのリセット・新しい文字・学習は、文書に確定できてから 1 回で送る
+                // （commit_then_start_composition。5c-3）。ライブプレビュー用の BG 変換は、
+                // その後に 3 文字以上なら始める
                 commit_then_start_composition(
                     ctx,
                     tid,
                     sink,
-                    full_text,
-                    preedit,
-                    learn,
-                    Some(reading),
+                    PartialPlan {
+                        commit_text: full_text,
+                        learn,
+                        then: rakukan_engine_rpc::ChangeRequest::PushRaw(c as u32),
+                        set_preedit: false,
+                        bg_start: true,
+                        live_notify: false,
+                    },
                 )?;
                 return Ok(true);
             }

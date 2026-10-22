@@ -1,7 +1,10 @@
 //! 確定トランザクション（入力処理の見直しの段 5、docs/Input_Pipeline_Plan.md 4.6）。
 //!
 //! 文書を先に確定し、ホストへの後処理（BG の回収・学習・文脈・編集状態を閉じる）は、
-//! 文書の結果を見てから送る。EditSession の中では RPC を送らない。
+//! 文書の結果を見てから送る。EditSession の中では RPC を送らない。ただし部分確定は、
+//! EditSession の中で文書の確定部分を確定した後に、引き継ぎ（学習・文脈・残りの読み）を
+//! 1 回送る（5c-3、設計書 4.6 の部分確定の文書先行）。部分確定の後処理（表示の要求・BG の
+//! 開始・確定しなかったときに閉じる処理）は、要求に持たせた [`set_after`] の処理で行う。
 //!
 //! EditSession は同期で実行されることも、後で実行されることもある。どちらの場合も
 //! EditSession の最後で結果を [`ReqState::Done`] に記録し、`WM_APP_COMMIT_DONE` を送る。
@@ -103,7 +106,13 @@ struct PendingCommit {
         (usize, usize),
         windows::Win32::UI::TextServices::ITfComposition,
     )>,
+    /// 後処理の最後に行う処理（部分確定。[`set_after`]）。引数は結果と、composition と
+    /// ホストの読みを残すか（`keep`）。
+    after: Option<AfterCommit>,
 }
+
+/// 確定の後処理の最後に行う処理（[`set_after`]）。
+pub(crate) type AfterCommit = Box<dyn FnOnce(&DocResult, bool)>;
 
 thread_local! {
     static PENDING: RefCell<BTreeMap<u64, PendingCommit>> = const { RefCell::new(BTreeMap::new()) };
@@ -150,6 +159,7 @@ pub(crate) fn begin(planned: String, effects: CommitEffects) -> ReqCell {
                 replacement: None,
                 restore: KEY_SESSION.with(|k| k.borrow().clone()),
                 target: crate::engine::state::composition_key_and_ref(),
+                after: None,
             },
         )
     });
@@ -174,6 +184,20 @@ pub(crate) fn mark_partial(cell: &ReqCell, replacement: Option<u64>) {
         {
             commit.leaves_input = true;
             commit.replacement = replacement;
+        }
+    });
+}
+
+/// 後処理の最後に行う処理を持たせる（部分確定。結果が出た後、後処理を送った後に 1 回だけ
+/// 呼ぶ。保留したキーの再生はその後）。
+pub(crate) fn set_after(cell: &ReqCell, after: AfterCommit) {
+    PENDING.with(|p| {
+        if let Some(commit) = p
+            .borrow_mut()
+            .values_mut()
+            .find(|c| Rc::ptr_eq(&c.cell, cell))
+        {
+            commit.after = Some(after);
         }
     });
 }
@@ -235,31 +259,32 @@ pub(crate) fn finish_completed() {
         done
     });
     for (id, commit, result) in done {
-        finish_one(id, &commit, &result);
+        finish_one(id, commit, &result);
     }
 }
 
-fn finish_one(id: u64, commit: &PendingCommit, result: &DocResult) {
+fn finish_one(id: u64, mut commit: PendingCommit, result: &DocResult) {
     if !matches!(result, DocResult::Committed { .. }) {
         tracing::warn!(
             "commit {id}: document result {result:?}; learning and context skipped planned={:?}",
             commit.planned
         );
     }
-    // 全体の確定で確定しなかった: ホストの読みを残し、セッションの状態を入口の値に戻す。
-    // 部分確定は、文脈・編集状態を閉じる処理・残りの引き継ぎを文書より先に送っているので
-    // 戻せない（今までどおり）
+    // 確定しなかった: ホストの読みを残し、セッションの状態を入口の値に戻す。部分確定も、
+    // ホストへの引き継ぎは文書の確定部分を確定した後なので戻せる（5c-3）
     let keep = kept_composition(
         result,
         commit.target.as_ref().map(|(key, _)| *key),
         crate::engine::state::composition_key(),
-    ) && !commit.leaves_input
-        && !commit.effects.close_on_abort;
+    ) && !commit.effects.close_on_abort;
     if keep {
         restore_session(id, commit.restore.as_ref());
     }
     let plan = plan_for_result(&commit.effects, &commit.planned, result, keep);
     send_effects(id, &plan);
+    if let Some(after) = commit.after.take() {
+        after(result, keep);
+    }
 }
 
 /// 確定しなかったので、確定の対象だった composition が残っている結果か。
@@ -390,17 +415,6 @@ fn apply_plan(target: &mut impl EffectTarget, plan: &EffectPlan) -> bool {
         .is_some_and(|reading| target.start_live_bg(reading))
 }
 
-thread_local! {
-    /// 直前に送った後処理で BG 変換を始めたか（`take_bg_started`）。
-    static BG_STARTED: Cell<bool> = const { Cell::new(false) };
-}
-
-/// 直前の後処理で BG 変換を始めたかを返し、印を消す（呼び出し側がライブ変換の
-/// タイマーを始めるかの判定に使う）。
-pub(crate) fn take_bg_started() -> bool {
-    BG_STARTED.with(|b| b.replace(false))
-}
-
 // 試験では、送る後処理をエンジンへ送らずに記録する
 #[cfg(test)]
 thread_local! {
@@ -430,8 +444,7 @@ fn deliver(id: u64, plan: &EffectPlan) {
     let Some(engine) = guard.as_mut() else {
         return;
     };
-    let started = apply_plan(engine, plan);
-    BG_STARTED.with(|b| b.set(started));
+    apply_plan(engine, plan);
 }
 
 /// 送る後処理（試験のため、エンジンを使わない部分を切り出す）。
@@ -542,6 +555,58 @@ mod tests {
         assert!(commit_pending());
         *b.borrow_mut() = ReqState::Done(DocResult::Failed("test"));
         finish_completed();
+    }
+
+    #[test]
+    fn the_after_step_runs_once_in_request_order_with_the_result() {
+        // 部分確定の後処理（5c-3）: 結果が出た後、要求の順に 1 回だけ呼ぶ。後の要求の結果が
+        // 先に出ても、前の要求の結果を待つ
+        let seen: Rc<RefCell<Vec<(String, DocResult, bool)>>> = Default::default();
+        let after = |name: &'static str| -> AfterCommit {
+            let seen = seen.clone();
+            Box::new(move |result, keep| {
+                seen.borrow_mut()
+                    .push((name.to_string(), result.clone(), keep))
+            })
+        };
+        delivered_learns();
+        let a = begin("a".into(), CommitEffects::default());
+        mark_partial(&a, None);
+        set_after(&a, after("a"));
+        let b = begin("b".into(), CommitEffects::default());
+        mark_partial(&b, None);
+        set_after(&b, after("b"));
+        *b.borrow_mut() = ReqState::Done(DocResult::Committed { text: "b".into() });
+        finish_completed();
+        assert!(seen.borrow().is_empty());
+        *a.borrow_mut() = ReqState::Done(DocResult::Aborted {
+            why: "EndComposition",
+            changed: false,
+        });
+        finish_completed();
+        finish_completed();
+        assert_eq!(
+            *seen.borrow(),
+            vec![
+                // 要求の時点の composition が無い（試験）ので、残す扱いにはならない
+                (
+                    "a".to_string(),
+                    DocResult::Aborted {
+                        why: "EndComposition",
+                        changed: false
+                    },
+                    false
+                ),
+                (
+                    "b".to_string(),
+                    DocResult::Committed { text: "b".into() },
+                    false
+                ),
+            ]
+        );
+        // 部分確定の後処理は after が行い、commit_txn からは何も送らない
+        assert!(delivered_learns().is_empty());
+        assert!(remaining().is_empty());
     }
 
     #[test]

@@ -93,7 +93,7 @@ mod on_compose;
 mod on_convert;
 mod on_input;
 use on_compose::{
-    commit_full, commit_text, commit_then_start_composition, end_composition,
+    PartialPlan, commit_full, commit_text, commit_then_start_composition, end_composition,
     get_caret_pos_from_context, update_caret_rect, update_composition,
     update_composition_candidate_parts, update_composition_range_select,
 };

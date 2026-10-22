@@ -459,7 +459,7 @@
 
 ### 4.6 確定トランザクション（C）と部分確定（A）
 
-**順序**: 文書を先に確定し、ホストの副作用は文書の結果を見てから送る。EditSession の中では RPC を送らない。
+**順序**: 文書を先に確定し、ホストの副作用は文書の結果を見てから送る。EditSession の中では RPC を送らない。ただし部分確定（Partial / CommitThenInput）は、EditSession の中で EndComposition が成功した後に `RestoreJournal` を 1 回と、成功したときの表示の読み出しを 1 回送る（下の「部分確定の文書先行（5c-3）」。2026-10-22 改訂）。
 
 **記録**: `CommitTxn { id, reason: CommitReason, kind, dm, ctx, lineage, input_gen, old_comp, plan, req: ReqCell, stage, doc_result, original_text, committed_text, post_commit_range, effects, bound_keys, retries }`。所有スレッドの表に置き、EditSession は `id` と `ReqCell` を持つ。
 
@@ -551,6 +551,56 @@
 - CommitThenInput: 空から。新しい文字は `KeyTask` の続きとして、新しい入力世代で 1 回実行する。表示は S7 で仮表示（例 `a`）を書き、確認後に作り直す（例 `あ`）。
 - 今のエンジンの取り直し（on_input.rs:214, 279, 465）はやめる。
 - 末尾の未確定 `n` は Selecting に入る前の `flush_pending_n`（on_convert.rs:326）で閉じている（今と同じ）。RangeSelect の部分確定（on_convert.rs:1757-1793）、番号キーの部分確定（edit_ops.rs:356-370）も同じ計画を通す。
+
+**部分確定の文書先行（5c-3、2026-10-22 改訂。上の S5〜S7 の仮表示と、Partial の journal の作り方を置き換える）**:
+
+5b の試行（新しい composition に仮の表示を書き、ホストへ送った後で作り直す）は、作り直しの失効の端の経路で Codex のレビューが続けて「直してから」になり、取りやめた。代わりに、EditSession の中でホストへ送り、その応答の表示で新しい composition を始める（利用者の決定、2026-10-22。9 節）。
+
+対象: `commit_then_start_composition` を使う 6 か所（HEAD 2822e88）。`on_input`（on_input.rs:204 BlockSelecting 中の文字、:272 Selecting 中の文字）、`on_input_raw`（on_input.rs:432 Selecting 中の文字）、`on_commit_raw`（on_convert.rs:1809 RangeSelect の部分確定、:1922 Selecting の Enter の残りあり）、`on_candidate_select`（edit_ops.rs:393 番号キーの残りあり）。今はどれも、文脈（`commit`）・`reset_preedit`・残りの引き継ぎ（`input_char` / `push_raw` / `seed_preedit`）を EditSession の前に別々の RPC で送っている。
+
+EditSession の手順:
+
+| 手順 | 失敗したとき | 結果 | ホスト |
+|---|---|---|---|
+| S0 `ReqCell` が `Pending` でない | 文書に触れない | 記録済みの `NotRun` | 送らない |
+| S0' 今の文脈の DM と composition（`composition_key`）が要求の時点と同じか | 文書に触れない | `NotRun("stale")` | 送らない |
+| E エンジンのロック（`engine_try_get`。H の後まで持つ） | 文書に触れない | `NotRun("engine busy")` | 送らない |
+| S1 `GetRange`・S1' `original_text` を読む | composition を保持し直す | `Aborted` | 送らない |
+| S2 確定部分に縮める SetText | 保持し直す（今は WARN だけで全体を確定している） | `Aborted` | 送らない |
+| S2' 読み直して確定部分と比べる | `original_text` に戻してから保持し直す。戻せなければ `changed` | `Aborted{changed}` | 送らない |
+| S3 確定部分の末尾の範囲を控える | 新しい composition は選択位置から（今と同じ） | ― | ― |
+| S4 EndComposition | `original_text` に戻してから保持し直す（今は手放して `Failed`） | `Aborted{changed}` | 送らない |
+| H 新しい編集状態を作り、`RestoreJournal` を 1 回送る | 下の H の結果の表 | `Committed{host}` | 下の表 |
+| finish | `ReqCell` を `Done` にする。H の結果にかかわらず、S5 の前に必ず行う | ― | ― |
+| S5〜S7 新しい composition の開始・範囲・表示 | `new_comp=false`（下の後処理） | 記録済み | ― |
+| S8 属性・選択・キャレット | 無視 | ― | ― |
+
+- composition が無い（直接の挿入）: 今と同じく直接の挿入を行い、成功したら H へ進む。失敗は `Failed`。
+- `Aborted` / `NotRun` の後処理は 5c-1 と同じ（ホストへ何も送らず、確定を要求した時点の composition がまだ保持されているときだけ、キーの入口のセッションに戻す）。部分確定の印（`leaves_input`）は「キーを保留するか」と「ホストへ文書より先に送ったか」の 2 つに分け、6 か所では後者を立てない。
+- 保持し直しに失敗したら `Failed`（5c-1 と同じ）。
+
+H（ホストへの送信）:
+- `RestoreJournal { owner: 新しい所有者, pre_effects: [Learn（学習するとき）, CommitContext(文脈の文字列)], journal: [InputChar(c, kind)] / [PushRaw(c)] / [SeedPreedit(残りの読み)] }`。ホストは 1 回のエンジンのロックの中で `pre_effects` → `reset_preedit` → journal の順に適用し、所有権を移す（server.rs:1205-1268）。トランザクションではない: journal の流し直しが失敗すると、ホストは `reset_preedit` して所有者を外し `Error` を返すが、`pre_effects` は取り消さない。
+- 新しい編集状態は S4 の成功の後（`composition_take` の後）に作り、`created_under` と `tsf_comp` を 0 にして、その DM に登録する（`take_terminated` は `tsf_comp == 0` の通知も、`created_under == 0` の状態も外さないので、古い composition の終了通知で外されない）。まだ送っていない `pre_effects` を新しい欄 `pending_effects` に持ち、`restore_journal_via` はそれが残っている状態の流し直しでだけ送る。TSF 側の `CompositionRpc::restore_journal` に `pre_effects` の引数を足す。
+- `Restored` の後、新しい所有者と世代を保存してから `preedit_display` を 1 回読み、その表示で S5〜S7 を行う。学習は H の中で済むので、BG の開始（`bg_start`、RangeSelect の `start_live_bg_if_ready` を含む）は EditSession の後の後処理にする（5b の「学習 → BG」の順を保つ）。
+
+H の結果:
+
+| 結果 | `pre_effects` | journal | 新しい編集状態 | 後処理 |
+|---|---|---|---|---|
+| `Restored` | 適用した | 適用した | 世代を保存、`pending_effects` を消す | 表示して `bg_start` |
+| `Rejected(GenMismatch / OwnerMismatch)` | 適用していない | 適用していない | 残す（`pending_effects` も残す） | 下の「H が成功しなかったとき」 |
+| `Rejected(ResultUnavailable)`・`Error`・送受信の失敗 | 分からない | 分からない（`Error` は適用していない） | 残す。`pending_effects` は消す（再送しない。利用者の決定） | 同上 |
+
+H が成功しなかったとき（文書の確定部分は取り消さない）:
+- ホストが動いている: セッションを Preedit（新しい読み）にする。新しい編集状態は journal と（残っていれば）`pending_effects` を持ったまま。次のキーの `apply_via` が `restore_journal_via` で流し直し、その表示で composition を始める。キーが来ないうちは、引き継ぎの文字は表示されない（利用者の決定）。
+- ホストが回復できない（`link_unrecoverable`）: 新しい編集状態の journal の文字（`SeedPreedit` の読みを含む）を、第 9 版の救済（`insert_text_direct`）で文書へ入れる。
+
+`Restored` の後の S5〜S7 の失敗（`new_comp=false`）: 結果は記録済み。EditSession の後の後処理（`finish_one`）で表示の要求を 1 回だけ出す（composition が無ければ S3 の範囲から始め、あれば今の composition に書く。表示を読めていなければ読み直す）。失効・再要求の仕組みは持たない。後のキーの表示より後に実行されて上書きしないことは、同じ文脈の EditSession が要求の順に実行されることに頼る（今のキーの表示と同じ前提。※TSF の仕様としては未確認）。保留したキーの再生は、今どおり後処理の後（key_queue）なので、表示の要求を出した後になる。
+
+待ちの危険（利用者が受け入れた）: H の RPC は同期の `ReadFile` / `WriteFile` で期限が無い（8 節）。EditSession が UI のスレッドで実行される場合（今の EditSession の前提。TSF の仕様は未確認）、ホストが応答しない間、そのスレッドとアプリの文書の編集が待つ。回復できない切断（第 9 版）では RPC はすぐ失敗する。H の RPC はメッセージを処理しないので、待っている間にこのスレッドへ通知・タイマー・別の EditSession は入らない（※推測）。
+
+CommitThenInput の確定の再試行（4.1 の `AfterCommit`）は 5c-2 で、この後に入れる。
 
 ### 4.7 副作用と、復元で戻るもの・戻らないもの
 
@@ -725,6 +775,7 @@ COM の部分を `DocOps`（EditSession の各手順の成否・`GetText` の結
 - 実装時の変更（2026-10-21、段 8）: 4.9 の分類を入れた。(a) `Reason`: `ConfigStale` / `ConfigUnusable` は段 4 で protocol に入っている。クライアントの拒否の扱い（`Change`・`Restore`・`RestoreJournal` で台帳の未解決を解決するか）を、`_` を使わない `match`（`rejection_may_have_applied`）にした。照合の拒否（`GenMismatch` / `OwnerMismatch`）は適用していない、`ResultUnavailable` と予約の 2 つは結果不明（通信失敗と同じ）。(b) 接続の失敗の分類: `DisconnectKind` を `Transport` / `Suppressed` / `VersionMismatch` / `HelloError` / `CreateError` にした（6b-1 の `Other` を分けた）。接続の試行の失敗には、失敗の段階（`AttemptStage`）から分類した `ConnectError { stage, kind }` を付け（表示は元のエラーの文言のまま）、`HostLink` はそれで分類する。版の違いは今までどおり `ProtocolMismatch` で見分ける。繋がっていた接続を捨てた場合と、分類の付いていない失敗は `Transport`。4.9 との違い: `stage` は `AttemptStage` ではなくその名前の文字列、`VersionMismatch` はホストの版の値を持たない（版の値はログの文言に残る）。4.2 の `EngineAccess::NoEngine` は入れていない（`EngineAccess` を作っていないため）。判断に使うのは今までどおり `VersionMismatch` かどうかと、切断しているかどうかだけで、他の分類はログと今後の拡張のため。
 - 実装時の変更（2026-10-22、4.2 の第 9 版の案の実装と、実機確認で見つかった切断中の停止の修正。#70）: (a) 6c の (b) の改め（切断中は UI のスレッドで保留したキーを再生しない）と、RPC クライアントの規則（要求の時点で接続が無く切断中なら、要求の種類によらずすぐ失敗する。切断中に繋ぎ直すのは `probe()` だけ）。詳しくは 6c の注記 (b)。(b) `DisconnectKind` に `HostMissing`（自分で起動を試みて失敗した。起動の後の接続の待ちは 0.5 s）を足した。6b-1 の注記の `Disconnected(VersionMismatch | Other)` と段 8 の注記の 5 分類は、この時点で `Transport` / `Suppressed` / `VersionMismatch` / `HelloError` / `CreateError` / `HostMissing` の 6 分類になった。判断に使うのは、切断しているかどうかと、待っても戻らない分類（`VersionMismatch` / `HostMissing` / `Suppressed`。4.2 の第 9 版の案）。(c) 知らせの窓（`tsf/notice.rs`）と、直接入力の間の言語バーのツールチップ（知らせと同じ文面の先頭に `rakukan: ` を付けたもの）。6b-1 の注記の「ツールチップの文言は変えていない」は、この時点で改めた。(d) 診断のログ（キーの判断 `key_diag:`、救済の各段階 `rescue:`、`engine_get` の待ち、背景の確認がロックを持った時間、`rpc SLOW` のスレッド）。
 - 実装時の変更（2026-10-22、5c の残りの最初の部分 5c-1）: 全体の確定（`commit_full`）で確定しなかったときに、composition・ホストの読み・セッションの状態を戻すようにした（4.6 の「取り出した composition は確定しなかった結果で必ず戻す」と S4）。(a) `DocResult::Aborted { why, changed }` を足した。EditSession の中の `GetRange` の失敗と `EndComposition` の失敗では、composition を `composition_set_with_dm` で保持し直す。保持し直せなかった（ロックの poison）ときは `Aborted` にせず、composition を手放した `Failed` として今までどおりの後処理をする。`EndComposition` の失敗のときは、置き換えた範囲を読んでおいた元の文字列に戻す SetText を試し、戻せなければ `changed`（置き換えた文字列のまま残る）。(b) 確定しなかった結果（`Aborted` と `NotRun`）で、確定を要求した時点の composition（文書と同一性、`composition_key`。終えるまでその参照を持ち、同一性のポインタ値が別の composition に使い直されないようにする）を終える時点でも保持しているときは、ホストへ何も送らない。要求した時点に composition が無かった（直接の挿入）・別の文書や別の composition に替わった・ロックが取れず確かめられないときは、今までどおり閉じる（composition が残っていれば、この段の前と同じ食い違いが残る）。保持しているときは、BG の回収・`reset_preedit` も送らずに読みを残し、キーの入口（`handle_action`）で控えたセッションの状態（`commit_txn::KeySession`。候補・選択・句読点の保留を含む）に戻す（`SessionState::restore_from`。選択中の印も合わせる。ロックが取れなければ戻さず WARN）。キーの処理の外の確定では控えが無いので、セッションは戻さない（ホストの読みと composition は残る）。(c) 対象は全体の確定だけ。部分確定（`commit_then_start_composition`）は、文脈・`reset_preedit`・残りの引き継ぎを文書より先に送っている（5b）ので、今までどおり閉じる。IME の切り替えの前の確定（`switch_ime`）は、切り替えた後に composition を残さないよう、今までどおり手放して閉じる（`CommitEffects::close_on_abort`）。(d) 直接の挿入（composition が無い）の失敗は今までどおり `Failed`。(e) この段の制限: 確定の前に呼び出し側が隠した候補ウィンドウ・止めたタイマーは戻さない（Selecting に戻った後、候補を動かすキーで再び出る）。`changed` のときの表示の作り直し（4.6 の「表示が古い印」と `display_epoch` の再要求）は入れていない（次のキーで表示を作り直す）。確定の前にホストへ送った変更（`flush_pending_n`・CycleKana の `force_preedit` など）は戻らない。IME の切り替えの前の確定（`close_on_abort`）で EditSession が実行されなかった（`NotRun`）ときは、composition が文書に残ったまま、ホストの読みとセッションへは閉じる後処理を送る（この段の前と同じ扱い。composition を手放すには EditSession が要るので、切り替えの後に確定を要求し直す仕組みと合わせて後の段で扱う）。
+- 実装時の変更（2026-10-22、5c の残りの 5c-3。設計は 4.6 の「部分確定の文書先行（5c-3）」、利用者の決定は 9 節の 5〜9）: (a) `commit_then_start_composition` を `PartialPlan`（確定部分・学習・引き継ぎの要求・Preedit にするか・BG を始めるか・ライブのタイマー）で呼ぶ形にし、6 か所の呼び出し元は文脈・`reset_preedit`・引き継ぎを送らずに呼ぶ。文脈に送る文字列は 6 か所とも確定部分と同じなので、`PartialPlan` に別の欄は持たない。(b) TSF 側の口: `DynEngine::partial_handoff`（古い編集状態を外し結果不明を断念してから、`created_under` と `tsf_comp` が 0 の新しい状態に引き継ぎを入れて `RestoreJournal` を 1 回送る。成功したら引き継いだ後の読みを返す）、`RemoteComposition.pending_effects`、`CompositionRpc::restore_journal` の `pre_effects`。`restore_journal_via` は `pending_effects` を送り、照合で拒否（`GenMismatch` / `OwnerMismatch`）・別の要求の結果不明に阻まれた場合だけ残し、それ以外は消す（`effects_settled`）。(c) 部分確定の後処理（表示の要求し直し・BG の開始・ライブのタイマー・確定しなかったときに古い読みを閉じる・回復できない切断の救済）は、要求に持たせる `commit_txn::set_after` の処理（`after_partial`）で行う。`finish_one` が後処理を送った後に 1 回だけ呼ぶので、保留したキーの再生より前になる。古い読みを閉じる（`bg_reclaim`・`reset_preedit`）のは、composition を手放した `Failed` だけ。`Aborted` / `NotRun` で要求の時点の composition が今は無い・替わった場合は、今のホストの状態が替わった先のもの（終わった composition の状態は終了通知の後始末が閉じる）なので触れない（5c-1 の全体の確定は、この場合も閉じる）。5c-1 の復元から部分確定を外していた条件（`leaves_input`）は外した（`leaves_input` はキーの保留の判定だけに使う）。`CommitEffects.bg_start` は本番の呼び出し元が無くなった（試験だけが使う）。`take_bg_started` は使う所が無くなったので外した。(d) 回復できない切断で引き継げなかったときは、新しい編集状態の確かめていない末尾（`take_unconfirmed_tail`）を `insert_text_direct` で入れる。このため `typed_tail` は `SeedPreedit` を「そこまでの文字を種の読みに置き換える」として数えるようにした（今までは数えるだけ）。(e) Selecting 中の文字（`on_input`）の診断の `InputChar` は、新しい文字の後の表示が引き継ぎの後まで分からないので、`preedit_after` を空で記録する。(f) RangeSelect の部分確定の `start_live_bg_if_ready` は、文書の確定の後（`after_partial`）へ移した。
 - 規模は ※推測。1・2 は今のコードの写しなので比較的確か。3〜6 は非同期・再入・宛先・スレッドの組み合わせで幅が大きく、合計（5,550〜9,600 行）は上限として信用できる値ではない。
 - 前提の決定 1 により、フェーズ 2 はフェーズ 3 と同じリリースで出す。engine ABI はフェーズ 3（#75）の変更と合わせて 1 回だけ上げる（版の番号は #75 と合わせて決め、2 か所を同時に直す）。1〜3 は動作の修正として先に main に入れてよい。4〜7 の間の中間の状態（縮約が無い・代替の `SeedPreedit`）は配布しない。
 - 依存: 5 は 3（記録・`ReqCell`）と 4（引き継ぎの journal）に依存する。6 は 3（`HostLink`・`probe()`）と 5（確定の理由・列の核）に依存する。7 は 4（`SeedPreedit` / `RetainRange` の protocol）に依存する。前の段が後の段の機能を使うことはない（上限は判定だけを 4 で入れ、有効化はそれぞれ 5・6・7）。
@@ -745,6 +796,16 @@ COM の部分を `DocOps`（EditSession の各手順の成否・`GetText` の結
 | 2 | 保留中にフォーカスが移った場合のキー | 元の文書が生きていれば、文字キーを打った文字のまま入れ、文字以外は捨てる（回復できない場合と同じ）。生きていなければ捨てて WARN | 4.2、4.6、6 の 7 |
 | 3 | T2-1b | 正確に復元できたときは Space で通常どおり変換する。V6_Test_Procedure.md の T2-1b の期待値を改める | 4.7、6 の 30、7 の 7 |
 | 4 | Enter の末尾の未確定 `n` | `ん` にして確定する（今の挙動）。「表示どおり」の承認済みの例外 | 4.5、6 の 25 |
+
+2026-10-22 に、部分確定の文書先行（5c-3）について次の 5 項目が決まった（Codex の設計レビュー 6 回の後、設計案のとおり）。
+
+| # | 事項 | 決定 | 反映した節 |
+|---|---|---|---|
+| 5 | 部分確定の文書先行の作り方 | EditSession の中で EndComposition の成功後に `RestoreJournal` を 1 回送る（仮の表示と作り直しは作らない） | 4.6 |
+| 6 | EditSession の中でホストが応答しないとき | アプリの文書のロックを持ったまま待つ危険を受け入れる | 4.6 |
+| 7 | 確定部分に縮める SetText の失敗 | 確定を止める（`Aborted`）。今は全体を確定している | 4.6 |
+| 8 | H の結果が分からないとき | 学習と文脈を再送しない（失いうる。二重の適用を避ける） | 4.6 |
+| 9 | H が一時的に失敗したとき | 次のキーまで引き継ぎの文字を表示しない（次のキーで流し直す）。CommitThenInput の再試行（5c-2）はこの後の段 | 4.6 |
 
 ## 10. Codex の指摘との対応
 

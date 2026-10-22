@@ -365,29 +365,56 @@ pub(super) fn update_composition(
     Ok(())
 }
 
-/// 確定テキストを commit し、即座に新しい composition を開始する（1 EditSession）。
+/// 部分確定の計画（入力処理の見直しの 5c-3、設計書 4.6 の部分確定の文書先行）。
+pub(super) struct PartialPlan {
+    /// 文書に確定する部分（計画）。文脈にもこの文字列を送る。
+    pub commit_text: String,
+    /// 確定部分の学習（文書に計画どおり確定できたときだけ、引き継ぎと一緒に送る）。
+    pub learn: Option<crate::tsf::commit_txn::LearnPlan>,
+    /// 新しい composition に引き継ぐ要求（打った文字・残りの読みの種）。
+    pub then: rakukan_engine_rpc::ChangeRequest,
+    /// 引き継いだ後の読みをセッションの Preedit にする。
+    pub set_preedit: bool,
+    /// 引き継いだ後の読みで BG 変換を始める（EditSession の後）。
+    pub bg_start: bool,
+    /// BG 変換を始めたら、ライブ変換のタイマーを始める。
+    pub live_notify: bool,
+}
+
+/// EditSession の中のホストへの引き継ぎ（H）の結果。後処理（`commit_txn::set_after`）で使う。
+enum Handoff {
+    /// 引き継いだ。`display` は新しい composition に書く表示（読めなければ `None`）、
+    /// `new_comp` は新しい composition に表示できたか。
+    Restored {
+        reading: String,
+        display: Option<String>,
+        new_comp: bool,
+    },
+    /// 引き継げなかった（新しい編集状態は journal を持って残っている）。
+    Failed,
+}
+
+/// 部分確定: 文書の確定部分を確定し、ホストへ引き継いでから、その表示で新しい composition を
+/// 始める（1 EditSession。入力処理の見直しの 5c-3、設計書 4.6 の部分確定の文書先行）。
 ///
 /// end_composition + update_composition を別々に呼ぶと TSF が2セッションを
 /// 別タイミングで実行し、"composition=None" の瞬間にアプリがテキストを
 /// クリアすることがある。これを1セッションにまとめて防ぐ。
 ///
-/// 学習（`learn`）だけは、文書の結果を見てから送る（入力処理の見直しの段 5 の 5b）。
-/// 残りの読みの BG 変換の開始（`bg_start`）は、その後に送る（BG の要求が結果不明で台帳に
-/// 残ると、後の学習の要求が断られるため）。BG 変換を始めたかを返す。
-/// 確定部分に縮めた後の範囲を読み直し、それが `commit_text` と同じときだけ学習する。
-/// 文脈・編集状態を閉じる処理・残りの読みの引き継ぎは、今までどおり呼び出し側が
-/// 先に送る（新しい composition にホストの表示を書くため）。EditSession が後で実行
-/// される場合は、結果が出てから学習を送る（その間のキーは key_queue が保留する）。
+/// 呼び出し側は、ホストへ何も送らずに呼ぶ（文脈・読みのリセット・引き継ぎ・学習はこの関数が
+/// 送る）。EditSession の中で、確定部分に縮めて EndComposition が成功した後にだけ、
+/// `RestoreJournal` を 1 回送る（学習・文脈・リセット・引き継ぎ）。確定しなかったとき
+/// （`Aborted` / `NotRun`）は composition を保持し直し、ホストには何も送らない
+/// （セッションはキーの入口の状態に戻す: commit_txn）。BG 変換の開始・表示の要求し直しは、
+/// EditSession の後の後処理で行う。EditSession が後で実行される場合、その間のキーは
+/// key_queue が保留する。
 pub(super) fn commit_then_start_composition(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    commit_text: String,
-    next_preedit: String,
-    learn: Option<crate::tsf::commit_txn::LearnPlan>,
-    bg_start: Option<String>,
-) -> Result<bool> {
-    use crate::tsf::commit_txn::{CommitEffects, DocResult, ReqState};
+    plan: PartialPlan,
+) -> Result<()> {
+    use crate::tsf::commit_txn::{DocResult, ReqState};
     use windows::Win32::Foundation::E_FAIL;
 
     // M1.8 T-MID1 拡張: 確定はライブ変換の世代を進める。これをしないと、
@@ -396,22 +423,11 @@ pub(super) fn commit_then_start_composition(
     // 二重に見える競合が起こりうる。
     crate::tsf::live_session::conv_gen_bump();
 
-    let cell = crate::tsf::commit_txn::begin(
-        commit_text.clone(),
-        CommitEffects {
-            learn,
-            bg_start,
-            ..Default::default()
-        },
-    );
+    let cell = crate::tsf::commit_txn::begin(plan.commit_text.clone(), Default::default());
     let session_cell = cell.clone();
-    let _ = crate::tsf::commit_txn::take_bg_started();
-
-    // composition_take() をセッション内に移動する（end_composition と同じ理由）。
-    // セッション外で take すると COMPOSITION=None になった瞬間に update_composition が
-    // 誤ったカーソル位置から新 composition を開始するリスクがある。
-    // 新しい composition に表示する編集状態（残りの読み）を、要求の時点で控える（Issue #71）
-    let bind = crate::engine::rpc_composition::bind_target();
+    // 実行の時点で、要求の時点と同じ文書・composition かを確かめるために控える（S0'）
+    let req_dm = crate::tsf::candidate_window::current_dm_hwnd().0;
+    let req_comp = crate::engine::state::composition_key();
     // 今の composition を置き換える EditSession を要求済みであることを示す（Issue #71）。
     // 実行より先に今の composition の終了通知が届いても、新しい composition のための
     // 状態・セッションを片づけない。この要求の EditSession の冒頭か、EditSession が
@@ -422,12 +438,22 @@ pub(super) fn commit_then_start_composition(
         .unwrap_or(0);
     let replacement = crate::engine::state::set_pending_replacement(ctx_dm);
     crate::tsf::commit_txn::mark_partial(&cell, replacement);
+    let handoff: std::rc::Rc<std::cell::RefCell<Option<Handoff>>> = Default::default();
+    let session_handoff = handoff.clone();
+    let commit_text = plan.commit_text.clone();
+    let then = plan.then.clone();
+    let learn = plan.learn.clone();
+    let set_preedit = plan.set_preedit;
     let ctx_req = ctx.clone();
+    let session_ctx = ctx.clone();
+    let session_sink = sink.clone();
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
+        let ctx = &session_ctx;
         crate::engine::state::clear_pending_replacement(replacement);
+        // S0: 失効した要求は文書に触れない
         {
             let mut state = session_cell.borrow_mut();
             if *state != ReqState::Pending {
@@ -439,6 +465,25 @@ pub(super) fn commit_then_start_composition(
             *session_cell.borrow_mut() = ReqState::Done(result);
             crate::tsf::candidate_window::post_commit_done();
         };
+        // S0': 要求の後に文書・composition が替わっていたら触れない
+        if crate::tsf::candidate_window::current_dm_hwnd().0 != req_dm
+            || crate::engine::state::composition_key() != req_comp
+        {
+            tracing::warn!("commit_then_start: document or composition changed; not run");
+            finish(DocResult::NotRun("stale"));
+            return Ok(());
+        }
+        // E: エンジンのロック（引き継ぎと表示の読み出しが済むまで持つ）
+        let Ok(mut engine_guard) = crate::engine::state::engine_try_get() else {
+            tracing::warn!("commit_then_start: engine busy; not run");
+            finish(DocResult::NotRun("engine busy"));
+            return Ok(());
+        };
+        if engine_guard.as_mut().is_none() {
+            tracing::warn!("commit_then_start: no engine; not run");
+            finish(DocResult::NotRun("no engine"));
+            return Ok(());
+        }
 
         // SetText 排他化（M1.8 T-MID3 の commit 版）: Phase1A / update_composition
         // の SetText と直列化する。他サイトは try_lock + skip だが、確定はスキップ
@@ -449,24 +494,31 @@ pub(super) fn commit_then_start_composition(
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
+        // 確定しなかったときに保持し直すため、取り出す前に文書を控える
+        let comp_dm = crate::engine::state::composition_dm();
         let comp = composition_take().unwrap_or(None);
         tracing::debug!(
-            "commit_then_start[session]: commit={:?} next={:?} has_comp={}",
+            "commit_then_start[session]: commit={:?} then={:?} has_comp={}",
             commit_text,
-            next_preedit,
+            then,
             comp.is_some()
         );
-        // 途中で `?` により抜けた手順を、内容付きでログに残す（Issue #69）。
-        // セッションの結果（phrSession）だけでは、どの手順で失敗したか分からない。
-        let warn_step = |e: &windows::core::Error| {
-            tracing::warn!(
-                "commit_then_start: {e} commit={:?} next={:?}",
-                commit_text,
-                next_preedit
-            );
+        // 確定しなかった: composition を保持し直す（5c-1 の commit_full と同じ）
+        let keep = |comp: windows::Win32::UI::TextServices::ITfComposition,
+                    why: &'static str,
+                    changed: bool| {
+            match composition_set_with_dm(Some(comp), comp_dm) {
+                Ok(()) => DocResult::Aborted { why, changed },
+                Err(e) => {
+                    tracing::warn!(
+                        "commit_then_start: re-hold composition failed after {why}: {e}"
+                    );
+                    DocResult::Failed(why)
+                }
+            }
         };
 
-        // ── Step1: 既存 composition を確定テキストで終了 ──
+        // ── S1〜S4: 既存 composition を確定部分に縮めて終了 ──
         // 文節分割後に候補表示している場合、composition のテキストは
         // "確定部分 + remainder" の全体になっている。
         // EndComposition だけだとその全体が確定されてしまうため、
@@ -477,73 +529,174 @@ pub(super) fn commit_then_start_composition(
         // EndComposition 前に range の末尾を取得しておく。
         let mut insert_after_commit: Option<windows::Win32::UI::TextServices::ITfRange> = None;
         if let Some(comp) = comp {
-            // 確定した文字列（縮めた後に読み直した値。読めなければ分からない）
-            let mut committed: Option<String> = None;
-            // composition テキストを commit_text だけに縮める
-            if let Ok(range) = comp.GetRange() {
-                if let Err(e) = range.SetText(ec, 0, &commit_w) {
-                    // 縮められないまま EndComposition へ進むと、確定部分に残りまで
-                    // 含まれ、新しい composition の残りと二重に見えるおそれがある（Issue #69）。
-                    tracing::warn!(
-                        "commit_then_start: SetText to the committed part failed commit={:?} next={:?}: {e}",
-                        commit_text,
-                        next_preedit
-                    );
+            // S1
+            let range = match comp.GetRange() {
+                Ok(range) => range,
+                Err(e) => {
+                    tracing::warn!("commit_then_start: GetRange failed: {e}");
+                    finish(keep(comp, "GetRange", false));
+                    return Ok(());
                 }
-                committed = range_text(ec, &range);
-                // 確定テキストの末尾位置を保存
-                if let Ok(end_range) = range.Clone() {
-                    let _ = end_range.Collapse(ec, TF_ANCHOR_END);
-                    insert_after_commit = Some(end_range);
-                }
-            } else {
-                tracing::warn!("commit_then_start: comp.GetRange() failed");
+            };
+            // S1': 確定しなかったときに戻す元の文字列
+            let Some(original) = range_text(ec, &range) else {
+                tracing::warn!("commit_then_start: original text unreadable");
+                finish(keep(comp, "original text", false));
+                return Ok(());
+            };
+            // 範囲を元の文字列へ戻す。戻せなければ範囲は変わったまま（表示が古い）
+            let restore_original = || {
+                let o_w: Vec<u16> = original.encode_utf16().collect();
+                range.SetText(ec, 0, &o_w).is_err()
+            };
+            // S2: 確定部分に縮める。縮められないまま EndComposition へ進むと、確定部分に
+            // 残りまで含まれる（Issue #69）ので止める
+            if let Err(e) = range.SetText(ec, 0, &commit_w) {
+                tracing::warn!(
+                    "commit_then_start: SetText to the committed part failed commit={commit_text:?}: {e}"
+                );
+                finish(keep(comp, "SetText", false));
+                return Ok(());
             }
-            comp.EndComposition(ec)
-                .map_err(|e| windows::core::Error::new(E_FAIL, format!("EndComposition: {e}")))
-                .inspect_err(warn_step)
-                .inspect_err(|_| finish(DocResult::Failed("EndComposition")))?;
-            finish(match committed {
-                Some(text) => DocResult::Committed { text },
-                None => DocResult::CommittedUnknown,
-            });
-        } else if !commit_text.is_empty() {
-            let insert_point = get_insert_range_or_end(&ctx, ec, "commit_then_start direct commit")
-                .inspect_err(warn_step)
-                .inspect_err(|_| finish(DocResult::Failed("direct commit")))?;
-            insert_point
-                .SetText(ec, 0, &commit_w)
-                .map_err(|e| {
-                    windows::core::Error::new(E_FAIL, format!("SetText direct commit: {e}"))
-                })
-                .inspect_err(warn_step)
-                .inspect_err(|_| finish(DocResult::Failed("direct commit")))?;
-            finish(DocResult::Committed {
-                text: commit_text.clone(),
-            });
-            if let Ok(end_range) = insert_point.Clone() {
+            // S2': 縮めた範囲が確定部分と同じか
+            let committed = range_text(ec, &range);
+            if committed.as_deref() != Some(commit_text.as_str()) {
+                tracing::warn!(
+                    "commit_then_start: committed part differs planned={commit_text:?} read={committed:?}"
+                );
+                let changed = restore_original();
+                finish(keep(comp, "committed part", changed));
+                return Ok(());
+            }
+            // S3: 確定テキストの末尾位置を保存
+            if let Ok(end_range) = range.Clone() {
                 let _ = end_range.Collapse(ec, TF_ANCHOR_END);
                 insert_after_commit = Some(end_range);
             }
-        } else {
-            finish(DocResult::Committed {
-                text: String::new(),
-            });
+            // S4
+            if let Err(e) = comp.EndComposition(ec) {
+                tracing::warn!("commit_then_start: EndComposition failed: {e}");
+                let changed = restore_original();
+                finish(keep(comp, "EndComposition", changed));
+                return Ok(());
+            }
+        } else if !commit_text.is_empty() {
+            let inserted = get_insert_range_or_end(ctx, ec, "commit_then_start direct commit")
+                .and_then(|insert| insert.SetText(ec, 0, &commit_w).map(|()| insert));
+            match inserted {
+                Ok(insert) => {
+                    if let Ok(end_range) = insert.Clone() {
+                        let _ = end_range.Collapse(ec, TF_ANCHOR_END);
+                        insert_after_commit = Some(end_range);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("commit_then_start: direct commit failed: {e}");
+                    finish(DocResult::Failed("direct commit"));
+                    return Ok(());
+                }
+            }
+        }
+        // 選択位置を確定部分の末尾へ（新しい composition を始められなかったときに、後処理の
+        // 表示の要求がここから始める）
+        if let Some(point) = insert_after_commit.as_ref().and_then(|p| p.Clone().ok()) {
+            let sel = TF_SELECTION {
+                range: std::mem::ManuallyDrop::new(Some(point)),
+                style: TF_SELECTIONSTYLE {
+                    ase: TfActiveSelEnd(0),
+                    fInterimChar: windows::Win32::Foundation::BOOL(0),
+                },
+            };
+            let _ = ctx.SetSelection(ec, &[sel]);
         }
 
-        if next_preedit.is_empty() {
+        // ── H: ホストへの引き継ぎ（RestoreJournal を 1 回）──
+        let mut pre_effects = Vec::new();
+        if let Some(learn) = &learn {
+            use crate::engine::state::LearnAction;
+            match learn.action {
+                LearnAction::Learn => pre_effects.push(rakukan_engine_rpc::SideEffect::Learn {
+                    reading: learn.reading.clone(),
+                    surface: learn.surface.clone(),
+                }),
+                LearnAction::LearnForce => {
+                    pre_effects.push(rakukan_engine_rpc::SideEffect::LearnForce {
+                        reading: learn.reading.clone(),
+                        surface: learn.surface.clone(),
+                    })
+                }
+                LearnAction::Skip => {}
+            }
+        }
+        if !commit_text.is_empty() {
+            pre_effects.push(rakukan_engine_rpc::SideEffect::CommitContext {
+                text: commit_text.clone(),
+            });
+        }
+        let engine = engine_guard.as_mut().expect("checked");
+        let host = match engine.partial_handoff(then.clone(), pre_effects) {
+            Ok(reading) => {
+                let display = engine.preedit_display().ok();
+                if set_preedit && let Ok(mut sess) = crate::engine::state::session_get() {
+                    sess.set_preedit(reading.clone());
+                }
+                Some((reading, display))
+            }
+            Err(e) => {
+                tracing::warn!("commit_then_start: handoff to the host failed: {e}");
+                // 種の読みは分かっている（次のキーで流し直す）
+                if set_preedit
+                    && let rakukan_engine_rpc::ChangeRequest::SeedPreedit { text } = &then
+                    && let Ok(mut sess) = crate::engine::state::session_get()
+                {
+                    sess.set_preedit(text.clone());
+                }
+                None
+            }
+        };
+        drop(engine_guard);
+        // 結果を記録する（この後の手順が失敗しても記録は済んでいる）
+        finish(DocResult::Committed {
+            text: commit_text.clone(),
+        });
+        let Some((reading, display)) = host else {
+            *session_handoff.borrow_mut() = Some(Handoff::Failed);
+            return Ok(());
+        };
+        // 新しい composition を始められたかを、抜ける経路にかかわらず記録する
+        let record = |new_comp: bool| {
+            *session_handoff.borrow_mut() = Some(Handoff::Restored {
+                reading: reading.clone(),
+                display: display.clone(),
+                new_comp,
+            });
+        };
+        record(false);
+        let Some(next) = display.clone() else {
+            tracing::warn!("commit_then_start: display unreadable after the handoff");
+            return Ok(());
+        };
+        if next.is_empty() {
+            record(true);
             return Ok(());
         }
 
-        // ── Step2: 同セッション内で新 composition 開始 ──
+        // ── S5〜S8: 同セッション内で新 composition 開始 ──
         // EndComposition 前に保存した確定テキスト末尾位置から新 composition を開始する。
         // EndComposition 後の GetSelection はカーソルが composition 開始位置を示すことがあり
         // 使用できない。ctx.GetEnd(ec) はドキュメント末尾を返すため文章途中の編集で問題になる。
+        let warn_step = |e: &windows::core::Error| {
+            tracing::warn!(
+                "commit_then_start: {e} commit={:?} next={:?}",
+                commit_text,
+                next
+            );
+        };
         let insert_point = if let Some(p) = insert_after_commit {
             p
         } else {
             tracing::warn!("commit_then_start: insert_after_commit=None, falling back to GetEnd");
-            get_document_end_range(&ctx, ec, "commit_then_start new composition")
+            get_document_end_range(ctx, ec, "commit_then_start new composition")
                 .inspect_err(warn_step)?
         };
         let cc: ITfContextComposition = ctx
@@ -553,34 +706,36 @@ pub(super) fn commit_then_start_composition(
             })
             .inspect_err(warn_step)?;
         let new_comp = cc
-            .StartComposition(ec, &insert_point, &sink)
+            .StartComposition(ec, &insert_point, &session_sink)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("StartComposition: {e}")))
             .inspect_err(warn_step)?;
-        let new_range = new_comp
-            .GetRange()
-            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))
-            .inspect_err(warn_step)?;
+        // 開始した composition は、すぐ保持して新しい編集状態に結び付ける（範囲の取得や表示が
+        // 失敗しても、後処理の表示の要求がこの composition に書く）
         let dm_ptr = ctx
             .GetDocumentMgr()
             .ok()
             .map(|dm| dm.as_raw() as usize)
             .unwrap_or(0);
         crate::engine::rpc_composition::bind_composition(
-            bind,
+            crate::engine::rpc_composition::bind_target(),
             crate::engine::state::composition_identity(&new_comp),
             dm_ptr,
         );
         let _ = composition_set_with_dm(Some(new_comp.clone()), dm_ptr);
-
-        let preedit_w: Vec<u16> = next_preedit.encode_utf16().collect();
+        let new_range = new_comp
+            .GetRange()
+            .map_err(|e| windows::core::Error::new(E_FAIL, format!("GetRange new: {e}")))
+            .inspect_err(warn_step)?;
+        let preedit_w: Vec<u16> = next.encode_utf16().collect();
         new_range
             .SetText(ec, 0, &preedit_w)
             .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText new: {e}")))
             .inspect_err(warn_step)?;
-        note_shown(&new_comp, &next_preedit);
+        note_shown(&new_comp, &next);
+        record(true);
 
         // 新 composition にもアンダーライン属性をセット
-        set_display_attr_prop(&ctx, ec, &new_range, display_attr::atom_input());
+        set_display_attr_prop(ctx, ec, &new_range, display_attr::atom_input());
 
         // カーソルを末尾に
         if let Ok(cursor) = new_range.Clone() {
@@ -615,8 +770,27 @@ pub(super) fn commit_then_start_composition(
 
         Ok(())
     });
+    // 後処理（保留したキーの再生より前）
+    let after_ctx = ctx.clone();
+    let bg_start = plan.bg_start;
+    let live_notify = plan.live_notify;
+    crate::tsf::commit_txn::set_after(
+        &cell,
+        Box::new(move |result, keep| {
+            after_partial(
+                result,
+                keep,
+                handoff.borrow_mut().take(),
+                after_ctx,
+                tid,
+                sink,
+                bg_start,
+                live_notify,
+            )
+        }),
+    );
     // end_composition と同じく、edit session の結果（phrSession）まで確認して
-    // 失敗をログに残す（Issue #69）。戻り値と後続の処理は変えない。
+    // 失敗をログに残す（Issue #69）。
     unsafe {
         match ctx_req.RequestEditSession(tid, &session, TF_ES_READWRITE) {
             // 非同期で受け付けた: EditSession の冒頭で印を消す
@@ -635,13 +809,118 @@ pub(super) fn commit_then_start_composition(
             }
         }
     }
-    // 同期で実行されていれば、結果を見て学習を送る。後で実行される場合は、結果が出て
-    // から送る（WM_APP_COMMIT_DONE。その間のキーは key_queue が保留する）
+    // 同期で実行されていれば、ここで後処理する。後で実行される場合は、結果が出てから
+    // （WM_APP_COMMIT_DONE。その間のキーは key_queue が保留する）
     crate::tsf::commit_txn::finish_completed();
     if crate::tsf::commit_txn::commit_pending() {
         crate::tsf::candidate_window::start_key_queue_timer();
     }
-    Ok(crate::tsf::commit_txn::take_bg_started())
+    Ok(())
+}
+
+/// 部分確定の後処理（EditSession の後、保留したキーの再生より前。設計書 4.6 の部分確定の
+/// 文書先行）。
+#[allow(clippy::too_many_arguments)]
+fn after_partial(
+    result: &crate::tsf::commit_txn::DocResult,
+    keep: bool,
+    handoff: Option<Handoff>,
+    ctx: ITfContext,
+    tid: u32,
+    sink: ITfCompositionSink,
+    bg_start: bool,
+    live_notify: bool,
+) {
+    use crate::tsf::commit_txn::DocResult;
+    match (result, handoff) {
+        (
+            DocResult::Committed { .. },
+            Some(Handoff::Restored {
+                reading,
+                display,
+                new_comp,
+            }),
+        ) => {
+            // 新しい composition に表示できなかった: 表示の要求を 1 回だけ出す（失効・再要求の
+            // 仕組みは持たない。次のキーの表示が上書きする）
+            if !new_comp {
+                let display = display.or_else(|| {
+                    crate::engine::state::engine_get()
+                        .ok()
+                        .and_then(|mut g| g.as_mut().and_then(|e| e.preedit_display().ok()))
+                });
+                match display {
+                    Some(display) => {
+                        if let Err(e) = update_composition(ctx.clone(), tid, sink, display) {
+                            tracing::warn!("commit_then_start: display request failed: {e}");
+                        }
+                    }
+                    None => tracing::warn!(
+                        "commit_then_start: no display for the handed-off input; the next key shows it"
+                    ),
+                }
+            }
+            if bg_start {
+                let started = crate::engine::state::engine_get().ok().is_some_and(|g| {
+                    g.as_ref()
+                        .is_some_and(|e| crate::engine::state::start_live_bg_if_ready(e, &reading))
+                });
+                if started && live_notify {
+                    crate::tsf::candidate_window::live_input_notify(&ctx, tid);
+                }
+            }
+        }
+        (DocResult::Committed { .. }, _) => {
+            // 確定部分は確定したが、ホストへ引き継げなかった。回復できない切断なら、引き継ぐ
+            // 文字を打った文字のまま入れる（第 9 版の救済）。そうでなければ、次のキーで
+            // 新しい編集状態の journal を流し直す
+            if crate::tsf::key_queue::link_unrecoverable() {
+                if let Some((text, skipped)) =
+                    crate::engine::rpc_composition::take_unconfirmed_tail()
+                {
+                    tracing::warn!(
+                        "commit_then_start: host unavailable; inserting the handed-off input as typed ({skipped} other request(s) dropped)"
+                    );
+                    if !text.is_empty() {
+                        let dm = crate::tsf::candidate_window::current_dm_hwnd().0;
+                        let _ = insert_text_direct(
+                            &ctx,
+                            tid,
+                            &text,
+                            Box::new(move || {
+                                crate::tsf::candidate_window::current_dm_hwnd().0 == dm
+                            }),
+                        );
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "commit_then_start: handoff not confirmed; the next key replays the journal"
+                );
+            }
+        }
+        // 確定しなかった: composition もホストの読みも残す（セッションは commit_txn が戻した）
+        _ if keep => {}
+        // 確定しなかった（文書にもホストにも触れていない）が、要求の時点の composition が今は
+        // 無い・別のものに替わった: 今のホストの状態は替わった先のもの（終わった composition の
+        // 状態は終了通知の後始末が閉じる）なので触れない
+        (DocResult::Aborted { .. } | DocResult::NotRun(_), _) => {
+            tracing::warn!(
+                "commit_then_start: not committed and the composition changed; host state left as is"
+            );
+        }
+        // 確定に失敗し、composition を手放した: ホストの古い読みを閉じる
+        _ => {
+            if let Ok(mut guard) = crate::engine::state::engine_get()
+                && let Some(engine) = guard.as_mut()
+            {
+                engine.bg_reclaim();
+                engine.reset_preedit();
+            } else {
+                tracing::warn!("commit_then_start: no engine; the old reading is not closed");
+            }
+        }
+    }
 }
 
 /// 直接の挿入の要求の状態（[`insert_text_direct`]）。

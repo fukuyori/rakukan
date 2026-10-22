@@ -3,7 +3,7 @@
 use rakukan_engine_rpc::{
     BgStartOutcome, BgTakeOutcome, BgView, ChangeOutcome, ChangeReply, ChangeRequest, Checkpoint,
     EditState, EngineGen, Expect, InputCharKind, Owner, ReadError, ReadRequest, Reason, Replay,
-    Response, RestoreJournalReply, RpcEngine,
+    Response, RestoreJournalReply, RpcEngine, SideEffect,
 };
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -55,6 +55,10 @@ pub struct RemoteComposition {
     /// journal の末尾（ホストの適用を確かめていない部分）ができた時刻。末尾が無ければ
     /// `None`（入力処理の見直しの段 6。末尾が確かめられないまま続くと回復できない場合に進む）。
     unconfirmed_since: Option<std::time::Instant>,
+    /// まだ送っていない、journal の流し直しの前に適用する副作用（部分確定の学習と文脈。
+    /// 入力処理の見直しの 5c-3、設計書 4.6）。次の `RestoreJournal` で送り、適用したか
+    /// 分からない結果になったら消す（再送しない）。
+    pending_effects: Vec<SideEffect>,
 }
 impl RemoteComposition {
     fn new() -> Self {
@@ -71,6 +75,7 @@ impl RemoteComposition {
             tsf_comp: 0,
             created_under: crate::engine::state::current_composition_identity_for(dm_key().ptr),
             unconfirmed_since: None,
+            pending_effects: Vec::new(),
         }
     }
     fn expect(&self) -> Option<Expect> {
@@ -203,8 +208,9 @@ fn take_terminated_from(
 }
 /// composition（`tsf_comp`）の編集状態の journal のうち、ホストの適用を確かめていない末尾の
 /// 文字を、打った文字のまま返す（入力処理の見直しの段 6、回復できない場合の救済）。
-/// Backspace は直前の末尾の文字を消す（消す文字が末尾に無ければ数えるだけ）。文字以外の
-/// 要求は数えるだけ。返り値は（文字列, 反映できなかった要求の数）。
+/// Backspace は直前の末尾の文字を消す（消す文字が末尾に無ければ数えるだけ）。種
+/// （`SeedPreedit`）はそこまでの文字を種の読みに置き換える。それ以外の文字以外の要求は
+/// 数えるだけ。返り値は（文字列, 反映できなかった要求の数）。
 pub fn unconfirmed_typed_text(tsf_comp: usize) -> (String, usize) {
     let states = lock_states();
     let mut text = String::new();
@@ -247,6 +253,11 @@ fn typed_tail(tail: &[ChangeRequest]) -> (String, usize) {
             },
             ChangeRequest::Backspace if !text.is_empty() => {
                 text.pop();
+            }
+            // 種は読みを置き換える（部分確定の引き継ぎの残りの読み。5c-3）
+            ChangeRequest::SeedPreedit { text: seed } => {
+                text.clear();
+                text.push_str(seed);
             }
             _ => skipped += 1,
         }
@@ -429,6 +440,7 @@ trait CompositionRpc {
     fn restore_journal(
         &self,
         owner: Owner,
+        pre_effects: Vec<SideEffect>,
         journal: Vec<ChangeRequest>,
         checkpoint: Option<Checkpoint>,
     ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>;
@@ -449,10 +461,26 @@ impl CompositionRpc for RpcEngine {
     fn restore_journal(
         &self,
         owner: Owner,
+        pre_effects: Vec<SideEffect>,
         journal: Vec<ChangeRequest>,
         checkpoint: Option<Checkpoint>,
     ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError> {
-        self.restore_journal(owner, Vec::new(), journal, checkpoint)
+        self.restore_journal(owner, pre_effects, journal, checkpoint)
+    }
+}
+/// `RestoreJournal` の結果のうち、送った副作用（`pre_effects`）が適用されたか分からない、
+/// または適用されたもの（再送しない）か。適用していないと分かるのは、照合で拒否された
+/// （`GenMismatch` / `OwnerMismatch`）と、別の要求の結果不明に阻まれて送っていない場合だけ。
+/// ホストの `Error` は、副作用を適用した後の流し直しの失敗と区別できないので、再送しない
+/// （設計書 4.6 の部分確定の文書先行）。
+fn effects_settled(result: &Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>) -> bool {
+    match result {
+        Ok(RestoreJournalReply::Restored { .. }) => true,
+        Ok(RestoreJournalReply::Rejected(reason)) => {
+            !matches!(reason, Reason::GenMismatch | Reason::OwnerMismatch)
+        }
+        Err(rakukan_engine_rpc::ChangeError::Unresolved(_)) => false,
+        Err(_) => true,
     }
 }
 /// journal の先頭 `upto` 件をホストで流し直し、所有権を取る（設計書 4.3）。
@@ -473,17 +501,36 @@ fn restore_journal_via(
             len: *len as u32,
             checkpoint_edit: edit.clone(),
         });
-    match rpc.restore_journal(
+    let result = rpc.restore_journal(
         state.owner,
+        state.pending_effects.clone(),
         state.journal[..upto].to_vec(),
         sent_checkpoint.clone(),
-    )? {
+    );
+    if !state.pending_effects.is_empty() {
+        if effects_settled(&result) {
+            if !matches!(result, Ok(RestoreJournalReply::Restored { .. })) {
+                tracing::warn!(
+                    "pre-commit effects may not have been applied; not resent: {:?}",
+                    state.pending_effects
+                );
+            }
+            state.pending_effects.clear();
+        } else {
+            tracing::debug!("pre-commit effects not applied; kept for the next restore");
+        }
+    }
+    match result? {
         RestoreJournalReply::Restored {
             engine_gen,
             replay,
             final_edit,
+            effects,
             ..
         } => {
+            if effects.contains(&rakukan_engine_rpc::EffectResult::Failed) {
+                tracing::warn!("restore: some pre-commit effects failed: {effects:?}");
+            }
             let confirmed = match (replay, sent_checkpoint) {
                 (Replay::Rebased, Some(checkpoint)) => {
                     let base = checkpoint.checkpoint_edit;
@@ -981,6 +1028,39 @@ impl DynEngine {
         });
         self.0.abandon_unresolved();
     }
+    /// 部分確定の引き継ぎ（入力処理の見直しの 5c-3、設計書 4.6 の H）。文書の確定部分を
+    /// 確定した後（EditSession の中、composition を取り出した後）に呼ぶ。
+    ///
+    /// 今の文脈の編集状態（古い所有者）を外し、結果不明を断念する（今の `reset_preedit` と
+    /// 同じ）。新しい編集状態を作り、journal に `then` を、`pending_effects` に `pre_effects`
+    /// （学習・文脈）を入れて、`RestoreJournal` を 1 回送る。成功しても失敗しても新しい
+    /// 状態は保存する（失敗したら、次のキーで流し直す）。成功したら、引き継いだ後の読みを
+    /// 返す。
+    pub fn partial_handoff(
+        &self,
+        then: ChangeRequest,
+        pre_effects: Vec<SideEffect>,
+    ) -> anyhow::Result<String> {
+        close();
+        self.0.abandon_unresolved();
+        let mut state = handoff_state(then, pre_effects);
+        let upto = state.journal.len();
+        let result = restore_journal_via(&self.0, &mut state, upto);
+        let reading = state.edit.reading.clone();
+        save(state);
+        result.map(|_| reading)
+    }
+}
+/// 部分確定の引き継ぎの新しい編集状態。古い composition の終了通知で外されないよう、
+/// `created_under` と `tsf_comp` を 0 にする（`take_terminated_from` は、どちらも 0 の状態を
+/// 外さない）。
+fn handoff_state(then: ChangeRequest, pre_effects: Vec<SideEffect>) -> RemoteComposition {
+    let mut state = RemoteComposition::new();
+    state.created_under = 0;
+    state.tsf_comp = 0;
+    state.journal = vec![journal_entry(&then)];
+    state.pending_effects = pre_effects;
+    state
 }
 
 #[cfg(test)]
@@ -1070,6 +1150,15 @@ mod tests {
             input('n'),
         ];
         assert_eq!(typed_tail(&tail), ("n".to_string(), 2));
+        // 種は読みを置き換え、その後の文字が続く
+        let tail = [
+            input('x'),
+            ChangeRequest::SeedPreedit {
+                text: "のこり".into(),
+            },
+            input('a'),
+        ];
+        assert_eq!(typed_tail(&tail), ("のこりa".to_string(), 0));
     }
     #[derive(Debug)]
     enum Sent {
@@ -1084,6 +1173,8 @@ mod tests {
         abandoned: RefCell<Vec<Owner>>,
         /// 断念の結果の台本（尽きたら `false` = 台帳に該当なし）。
         abandon_results: RefCell<VecDeque<bool>>,
+        /// `RestoreJournal` で送った副作用（送った順）。
+        restore_effects: RefCell<Vec<Vec<SideEffect>>>,
     }
     impl CompositionRpc for FakeRpc {
         fn abandon_for(&self, owner: Owner) -> bool {
@@ -1107,9 +1198,11 @@ mod tests {
         fn restore_journal(
             &self,
             owner: Owner,
+            pre_effects: Vec<SideEffect>,
             journal: Vec<ChangeRequest>,
             checkpoint: Option<Checkpoint>,
         ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError> {
+            self.restore_effects.borrow_mut().push(pre_effects);
             self.sent
                 .borrow_mut()
                 .push(Sent::Restore(owner, journal, checkpoint));
@@ -1159,6 +1252,7 @@ mod tests {
             restores: RefCell::new(restores.into()),
             abandoned: RefCell::new(vec![]),
             abandon_results: RefCell::new(VecDeque::new()),
+            restore_effects: RefCell::new(vec![]),
         }
     }
     fn owned_state() -> RemoteComposition {
@@ -1796,5 +1890,120 @@ mod tests {
         assert!(!ReadError::Host("poison".into()).ownership_lost());
         assert!(!ReadError::Transport(anyhow::anyhow!("disconnected")).ownership_lost());
         assert!(!ReadError::NoComposition.ownership_lost());
+    }
+    fn context(text: &str) -> SideEffect {
+        SideEffect::CommitContext { text: text.into() }
+    }
+    #[test]
+    fn the_handoff_state_survives_any_termination_notice() {
+        // 部分確定の引き継ぎの新しい状態（5c-3）: 古い composition の終了通知で外されない
+        let state = handoff_state(
+            ChangeRequest::SeedPreedit {
+                text: "のこり".into(),
+            },
+            vec![context("確定")],
+        );
+        assert_eq!(state.created_under, 0);
+        assert_eq!(state.tsf_comp, 0);
+        assert_eq!(
+            state.journal,
+            vec![ChangeRequest::SeedPreedit {
+                text: "のこり".into()
+            }]
+        );
+        assert_eq!(state.pending_effects, vec![context("確定")]);
+        let mut states = HashMap::from([(dm(0xA), state)]);
+        for replacing in [false, true] {
+            assert!(take_terminated_from(&mut states, 0x1, replacing).is_empty());
+            assert!(take_terminated_from(&mut states, 0, replacing).is_empty());
+        }
+        assert!(states.contains_key(&dm(0xA)));
+    }
+    #[test]
+    fn the_handoff_sends_its_effects_with_the_journal_and_clears_them_when_restored() {
+        let fake = rpc(vec![], vec![Ok(restored(Replay::Exact, reading("あ", "")))]);
+        let mut state = handoff_state(
+            ChangeRequest::InputChar {
+                c: 'a' as u32,
+                kind: InputCharKind::Char,
+                bg_start_n_cands: None,
+            },
+            vec![context("確定")],
+        );
+        restore_journal_via(&fake, &mut state, 1).unwrap();
+        assert_eq!(*fake.restore_effects.borrow(), vec![vec![context("確定")]]);
+        assert!(state.pending_effects.is_empty());
+        assert_eq!(state.edit, reading("あ", ""));
+        assert_eq!(state.checkpoint, Some((1, reading("あ", ""))));
+        assert!(state.generation.is_some());
+    }
+    #[test]
+    fn the_handoff_effects_are_resent_only_when_known_not_applied() {
+        let unresolved = rakukan_engine_rpc::Unresolved {
+            seq: 3,
+            kind: rakukan_engine_rpc::ChangeKind::BgStart,
+            owner: RemoteComposition::new().owner,
+            engine_gen: generation(),
+        };
+        let cases: Vec<(
+            Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError>,
+            bool,
+        )> = vec![
+            // 照合で拒否・別の要求の結果不明に阻まれた: 適用していないので残す
+            (
+                Ok(RestoreJournalReply::Rejected(Reason::OwnerMismatch)),
+                true,
+            ),
+            (Ok(RestoreJournalReply::Rejected(Reason::GenMismatch)), true),
+            (
+                Err(rakukan_engine_rpc::ChangeError::Unresolved(unresolved)),
+                true,
+            ),
+            // 適用されたか分からない: 再送しない
+            (
+                Ok(RestoreJournalReply::Rejected(Reason::ResultUnavailable)),
+                false,
+            ),
+            (
+                Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "lost"
+                ))),
+                false,
+            ),
+            // ホストの Error は、副作用の後の流し直しの失敗と区別できない: 再送しない
+            (
+                Err(rakukan_engine_rpc::ChangeError::Host("poison".into())),
+                false,
+            ),
+        ];
+        for (reply, kept) in cases {
+            let label = format!("{reply:?}");
+            let fake = rpc(vec![], vec![reply]);
+            let mut state = handoff_state(ChangeRequest::PushRaw('a' as u32), vec![context("x")]);
+            assert!(
+                restore_journal_via(&fake, &mut state, 1).is_err(),
+                "{label}"
+            );
+            assert_eq!(
+                *fake.restore_effects.borrow(),
+                vec![vec![context("x")]],
+                "{label}"
+            );
+            assert_eq!(state.pending_effects.is_empty(), !kept, "{label}");
+            // journal（引き継ぎ）は残り、次の流し直しで送る
+            assert_eq!(state.journal.len(), 1, "{label}");
+            assert!(state.generation.is_none(), "{label}");
+        }
+    }
+    #[test]
+    fn a_restore_without_pending_effects_sends_none() {
+        let fake = rpc(vec![], vec![Ok(restored(Replay::Exact, reading("か", "")))]);
+        let mut state = RemoteComposition::new();
+        state.journal = vec![ChangeRequest::PushChar('k' as u32)];
+        restore_journal_via(&fake, &mut state, 1).unwrap();
+        assert_eq!(
+            *fake.restore_effects.borrow(),
+            vec![Vec::<SideEffect>::new()]
+        );
     }
 }

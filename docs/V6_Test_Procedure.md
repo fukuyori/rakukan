@@ -166,3 +166,15 @@ v6 のリリース条件（`docs/handoff.md` 0 章「2026-10-10 の更新」）�
   - 直接入力の間、キーはアプリへ渡り、固まらなかった。
   - 名前を戻すと、背景の接続確認で約 10 s で日本語入力が戻り、「日本語入力が使えるようになりました。」の知らせが出た。試験の途中で起動したもう 1 つのアプリでも同じだった。
 - 残る制限: 切断に気づく最初のキーの待ち（今回 1.8 s）。保留中に押した文字以外のキー（Enter など）は救済で捨てる。
+
+## 2026-10-22 の結果（続き: 部分確定の文書先行 5c-3。開発ビルド `2822e88` + 未コミットの 5c-3）
+
+`cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入（engine は変えていない）。メモ帳で、部分確定の 6 か所（docs/Input_Pipeline_Plan.md 4.6 の「部分確定の文書先行（5c-3）」）をそれぞれ通した。TSF のログで、どれも `commit_then_start[session]` を通り、引き継ぎ（`then=`）が想定どおりであることを確かめた。直近の TSF のログに、引き継ぎ・復元・確定の WARN は無かった。
+
+- Selecting 中の文字（`kanji` → Space → `a` → `i` → Enter）: 合格。候補が確定し、続けて「あ」が未確定で出た（`then=InputChar`）。
+- Selecting の Enter の残りあり（`kankou` → Shift+← × 2 → Space → Enter → Enter）: 合格。選んだ候補だけが確定し、「こう」が未確定で残った（`then=SeedPreedit{"こう"}`）。
+- 番号キーの残りあり（`kankou` → Shift+← × 2 → Space → `2` → Enter）: 合格（`then=SeedPreedit{"こう"}`）。
+- RangeSelect の部分確定（`kankou` → Shift+← × 2 → Enter → Enter）: 合格。「かん」がひらがなのまま確定し、「こう」が未確定で残った（`then=SeedPreedit{"こう"}`）。
+- BlockSelecting 中の文字（`kyouha,ameda` → Space → `a` → Enter）: 合格。表示どおり全体が確定し、続けて「あ」が出た（`then=InputChar`）。Space の後、区間ごとの候補の先頭がひらがな（`merge_candidates` の並び「きょうは」「あめだ」）だったので全体がひらがなで確定したが、5c-3 では変えていない部分で、利用者の判断で問題なしとした。
+- `on_input_raw` の Selecting（`kanji` → Space → テンキーの `-` → Enter）: 合格（`then=PushRaw(45)`）。テンキーの `*` `+` も問題なし。テンキーの `/` は記号の経路（`on_punctuate`）で「・」になり、部分確定の経路を通らなかった（次の節で直した）。
+- 確定しなかった場合・ホストへの引き継ぎに失敗した場合の経路は、狙って起こせないので確かめていない（未確認）。

@@ -14,7 +14,7 @@ use crate::engine::state::{
 use crate::tsf::candidate_window;
 
 use super::{
-    commit_full, commit_text, commit_then_start_composition, end_composition,
+    PartialPlan, commit_full, commit_text, commit_then_start_composition, end_composition,
     engine_convert_sync_multi, update_caret_rect, update_composition,
     update_composition_candidate_parts,
 };
@@ -1794,19 +1794,23 @@ impl super::TextServiceFactory_Impl {
                 sess.set_idle();
                 drop(sess);
                 candidate_window::hide();
-                engine.commit(&selected);
-                engine.reset_preedit();
-                // 残りを種で engine に設定して LiveConv 再開（F9 / F10 は種の綴り。
-                // 入力処理の見直しの段 7、設計書 4.8）
-                engine.seed_preedit(unselected.clone())?;
-                let _ = crate::engine::state::start_live_bg_if_ready(engine, &unselected);
-                let preedit = engine.preedit_display()?;
-                {
-                    let mut sess = session_get()?;
-                    sess.set_preedit(unselected.clone());
-                }
                 drop(guard);
-                commit_then_start_composition(ctx, tid, sink, selected, preedit, None, None)?;
+                // 文脈・読みのリセット・残りの種（F9 / F10 は種の綴り。段 7、設計書 4.8）は、
+                // 文書に確定できてから 1 回で送る（commit_then_start_composition。5c-3）。
+                // 残りの BG 変換はその後
+                commit_then_start_composition(
+                    ctx,
+                    tid,
+                    sink,
+                    PartialPlan {
+                        commit_text: selected,
+                        learn: None,
+                        then: rakukan_engine_rpc::ChangeRequest::SeedPreedit { text: unselected },
+                        set_preedit: true,
+                        bg_start: true,
+                        live_notify: false,
+                    },
+                )?;
                 return Ok(true);
             }
             // ── BlockSelecting（区読点分割変換）: Enter → 全ブロックまとめて確定 ──
@@ -1907,30 +1911,28 @@ impl super::TextServiceFactory_Impl {
                 candidate_window::stop_live_timer();
                 let confirmed = format!("{prefix}{commit_text}");
                 if !remainder_reading.is_empty() {
-                    // remainder がある → 確定部分を commit し、残りで LiveConv 再開
-                    // （学習は、文書に確定部分を確定できてから送る: commit_then_start_composition）
-                    engine.commit(&confirmed);
-                    engine.reset_preedit();
-                    // 残りは種で入れる（F9 / F10 は種の綴り。入力処理の見直しの段 7、設計書 4.8）
-                    engine.seed_preedit(remainder_reading.clone())?;
-                    let preedit = engine.preedit_display()?;
-                    {
-                        let mut sess = session_get()?;
-                        sess.set_preedit(remainder_reading.clone());
-                    }
+                    // remainder がある → 確定部分を確定し、残りで LiveConv 再開。文脈・読みの
+                    // リセット・残りの種（F9 / F10 は種の綴り。段 7、設計書 4.8）・学習は、文書に
+                    // 確定できてから 1 回で送る（commit_then_start_composition。5c-3）
                     drop(guard);
                     commit_then_start_composition(
                         ctx,
                         tid,
                         sink,
-                        confirmed,
-                        preedit,
-                        Some(LearnPlan {
-                            reading,
-                            surface: text,
-                            action,
-                        }),
-                        Some(remainder_reading.clone()),
+                        PartialPlan {
+                            commit_text: confirmed,
+                            learn: Some(LearnPlan {
+                                reading,
+                                surface: text,
+                                action,
+                            }),
+                            then: rakukan_engine_rpc::ChangeRequest::SeedPreedit {
+                                text: remainder_reading,
+                            },
+                            set_preedit: true,
+                            bg_start: true,
+                            live_notify: false,
+                        },
                     )?;
                 } else {
                     let full_text = format!("{confirmed}{remainder}");
