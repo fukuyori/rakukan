@@ -1,0 +1,478 @@
+# Rakukan 引き継ぎ資料
+
+更新日: 2026-10-11（mozc・karukan の更新の調査、#77〜#83 の登録、mozc 辞書のライセンス表記の修正、ロードマップの更新）／2026-10-10（夕方: 0.12.0 のリリース、#56・#65・#72 のクローズ。午後: 実機試験 T1〜T3、0.12.0 への版数の更新、#71〜#76 の登録、regsvr32 の失敗とログの見直しの設計。午前: インストーラーの方式の決定、旧ホスト停止の先行実装の取りやめ、v6 のリリース条件とロードマップの改定。10/9: PR #68 のマージ、#69 / #70 の登録。10/8: PR #68 (b) のレビュー経過、poison 前提の訂正、#65 再接続組込みの順序。履歴は git と [CHANGELOG.md](../CHANGELOG.md) を参照）
+
+この文書は「次のセッションが何を知っていれば作業を続けられるか」だけを書く。
+設計の全体は [DESIGN.md](DESIGN.md)、現在の作業計画は [October_Plan.md](October_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md)、9 月後半の作業計画と判断の経緯は [September_Late_Plan.md](September_Late_Plan.md)、9 月前半の作業記録は [September_Revised_Plan.md](September_Revised_Plan.md) にある。
+
+## 0. 2026-10-08 PR #68 (b) レビュー中の引き継ぎ・次回の開始点
+
+この節を現在の開始点とする。下に残る「現在」「次回」の記述は各日時点の履歴であり、この節と食い違う場合は再実行しない。
+
+### 2026-10-10 の更新（この節のうち、10/9 以前の記述より優先）
+
+- **インストーラーの方式を決めた**（#33 のコメント https://github.com/fukuyori/rakukan/issues/33#issuecomment-6092071876 、`docs/Installer_Redesign_Plan.md` を改定）。旧ホストは止めない。`[Files]` に `restartreplace uninsrestartdelete`、`AlwaysRestart=yes` / `UninstallRestartComputer=yes`（CorvusSKK と共通の方針）。完了は**再起動**だけ（サインアウト・サインインは完了の条件にしない）。再起動までは Rakukan が使えないことがあるのを制限として受け入れる。経緯: 旧ホスト停止の設計（設計メモ v1・v2、Codex CLI のレビュー 4 回）→ Mozc・CorvusSKK との比較 → 要件「切り替えまで旧状態で動く」に照らして、停止・改名退避・ローダーを比較し、要件を「再起動で完了」に改めた。当初の「サインアウトでも完了」はクロの見込み違い（改名退避では旧状態を保てない）
+- **旧ホスト停止の先行実装は取りやめた**。**現在のインストール方法（別の IME に切り替え → サインアウト → サインイン → インストール）は #33 の対応まで変えない**。v6 もこの手順で配布する（リリースノートで手順を守るよう案内する）
+- **v6 のリリース条件（改定）**: (b)（PR #68、済）と #65 の再接続組込み（済）。この後、統合試験・実機試験（実 DLL を通した `apply_change` / `Restore`、ホスト交換中の composition 復元、#65 の再接続で新しい設定の `Create`、現在の手順でのインストール・更新・アンインストール）に合格したら 1 回だけリリースする。旧ホスト停止は条件から外した。#69 / #70 は条件に入れない
+- Mozc・CorvusSKK との比較で分かった、パイプとミューテックスの名前の範囲の食い違い（パイプは `USERNAME` でセッションをまたぎ、ミューテックスは `Local\`）、パイプに `FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS` が無いこと、`USERNAME` を使うことは、Issue にはまだしていない（起票するかはレモンの判断）。CorvusSKK は利用者 SID ＋ ログオンセッションから名前を作っている（`common/common.cpp:186-300`）
+
+### 2026-10-10 午後の更新（この節の上の記述より優先）
+
+- **実機試験（開発ビルド `7354de5-dirty`）**: T1〜T3 は合格（結果は [Test_Procedure.md](Test_Procedure.md) の末尾）。T2-3 で、候補選択中にホストが入れ替わると、状態は変換前に戻るが画面は変換後のまま書き換わらず、Enter でひらがなが確定する（#69 の資料。Issue への投稿は未実施、文案はセッションのスクラッチパッド）。T2-5（2 アプリ同時）は成立しない状況として外した。T4 は版数を上げた後のパッケージで行う。手順書は試験の結果で改定（`198c1e9`）
+- 試験で見つかって直したもの: Selecting の表示（`e132a8f`）、F9 / F10 で全角と半角を切り替えるときに大文字・小文字を保つ（`f1d7939`、実機未確認）。engine DLL のログを 16MiB × 5 世代にし、1 キー・1 候補ごとの行を TRACE へ（`9cece6b`）
+- **0.12.0 に版数を上げた**（`ef0f375`）。CHANGELOG の日付は仮に 2026-10-10
+- **[#71](https://github.com/fukuyori/rakukan/issues/71) を登録**: PR #68 以降、`OnCompositionTerminated` が `rpc_composition::close()` を `reset_all()` より先に呼ぶため `ResetAll` が送られず、フォーカス移動で LLM の文脈（`committed`）が消えない（DESIGN.md の設計から外れている）。直し方は照合と制約を含めて Issue に記録（Codex CLI のレビュー済み）。0.12.0 に入れるかは未決
+- **インストールが regsvr32 の失敗で止まる**: `sudo cargo make install` の regsvr32 が 4 回続けて 0xC0000005。cdb で、regsvr32 が DLL を外している間に `DllMain` が起動した `rakukan-log-cleanup` スレッドが外された CRT を実行して落ちることを確認（`C:\rb\regsvr32-cdb.log`）。同じ種類のクラッシュは 9/24・10/8 にもある。**今の作業ツリーのビルドは、レモンの PC にまだ入っていない（インストールは手順 3 で止まったまま）**
+- **ログの作り方の見直し**を設計した（[Log_Redesign_Plan.md](Log_Redesign_Plan.md)、Codex CLI のレビュー 4 回）。段 1〜5 を Issue に登録: [#72](https://github.com/fukuyori/rakukan/issues/72) 段 1（`DllMain` を空にし、最初の Activate で初期化。**0.12.0 に入れる**）、#73〜#76 段 2〜5（**#33 の対応の中で行う**。[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 4.3b）。インストールの経路で扱う事項（トレイの配布・起動、登録の成否の判定、旧版での登録解除）は #33 に回した（同 4.3a）。決めた値: 掃除はトレイの起動時、90 日・30000 ファイル、容量の上限なし、旧 `rakukan.log*` も消す。engine DLL のログはホストへ渡す。ファイルのログを主にし ETW は調査用
+- 0.11.9 リリース後のログの再計測（9/24〜10/10、TSF ログ 1229 ファイル）: `spawn_host failed` / `spawn suppressed` / `edit_session: SLOW grant` / `live_continuation_guard fallback` / keymap 直後の `SLOW [OnKeyDown]` / echo strip のカタカナ needle はいずれも 0。`rpc SLOW` 10 件（BgReclaim 9）。auto backend は設定が `cuda` 明示のため確認できず、#9 は再現操作が要る。月単位の目標は 10/24 ごろに再計測して判定する
+
+### 2026-10-10 夕方の更新（上の記述より優先）
+
+- **#72 を実装した**（`4eb355e`、CHANGELOG に記載）。`sudo cargo make install` が完了し、regsvr32 の登録・解除の繰り返しで終了コードはすべて 0、クラッシュなし。変換・F9 → F10・設定の反映も確認
+- **T4 合格**（`rakukan-0.12.0-setup.exe`、署名あり）。旧版（同日朝の開発ビルドの 0.11.9 パッケージ）からの更新、アンインストール、再インストール。詳細は [Test_Procedure.md](Test_Procedure.md) の末尾。旧版の DLL での登録解除で regsvr32 が 1 回落ちた（インストールは成功。#33 の 4.3a）。サインアウトせずにアンインストールすると使用中のファイルが残る → README にアンインストールの節を追加
+- **v6（0.12.0）の試験は T1〜T4 すべて終わった**。CHANGELOG の日付は 2026-10-10
+
+- **0.12.0 をリリースした**（2026-10-10 05:26Z、タグ `0.12.0` = main `c15fefe`、配布物 `rakukan-0.12.0-setup.exe`）。#56・#65・#72 をクローズ（各 Issue に確認内容をコメント）
+
+### 2026-10-11 の更新（上の記述より優先）
+
+コードの変更は無い（文書と Issue のみ）。この節を書く前の時点で、main は `4411108` で GitHub と一致していた（push 済み。この handoff の更新は別のコミット）。
+
+- **mozc の更新を調査した**（手元のクローン `D:\home\source\cpp\mozc`、HEAD `18e76511a`（2026-10-09）。fetch はしていない）。10 月の 34 件と、2026 年の変換精度関連（記号・絵文字・ユーザー辞書の優先度・助数詞）を rakukan と照合。後者は Codex CLI のレビュー済み
+- **karukan の更新を調査した**（手元のクローン `D:\home\source\rust\karukan`、HEAD `aeac439`（2026-10-10）。fetch はしていない）。8 月以降の 22 件を評価し、Codex CLI のレビュー済み。主な結論: NFKC 正規化（`c750998`）は v1 / v2 の比較で確かめてから採用、ビームサーチの KV キャッシュ再利用（`8d132a9`）は計測してから、変換ペルソナ（`fbe9927`）は #71 と関係するので検討扱い、オフライン時のキャッシュ優先（`9d3ebb1`）は hf-hub 0.4.3 で対応済み。これらのうち Issue にしたのは #82・#83 だけで、NFKC・ペルソナ・変換結果のキャッシュ・単漢字・日付などは未登録
+- **Issue を登録した**（いずれも `Issue_Status.md` の「判断待ち」）:
+  - [#77](https://github.com/fukuyori/rakukan/issues/77) 数字・英字の全角/半角を学習しない（mozc の幅の学習の修正 6 件を参考に記録）
+  - [#78](https://github.com/fukuyori/rakukan/issues/78) MOZC 辞書の取得方法と、mozc 本来の辞書との差（除外 5 件・追加語 約 920 件・`aux_dictionary.tsv` 6 件）。**決めたこと**: 辞書ファイルはリポジトリにコミットせず、版の一覧（コミット SHA と各ファイルの SHA256）をリポジトリに置いてビルド時に 1 回取得する。版の更新は指示があったときだけ。ビルドする人が一覧にある完全な SHA から個別に指定できる（ブランチ名・一覧に無い版は拒否）。一覧は今の版（`cbbb6e1bd`）から始め、更新のたびに追加。反映の順は 切替（今と同じ辞書ができることを確認）→ 除外 → 追加語 → aux。**未決**: 着手の時期、一覧の作成手順、置き場所と名前、呼び出すタスク
+  - [#79](https://github.com/fukuyori/rakukan/issues/79) ヒエログリフ・珍しい仮名が 4 番目前後に出る（実測で確認）。一度 10 月の計画に段 B2 として入れたが、**重要度は中〜低（先頭 3 件は変わらず誤確定にもつながらない）として計画から外した**。推奨はエンジン側で文字のコードで判定する方式（辞書の作り直し不要。固定版の `symbol.tsv` で対象 120 件に一致、誤検出 0）
+  - [#80](https://github.com/fukuyori/rakukan/issues/80) 助数詞の学習が数字が変わると効かない（学習が読み全体の単位であることをコードで確認）。#16 の設計に含める
+  - [#81](https://github.com/fukuyori/rakukan/issues/81) 候補ウィンドウがダークテーマに未対応
+  - [#82](https://github.com/fukuyori/rakukan/issues/82) モデル定義を `models.toml`（エンジン埋め込み）から config.toml の `[models]` へ（karukan #111 方式）。段 C の後、#49 / #66 / #64 と合わせて設計
+  - [#83](https://github.com/fukuyori/rakukan/issues/83) Space 変換のビームサーチがステップごとに全系列を再計算している（KV キャッシュの再利用）。計測と上位 k 件の部分選択は並行作業、再利用は段 C の後に計測結果を見て判断
+- [#46](https://github.com/fukuyori/rakukan/issues/46) に、mozc の履歴消去の統一（`a34b56800` / `f6d655d73` / `14882c3b8`）と文字幅の学習の保存先の移動（`b7277bbe3`）を参考としてコメントした
+- **`docs/THIRD_PARTY_LICENSES.md` の mozc 辞書のライセンス表記を直した**（`724f1f0`）。Apache 2.0 としていたのを、mozc の `LICENSE` にある BSD 3 条項・NAIST / ICOT の表示・沖縄辞書のパブリックドメインの表記に改め、対象を実際に取得している 12 ファイルにした。取得元の版の SHA を書いたので、#78 で版を上げるときはこの行も更新する
+- **ロードマップを更新した**（`4411108`）: `October_Plan.md` に #83 の並行作業と、#82・#83 の KV 再利用（段 C の後）を追加。`DESIGN.md` の 15 章を、0.12.0 を完了済みに、次の作業を October_Plan の順に改めた
+- 調査で作った確認用のプログラム（記号の並びの再現）と Codex への依頼文・結果は、セッションのスクラッチパッドにあり、リポジトリには置いていない
+- **`October_Plan.md` を整理し、フェーズ 1〜5 に分けた**（`ae65fb3` の後）: 1 節をフェーズの表（段・理由・リリースの欄）にし、旧「リリースの単位」を表に統合。段 C の後に扱うものをフェーズ 4（#64・#66・#49・#82）とフェーズ 5（#83 の KV キャッシュの再利用、IPC の名前とパイプの設定）に分け、並行作業と対象外（#77〜#81 を追加）を別の節にした。段 A〜C の呼び方と文書名は残し、時期は決めない。改定の経緯は同文書の 10 節。`DESIGN.md` の 15 章と `Issue_Status.md` の冒頭もフェーズの表記に合わせた
+
+### 2026-10-21〜22 の更新（上の記述より優先）
+
+この節を書く前の時点で、main は `3a2bc78` で GitHub と一致していた（push 済み）。
+
+- **フェーズ 1（段 A）を実装した**（`cccaca7` engine DLL のログの絞り込み、`eee267e` #71）。完了条件の実機の確認は 2026-10-22 に合格（`log_level = "trace"` で `tokenizers::` の行 0 件、フォーカスの移動で `ResetAll` が適用され `committed` が空になる。[October_Plan.md](October_Plan.md) の 2.2 節）
+- **フェーズ 2（段 B）#69 / #70 の実装を終えた**。設計書は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md)（第 9 版、各段の実装時の変更は 7 節、利用者の決定は 9 節）。コミットと完了条件の照合は [October_Plan.md](October_Plan.md) の 3.1 節。RPC protocol v7・engine ABI 12。前提の決定 1 により、フェーズ 3 と同じ版で出す（途中の状態は配布しない）
+- **実機試験**（[Test_Procedure.md](Test_Procedure.md) の 2026-10-22 の節）: T1 相当・F-4・F-6・T2-1b・T2-2・T2-3、ホストを起動できないとき（試験 G。1〜3 回目は UI が固まり `bafb8d3` で直した）、部分確定の 6 か所、テンキーの記号、5c-2 と `display_epoch` の通常の経路。確定に失敗する経路などは実機で起こせていない
+- **実機で見つけて直したもの**: ホストを起動できないときに UI のスレッドが繋ぎ直しを待って固まる（`bafb8d3`）、テンキーの `/` が「・」・`.` が「。」になる（`bdc6130`。利用者の決定で「／」「．」）。2026-10-22 の後半に見つけて直したもの（未コミット。設計書 7 節の実機試験の注記 (a)〜(d)）: 打っただけの読みで Shift+← / Shift+→ が効かない、RangeSelect の Esc / Backspace で composition が空になる、メモ帳で言語バーのメニューが出ない、救済の間に押した Enter が救済の後にアプリへ渡る
+- **2026-10-22 の後半の実機試験**（Test_Procedure.md の同日の最後の節）: T2-1・F-3（手順を `sikann` に改めた）・F-11・範囲の選択・言語バーのメニュー・試験 8・12・フェーズ 1 の 2 件、すべて合格
+- **フェーズ 1・2 を 0.13.0 として出す**（2026-10-22 の利用者の決定。フェーズ 3 と同じ版にする決定を改めた。Input_Pipeline_Plan.md 9 節の決定 1）。タグ `0.13.0` = `7c76649`。配布物で T4（更新・インストール・アンインストール）に合格し、試験 30 は T4 で足りるとした（Test_Procedure.md の「試験を行う時期」と 0.13.0 の結果）。#69・#70・#71 は同日にクローズ
+- **フェーズ 1・2 は完了**（2026-10-22）。最後に F-1・F-2・T2-4 を実機で確かめた（合格）。257 キー目・`VersionMismatch`・ロック競合を起こす試験は #85 に回した（利用者の決定）。上の修正は `de31d6a` でコミット済み。試験 30（配布物での統合試験）はフェーズ 3 で行う
+- **Issue**: [#85](https://github.com/fukuyori/rakukan/issues/85)（試験の自動化の基盤）を 2026-10-22 に登録した。今回の作業（フェーズ 2）には入れない（利用者の判断）。[#84](https://github.com/fukuyori/rakukan/issues/84)（単漢字）は 2026-10-21 に登録されている
+- **次の開始点**: [October_Plan.md](October_Plan.md) の順に従い、フェーズ 3（段 C）の開始の条件（同 4 節: Installer_Redesign_Plan.md の 7 章の確認事項、#64 の DLL の寿命の方針、旧版との組み合わせの保証範囲）に進む
+
+### 次の順序（2026-10-10 リリース後に改定）
+
+**[October_Plan.md](October_Plan.md) に従う**（2026-10-11 にフェーズ 1〜5 に分けた。時期は決めない）: フェーズ 1（段 A）#71 → フェーズ 2（段 B）#69 / #70（定義 → 設計書 → 実装）→ フェーズ 3（段 C）#33（#73〜#76 を含む）→ フェーズ 4 #64・#66・#49・#82 を合わせて設計・実装（#64 の DLL の寿命の方針はフェーズ 3 の前に決める）→ フェーズ 5 #83 の KV キャッシュの再利用と IPC の名前とパイプの設定。並行して（フェーズに属さない）10/24 ごろに 1 か月分のログで再計測（#57・#50 の運用確認を含む）と、#83 のビームサーチの計測・上位 k 件の部分選択
+
+### 2026-10-09 の更新（この節の 10/8 時点の記述より優先）
+
+- **PR #68 は 10/9 に rebase merge 済み**（main `3dfd0e7` / `59fa141` / `39c438a`。マージ後の CI 成功）。マージ前の照合コメント: https://github.com/fukuyori/rakukan/pull/68#issuecomment-6078660113 。Issue #56 は開いたまま（`Refs` のため自動では閉じない）。実機での確認は v6 の統合試験で行う
+- `af1b155`: E のテストで `take_checked` の呼び出し回数（`take_calls`）を数えるようにした
+- PR #68 の照合で見つかった、ホストとの通信失敗時に打鍵や確定する文字列が失われる経路は、**[#69](https://github.com/fukuyori/rakukan/issues/69)**（部分確定の中断、Enter、確定の失敗が見えない、キーを食べるかの判断、F9/F10 で復元した部分が消える）と **[#70](https://github.com/fukuyori/rakukan/issues/70)**（エンジンの準備前・ロック競合中のキーがアプリへ素通りする）に登録した。**どちらも v6 のリリース条件に入れない**。小さく直すと別の経路に穴が残るので、#69 の「キーをどこまで処理したか」などの定義から設計する。検討した修正案とその課題（Codex CLI のレビューを含む）は #69 の本文の「論点」
+- #69 の C のうち、`commit_then_start_composition` の失敗をログに残す変更だけを先に入れた（挙動は変えない）
+- **#65 の再接続組込みを入れた**: `RpcEngine::connect_or_spawn_with_source` と `ConfigSource`（`crates/rakukan-engine-rpc/src/client.rs`）。接続試行のたびに、パイプを開く前に 1 回だけ `state::engine_config_source()`（`config::snapshot_for_reconnect()` で `config.toml` を読み直した組の JSON）を呼び、その試行の `Create` に固定して使う。初回の接続・ハンドルの作り直し・自動の再接続のすべてが対象（`create_engine` も切り替えた）。`Create` の成功では反映待ちを解除しない（成功した組の識別子は、`ConfigSource` が返す `CreateConfig.label` として接続ログ `Hello/Create ok config=(rev=… sha256=…)` に残る）。使われなくなった `config::current_snapshot()` は削除。#55 の計数・再試行のテストは組込み後も成功。実機の確認（設定を変えてからホストを入れ替え、新しい設定で `Create` されることをログで見る）は v6 の統合試験で行う。下の「#65 の再接続組込み」の項の「組込みのときに決める・確かめること」の状態: (1) `allow(dead_code)` は外した／(2) 反映待ちは解除せず、成功した組をログに記録（テストあり）／(3) 同期の読込は受け入れ（実測なし）／(4) ロックの順序は**コードを読んでの確認**。テストで確かめたのは、rpc 側の「試行ごとに 1 回だけ取り、固定する」「再試行で取り直す」「関数が無ければ保存値」「関数が `None` を返しても保存値に戻らない」「成功した組の識別子の記録」と、TSF 側の「`RAKUKAN_ENGINE` を取りに行かない」まで。設定の公開を伴う読込と、エンジン・接続のロックを組み合わせた検証はしていない。Codex CLI のレビューで、`ShutdownIfConfigDiffers` で A を送る途中の再接続で B を `Create` し、その後 A との比較でホストが終了しうる順序が指摘された（元の要求は書き換えない設計の範囲。#66 で扱う）
+- （10/10 に改定）次の順序は上の「次の順序（2026-10-10 改定）」。下の「現在の状態」「次の順序」は 10/8 時点のもの
+
+### 現在の状態
+
+- ローカルと GitHub の `main` は `b77d7df`（`docs: update handoff after issue 56 part a`）で一致（2026-10-08 に `git ls-remote` で確認）
+- 開いている PR は [#68](https://github.com/fukuyori/rakukan/pull/68)（nick、#56 (b)、`feat/rpc-change-migration-56b`）だけ（10/8 に `gh pr list` で確認）。2026-10-03 に提出（`gh` の `createdAt`）、コミットは `1dceaac`（10/3）/ `f2fc9bb`（10/4）で、`b77d7df` を基点とする。GitHub の判定は `MERGEABLE`（10/8 確認）。engine ABI 10 → 11、RPC protocol は v6 のまま（v6 を出す前の変更なので版は上げない。開発ビルドを入れ替えるときは engine / host / tsf をそろえる）
+- **nick の実装の更新待ち**。10/8 の 2 件目のコメントで、確認事項（下記）に該当しなければ、残りの合意事項で実装を進めるよう伝えた
+- 10/1〜10/3 の PR #67 上でのやり取り（(b) の応答型、受入条件 A〜E、`WorkerBusy` の待機表示）は、この handoff では未整理。A〜E と本文の対応は PR #68 の本文にある
+
+### PR #68 のレビュー経過
+
+| 日付 | 投稿 | 内容 |
+|---|---|---|
+| 10/4 | nick | PR #67 の 10/3 の依頼（C の補足 3 点）を本文に追記。`BgStart` の poison のテストを追加（`f2fc9bb`） |
+| 10/5 | こちら | [レビュー](https://github.com/fukuyori/rakukan/pull/68#issuecomment-5987071786)（同日に poison の節を 2 か所訂正）。A〜E と C の補足は実装どおりと確認。修正 1 点（poison で変更系・`Restore` が通らない）、確認 2 点（打鍵ごとの RPC 追加、変更の失敗の握りつぶし）、細かい点、テストの検証力 |
+| 10/6 | nick | 方針: poison でも入力を続ける形に直す（`BgView::Unreadable` 追加など）、入口の読み取りを 1 回にまとめる、`push_raw` / `force_preedit` だけ `Result` 化、細かい点・テストはすべて対応 |
+| 10/6 | こちら | 了承のうえ、poison 関連で 4 点を追加要求（入口の読み取り、`Restore.then`、`bg_start_n_cands` 付き `InputChar`、`Unreadable` の影響） |
+| 10/7 | nick | 4 点への回答 |
+| 10/8 | こちら | [返信](https://github.com/fukuyori/rakukan/pull/68#issuecomment-6050262438): BG と無関係な読み取りも poison で失敗する件、`Unreadable` の範囲（A 推奨）、WorkerBusy の時計、`Restored.then` の形 |
+| 10/8 | こちら | [訂正](https://github.com/fukuyori/rakukan/pull/68#issuecomment-6050441046): **配布ビルドは `panic = "abort"` なので poison は起きない**。10/6 の 1〜4 と 10/8 の返信の要求を取り下げ、poison は `f2fc9bb` のまま `Response::Error` でよいとした。代わりに理由をコメント 1 か所と PR 本文に書くよう依頼 |
+
+**10/8 時点で残っている依頼**:
+
+10/6 に了承済みの、poison と無関係なもの:
+
+- 入口の所有権の確認と診断ログ用の `bg_status` を 1 回の読み取りにまとめる
+- `push_raw` / `force_preedit` を `Result` 化して失敗時はキー処理を中断。`commit` / `reset_*` / `learn*` / `bg_reclaim` は警告ログのまま
+- 最初の変更が失敗したときは `save` しない／`input_log` を既知の制限として本文に書く／残っているコメント 4 か所を直す／composition が無いときの `bg_reclaim()` は送らない
+- テスト: E のテストで `apply_change` の `NotYours` / `Taken` を通す／「3 variant 共通」の書き分け／`codec.rs` で末尾の `Request::Read` / `Response::Bg` / `Response::OptionalString` の順序を固定
+
+10/8 の訂正コメントで、取り下げの代わりに足したもの:
+
+- poison を `Error` のままにする理由のコメントと PR 本文への記載。既存の poison のテストは残す
+- nick への確認: 標準タスク以外のビルド（`-Profile debug`、直接の `cargo build`）の常用や、`CARGO_PROFILE_RELEASE_PANIC`・`RUSTFLAGS` などによる release の `panic` の上書きがあれば、poison の扱いを決め直す
+
+**poison 前提の訂正の根拠**: `Cargo.toml:64` の `[profile.release]` が `panic = "abort"`、`cargo make build-engine` / `build-tsf` は `-Profile release`（`Makefile.toml:32`, `37`）。巻き戻しが無いので mutex は poison せず、engine DLL の panic は engine-host ごと終了する。標準の設定では、poison が起きうるのは `cargo test` や `-Profile debug` のビルドだけ。`conv_cache` の `catch_unwind`（`conv-worker PANIC`）も release では効かない（PR の範囲外として未扱い）。手元の環境に release の `panic` を上書きする設定は無かった。配布物が実際にどの設定でビルドされたかはリポジトリからは確かめられない。**poison の自己再起動を別 Issue にする案は、この訂正により起票しない**
+
+**レビューの進め方**: 10/8 の 2 件の下書きは、Codex CLI（`codex exec -s read-only`、PR 先端の worktree をスクラッチパッドに作って読ませる）にもレビューさせ、指摘をコードで確かめてから反映した。Codex は投稿・変更をしない指示で使う
+
+### こちらが担当する残作業とリリース条件
+
+- **#65 の再接続組込み**: 未着手（ブランチ・stash も無い）。ホスト入れ替わり時に反映待ちを残す処理（`ShutdownSkipped` → `HostReplaced`、`crates/rakukan-tsf/src/engine/state.rs:504-527`）は main にある。残りは、自動の再接続（`call_with_retry` → `try_connect_once`）で保存済みの `self.config_json`（`crates/rakukan-engine-rpc/src/client.rs:1281`）ではなく、公開済みの設定の組から作り直した JSON で `Create` すること（設計は `docs/September_Late_Plan.md` の 2079〜2083 行）。**PR #68 が `client.rs` を大きく変えるので、組込みは #68 のマージ後**に行う。**準備は 10/8 に main へ入れた**: `config::snapshot_for_reconnect()`（`crates/rakukan-tsf/src/engine/config.rs`。共通の読込処理を 1 回通してから公開済みの組を返す。読めなければ直前の組）と、テスト 4 件（`reconnect_snapshot_tests`）。テストのため `reload_config` の本体を、ロックを引数で受ける `reload_in` に移した（挙動は同じ）。呼び出し元はまだ無く、`#[allow(dead_code)]` を付けている。Codex CLI のレビュー済み。**組込みのときに決める・確かめること**: (1) `allow(dead_code)` を外す、(2) 読み直しで新しい組が公開されると反映待ちが立ちうる。再接続の `Create` 成功を反映待ちの解除と結び付けるか（計画書 2074 行の「`Create` 成功を別に記録」も未実装）、(3) `RAKUKAN_ENGINE` と `RpcEngine` の内部 Mutex を持ったまま同期でファイルを読むので、キー処理が待たされうる（数 KB の読込だが上限はコードから言えない）、(4) RPC の接続のロックとの順序のテスト（今のテストは `RAKUKAN_ENGINE` を取りに行かないことまで）。統合後に #55 の計数・再試行テストを再検証する。新しいハンドルを作る `create_engine` は、公開済みの組の JSON を読み直さずに渡している（`state.rs:814-830`）。生成関数へ切り替えるかは組込みと合わせて決める
+- **旧ホスト停止の先行実装**は 2026-10-10 に取りやめた。**リリースしない条件**は上の「2026-10-10 の更新」で改定した（下の 9/30 の節は履歴）
+
+### 次の順序
+
+1. nick の (b) の更新を待つ。届いたら上の「残っている依頼」と照合してレビューする
+2. ~~待つ間に、#65 の再接続組込みの準備（`client.rs` に触れない範囲）を進める~~ 10/8 に完了（上記）
+3. (b) をマージする
+4. #65 の再接続組込みを `client.rs` に入れ、#55 のテストを再検証する
+5. 現行 `rakukan_installer.iss` へ旧ホスト停止を先行実装する
+6. 統合試験・実機試験（9/30 の節の「リリースしない条件」の項目）を行い、合格後に v6 のリリース判断をする
+
+## 0. 2026-09-30 #56 (a) マージ後の引き継ぎ（履歴）
+
+2026-10-08 時点の開始点は上の節。この節は 9/30 時点の記録。
+
+### 現在の状態
+
+- ローカルと GitHub の `main` は `ffac230`（`docs: record v6 release prerequisites`）で一致し、作業ツリーはこの節の編集前までクリーン。`VERSION` は 0.11.9
+- PR [#67](https://github.com/fukuyori/rakukan/pull/67) の (a) は 2026-09-30 に rebase merge 済み。コード側の先端は `d94f34c8`。RPC protocol は v6 になり、所有者・要求番号・保持応答、`Change` / `Restore`、`Unresolved`、`ShutdownSkipped` と TSF の最小対応まで main に入った。TSF の通常送信はまだ旧 variant のままで、利用者向けの #56 は未完成
+- `d94f34c8` の main CI と文書コミット `ffac230` の CI は、Windows Build & Test / Format Check とも成功
+- 開いている PR は無い。nick には [PR #67 の最終コメント](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5904167672) で、最新 main を土台に (b) を別 PR とし、実装前に BG ワーカー使用中の応答型と TSF 遷移を提示するよう依頼済み
+
+### nick が担当する #56 (b)
+
+実装前に、次を区別する具体的な応答型と TSF 側の遷移を、このスレッドか #56 に提示してもらう。
+
+- 現在の所有者自身の通常の `running`
+- `OwnerMismatch`
+- 旧所有者の変換ワーカーがまだ使用中である状態
+
+(b) は次を同じ PR で扱う。
+
+- `ChangeOutcome` への編集状態の追加と、composition ごとの復元元の保持
+- composition 依存の読み取りの `Result` 化。失敗を `unwrap_or_default()` などで空値へ戻さず、TSF の遷移まで区別する
+- 新しい composition の最初の変更要求を `Restore { ..., then }` で送り、`Restored` の世代を後続の `Change.expect.engine_gen` に使う
+- TSF の変更系送信を `Change` へ移行する
+- `BgTakeCandidates` を `Change` として採番し、応答を再送用に保持する
+- 旧変更系 variant を、宣言位置とフィールド構造を保った `_Reserved` にする
+
+### こちらが担当する残作業とリリース条件
+
+- **#65 の再接続組込み**: (a) の `ShutdownSkipped` / `HostReplaced` で着手条件を満たした。(b) と並行して、現在公開されている設定の組から新しいホストへ `Create` し直し、通信失敗では反映待ちを消さない処理をリリース前までに実装する
+- **旧ホスト停止の先行実装**: (a)+(b) のマージ後、v6 のリリース前に、現行の `rakukan_installer.iss` へ更新対象の旧ホストの検出・停止・終了確認・置換前の再確認・停止失敗時の中断を入れる。同名というだけで別の場所のプロセスを停止しない。配置変更、経路一本化、署名・アンインストールを含む全面的な再設計は #33 に残す
+- **リリースしない条件**: (b)、#65 の再接続組込み、旧ホスト停止が揃うまでは v6 をリリースしない。揃った後に、実 DLL を通した `apply_change` / `Restore`、ホスト交換中の composition 復元、旧ホストを動かしたままの更新、インストール・更新・アンインストールを実機で確認してから 1 回だけリリースする
+
+### 次の順序
+
+1. nick から (b) の応答型と TSF 遷移案が届いたら、9/22〜9/30 の合意と照合して回答する
+2. (b) の設計・実装と並行して、こちらで #65 の再接続組込みを進める
+3. (b) をレビューしてマージする
+4. 現行 `rakukan_installer.iss` へ旧ホスト停止を先行実装する
+5. 上記の統合試験・実機試験を行い、合格後にリリース判断をする
+
+## 2026-09-24 #65 故障試験の進捗
+
+**同日の続き（クロ）**: 起動スクリプト `scripts/issue65-start-fault-target.ps1` を仕上げ（対象プロセス名の引数化、対象 PID の TSF ログで `armed` を待って `ARMED=yes|no` / `BUILD_KIND` を表示、解除コマンドの表示、既定の対象を `charmap.exe` に変更）、導入済みの試験用 DLL（SHA256 `92BDF73F…`）で実機確認した。`suppress_notifications` の有効化と 30 秒定期読込、制御ファイル削除による約 160 ms での解除、`fail_dir_watch` の初回生成失敗（`dir_watch=false`）と解除時の即時再登録（`dir_watch=true`）をログで確認。**ストア版 Notepad は exe の直接起動では窓が出ず TSF DLL が読み込まれない**ので既定から外した。続けて `fail_save_event` / `fail_request_event`（起動時に該当の源だけ `false`、解除の約 0.5〜0.8 秒後に `true`）、`fail_rearm_once`（注入した再設定失敗の直後、デバウンス後の読込で再登録し、その後の通知も受信）、通知遮断中の設定変更の定期取得（`read (notify)` なしで 30 秒後の `read (periodic) -> Updated`）、同一 mtime・同一サイズの変更の待機ループでの取得（読込前に更新日時を復元、`Updated`）を確認。設定は値を変えない変更だけで、いずれも元のバイト列（と更新日時）へ復元しハッシュ一致を確認。通常版への復元も同日 14:27 JST に完了（サインアウト → サインイン → `sudo cargo make install-tsf-normal-restore`、導入先 SHA256 `DB3B76BD…`、charmap で `build_kind=normal` / `ARMED=no` を確認）。復元の登録し直しで入力方式が MS-IME に切り替わっていたので、復元後の確認は入力方式を Rakukan に戻してから行う。復元後の回帰は「設定保存による両アプリへの反映」を再実施（16 → 32 → 16、全プロセスが同じ秒に `config published`、RPC 送信なし、ホスト再起動なし）。残る 3 項目は単体・統合テストで代える。終了時の `config.toml` は候補数 19・候補文字サイズ 16（9 月 22 日のバックアップとの差は `ime_on_apps` 1 行で、レモンの設定変更）。設定アプリの保存失敗も同日 14:42 JST に確認（読み取り専用属性で置換を失敗させ、ダイアログ表示・本文不変・`.tmp` 無し・保存イベント無しを確認。属性解除後の保存は成功）。**#65 の実機試験ケースはすべて実施済み**。残件は #56 との調整待ちの再接続への組込みだけで、#65 の完了判定はそれまで保留。詳細は設計書「起動スクリプトと実機の初回確認」。
+
+9 月 22 日終了時の「次は詳細設計」は下の履歴。現在は [Issue65_Fault_Test_Design.md](Issue65_Fault_Test_Design.md) に設計と確認結果を記録し、試験用 feature・別出力のビルドタスク・本番の Win32 待機ループを通る統合テストを実装した。通知遮断中の定期読込、全監視源の生成失敗と復旧、通知の再設定失敗と復旧、読込中の保存イベント、破損・欠落設定からの回復、無関係ファイルの連続書込を自動確認した。通信失敗・無応答と A の送信中の B は試験用通信境界で確認した。通常版の並列テストは 173 件、試験 feature の単一スレッドテストは 174 件成功。試験 feature の並列実行では WARN 捕捉テストが間欠的に失敗し、原因は未特定。試験用 DLL と復元用通常版 DLL のリリースビルドは成功したが、どちらも未インストール。対象アプリでの故障試験と復元確認、保存失敗、個別監視源の失敗、#56 と調整する再接続処理は残る。成果は未コミット。詳細は設計書の「実装と確認の状態」を参照。
+
+試験用と復元用の導入経路として、`scripts/install.ps1 -TsfOnly` と、固定の出力先を渡す `cargo make install-tsf-fault-test` / `cargo make install-tsf-normal-restore` を追加した。DLL だけをコピーして登録し直し、出力元と導入先の SHA256 を照合する。通常の `cargo make install` は従来どおり。専用タスクの実行・実機での復元はまだ行っていない。
+
+## 0. 2026-09-22 終了時の引き継ぎ・次回の開始点
+
+**次回は #65 の不足する故障試験の詳細設計から再開する。** 通常操作の実機確認は下記の範囲まで済んでおり、最初からやり直す必要はない。
+
+- ローカル `main` と GitHub の `main` はともに `7b3d83227b12c7da65c21cbc6d89504c36778387`。`git ls-remote origin refs/heads/main` で確認した。#65 の実装と、それまでの計画書・handoff の記録はコミット・プッシュ済み。**`7b3d832` の CI（Build & Test / Format Check）は成功**。終了時点で開いている PR は無く、#56 / #65 の最後のコメントはこちらの投稿（#56 は 07:42 UTC の `Reload` 廃止の連絡、#65 は 07:48 UTC の方式採用）で、nick からの新しい返答は無い。#66 にコメントは無い
+- この引き継ぎの作成開始時、作業ツリーは変更なしだった。**今回の終了時更新は `docs/handoff.md` と `docs/September_Late_Plan.md` のみで未コミット**。コード・インストール状態は変更していない。次回は利用者によるコミットの有無を `git status` と履歴で確認する
+- インストール後、メモ帳・EmEditor で通常操作 4 項目を確認した。同一 mtime の試験は、日時復元と読込の順序を制御できていないため範囲付き。#65 の全受入条件を合格にした記録ではない
+- 終了時に設定を再確認し、候補数 19・候補文字サイズ 16、`config.toml` と `%APPDATA%\rakukan\config.issue65-20260922-174950.bak` の SHA256 一致を確認した。バックアップは残している。試験用の故障注入機構はまだ作成・導入していない
+
+**2026-09-24 夕方の状態（#50 実装・実機確認 → 0.11.9 リリース準備）**: #50 は `c078e51` でコミット・プッシュ済み（main と一致）。**0.11.9 のリリース準備（版数 5 か所、CHANGELOG `[0.11.9]`、README）は作業ツリーに作成済みで未コミット。コミット・タグ・パッケージ作成はレモンの指示待ち**。16:28 に engine / tsf を導入し（`%LOCALAPPDATA%\rakukan` の DLL、SHA256 先頭 B5C632AD、`build=2026-09-24 07:20:40 UTC`）、実機確認は範囲付きで完了。次回は `git status` で利用者によるコミットの有無を確認する。Issue 表の #50 行と計画書 9 節「2026-09-24 #50 の実装」が正。
+
+**2026-09-24 の初期進捗記録**（下記の未着手の記述はその時点のもの。最新状態は冒頭と設計書を参照）:
+
+- 故障試験の詳細設計を [Issue65_Fault_Test_Design.md](Issue65_Fault_Test_Design.md) に記録した（試験経路と隔離、対象アプリ用の故障制御 = 試験用ビルドだけ・環境変数の識別子と PID の一致で有効化・制御ファイル削除か単調時計 90 秒で自動解除、試験ケース 7 件と競合・保存失敗、実機記録と停止）。試験機構の実装・試験実行は未着手
+- 自動テスト補強の 1 件目 `config_snapshot_tests::changed_bytes_with_same_mtime_and_size_are_published` を追加（本文を同じサイズで変え、更新日時を戻してから `reinit` → 本文差で公開・反映待ち）。TSF 単体テストは 164 件成功、clippy・`cargo fmt --all -- --check` 問題なし。これは設定読込経路の確認で、Win32 の待機ループ・通知遮断・監視源失敗と復旧・実機の確認ではない
+- **未コミット**: `docs/handoff.md`、`docs/September_Late_Plan.md`、`crates/rakukan-tsf/src/engine/config.rs`（テスト追加）、新規 `docs/Issue65_Fault_Test_Design.md`。コード本体・インストール状態は `7b3d832` から変わっていない
+- 次は、設計書の試験ケースに対応する自動テストの補強（競合・通信失敗・保存失敗・通知順序）と、`config_watch.rs` の待機ループを監視ディレクトリ・イベント名・監視源の生成・停止イベントを指定できる形にする準備。試験用ビルドの区別は設計書に追記済み（既定無効の Cargo feature `config-watch-fault-test`、`config_watch: build_kind=normal|fault-test` を INFO で 1 回記録、`scripts/build-tsf.ps1` に専用引数と出力先を追加する。試験用ビルドだけ 1 秒間隔で故障解除を確認し、解除時に欠けた監視源を直ちに再登録。初回の監視源生成前に制御情報を最大 5 秒待つ）。feature とログ出力の実装・実行は未着手
+
+**次回の手順**（2026-09-22 時点の記録。2〜3 は 2026-09-24 に完了）:
+
+1. Git の状態を確認し、#56 の設計反映・Reload 廃止・共通の要求／応答について新しい返答があるか確認する。#65 の故障試験設計は独立して進め、再接続への組込みは調整結果に従う
+2. 計画書 9 節「2026-09-22 #65 の実装」の末尾にある「残る確認と必要な証拠」「この後の実施順序と完了条件」を読み、既存テストと実際の待機・読込・送信経路の対応を点検する
+3. 通知の遮断箇所、監視源作成失敗の注入箇所、復旧の契機、対象プロセス・ディレクトリ・イベント名の隔離、停止条件、取得するログ、合格条件を設計としてまとめる。操作するターミナルが終了しても故障状態を解除できる方法を先に決める。**#55 のホスト実行ファイルを無効化する手順は再使用しない**
+4. その後は「自動テスト補強 → Windows 統合試験 → 通過直後に試験用ビルドで実機確認 → 通常版・元設定への復元と回帰確認」の順。次回の開始時点では試験機構の追加実装・故障試験は未着手
+
+**今回の証拠の場所**（ログは `%LOCALAPPDATA%\rakukan`、時刻は UTC）:
+
+| 対象 | ログと確認点 |
+|---|---|
+| メモ帳 PID 5096 | `rakukan-tsf-5096-1790066681091.log`。09:01:12 に背景読込・反映待ち、09:03:06 に ModeSwitch / RestartAccepted / 解除、09:03:07 に Hello/Create 成功 |
+| EmEditor PID 10068 | `rakukan-tsf-10068-1790066605909.log`。09:01:12 に背景読込・反映待ち、09:04:21 に ModeSwitch / RestartAccepted / 解除、09:04:22 に Hello/Create 成功 |
+| 手動再起動を実行した PID 32132 | `rakukan-tsf-32132-1790066633031.log`。09:09:41 に ManualRestart / force=true、ShutdownAcknowledged / pending_now=none、09:09:45 に Hello/Create 成功 |
+
+候補数 19 への復元後の解除・再接続、手動再起動後の両アプリの再接続もログで確認し、変換・確定はレモンが操作して確認した。
+稼働中のログは `FileShare.ReadWrite | FileShare.Delete` で読む。今回、ディレクトリ一覧では Length が 0、更新日時が古いままでも読み出すと新しい記録があったため、一覧のサイズ・更新日時だけで対象を除外しない。
+
+## 1. 現在の状態（main と #56 / #65 / #66 は 2026-09-22、その他は 2026-09-21 に確認）
+
+| 項目 | 値 |
+|---|---|
+| main | ローカル・GitHub ともに `c078e51`（2026-09-24、`git push` で確認。#50 の実装と実機確認の記録まで入っている）。**0.11.9 のリリース準備（VERSION / Cargo.toml / Cargo.lock / rakukan_installer.iss / csproj の版数、CHANGELOG の `[0.11.9]`、README の 1 行目と「最新の変更」）は 2026-09-24 に作業済みで未コミット**。導入済みの DLL は `c078e51` 相当（16:28 導入） |
+| 直前の版 | **0.11.7**（2026-09-14、タグ `0.11.7`） |
+| 次のリリース番号 | **0.11.9**。0.11.8 は取り消して欠番（タグもリリースも作っていない）。**版数の更新と CHANGELOG は作業ツリーに作成済み（未コミット・未タグ）**。パッケージはレモンが `-Sign` で作る |
+| engine ABI | **main は 10**（PR #59 のマージ `fb656e1` で 9 → 10。`crates/rakukan-engine/src/ffi.rs` と `crates/rakukan-engine-abi/src/lib.rs` の 2 か所）。**次のインストールでは engine と tsf の両方をビルドし直す**（片方だけだと不一致でエンジンが起動しない） |
+| RPC protocol | 5（`crates/rakukan-engine-rpc/src/protocol.rs`）。#56 / #66 の実装で上げる見込み。共通の要求・応答を先に設計し、PR は分ける案 |
+| `dict_schema` | 2 |
+| 開いている PR | 無し。**#58（#53）と #59（#57）は 2026-09-21 に rebase でマージした**。下の「マージした PR と状態」を参照 |
+| CHANGELOG | `## [0.11.9] - 2026-09-24` を作成済み（未コミット。リリース日がずれたら日付を直す）。次の開発開始時に `[Unreleased]` を再作成する |
+| 作業計画 | [September_Late_Plan.md](September_Late_Plan.md)（段 1〜4。判断事項 J-1〜J-9、9 節に実施記録） |
+| J-5 の (2) | [#65](https://github.com/fukuyori/rakukan/issues/65) は方式採用済み、実装・自動テスト済みで `7b3d832` にコミット・プッシュ済み。**通常操作 4 項目は範囲付きで実機確認済み**。2026-09-24 に故障試験機構と Win32 統合テストを実装（未コミット）。残るのは個別の監視源失敗、設定アプリの保存失敗、同一 mtime の待機ループ試験、対象アプリの故障試験と通常版への復元。再接続への組込みは #56 と調整待ち。[#66](https://github.com/fukuyori/rakukan/issues/66) は方式採用・実装着手が未承認 |
+
+### 0.11.7 の後に main へ入った変更（0.11.9 に含まれる）
+
+- **アプリごとの IME 初期状態を config で設定する**（#51 の段 1、PR #52、`8940bb0` / `928e066`）
+  - `[input] ime_off_apps`: アプリがアクティブになったら IME をオフにする。既定値は `conhost.exe` / `WindowsTerminal.exe` / `mintty.exe` / `wezterm-gui.exe` / `ghostty.exe`
+  - `[input] ime_on_apps`: アクティブになった後、アプリ本体とは別の入力先に入ったときに 1 回だけオンにする。既定値は空
+  - どちらも、利用者が IME を操作したらその状態を保ち、インアクティブになったら破棄する。対象アプリでは入力先ごとのモード記憶を使わない
+  - ウィンドウクラス名によるターミナル判定（`is_terminal_hwnd`）は削除し、config を唯一の情報源にした
+- **RPC クライアントのログを TSF のログに記録する**（#54、`a981b07`。当時のファイル名は `rakukan.log`。#60 でプロセス別に変わった）
+  - TSF のログ filter を `LOG_TARGETS`（`rakukan_tsf` / `rakukan_engine_rpc`）にまとめ、ファイル出力と出力先が無い場合で同じ filter を使う。`RAKUKAN_LOG` の優先は維持
+  - これで `rpc SLOW`、`spawn_host failed`、`host spawn suppressed`、`Shutdown` の応答などが記録される
+- **TSF のログをプロセス別に分け、ローテーションを書き込み処理へ移す**（#60、`e37c645`）
+  - `rakukan-tsf-<PID>-<起動識別子>.log` になり、**旧 `rakukan.log` は書かれなくなった**
+  - 1 ファイル 16 MiB × 5 世代、TSF ログ全体の保持目安 256 MiB（使用中は消さないので厳密な上限ではない）
+  - 調査用に `scripts/merge-logs.ps1` を追加（複数のログを時刻順に統合する）
+- **config.toml が読めないときに設定を既定値へ戻さない**（#61、`b31ef5c`）
+  - 再初期化は失敗時に直前の設定を保持、初回だけ既定値。どちらもパスとエラー内容を警告に残す
+  - ファイル不在も同じ扱い（削除を暗黙の「設定リセット」にしない）
+- **MOZC 辞書の取得元を SHA で固定し、差し替えを中断に耐えるようにする**（#62、`fbe7848`）
+  - `mozc_rev` = `cbbb6e1bd181cb9f3b409622d916a53a35400ec7`。`build.json` に取得元と SHA を記録する
+  - SHA が違う辞書と `mozc_rev` が無い辞書は、`RAKUKAN_FORCE_DICT=1` なしで作り直される
+  - 差し替えは `scripts/dictionary-swap.ps1`。回帰テストは `scripts/test-dictionary-swap.ps1`
+- **`参` / `拾` が入力の読みで正当化されるときは数字保存の検証で数えない**（#53、PR #58、`9d6ba20` / `5bad674`、nick）
+  - 辞書による語と読みの対応付け + 動的計画法による存在判定。照合表で引く読みの長さは `MAX_READING_CHARS = 12` まで、上限超の語は従来の検証に戻す
+  - 発動時は `rakukan-engine-dll.log` に `digits::license:` のログ（DEBUG）が出る。**2026-09-21 に実機で発動と変換結果を確認し、#53 をクローズした**
+- **変換の詰まりの監視をホストへ移し、実行番号で数える**（#57、PR #59、`fb656e1` / `cce2f17`、nick）
+  - TSF 側の `bg_timeout_watchdog` を撤去。エンジン DLL が実行番号と `Running` に入った時刻を持ち、ホストの監視スレッドが 30 秒（`STALL_THRESHOLD`）で確定して自己終了する。口（`StallProbe`）は世代を持ち、確定は口のロック内で世代を照合する
+  - engine ABI 9 → 10。復帰マーカーに理由欄（`stall` / `inference_failed`）が付いた
+  - 詰まりの検出は**実機未確認**（意図的に詰まりを起こす手段が無い）
+- PR #47（`input.text_field_mode`）のマージと 0.11.8 を revert（`7920e1f`）。理由は `September_Revised_Plan.md` の「PR #47 のマージと 0.11.8 を取り消し」節
+
+このほかの 0.11.7 以降のコミットは、計画書・引継書などの文書だけ。
+
+リリース時の更新対象は [version-update-checklist.md](version-update-checklist.md)。
+パッケージはレモンが `-Sign` を付けて作成する（Claude 側では作らない）。
+
+### 作業計画の進み具合（September_Late_Plan.md）
+
+| 段 | 内容 | 状態 |
+|---|---|---|
+| 1 | #53 の影響確認と方針回答、#54 のログ修正、#45 は PR 待ち | #54 はコミット済み・実ログ出力も確認済みで、**1 日分のログ量の確認だけ残る**。**#53 は PR #58 をマージし、実機確認のうえクローズ済み（2026-09-21）**。#45 は PR 待ち |
+| 2 | 0.11.9 リリースと 1 週間の再計測（Step 14） | 未着手 |
+| 3 | 状態の正しさに関わる修正（#55 / #50 / reload / #49 / config 読込失敗） | **#57 は PR #59 をマージ済み（2026-09-21）。実機未確認のため Issue は開いたまま、運用ログで確認する**。**#56 は 2026-09-22 に設計回答を受領し、Result 化の範囲・所有者不一致の扱い・BgTakeCandidates の訂正を返信済み。nick の設計反映後に実装範囲を確定する**（実装着手は未承認）。**config 読込失敗（J-5 の (1)）は #61 として完了**。**J-5 の (2) は #65 が実装・自動テスト済みで `7b3d832` にコミット・プッシュ済み、通常操作の実機確認は範囲付き。次は不足する故障試験の設計。再接続への組込みは #56 と調整待ち。#66 は方式採用・実装着手が未承認**。**#55 は `b40b428` で main に入り、実機で加算・抑止・回復を確認してクローズ済み（2026-09-22。30 秒経過後の再試行と、`Hello` / `Create` 各段階の失敗・Shutdown 直後の競合は単体テストのみで実機未確認）**。#50 / #49 は未着手 |
+| 4 | 判断済みの機能（#35 本線 / #16）と nick の PR 受け入れ（#45 / #40-2 / #53） | #53 は完了（クローズ済み）。ほかは判断待ち・PR 待ち |
+
+判断事項 J-1〜J-9 のうち、決定済みは J-1（#53。方式・PR の依頼・上限 L = 12 の採用まで）と **J-5 の起票方針および #65 の方式採用・詳細設計**（(1) は #61 として完了、(2) は #65 / #66 に分けて起票済み、#65 は実装・検証中）。**#66 の方式採用・実装着手は未承認**。J-2（#45 は依頼済みの PR を待つ）ほかは、計画書の推奨のままレモンの判断待ち。
+
+**PR と重ならない独立した 3 件（#60 / #61 / #62）を 2026-09-19 に起票・実装し、実機確認まで終えてクローズした。** 経緯は [September_Late_Plan.md](September_Late_Plan.md) 9 節の「2026-09-19 PR と重ならない 3 件を起票・実装」と「2026-09-19 #60 / #61 / #62 の実機確認」。
+
+### #56 の最新状況（2026-09-30 更新）
+
+- **2026-09-25 03:18 UTC、nick が Draft [PR #67](https://github.com/fukuyori/rakukan/pull/67)（(a) の最初のコミット、要求・応答の形だけ、v6、`rakukan-engine-rpc` のみ +275/-24、main `4399279` 上、CI 成功）を提出**。同日 07:15 UTC に[返信を投稿](https://github.com/fukuyori/rakukan/pull/67#issuecomment-5828464616)。5 点への回答（`Change` に包む形で進める・変更系の旧 variant は `_Reserved…` にしてホストは `Error`・型の幅はそのまま・`RequestRecord` は `server.rs` へ・`config_version` は別フィールドで今回足す・v6 は次版で (a)+(b) が入ってから 1 回リリース）と、型を確定する段階で決める追加 3 点（A: `Restored { engine_gen, then: Option<ChangeOutcome> }` と `Change` の応答を同じ型に、B: `ShutdownIfConfigDiffers` の `host_id` 不一致は `ShutdownSkipped`（9/22 §4 の `Bool(false)` とこちらの #66 受入条件の食い違いを明示し、こちらの判断で揃えた）、C: `config_version: Option<[u8; 32]>` を `Create` / `ShutdownIfConfigDiffers` / `Change` に `None` 固定で今回足す。`None` は #66 で「一致するハッシュ」として受理しない）。**A〜C の反映で形を確定、その後 (a) の残り**。TSF 側の `ShutdownSkipped` の扱いは #65 の再接続組込みでこちらが行う。**古いホストの残存**: 配布インストーラー（`rakukan_installer.iss`、`CloseApplications=no`）はホストを停止しないので、版上げを含むリリースの前に扱いを決める（インストーラー側で停止か、版不一致の `Hello` を受けた TSF が旧ホストの終了を試みるか）。記録は計画書 9 節「2026-09-25 #56 Draft PR #67 の形の確認と返信」
+- **2026-09-25、#66 の設計条件とインストーラー再設計の計画を更新（`b3a0f9a` でコミット・プッシュ済み）**。`config_version = Some(hash)` とディスク本文のハッシュが一致するときだけ採用し、`None` は本文が存在する場合も欠落する場合も受理しない条件・試験を計画書 9 節に追加。配布インストーラーによる旧ホスト停止とプロトコル版不一致の両方向の検証は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) に組み込んだ。当時は実装をインストーラー再設計時に行うとしていたが、2026-09-30 に下記の先行実装へ変更した。#65 の再接続組込みは #67 の A〜C が反映されてから着手する
+- **2026-09-30、PR #67 の (a) を `d94f34c8` まで rebase merge**。要求の所有者・番号・再送記録、`Restore`、`ShutdownSkipped` と TSF の最小対応までが main に入った。(b) は最新 main を土台とする別 PR とし、実装前に通常の `running` / `OwnerMismatch` / 旧所有者のワーカー使用中を区別する応答型と TSF 遷移を提示してもらう。#65 の再接続組込みは (a) で着手条件を満たしたため、(b) と並行してリリース前までにこちらで行う
+- **旧ホスト停止の時期を変更**。#56 (a)+(b) のマージ後、v6 のリリース前に、現行の `rakukan_installer.iss` へ更新対象の旧ホストの検出・停止・終了確認・停止失敗時の中断を先行実装する。全面的な配置変更、経路一本化、署名・アンインストールを含むインストーラー再設計は、引き続き #33 で行う
+
+#### 2026-09-22 時点の経緯
+
+- nick の[設計回答](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5770284657)を受領（11:17 JST）。識別子を `host_id` / `engine_gen` / `owner` に分離し、プロセス static の未解決要求、記録の回収と `highest_sent` / `floor`、読み取りの照合、`Shutdown` / `Reload`、復元と再送を整理した提案。**設計全体の承認ではない**
+- 同日 14:17 JST に[返信を投稿済み](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5771571724)。composition 依存の読み取り関数は **全呼び出し箇所を同じ PR で `Result` 化**する。打鍵・候補表示・ライブ変換・タイマーを含め、失敗を空値に戻さないことを受入条件にする
+- 所有者不一致は **`OwnerMismatch`** として返す。該当 composition の候補待機・ライブ変換タイマーを停止し、表示と復元元を保持する。背景タイマーから所有権を取り返さず、入力フォーカスと composition の有効性を確認して復元する。復元後は `Waiting` → `Preedit`、次の Space まで自動再変換しない
+- 所有者が一致した後も旧所有者の BG 変換が実行中なら、所有者不一致や自分の変換待ちと区別して「ワーカー使用中」を返す。具体的な応答型と遷移は設計への反映を確認する
+- **`BgTakeCandidates` は変更要求として採番・応答保持の対象**に訂正する。同じ `seq` の再送には保持応答を返し、別キーでの再試行は新しい `seq` にする。キー不一致で `Done` を復元する動作は維持。`BgPeekTopCandidate` は読み取りのまま
+- 根拠は main `374b9e3` のコード（返信に 4 か所の行範囲付き permalink）。**実機での復旧は未検証。9/24 に実装着手を承認（PR 2 本、rebase 先 `ff49573`）。9/25 に Draft PR #67 が出て形を確認中（上記）**
+- 同日、#66 の設計で `Reload` を廃止する方向にしたことを [別コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5772891346)で連絡した（nick の 4 節「条件を加えて残す」からの変更。予約 variant は宣言位置とフィールド構造を維持して `Error("unsupported")`。#56 の設計から `Reload` の条件追加を外してよいか、統合ブランチでの利用の有無、共通の要求・応答を先に決めて PR を分ける方針、#55 取り込み後の rebase を依頼）。**2026-09-23 08:27 UTC に nick が回答**: 05:17 の 2 点（Result 化は全経路を同じ PR で、`OwnerMismatch` と「ワーカー使用中」を分ける、`BgTakeCandidates` は採番）はすべて了解。`Reload` の条件追加は取り下げ、統合ブランチ（実機ビルド `a737893`）にも `RpcEngine::reload()` の呼び出し元は 0 件。共通の形は「要求に `expect { engine_gen, owner }` と #66 の `config_version` を別フィールドで持ち、拒否は `Rejected(Reason)` 1 つに（Reason は #56 で `GenMismatch` / `OwnerMismatch`、#66 で `ConfigStale` / `ConfigUnavailable` を足す）」の案。**2026-09-24 02:35 UTC に nick から 2 点の確認**: (1) 設計全体としてこれで実装に着手してよいか、(2) rebase 先は #65 が入ったので `7b3d832` 以降の main。着手可なら最初のコミットで共通の形を確定し Draft PR で先に見せる、とのこと。**2026-09-24 に着手を承認して返信**（[コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5808610745)）: 最初のコミットで共通の形を示して Draft PR、PR は 2 本に分ける（(a) 識別子・要求番号・`Unresolved`・回収と `floor`・`Restore`・`Rejected(Reason)`・`Shutdown` 系の応答・`handle_session`・版上げ、(b) 読み取り関数の Result 化と呼び出し箇所・`FlushPendingN` の応答拡張）。rebase 先は main `ff49573`。条件: `Reload` は #56 で触らない（#66 側）、`client.rs` の `handshake_hello` に `Hello` の項目を足す、`state.rs` の `finish_apply` の 4 区分を保つ、受入条件は 9/21 の 5 点と 9/22 の判断。マージと 0.11.9 の順序は Draft PR の時点で相談（着手とマージは別）。**次は nick の Draft PR（(a) の形）待ち。届いたら形を先に確認する**
+
+### マージした PR と状態（2026-09-21）
+
+| PR | 対象 | main のコミット | 状態 |
+|---|---|---|---|
+| [#58](https://github.com/fukuyori/rakukan/pull/58) | #53（`参` / `拾` を数字保存の検証で数えない） | `9d6ba20` / `5bad674` | **マージ済み**（rebase）。依頼した記述の書き分け（「TSV 上では 1 件」「通常語フィルター適用後は未確認」）は PR 本文に反映済み。実機の `digits::license:` の発動と回帰テスト（インストール済み辞書、62 判定すべて期待どおり）を 2026-09-21 に確認し、**#53 はクローズ済み** |
+| [#59](https://github.com/fukuyori/rakukan/pull/59) | #57（詰まりの監視をホストへ移す） | `fb656e1` / `cce2f17` | **マージ済み**（rebase）。確認事項 4 件への対応 `e94fe83` を差分・周辺コード・テスト実走で確認し、[返信](https://github.com/fukuyori/rakukan/pull/59#issuecomment-5755508624)。前回指摘 4（`last_status` の経路）は `observe("done")` が `prior_attempts` を 0 に戻すため成立せず、撤回した。実機の詰まり検出は未確認 |
+
+- 両 PR が `conv_cache.rs` と `docs/DESIGN.md` に触れていたが、`git merge-tree` と GitHub の判定とも競合なし。**マージ後の main `cce2f17` の CI は Build & Test / Format Check とも成功**
+- **`5bad674`（#58 だけを入れた時点）の main の CI は失敗していた**。`kanji::backend::tests::test_default_model_beam_conversion` が HuggingFace キャッシュのロック取得に失敗（`Download(LockAcquisition(...jinen-v1-small.gguf/blobs/....lock))`）。270 件成功・1 件失敗。**原因は未特定**。同じテストは `cce2f17` で成功している（[run](https://github.com/fukuyori/rakukan/actions/runs/35562159411)）。※推測: 同じモデルを読む 2 テスト（`backend.rs:875` / `:892`）が並列にダウンロードして競合した。main の失敗履歴は 9/1 以降 10 件あり、同じ原因かは未確認（→ 2026-10-08 に原因を特定し `e348bc9` で修正。5 章を参照）
+- 過去の PR（#48 / #52）に合わせて rebase マージにした（線形履歴。コミット単位を維持し、SHA は変更）
+
+詳細と根拠は [September_Late_Plan.md](September_Late_Plan.md) 9 節の 2026-09-18〜2026-09-21 の各小節。
+
+### 直近起票した Issue（2026-09-20〜2026-09-22）
+
+- [#65](https://github.com/fukuyori/rakukan/issues/65) 設定変更を全 TSF プロセスへ反映する（2026-09-22）。J-5 の (2) の A。ディレクトリ変更通知・定期確認・本文比較と、正常設定の組の保持、検出とエンジンへの反映待ちの分離を実装済み。**プロトコル変更なし。背景監視から再起動を増やさず、古い設定の採用防止は #66 で扱う**。再接続時に公開済みの組から JSON を取得する変更は #56 と調整待ち
+- [#66](https://github.com/fukuyori/rakukan/issues/66) ホスト再接続時の古い設定の再送による巻き戻りを防止する（2026-09-22）。同 B と C。本文ハッシュによる採用判定、ホスト内のエンジン置き換えの廃止、JSON と DLL 選択の一致を扱う。**プロトコル変更ありの案で、#56 と共通の要求・応答と実装順序を先に調整する**。`Reload` 廃止も nick の #56 案からの変更として調整する。#49 / #64 と関連
+- **#65 は方式採用・詳細設計を経て実装・自動テスト済み、`7b3d832` にコミット・プッシュ済み。#66 は方式採用・実装着手が未承認**。詳細は [September_Late_Plan.md](September_Late_Plan.md) 9 節の J-5 の (2) と「2026-09-22 #65 の実装」を参照
+
+**#65 の実機結果と次の作業（2026-09-22）**:
+
+- メモ帳・EmEditor で、設定保存による表示反映、直接編集の表示反映、背景読込後のモード切替による反映待ち処理、反映待ちがない状態での手動再起動と変換を確認した。**同一 mtime の試験は範囲付き**: 日時・サイズを元に戻した後の一致と表示反映は確認したが、監視が日時の復元前に読んだ可能性は除外していない
+- 終了時は候補数 19・候補文字サイズ 16 に復元し、`config.toml` と事前バックアップ `config.issue65-20260922-174950.bak`（同じ設定ディレクトリ）の SHA256 一致を確認した
+- 最新の TSF 単体テストは 163 件成功。ただし警告捕捉テストの間欠的な失敗は原因未特定。再実行の成功で解決扱いにしない。競合・故障の単体テストの結果を実機結果として扱わない
+- **次は故障試験の詳細設計 → 不足する自動テストの補強 → Windows 統合試験 → 通った直後に試験用ビルドで対象アプリの通知遮断・監視失敗と復旧を確認 → 通常版・元の設定へ復元して通常操作 4 項目を再確認**。対象プロセスに限定し、操作するターミナルが終了しても故障状態を解除できる方法を先に設計する。試験機構の設計・追加実装・故障試験は未着手
+- 残る確認は 4 節と計画書の「残る確認と必要な証拠」を参照。**再接続への組込みは #56 との調整待ちの別残件として追跡し、上の試験の成功だけで #65 全体を完了扱いにしない**。#66 の古い設定の採用防止は今回の確認範囲に含めない
+- [#64](https://github.com/fukuyori/rakukan/issues/64) config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる（2026-09-21）。コード上の成立条件のみで起票、**クラッシュの再現は未実施**。DLL の選択はホストがディスク上の `config.toml` を読み直して行う（TSF の `config_json` に `gpu_backend` は無い）。`rakukan-conv-worker` は `CACHE` の初期化時に起動し（BG 変換・モデル読み込み準備・監視の状態取得のいずれからも）、停止・join の処理が無い。ワーカーの終了を待たずに解放しうる構造は #59 以前から存在し、#59 の `StallProbe` は保持参照と解放タイミングに影響するだけ
+- [#63](https://github.com/fukuyori/rakukan/issues/63) 文節変換の土台として、読みと変換結果を文節単位で対応付ける方式の検討（辞書ラティス / 形態素解析 / jinen スコアリング）。jinen は指示追従モデルではなく出力に区切りトークンも無いので、LLM に直接「区切り」を聞くことはできない。かなアンカー法は「にわにはにわにわとりがいる」で成立せず不採用。実装の予定は無く、方式の記録と再開点
+
+### 直近クローズした Issue（2026-09-19 / 2026-09-21）
+
+いずれも実装・コミット・実機確認まで完了。詳細は [September_Late_Plan.md](September_Late_Plan.md) 9 節。
+
+| Issue | 内容 | コミット |
+|---|---|---|
+| #53 | 数字と「参考」を同じ変換単位で打つと候補が捨てられる（PR #58、nick）。2026-09-21 に実機と回帰テストで受入確認 | `9d6ba20` / `5bad674` |
+| #60 | TSF のログがローテーション後も旧世代へ書き込まれ、16 MiB を超えて増え続ける | `e37c645` |
+| #61 | config.toml のパースに失敗すると、警告なしで全設定が既定値に戻る | `b31ef5c` |
+| #62 | MOZC 辞書を master から取得していて、生成元のリビジョンを固定も記録もしていない | `fbe7848` |
+
+残った未確認は「4. 実機で未確認の項目」を参照。
+
+## 2. 作業の進め方
+
+### ビルドとインストール
+
+```powershell
+cargo make build-engine
+cargo make build-tsf
+# サインアウト → サインイン
+sudo cargo make install
+```
+
+- ビルドとインストールはレモンが行う。進言する前に状態を確認する
+- `cargo test` は PowerShell から実行する（Git Bash 経由では ConPTY テストがハングする）
+- 型チェックだけなら `cargo make check`、テストは `cargo test --workspace --lib`
+- **`--workspace --lib` は lib ターゲットだけなので、バイナリ crate のテストが走らない。** `rakukan-dict-builder` は `src/main.rs` にテストを持つので `cargo test -p rakukan-dict-builder` を併せて実行し、件数を分けて報告する
+- PowerShell のスクリプトを変えたら、構文チェック（`[System.Management.Automation.Language.Parser]::ParseFile`）と `scripts/test-dictionary-swap.ps1` を流す。後者は PowerShell 7 と Windows PowerShell 5.1 の両方で確認する
+- `PROTOCOL_VERSION` を変えたリリースでは、古いホストが残っていると新しい TSF が接続できない。サインアウト／サインインで解消する
+
+### ファイルの場所
+
+| 用途 | 場所 |
+|---|---|
+| インストール先 | `%LOCALAPPDATA%\rakukan\`（`%ProgramFiles%` への移行は #33） |
+| 設定 | `%APPDATA%\rakukan\config.toml` / `keymap.toml` / `user_dict.toml` |
+| 学習履歴 | `%APPDATA%\rakukan\learn_history.bin` |
+| 辞書 | `%LOCALAPPDATA%\rakukan\dict\rakukan.dict`（隣に `rakukan.dict.build.json`） |
+| ログ | `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（TSF。**アプリごとのプロセス単位で分かれる**。時刻順の統合は `scripts/merge-logs.ps1`）/ `rakukan-engine-host.log` / `rakukan-engine-dll.log`。旧方式の `rakukan.log` / `.1`〜`.5` は 0.11.x までのもので、自動削除の対象外（#60） |
+| 復帰マーカー | `%LOCALAPPDATA%\rakukan\engine-recovery.txt`（`<exited_at_ms> <attempt> <reason>`、#43 / #57）。理由欄は `stall` / `inference_failed`。旧形式（2 列）は「不明」として読む |
+
+### GitHub
+
+- `origin` = fukuyori/rakukan、`nick` = nick20002005 のフォーク（PR と Issue の主な提案者）
+- コミット・リリースの状態を話す前に `git fetch` / `gh` で GitHub 側を確認する（ローカルの追跡参照は古いことがある）
+- **コミットメッセージと PR 本文に、完了キーワードと Issue 番号を並べて書かない。** 引用でも GitHub が解釈する。2026-09-15 に #51 がこれで 2 回自動クローズされた。段階的な対応は `Refs` や「#NN の段 1」と書き、Issue は手でクローズする
+- Issue の依頼や判断の有無は、コメントを全件読んでから判断する（`gh issue view N --json comments`）。2026-09-17 に、#40 のコメントを途中までしか読まずに「#45 の PR 依頼が出ていない」と誤って報告した
+- Issue への投稿は、本文をレモンが確認し「投稿して」の指示があってから行う
+
+## 3. 開いている Issue と状態
+
+| Issue | 内容 | 状態 |
+|---|---|---|
+| [#65](https://github.com/fukuyori/rakukan/issues/65) | 設定変更を全 TSF プロセスへ反映する（通知漏れ・同一 mtime の変更に対応） | **方式採用済み、実装・自動テスト済みで `7b3d832` にコミット・プッシュ済み。通常操作 4 項目の実機確認は範囲付き**。2026-09-24 に故障試験機構と Win32 統合テスト（通知遮断・全監視源の失敗と復旧・再設定失敗・保存イベントの保持・破損と欠落からの回復・連続書込）、送信境界の試験（通信失敗・無応答・A 送信中の B）を実装し確認（未コミット）。残るのは個別の監視源失敗、設定アプリの保存失敗、同一 mtime の待機ループ試験、対象アプリの故障試験と通常版への復元。プロトコル変更なし。**再接続への組込みは #56 と調整待ち**。巻き戻り防止は #66 と分担。詳細は計画書 9 節「2026-09-22 #65 の実装」 |
+| [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | **2026-09-22 起票済み・設計案あり。方式採用・実装着手は未承認、実機未検証**。#65 の読み取りの組を前提に、`config_version` の照合とホスト再起動への統一を設計する。プロトコル変更あり。#56 と要求・応答、`Reload` 廃止と復元の実装順序を調整する。#49 / #64 と関連 |
+| #57 | 長文を Space で変換すると、返っているのにエンジンが再起動されることがある（`bg_timeout_watchdog` の詰まり開始時刻が残る） | **確認済み・設計への意見を求めて返信済み**（2026-09-17、nick。[返信](https://github.com/fukuyori/rakukan/issues/57#issuecomment-5709038255)）。`candidate_window.rs` の `on_waiting_timer` が `bg=done` で `bg_timeout_watchdog(false)` を呼ばないため、古い時刻から数えて閾値を超え `engine_reload_force()` が走る、という報告。2026-09-16 の `rakukan.log` に `conv worker stuck 3618s` / `65s` の実例。手元の修正はフォークの `e8eeac9`（#56 と同じコミット。PR にするなら分けると書かれている）。**主経路はコードと合う**。待機タイマーの上限（10 秒）が監視の閾値（20 秒）より短く、今の詰まりの検出は記録を次の待機まで残すことで成り立っているので、UI の待機の終了で記録を消すと検出が効かなくなる。一方で、観測していない間に実行が完了して別の実行が始まることや、監視している実行・エンジンが置き換わることもあるので、TSF 側で `false` を足す案では足りない。**判断: 監視対象を「同じ実行中の変換」にし、B（エンジン側で実行番号と開始からの経過時間を持ち、ホストが監視する）を軸に設計する**（計画書 3-6）。**実装前の判断 5 点を 2026-09-18 に返信し（[コメント](https://github.com/fukuyori/rakukan/issues/57#issuecomment-5725464861)）、PR #59 をレビュー → 確認事項 4 件の対応 `e94fe83` を確認 → 2026-09-21 にマージ**（`fb656e1` / `cce2f17`、[確認結果の返信](https://github.com/fukuyori/rakukan/pull/59#issuecomment-5755508624)）。**実機で詰まりの検出は未確認**（意図的に起こす手段が無い）なので Issue は開いたまま、運用ログ（`rakukan-engine-host.log` の `conversion stalled reason=stall`、マーカーの `stall`）で確認してからクローズする。閾値 30 秒は「正当な処理でも超えうる誤発動を許容する暫定値」として採用（`GEN_TIMEOUT_SECS` は生成 1 回の上限で、変換 1 回は かな run ごとに生成を呼ぶため k × 15 秒かかりうる）。ABI は 9 → 10 |
+| #56 | 未確定文字があるときにホストが再起動すると、Space も Backspace も効かなくなる | **確認済み・設計への意見を求めて返信済み**（2026-09-17、nick。[返信](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5709038552)）。新しいホストの読みバッファが空になり、TSF のセッションと composition だけが未確定文字を持つ、という報告。`handle_action: "Input" state=Preedit("…") bg=idle hira=""` の実例。手元の修正はフォークの `e8eeac9`（composition が生きていてエンジンの読みが空なら、セッション側の読みを `force_preedit` で戻す。Esc 直後は対象外）。**前提（新しいエンジンは読みが空、TSF は合わせない）はコードと合う**。ただし、ホストやエンジンの世代を示す情報が無く、RPC 失敗も「空」になる。エンジンは全アプリで共有。通常入力ではセッションが `Idle` のままで復元の元が無い。`force_preedit` は未確定ローマ字を失う。自動再送で読みを変える要求が二重に適用されうる。**判断: エンジンの世代情報を追加する方向で設計する**。世代だけでは足りず、共有エンジンの所有者（どの composition の読みか）、復元元の編集状態の保持場所（TSF 側）、世代違いを適用前に検出する順序、再送の二重適用も合わせて設計する。未確定ローマ字・打鍵履歴の復元は未確定（計画書 3-7、9 節「#56 / #57 の確認」「#56 / #57 の設計」）。プロトコルの版を上げる見込み。**2026-09-18 にコード照合の結果を返信し、2 度の訂正と回収規則の確認事項を追加した**（[1](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5725537904) / [2](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5725557345) / [3](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5725568117)）。要点: 識別子はプロセス再起動でも衝突しない形にし、世代は要求ごとに照合する／**復元用 RPC を 1 つ設ける**（既存のバッチでは不可分にできない）／判定の優先順は「世代 → 要求番号 → 所有者」で、**所有権の移動では適用済み記録を破棄しない**（破棄すると `Learn` の二重適用が残る）／`input_log` は復元せず、失われるのは「復元**前**の打鍵履歴に依存する機能」。**2026-09-21 に nick から回答**（[コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5754617795)。要求番号は TSF 起動インスタンスごとの単調増加でプロセス static に置く／記録は接続の無いインスタンスだけ回収し `Hello` で有無を返す／結果不明の要求は種類で分け、読みを変える要求は復元後に送り直す／変更 RPC の一覧／`Learn` `Shutdown` `Reload` は期待する世代で止める）。**同日、確認事項 5 点を返信**（[コメント](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5755597587)）: (1) 未応答の要求の寿命と順序、(2) 記録回収と `Hello` の同期・未解決の要求を忘れない、(3) 読み取り RPC（`PreeditIsEmpty` など）も世代・所有者の照合が要る（`on_convert` の `FlushPendingN` → `PreeditIsEmpty` → 空白確定の経路。`preedit_is_empty` は失敗時に `true` を返す）、(4) `Shutdown` / `Reload` の世代不一致を成功扱いにする条件（エンジンの世代とホストの入れ替わりは別。`handle_session` は先に `Shutdown` を記録して応答後に終了する）、(5) 保証は「復元後の編集状態に 1 回分反映」と書く。**2026-09-22 に設計回答を受領し、2 点の判断と候補取得の訂正を返信済み**（[回答](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5770284657) / [返信](https://github.com/fukuyori/rakukan/issues/56#issuecomment-5771571724)）。内容は 1 節「#56 の最新状況」を参照。**nick の設計反映後に実装範囲を確定する。#59 はマージ済みで順序の前提は満たしたが、実装着手は未承認** |
+| #55 | ホストを spawn した後の接続失敗が `HostSpawnGuard` の失敗回数に入らない | **`b40b428` でコミット・プッシュし、2026-09-22 にクローズ済み**（[コメント](https://github.com/fukuyori/rakukan/issues/55#issuecomment-5772858986)）。実機確認は範囲付き。接続試行の終了処理を 1 か所にまとめ、試行全体が失敗したときに 1 回だけ数える。再試行回数・閾値・窓・抑止は維持、プロトコル変更なし。単体テスト 42 件（rpc）成功。実機で確認済み: spawn 失敗後の接続失敗の加算、3 回で抑止、抑止中は加算も期限延長もしない、exe 復元後の `Hello` / `Create` 成功と変換回復。**実機未確認**: 30 秒経過後の再試行（数え直し）、`Hello` / `Create` 各段階の失敗と Shutdown 直後の競合（単体テストのみ）。入力停止時間（実測: EmEditor のキー処理 15.35 秒）は #56 の範囲確定後に別 Issue。nick へ先行方針を [連絡済み](https://github.com/fukuyori/rakukan/issues/55#issuecomment-5772061363)。詳細は計画書 9 節「2026-09-22 #55」 |
+| #54 | RPC クライアントのログが `rakukan.log` に記録されない | **修正済み**（`a981b07`、0.11.9 に含まれる）。インストール版で、言語バーの「エンジン再起動」で `INFO rakukan_engine_rpc::client: rpc: Shutdown acknowledged by host` が記録されることを確認（2026-09-17T02:50:06Z）。**1 日分のログ量の確認が残る。ただし #60 で基準が使えなくなった**（旧 `rakukan.log` は 2026-09-19T10:10:05Z を最後に更新が止まり、以後はプロセス別のファイルになった。以前の基準値 73,033 行・9,736,860 バイトとは比べられない）。**2026-09-24 にプロセス別ログの合計で測り直した**（計画書 9 節「2026-09-24 #54 の 1 日分のログ量の測り直し」）: 通常日の `rakukan_engine_rpc` は 0〜6 行・最大 622 バイト/日で無視できる。`rpc SLOW` 10 件はすべて 09-22 の #55 実機試験中（3.6〜17.2 秒、入力停止時間の実測根拠）。**#65 の定期読込の DEBUG 2 行が `debug` 運用でのログ量の主因（09-23 で 22,096 行・2.5 MB、19%）だったので、変更なしの読込を `trace` に下げた（2026-09-24、未コミット。`Updated` / `Failed` は `debug` のまま、WARN は config 側の 1 回のみ）**。#54 の残件は完了し、**2026-09-24 にクローズ**（[コメント](https://github.com/fukuyori/rakukan/issues/54#issuecomment-5808769991)。修正 `a981b07` は 0.11.9 に含まれる） |
+| #51 | アプリごとの IME 初期状態 | 段 1 は main に入った（`8940bb0` / `928e066`、0.11.9 に含まれる）。**段 2 = 設定アプリ（WinUI）での編集画面が残る**。実行中のアプリから選ばせたい。#33 と時期を調整 |
+| #50 | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | **J-4 は (a)（世代と生存状態）に決定（2026-09-24）。詳細設計（案）を計画書 9 節「2026-09-24 #50 …」に記録**: TSF スレッドの thread-local な台帳で世代の登録（`OnInitDocumentMgr` / Activate の `EnumDocumentMgrs` による列挙。初回目撃は採らない）と失効（`OnUninitDocumentMgr` / Deactivate）、`FocusChange` にキュー投入時の `DmRef { ptr, gen }`、遅延処理で dead / 世代違いの `prev` は保存せず `next` は復元も apply もしない、`ModeStore` の鍵を `DmRef` に、`doc_mode_remember_current` も生存確認、#51 の `base_dm` も `DmRef`。4 点（台帳の thread-local、dead な next は復元も apply もしない、`base_dm` も `DmRef`、死んだ slot の上限 1024）は推奨どおりに決定（2026-09-24）。**同日、実装前レビューで初回目撃と掃除の矛盾・未登録 DM の Uninit が未定義と分かり、案 A（Activate で `EnumDocumentMgrs` により既存 DM を全登録、以後の未知 ptr は登録せず死んだ扱い、未知の ptr への Uninit は死んだ slot、Deactivate で生存 slot を全失効・世代は戻さない、列挙は生存中の世代を進めない）に決定して実装済み（未コミット・実機未確認）**。新規 `engine/dm_registry.rs`、`state.rs` / `candidate_window.rs` / `factory.rs` を変更。差分レビューの 2 点（Deactivate で現在 DM / HWND のキャッシュを空にする、列挙と `GetFocus()` の COM 参照を保持したまま登録し `Next` 失敗を warn）も反映済み。TSF 単体テスト 193 件成功（追加 20 件）、fmt / clippy（両ビルド）/ `cargo make check` / workspace テスト成功。記録は計画書 9 節「2026-09-24 #50 の実装」。**実機確認済み（2026-09-24 16:28 導入、範囲付き）**: Edge のタブ切替（#51 の挙動）・ghostty・メモ帳の記憶復元は回帰なし、MS-IME → Rakukan の戻しで `restored mode=On from hwnd=0xd0d26 (dm=…/g3 is new)` を確認。`unknown dm` / dead 系 0 件。DM の破棄後の古い通知とアドレス再利用は実機では通らず単体テストのみ。記録は計画書 9 節「2026-09-24 #50 の実機確認」。**コミットは未指示** |
+| #49 | `model_variant` を変えてもホストが続く限り古いモデルのまま | 未着手。計画書の J-3（推奨: モデル設定の変更でホストを終了）と段 3（3-4）。先に設定の全プロセス反映（3-3）を設計する前提 |
+| #46 | 学習履歴を個別に削除する手段が無い | インストーラー改修（#33）と合わせる予定 |
+| #45 | 速く打つとライブ変換のプレビューが更新されない | nick の PR 待ち（#40 の 2026-09-12 のコメントで依頼済み） |
+| #40 | 候補・予測の品質（統合ブランチ側の報告 7 件） | 1・3 は再現せず、7 は #45、2 は縮小版の PR 待ち（依頼済み）、4 は見送り |
+| #35 | 区読点だけの読みとリーダー記号 | 判断待ち。計画書の J-6（推奨: Space 変換の本線を先に、`z` キー列は後）。[Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) の 3.1.1 の A〜C が未決。**PR #31 は 2026-09-13 に nick が取り下げてクローズ済み**（方針が決まったら新しく出すとのこと） |
+| #33 | インストーラー再設計（`%ProgramFiles%` 移行、インストーラー実行後に再起動またはサインアウト・サインインで完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) |
+| #32 | 文節変換 | 判断待ち。[Segment_Edit_Plan.md](Segment_Edit_Plan.md)。計画書では本計画とインストーラー改修の後。読みと変換結果の対応付け方式は #63 に分けた |
+| #64 | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。**対処方針は未決定、再現・実機検証は未実施**。2026-09-22 起票の #66 に、古い設定の拒否とホスト内のエンジン置き換え・`Reload` の廃止を組み合わせる案を記録した。#56 の復元との順序調整が必要。方式採用・実装着手は未承認 |
+| #63 | 読みと変換結果を文節単位で対応付ける方式の検討 | 2026-09-20 起票。実装予定なし。方式 1（かなアンカー）は不採用、2（辞書ラティス）/ 3（形態素解析）/ 4（jinen の NLL スコアリング）を比較して記録。進める前に決めること: 文節の定義、発火タイミング、実験の順番 |
+| #29 | ユーザー辞書の `priority = "low"` | 保留 |
+| #18 | 統合ブランチの棚卸し | 各項目は個別 Issue へ分割済み。記録として残している |
+| #16 | 数字混在の読みで、かな run が辞書を参照できない | 判断待ち。計画書の J-7（推奨: 段 4 で設計から）。変換ワーカーへ辞書を渡す配線は #53 と共通になる。`はんは` のように助詞を含む読みも辞書に届かない（2026-09-14 確認） |
+
+#56 / #57 は作業計画の段 3 に別項目で追加した（3-6「#57 修正経路と回帰条件の確認」、3-7「#56 復旧条件・状態復元の設計」）。コードでの確認結果は計画書 9 節「#56 / #57 の確認」、設計（案）は「#56 / #57 の設計」、2026-09-18 以降の判断は同節の日付ごとの小節。**PR は分けて #57 を先に入れる順序で合意済み**。#57 は ABI を 9 → 10、#56 はプロトコルの版を上げる見込み。
+
+Issue への投稿・レビューは、いずれも本文をレモンが確認してから送っている。#53 / #57 / #56 の返信では、**結論を「実際に確かめた範囲」に限定して書く**ことを繰り返し求められた（「TSV 上では 1 件」「同一ホスト世代内の重複のみ」「復元前に打った分だけ」「その計測条件での値」）。断定できない箇所は撤回して書き直す。
+
+## 4. 実機で未確認の項目
+
+| 項目 | 補足 |
+|---|---|
+| #65 厳密な同一 mtime の変更検出 | 日時の復元後に初めて読込を開始する順序は未確認。今回の表示反映と、復元後の日時・サイズの一致だけでは代替しない |
+| #65 通知遮断時の 30 秒定期確認 | 通常時の定期読込ログは確認済み。通知を遮断した状態での変更取得は未確認 |
+| #65 連続保存・`learn_history.bin` の連続通知 | デバウンス・最大待ち・定期確認の期限は単体テストで確認。実際の通知に対する読込回数と期限は未確認 |
+| #65 監視源の作成失敗・再登録・復旧 | `WaitSet` は番号対応のテストまで。一部または全部の監視源が無い状態での継続と復旧は未確認 |
+| #65 保存イベントの先着・読込中の通知、A 送信中の B 更新 | スケジューラ・設定状態の単体テストで確認した範囲のみ。実際の待機・読込・送信経路は順序を制御する試験で確認する |
+| #65 破損・欠落した設定と回復 | 正常設定保持と WARN 抑制・回復は単体テストで確認。監視からの再確認・回復は実機未確認 |
+| #65 保存失敗 | 元ファイル保持、保存成功の表示・通知を行わないことの確認が残る |
+| #65 RPC 通信失敗から反映待ち保持まで | `CommFailure` を渡す設定状態の単体テストまで。実際の RPC の失敗・応答消失が成功扱いされないことを確認する |
+| `ime_off_apps` の既定値 `conhost.exe` / `WindowsTerminal.exe` / `mintty.exe` | 一致したログの記録が無い。wezterm-gui.exe / ghostty.exe は確認済み |
+| `ime_on_apps` で Photoshop の文字ツール | 環境が無い。firefox / msedge / chrome は確認済み |
+| Step 13-1「モデルが ready になったら自動で変換をやり直す」 | モデル読み込みが 157ms で終わり手で狙えない。コールドスタート時に確認する |
+| Step 13-2 `edit_session: SLOW grant` | 閾値を超えたときだけ出る。0 件は「観測期間中に閾値超過を記録しなかった」と扱う |
+| Step 13-2 `rpc SLOW` | #54 の修正で**記録されるようになった**（出力経路は確認済み）。インストール直後の変換（約 380 行分）では 0 件。1 週間の再計測（段 2）で件数を見る |
+| #54 の 1 日分のログ量 | 2026-09-24 にプロセス別ログの合計で測定済み（計画書 9 節）。通常日 1.7〜7.3 MB、試験日 5.7〜13.2 MB（`debug` 運用）。`rakukan_engine_rpc` の分は無視できる |
+| #60 ログの 16 MiB 退避 | 主要な確認は 2026-09-19 に完了。退避だけはその量に達しておらず未確認（日常利用で自然に到達する） |
+| #61 初回パース失敗時の既定値 | 主要な確認は 2026-09-19 に完了。初回だけは DLL 読み込み前に壊す必要があり未確認（単体テストでは確認済み） |
+| #62 SHA 一致時のスキップ | 次回のインストールで `already built ... mozc cbbb6e1bd181, skipping` が出れば確認できる |
+| #62 同時インストール全体の安全性 | ロックが守るのは復旧・差し替えの実行中だけ。取得・ビルドを含む全体は未検証 |
+| #62 辞書のバイト単位の一致 | SHA の固定が保証するのは取得元データの一致まで。生成物の一致は別の検証事項 |
+| #58 の上限で根拠を失う語の件数 | TSV 上は `吉祥院新田参ノ段` の 1 件。**通常語の帯（`cost_band::Class::Normal`）の絞り込みを適用した後の件数は未確認** |
+| #53（PR #58）の照合表の作成時間 | 実機で初回 5〜33 ms、2 回目約 0.1 ms（`table=` の値）。**差の原因は未特定**。PR の計測（120 文字で 0.81 ms）は暖まった状態の値。発動ログと変換結果そのものは 2026-09-21 に確認済み |
+| #57（PR #59）の詰まりの検出 | **マージ済み・実機未確認**。詰まりを意図的に起こす手段（#43 の `force_inference_failure` に相当する診断設定）は無い。運用ログで `conversion stalled reason=stall` が出るのを待つ。同じ DLL を `Reload` すると世代だけ進んでキャッシュと実行番号は同じなので、`unrecoverable` でホストが生きている間は同じ `run_id` の発動ログが 2 回出うる（設計どおり） |
+| #57 の `last_status` が `"done"` のまま回復処理を素通りする経路 | **成立しないことをコードで確認した**（`observe("done")` が `prior_attempts` を 0 に戻すため、その後の詰まりは `ExitHost` になる）。番兵 `"<stalled>"` は保険として入った。指摘は撤回済み |
+| #55 ホスト不在のまま 30 秒経過後の再試行（数え直し） | 2026-09-22 の実機試験のログでは未確認。単体テストでは確認済み |
+| #55 `Hello` / `Create` 各段階の失敗、Shutdown 直後の競合からの回復 | 単体テストで確認済み。実機では未確認 |
+
+## 5. 既知の問題（Issue 化していないもの）
+
+- **（2026-10-08 修正済み）CI の実モデルのテストが HuggingFace キャッシュのロック取得で落ちていた**。10/8 の `c02c345` / `69461f7` の CI で `test_default_model_conversion` / `test_default_model_beam_conversion` が交互に 1 件ずつ失敗（`Download(LockAcquisition(...jinen-v1-small.gguf/blobs/....lock))`）。**原因**: 2 つのテストが同じ `jinen-v1-small-q5` を並列にダウンロードし、hf-hub 0.4.3 の `lock_file`（`src/api/sync.rs`。ロック取得を 1 秒おきに 5 回再試行して諦める）を超えて待った側が失敗する。CI は `~/.cache/huggingface` をキャッシュしないので毎回ダウンロードが走る（手元はキャッシュ済みで起きない）。失敗は 2 回ともテスト開始の約 5.5 秒後で、待ちの上限と一致した。**修正**: `e348bc9` で、テスト専用の `SMALL_MODEL_LOCK` を持ってモデルを読み込むようにした（`crates/rakukan-engine/src/kanji/backend.rs`、本番コードは変更なし）。同じコミットの CI は成功（2 つのテストは約 3.5 秒・5 秒で順に成功）。CI での確認は 1 回分。9/1 以降の過去の失敗 10 件が同じ原因かは確かめていない
+- 入力先ごとのモード記憶で、手動変更の即時保存（`doc_mode_remember_current`）は `trace!`、`DOC_MODE_STORE.try_lock()` の失敗は無言で抜けるため、この 2 経路はログから確認できない
+- ブラウザで「入力項目が変わると英数に変わる」という症状は、調査を途中で打ち切った（`default=` のイベント 42 件を見た段階で、原因は未特定）
+
+## 6. 検証と調査の知見
+
+- **モデル未準備の状態を作る**: `model_variant` を存在しない値にする。その後ホストを終了する（#49 のため config を変えただけではモデルが切り替わらない）
+- **推論失敗を作る**: `[diagnostics] force_inference_failure = true`。converter に焼き込まれるので、有効化にはホストの作り直しが要る
+- **ホストが起動できない状態を作る**（#55）: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe` を改名し、既存ホストを終了させてプロセス一覧で不在を確かめてから打鍵する。ホストは常駐なのでアプリを閉じるだけでは止まらない。**復元を PowerShell の `finally` に任せる手順は、ターミナルの強制終了で実行されなかった（2026-09-22）ので再使用しない**（`finally` は例外時には実行されるが、プロセスの強制終了では実行が保証されない）。今回の復元は SHA256 の一致で確認した。復元操作をするターミナル自体が操作不能になったので、次回の手順は未設計・未検証
+- **config の全プロセス反映は #65 で実装・検証中**: auto-reset の reload イベントだけで全プロセスへの配送を保証せず、各プロセスのディレクトリ監視・定期確認・本文比較で補う。メモ帳・EmEditor の通常操作は範囲付きで確認済み。通知遮断・監視失敗からの復旧などは未確認。再接続への組込みは #56 と調整待ち、古い設定の採用防止は #66 の未承認の設計案で扱う
+- **RPC クライアントのログが出ることを確かめる**: 言語バーの「エンジン再起動」。config が同じでもホストに Shutdown を送るので、`rpc: Shutdown acknowledged by host` が必ず出る。#55 以降は、接続が `Hello` / `Create` まで通るたびに `host connected: Hello/Create ok spawn=… spawn_to_connect_ms=… while_blocked=…`（INFO）が出る。正常な変換でも、RPC の所要時間が閾値を超えると `rpc SLOW`（WARN）が出る
+- **エンジン DLL のログレベル**は `config.toml` の `log_level` に追随する（ホスト spawn 時に `RAKUKAN_LOG` として渡す。環境変数を明示していればそちらが優先）
+- **ホストの健全性**: 連続 3 回の推論失敗でホストが自己終了し、5 分以内に 2 回自己終了した後にまた失敗すると `unrecoverable`。判断はホスト側（`crates/rakukan-engine-rpc/src/health.rs`）
+- **辞書・モデルの注入**はホストの `dispatch_engine` 冒頭で毎回試みる。TSF のラッチやホストが入れ替わった理由に依存しない
+- **判定規則の一時的な比較**: `crates/rakukan-engine/src/digits.rs` の末尾に `#[cfg(test)]` の一時モジュールを追記して `cargo test -p rakukan-engine --lib <モジュール名> -- --nocapture` で流し、終わったら `git checkout -- crates/rakukan-engine/src/digits.rs` で撤去する。#53 の検証はすべてこの形（コミットしていない）。`cargo test … digits` のフィルタは一時モジュールの名前にも当たるので、既存テストの件数を数えるときは一時モジュールを撤去してから流す（2026-09-17 に「47 件」と誤って報告した。正しくは 46 件成功・1 件 ignored）
+- **辞書ファイルの中身を見る**: `rakukan.dict` の形式は `crates/rakukan-dict/src/mozc_dict.rs` の冒頭のコメントどおり（ヘッダー 16 バイト、読みの索引 12 バイト × 件数、読みのヒープ、エントリ 8 バイト × 件数、表記のヒープ）。読み取り専用のスクリプトで引ける。元辞書の品詞は `dictionary_oss/id.def` と `src/data/rules/pos_matcher_rule.def`（`名詞,サ変接続` は `Unknown` にも使われる）
+- **ツールの注意**
+  - Git Bash のヒアドキュメントで Python にファイルを書かせると `\\` が潰れ、Windows パス中の `\r` が CR になる。書いた後に CR の混入を確認する
+  - Bash ツールのヒアドキュメントは、長い本文で `unexpected EOF while looking for matching` と失敗することがある（何も書き込まれない）。その場合は Write ツールでスクラッチパッドにファイルを作り、`cat >>` で追記する
+  - Git Bash から `powershell.exe`（Windows PowerShell 5）経由で `cargo test` を流すと、日本語の出力が化ける。PowerShell ツール（pwsh）で `[Console]::OutputEncoding = [Text.Encoding]::UTF8` を設定し、`Out-File -Encoding utf8` で保存して読む
+- 過去の Issue コメントのうち Claude が起案したもの（例: #18 の 9/4 返信）を、レモンの決定として扱わない
+
+## 7. 関連資料
+
+| 資料 | 内容 |
+|---|---|
+| [September_Late_Plan.md](September_Late_Plan.md) | **現在の作業計画**。段 1〜4、判断事項 J-1〜J-9、9 節に実施記録（#54 の修正と確認、#53 の設計と PR #58 のレビュー・マージ、#56 / #57 の設計と PR #59 のレビュー・マージ、#60 / #61 / #62 の起票・実装・実機確認、#63 の起票、#56 の確認事項 5 点と 2026-09-22 の設計回答・判断の返信） |
+| [DESIGN.md](DESIGN.md) | 全体設計（プロセス構成、RPC、ホストのライフサイクル、設定、辞書） |
+| [September_Revised_Plan.md](September_Revised_Plan.md) | 9 月前半の実行計画と、Step ごと・リリースごとの記録（Step 14 は September_Late_Plan.md に引き継いだ） |
+| [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) | インストーラー改修（#33） |
+| [Issue_Status.md](Issue_Status.md) | 開いている Issue の概要・対応状況・次の動き（Issue の状態を変えたら同じコミットで更新） |
+| [Segment_Edit_Plan.md](Segment_Edit_Plan.md) | 文節変換の論点（#32） |
+| [Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) | リーダー記号の検討（#35） |
+| [Step10_Romaji_Rebuild_Plan.md](Step10_Romaji_Rebuild_Plan.md) | ローマ字入力の再構築（完了） |
+| [version-update-checklist.md](version-update-checklist.md) | バージョン変更で更新するファイル |
+| [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) | ホスト多重起動時の GPU メモリ（「GPU 浪費」と論じない根拠） |
+| [EXPLORER_CRASH_HISTORY.md](EXPLORER_CRASH_HISTORY.md) / [INVESTIGATION_GUIDE.md](INVESTIGATION_GUIDE.md) | Explorer 異常終了の対策年表と dump 解析の手順（前版の「既知の問題」はこちらに集約されている） |
+| [archive/](archive/README.md) | 完了・破棄した計画書 |

@@ -1,7 +1,7 @@
 # 開いている Issue の状況
 
 2026-10-22 時点。GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合して更新した。
-10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
+10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
 Issue の状態を更新したら、この表も同じコミットで更新する。クローズしたら行を削除し、末尾の「クローズの記録」に移す。
@@ -13,10 +13,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ |
 | [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる | 運用ログで `unknown dm` / `skipped save for dead dm` の有無と回帰を見てクローズ |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
-| [#45](https://github.com/fukuyori/rakukan/issues/45) | 速く打つとライブ変換のプレビューが連続入力中に一度も更新されない | nick の PR 待ち（#40 の 2026-09-12 のコメントで依頼済み） | PR が来たらレビュー |
-| [#40](https://github.com/fukuyori/rakukan/issues/40) | 候補・予測の品質に関する統合ブランチ側の報告 7 件の再現確認 | 1・3 は main で再現せず、7 は #45 に切り出し、2 は縮小版の PR を依頼済み、4 は見送り | 2 の PR が来たらレビュー。残りが片付いたらクローズ |
 
-## 2. 判断待ち（レモンの決定が要る）
+## 2. 判断待ち（利用者の決定が要る）
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
@@ -35,6 +33,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#84](https://github.com/fukuyori/rakukan/issues/84) | 単漢字（mozc `single_kanji.tsv`）を候補に加え、表示順（または種類の切り替え）を決める | 2026-10-21 起票 | 10 月の計画には入っていない。扱いを決める |
 | [#85](https://github.com/fukuyori/rakukan/issues/85) | 試験の自動化の基盤（試験用のアプリ・台本の実行器・ホストの故障の口） | 2026-10-22 起票。今後の改修・開発の基盤として計画する。フェーズ 2 には入れない（利用者の判断） | 10 月の計画には入っていない。着手の時期を決める |
 | [#86](https://github.com/fukuyori/rakukan/issues/86) | 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される | 2026-10-22 起票。重要度は低（利用者の判断）。メモ帳・Explorer は窓ごとに別のスレッドで Activate する。メモ帳は窓を移ると composition を終わらせるので起きない。起きるアプリは見つかっていない | ログのアプリ名（`app=`）で、当てはまるアプリを調べる。直し方は起きるアプリが見つかってから |
+| [#45](https://github.com/fukuyori/rakukan/issues/45) | 速く打つとライブ変換のプレビューが連続入力中に一度も更新されない | 未着手。直し方の方向は #40 の 2026-09-12 のコメントにある（タイマーが張られていなければ張る、最後の通過から 400 ms で debounce を強制通過） | 直すか、直すならいつ行うかを決める |
+| [#40](https://github.com/fukuyori/rakukan/issues/40) | 候補・予測の品質に関する統合ブランチ側の報告 7 件の再現確認 | 1・3 は main で再現せず、7 は #45 に切り出し、4 は見送り。2（候補の末尾に ひらがな → カタカナ を添える）は未着手 | 2 を直すかを決める。決まったらクローズ |
 | [#29](https://github.com/fukuyori/rakukan/issues/29) | ユーザー辞書エントリに `priority = "low"` を追加する | 保留 | 要望があれば再検討 |
 
 ## 3. 別計画で扱う

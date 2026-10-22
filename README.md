@@ -230,7 +230,7 @@ rakukan の入力状態は **IME オン**（かな漢字変換）と **IME オ�
 ### 主要設計書
 
 - [DESIGN.md](docs/DESIGN.md) — 全体設計書（クレート構成・RPC プロトコル・スレッドモデル・辞書システムなど）
-- [handoff.md](docs/handoff.md) — 引き継ぎ資料（現在の状態・開いている Issue・未確認の項目・既知の問題）
+- [handoff.md](docs/handoff.md) — 引き継ぎ資料（現在の位置・次の開始点・作業の決まり・文書の地図）
 
 ### 独立した技術課題
 

@@ -1,7 +1,8 @@
 # docs/archive — 過去の設計書・計画書
 
 役目を終えた設計書・計画書の置き場。内容は作成当時のままで、現行コードとは乖離している。
-現行の資料は [DESIGN.md](../DESIGN.md)、[handoff.md](../handoff.md)、[September_Revised_Plan.md](../September_Revised_Plan.md) を参照。
+現行の資料は [DESIGN.md](../DESIGN.md)、[handoff.md](../handoff.md)、[October_Plan.md](../October_Plan.md) を参照。
+移した文書の中のリンクは、移す前の場所（`docs/`）を前提にしたままで、直していない。
 
 | ファイル | 使用した作業 | 期間 / バージョン | 結末 |
 |---|---|---|---|
@@ -19,3 +20,8 @@
 | [CONVERSION_ANOMALY_FIX_PLAN.md](CONVERSION_ANOMALY_FIX_PLAN.md) | 変換停止・異常変換（EOS 未到達ビームなど）の修正計画 | 2026-07-03〜13 / v0.9.12 | 2026-07-03 に実装完了 |
 | [JULY_LOG_IMPROVEMENT_PLAN.md](JULY_LOG_IMPROVEMENT_PLAN.md) | 7月運用ログ分析にもとづく改善計画（エンジン再 init 乱発、echo strip 誤爆など） | 2026-08-04 / v0.9.16〜0.10.0 | Phase A〜 を 0.10.x で実装 |
 | [AUGUST_LOG_IMPROVEMENT_PLAN.md](AUGUST_LOG_IMPROVEMENT_PLAN.md) | 8月運用ログ分析にもとづく改善計画 | 2026-09-01 / v0.10.5〜 | September_Revised_Plan.md（第2版）に引き継ぎ |
+| [September_Revised_Plan.md](September_Revised_Plan.md) | 9 月の作業計画（第 2 版。Step 1〜13、8 月のログ分析の引き継ぎ） | 2026-09-01〜09-15 / 0.11.0〜0.11.7 | September_Late_Plan.md に引き継ぎ |
+| [Step10_Romaji_Rebuild_Plan.md](Step10_Romaji_Rebuild_Plan.md) | Step 10（ローマ字入力の状態を打鍵ログから作り直す、#34）の詳細設計 | 2026-09-07〜09-12 / 0.11.5 | 0.11.5 で実装 |
+| [September_Late_Plan.md](September_Late_Plan.md) | 9 月後半の作業計画（#56 / #65 / #72、v6 の条件） | 2026-09-17〜10-10 / 0.11.9〜0.12.0 | October_Plan.md に引き継ぎ |
+| [Issue65_Fault_Test_Design.md](Issue65_Fault_Test_Design.md) | #65（再接続で config.toml の設定を使う）の故障試験の設計 | 2026-09-24 / 0.12.0 | #65 は 0.12.0 でクローズ |
+| [handoff_to_2026-10-22.md](handoff_to_2026-10-22.md) | 2026-10-22 までの引き継ぎ資料（日付ごとの更新の積み重ね） | 2026-04-17〜10-22 / 〜0.13.0 | 2026-10-23 に handoff.md を作り直した |

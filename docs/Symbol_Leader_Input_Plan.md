@@ -4,7 +4,7 @@
 
 位置づけ: PR #31（記号の連打を三点リーダーへ畳む）のレビューから派生した検討の記録。**すべて検討段階で、実装には進んでいない。**
 
-関連: Issue #18 の G（記号）、`docs/Step10_Romaji_Rebuild_Plan.md` §3.3 / §4.4
+関連: Issue #18 の G（記号）、`docs/archive/Step10_Romaji_Rebuild_Plan.md` §3.3 / §4.4
 
 関連 Issue: #35（本件の問題点の記録）、#34（問題点 4: `z` + 記号で未確定ローマ字が残る）、PR #31
 
@@ -133,5 +133,5 @@
 - `crates/rakukan-tsf/src/tsf/factory/dispatch.rs`: `z` + 記号の振り分け
 - `crates/rakukan-engine/src/romaji/rules.rs`: `z/` → `⋯`
 - `apps/rakukan-settings-winui/MainWindow.xaml`: キー名ヘルプに `z` 系キー列
-- `README.md`、`docs/Step10_Romaji_Rebuild_Plan.md`
+- `README.md`、`docs/archive/Step10_Romaji_Rebuild_Plan.md`
 

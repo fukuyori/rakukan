@@ -127,7 +127,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 - **`scripts/build-installer.ps1` の入力をインストール先からビルド出力へ変える**（2026-09-25 のレビューで追加）。現行はTSF DLL・engine DLL 3 種・host・settings-ui・モデルを `-InstallDir`（既定 `%LOCALAPPDATA%\rakukan`）から、辞書を `%LOCALAPPDATA%\rakukan\dict` から集め、無ければ「先に `cargo make install`」と言って止まる。`install` から `build-installer` を呼ぶ形にすると循環するので、**全成果物を `-BuildDir`（既定 `C:\rb`）の `release` 配下と WinUI の publish 出力から集める**形にし、`-InstallDir` と「`cargo make install` 済み」の前提を外す。辞書は下記のとおり dist 準備段階で作る。モデルは同梱しない（現行の「存在する場合はコピー」も外す。取得は engine-host の初回変換時）。
 - `Makefile.toml`: `install` タスクを `build-installer`（署名なし）→ `output\rakukan-<version>-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` の実行に置き換える（完了には再起動が要る）。`quick-install` は `build-tsf` → `install`、`full-install` は `build-engine` → `build-tsf` → `install` の開発用に限定し、`sign` を外す。`uninstall` はインストーラーのアンインストーラーをサイレント実行する形にする。
-- **リリース向けの署名経路を開発用と分けて定める**（同レビューで追加）。`cargo make package`（仮称）を新設し、`sign`（`sign-artifacts.ps1`。`C:\rb\release` の DLL / EXE に署名）→ `build-installer.ps1 -Sign`（セットアップ本体と、`SignedUninstaller=yes` によるアンインストーラーに署名）の順に実行する。`build-installer` が署名済みの成果物を集めるよう、`sign` を先にする。**パッケージ作成はレモンが `-Sign` 付きで実行する**（Claude は行わない。`CLAUDE.md` のとおり）。開発用の `install` は署名しないサイレント導入で、配布物には使わない。
+- **リリース向けの署名経路を開発用と分けて定める**（同レビューで追加）。`cargo make package`（仮称）を新設し、`sign`（`sign-artifacts.ps1`。`C:\rb\release` の DLL / EXE に署名）→ `build-installer.ps1 -Sign`（セットアップ本体と、`SignedUninstaller=yes` によるアンインストーラーに署名）の順に実行する。`build-installer` が署名済みの成果物を集めるよう、`sign` を先にする。**パッケージは `-Sign` 付きで作る**。開発用の `install` は署名しないサイレント導入で、配布物には使わない。
 - `scripts/install.ps1` を削除。担っていた処理の行き先:
   - コピー・登録・tray 自動起動登録 → インストーラー
   - mozc 辞書の取得と `rakukan-dict-builder` によるビルド（[4a]） → `scripts/build-installer.ps1` の dist 準備段階へ移す（辞書は配布物に同梱済みのため、利用者の PC では行わない）
@@ -169,17 +169,20 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 ## 5. 作業ステップ
 
 各ステップは「変更 → 検証 → 完了判定」の順に進め、未解決の回帰を次へ持ち越さない。
+削除（アンインストール）を含む検証（Step 2 の削除、Step 5 の `winget uninstall`、6 章）の前には、[October_Plan.md](October_Plan.md) の 4 節「アンインストールを含む確認の前に、ログを退避する」の手順でログを写す（アンインストールで `rakukan-engine-host.log` が消されるため）。
 
 | Step | 内容 | 完了条件 |
 |---|---|---|
 | 1 | コードのパス解決を配置非依存にする（4.2 の `install_dir()`、辞書ディレクトリ、モデルディレクトリ、RPC 版不一致の扱い）。ログの見直しの #73（書き手を 1 つに・発生元）・#75（ホストと engine DLL のログ、ABI の版を上げる）・#76（書き込みを別スレッドへ・ETW）も行う（4.3b） | 現行の `%LOCALAPPDATA%` 配置のまま全テストと実機動作が変わらない。`%ProgramFiles%` に手動配置しても動く |
 | 2 | インストーラーを新方式にする（4.1）。トレイの配布・起動・Run 登録と、登録の成否の判定・旧版での登録解除の扱い（4.3a）、ログの掃除をトレイへ移す #74（4.3b）も行う | 新規 PC 相当（旧配置なし）で初回インストール → 再起動後に変換。旧ホスト・旧 TSF が動いたまま更新（事前のサインアウトなしでインストーラーが完走） → 再起動後に新版で動作。再起動までの間に、文字入力が壊れず、アプリが異常終了せず、設定・学習履歴が壊れない。削除で登録とファイルが消える。サイレント実行でも結果（再起動の要否を含む）が判別できる |
 | 3 | 既存利用者の移行 | `%LOCALAPPDATA%\rakukan` に旧版がある状態から新インストーラーで更新し、再起動後に旧配置の登録・ファイルが残らず、新配置で動作する |
-| 4 | 経路一本化（4.3）。`build-installer.ps1` の入力をビルド出力へ、`install.ps1` / `uninstall.ps1` の削除、`-TsfOnly` の `dev-swap-tsf.ps1` への切り出し、Makefile（`install` / `package` / `full-install` / `quick-install` / 故障試験 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook | `cargo make build-engine` → `build-tsf` → `install` → 再起動が**インストール先が空の状態から**完走し、README の手順どおりに反映できる。`install-tsf-fault-test` / `install-tsf-normal-restore` が新経路で動き、SHA256 の一致確認と再登録が従来どおり働く。`cargo make package` をレモンが実行し、成果物・セットアップ本体・アンインストーラーの 3 つに署名が付くこと（`signtool verify`）を確認する |
+| 4 | 経路一本化（4.3）。`build-installer.ps1` の入力をビルド出力へ、`install.ps1` / `uninstall.ps1` の削除、`-TsfOnly` の `dev-swap-tsf.ps1` への切り出し、Makefile（`install` / `package` / `full-install` / `quick-install` / 故障試験 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook | `cargo make build-engine` → `build-tsf` → `install` → 再起動が**インストール先が空の状態から**完走し、README の手順どおりに反映できる。`install-tsf-fault-test` / `install-tsf-normal-restore` が新経路で動き、SHA256 の一致確認と再登録が従来どおり働く。`cargo make package` を実行し、成果物・セットアップ本体・アンインストーラーの 3 つに署名が付くこと（`signtool verify`）を確認する |
 | 5 | winget 登録（4.4）。リリース後に manifest を提出 | `winget install` / `upgrade` / `uninstall` が通る |
 | 6 | PR #30 に結論コメント、`handoff.md` と `DESIGN.md` の配置記述を更新、CHANGELOG | 文書が実装と一致 |
 
 ## 6. 検証項目
+
+アンインストールを含む項目（再起動前の再インストール／アンインストール、削除後の確認、トレイの解除など）の前には、[October_Plan.md](October_Plan.md) の 4 節「アンインストールを含む確認の前に、ログを退避する」の手順でログを写す。
 
 - 更新時: 旧 TSF・旧ホストの状態の組み合わせ（旧 TSF が読み込まれている／いない × ホストが動いている／止まっている）ごとに更新し、再起動までの間に、文字入力が壊れない（Rakukan が使えない場合も、未確定の文字・確定に見える文字列・キーを失わない。#69 / #70 の経路を含む）、アプリが異常終了しない、設定・学習履歴が壊れないことを確かめる。再起動後に新版に揃い、変換できる。
 - `PROTOCOL_VERSION` と Hello の項目が異なるビルドで更新し、旧 TSF DLL → 新 host と新 TSF DLL → 旧 host の両方向で Hello が失敗する経路を確認する。該当プロセスの TSF ログに得られた理由が残り、異なる版の要求を適用しないことを確認する。版番号を受け取れずデコード失敗・切断となる場合も含める。
