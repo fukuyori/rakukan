@@ -196,3 +196,17 @@ v6 のリリース条件（`docs/handoff.md` 0 章「2026-10-10 の更新」）�
 - 試験 2（部分確定の残りの経路）: BlockSelecting 中の文字・Selecting の Enter の残りあり・番号キーの残りあり・RangeSelect の部分確定・テンキーの `-`。合格（引き継ぎはそれぞれ `InputChar` / `SeedPreedit{"こう"}` × 3 / `PushRaw(45)`）。
 - 試験 3（確定・取り消し・フォーカスの移動の直後）: `k` → Enter × 3（「k」が 3 個。`commit_full` 3 回）、`ka` → Esc × 3（何も残らない。`end_composition` 3 回）、`kanji` のまま別のアプリをクリック → 戻って `a` → Enter（メモ帳がフォーカスを失った時点で composition を終わらせ、表示中の「かんじ」を確定した。`OnCompositionTerminated current=true`。今までと同じアプリ側の動作。戻った後の入力は通常どおり）、テンキーの `/` `.` `3` `.` `1` `4` → Enter（「／．3.14」）。合格。
 - メモ帳では表示の要求がその場で実行されるため、`display_epoch` が古い要求を失効させる場面そのもの、と確定に失敗してやり直す経路は、起こせていない（未確認）。
+
+## 2026-10-22 の結果（続き: フェーズ 2 の完了条件の残りとフェーズ 1 の確認。開発ビルド `3a2bc78` + 未コミットの修正）
+
+`cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入し、メモ帳で行った。途中で見つかった不具合を直し、導入し直してから再試験した（直し方は Input_Pipeline_Plan.md の 7 節、2026-10-22 の実機試験の注記 (a)〜(d)）。
+
+- T2-1: 合格（07:15:26 UTC にホストを繋ぎ直し（`GenMismatch` の後）、「かんじあ」が残った）。
+- F-3: `sikan` と打つと「しかｎ」で残り、Shift+← が効かなかった（未変換のローマ字が残っている間は無視する。利用者の決定）。手順を `sikann` に改めて合格（「sikann」→「ｓｉｋａｎｎ」→「しかん」）。
+- F-11: 合格（「ｋａｎｊｉ」→「ｋａｎｊｉあ」→「ｋａｎｊｉａ」）。
+- 範囲の選択（R1）: 打っただけの「しかん」で Shift+← / Shift+→ が効かず、RangeSelect の Esc / Backspace で composition が空になっていた。直した後: Shift+→ で範囲を選べる、Esc / Backspace で「しかん」に戻る、「しかｎ」では矢印が無視される。合格。
+- 言語バーのメニュー（M1）: メモ帳でメニューが出ず、`TrackPopupMenu` がエラー 87 で失敗していた。直した後: メニューが出て、選択と取り消しができる（ログ `from_focus=true`、失敗の WARN なし）。合格。
+- 試験 8・12（ホストを起動できない状態で、未確定の「かんじ」の後に `ka` + Enter を素早く打つ）: 直す前は「かんじka」が入った後に改行が入った（UI のスレッドが止まっている間に押した Enter が、救済の後にアプリへ渡った）。直した後: 「かんじka」が確定し、改行は入らない。TSF のログで、`a`（`msg_time` が切り替えの 719 ms 前）と Enter（1500 ms 前）が `pressed_before=true` と判定され、Enter は `key pressed before direct input dropped` で捨てられた。7 s 後の Enter は改行になった。ホストの実行ファイルの名前を戻すと `host is back; direct input ended` で戻り、`a` で「あ」が出た。合格。
+- フェーズ 1 の 2.0（October_Plan.md）: `log_level = "trace"` で起動し直したホストの `rakukan-engine-dll.log`（25,468 行。LLM の変換を含む）に `tokenizers::` の行は 0 件、rakukan の TRACE は 9,119 件。合格。
+- フェーズ 1 の 2.1（#71）: ユーザーの環境変数 `RUST_LOG=info,rakukan_engine_rpc=debug` でサインインし直し、メモ帳で「今日はいい天気」を確定した後、`asita` を未確定のまま別の窓をクリックした。ホストのログに `change ResetAll seq=37 result=applied … committed_empty before=false after=true`（期待と今の Owner・世代が一致）。取り消して閉じたときも `result=applied … before=true after=true`。合格。試験の後に `RUST_LOG` を消した。
+- 観察（調べていない）: ホストを起動できない状態で、最初のキーの待ちが 3.6 s になったことがある（`Transport` → `HostMissing` → `Suppressed`）。

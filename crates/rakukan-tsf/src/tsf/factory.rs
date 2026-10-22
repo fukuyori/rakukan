@@ -57,8 +57,8 @@ use windows::{
             },
             WindowsAndMessaging::{
                 AppendMenuW, CreatePopupMenu, DestroyMenu, GA_ROOT, GetAncestor,
-                GetForegroundWindow, HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_RETURNCMD,
-                TPM_RIGHTBUTTON, TrackPopupMenu,
+                GetForegroundWindow, HICON, MF_SEPARATOR, TPM_LEFTALIGN, TPM_NONOTIFY,
+                TPM_RETURNCMD, TPM_RIGHTBUTTON, TrackPopupMenu,
             },
         },
     },
@@ -198,12 +198,21 @@ fn show_langbar_popup_menu(
         // 言語バーのクリックがここまで届いたか、どの座標・所有ウィンドウで
         // メニューを出そうとしたかを残す（DPI 変更後にメニューが出なくなる
         // 報告の切り分け用。2026-09-06: 150% へ変更後にメニューが出なくなった）。
-        let owner = GetForegroundWindow();
+        // 所有ウィンドウは呼んだスレッドのフォーカスのウィンドウ（mozc・CorvusSKK と同じ）。
+        // 前面のウィンドウは別のスレッドのことがあり、メモ帳では TrackPopupMenu が
+        // last_error=87 で失敗した（2026-10-22）。フォーカスが無いときだけ前面のウィンドウ。
+        let focus = windows::Win32::UI::Input::KeyboardAndMouse::GetFocus();
+        let owner = if focus.0.is_null() {
+            GetForegroundWindow()
+        } else {
+            focus
+        };
         tracing::info!(
-            "langbar OnClick: pt=({}, {}) owner_hwnd={:#x} mode={:?}",
+            "langbar OnClick: pt=({}, {}) owner_hwnd={:#x} from_focus={} mode={:?}",
             pt.x,
             pt.y,
             owner.0 as usize,
+            !focus.0.is_null(),
             current_mode
         );
 
@@ -249,10 +258,12 @@ fn show_langbar_popup_menu(
 
         // TPM_RETURNCMD 指定時はキャンセルも失敗も戻り値 0 なので、直前に
         // last error を 0 にしておき、0 が返ったときに GetLastError で区別する。
+        // TPM_NONOTIFY: 所有ウィンドウ（アプリのウィンドウ）へメニューの通知を送らない
+        // （送るとアプリがメニューの状態を変えることがある。mozc と同じ）。
         SetLastError(WIN32_ERROR(0));
         let cmd = TrackPopupMenu(
             menu,
-            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
+            TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
             pt.x,
             pt.y,
             0,
@@ -261,6 +272,23 @@ fn show_langbar_popup_menu(
         );
         let last_error = GetLastError();
         let _ = DestroyMenu(menu);
+        if cmd.0 == 0 && last_error.0 != 0 {
+            // メニューを出せなかった: 所有ウィンドウと呼んだスレッドの関係を残す（メモ帳で
+            // last_error=87 になる件の切り分け。2026-10-22）
+            use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+            let mut owner_pid = 0u32;
+            let owner_tid = GetWindowThreadProcessId(owner, Some(&mut owner_pid));
+            tracing::warn!(
+                "langbar menu: TrackPopupMenu failed last_error={} owner_hwnd={:#x} is_window={} owner_tid={} owner_pid={} caller_tid={} caller_pid={}",
+                last_error.0,
+                owner.0 as usize,
+                IsWindow(owner).as_bool(),
+                owner_tid,
+                owner_pid,
+                windows::Win32::System::Threading::GetCurrentThreadId(),
+                std::process::id()
+            );
+        }
 
         if cmd.0 != 0 {
             tracing::info!("langbar menu: selected cmd={}", cmd.0);
@@ -763,27 +791,26 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             let Some(action) = key_resolve(resolved, vk) else {
                 return Ok(FALSE);
             };
-            // 保留した文字がある間の文字キーは、IME のオン・オフにかかわらず食べる（OnKeyDown で
-            // 積む。入力処理の見直しの段 6）
-            if crate::tsf::key_queue::holds_typed_char(&action) {
-                return Ok(TRUE);
+            // 保留した文字・IME オフ・直接入力の判定（OnKeyDown と同じ規則: `entry_gate`）
+            let ime_on = crate::engine::state::ime_mode_get_atomic().is_on();
+            let fallback = crate::tsf::key_queue::direct_fallback();
+            match entry_gate(
+                &action,
+                crate::tsf::key_queue::holds_typed_char(&action),
+                ime_on,
+                fallback,
+                fallback && crate::tsf::key_queue::pressed_before_direct_input(vk),
+            ) {
+                EntryGate::HoldChar | EntryGate::Drop => return Ok(TRUE),
+                EntryGate::Pass => return Ok(FALSE),
+                EntryGate::Continue => {}
             }
             // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
             // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
             // その場でアプリへ渡す
-            if crate::engine::state::ime_mode_get_atomic().is_on() {
-                // 回復できない場合の処置の後の直接入力: IME のモードキーだけを食べる
-                if crate::tsf::key_queue::direct_fallback() {
-                    return Ok(if is_ime_mode_action(&action) {
-                        TRUE
-                    } else {
-                        FALSE
-                    });
-                }
-                if crate::tsf::key_queue::should_hold() {
-                    let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
-                    return Ok(if eat { TRUE } else { FALSE });
-                }
+            if ime_on && crate::tsf::key_queue::should_hold() {
+                let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
+                return Ok(if eat { TRUE } else { FALSE });
             }
 
             // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
@@ -869,6 +896,12 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                 .try_borrow()
                 .ok()
                 .and_then(|g| g.keymap.resolve_action(vk));
+            // 数字キーの規則に従うキーか（保留して再生するときに、候補を選んでいれば候補番号に
+            // 解釈し直す。設計書 6 節の試験 5）。今の修飾キーの状態で、届いた時点に決める
+            let digit_rule = self
+                .inner
+                .try_borrow()
+                .is_ok_and(|g| g.keymap.follows_digit_rule(vk));
             // keymap を借用できない・解決できない場合は、OnTestKeyDown と同じく重要キーの
             // fallback を使う。Test が食べると判断した Enter などを、KeyDown で
             // unmapped としてアプリへ渡さない（入力処理の見直しの段 2）。
@@ -953,25 +986,31 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             // 追い越さない。入力処理の見直しの段 6）。再生で IME がオフなら、今のキーはアプリへ渡す
             let hold_char = crate::tsf::key_queue::holds_typed_char(&action);
 
-            // ── IME オフガード（最終防衛線）───────────────────────────────────
-            // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
-            // アトミックなのでロック競合なし。
-            if !hold_char
-                && keydown_ime_off_ignores(
-                    &action,
-                    crate::engine::state::ime_mode_get_atomic().is_on(),
-                )
-            {
-                diag::event(DiagEvent::KeyIgnored {
-                    vk,
-                    reason: "ime_off",
-                });
-                return Ok(FALSE);
-            }
-
-            // 回復できない場合の処置の後の直接入力: IME のモードキー以外はアプリへ渡す
-            if crate::tsf::key_queue::direct_fallback() && !is_ime_mode_action(&action) {
-                return Ok(FALSE);
+            // IME オフガード（最終防衛線。OnTestKeyDown が FALSE を返してもターミナル等が
+            // OnKeyDown を直接呼ぶ場合がある）と、回復できない場合の処置の後の直接入力
+            // （IME のモードキー以外はアプリへ渡す）。OnTestKeyDown と同じ規則（`entry_gate`）
+            let ime_on = crate::engine::state::ime_mode_get_atomic().is_on();
+            let fallback = crate::tsf::key_queue::direct_fallback();
+            let pressed_before =
+                fallback && crate::tsf::key_queue::pressed_before_direct_input(vk);
+            crate::tsf::key_queue::forget_pressed_before();
+            match entry_gate(&action, hold_char, ime_on, fallback, pressed_before) {
+                EntryGate::Pass => {
+                    if !ime_on {
+                        diag::event(DiagEvent::KeyIgnored {
+                            vk,
+                            reason: "ime_off",
+                        });
+                    }
+                    return Ok(FALSE);
+                }
+                EntryGate::Drop => {
+                    tracing::warn!(
+                        "key_queue: key pressed before direct input dropped action={action:?}"
+                    );
+                    return Ok(TRUE);
+                }
+                EntryGate::HoldChar | EntryGate::Continue => {}
             }
 
             // 確定の結果待ちの間に届いたキーは保留し、結果の後処理の後で届いた順に実行する
@@ -995,6 +1034,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                         sink: sink.clone(),
                         dm,
                         at: std::time::Instant::now(),
+                        digit_rule,
                     }
                 },
             );
@@ -1044,6 +1084,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                         sink: sink.clone(),
                         dm,
                         at: std::time::Instant::now(),
+                        digit_rule,
                     },
                 )
             };
@@ -1067,6 +1108,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                         sink: sink_resume,
                         dm,
                         at: std::time::Instant::now(),
+                        digit_rule,
                     },
                 );
             }
@@ -1310,6 +1352,7 @@ impl TextServiceFactory_Impl {
     /// 無いキーは実行せず `None`。IME がオフになっていたキー・IME が使わなかったキーは
     /// `Some(false)`（今のキーならアプリへ渡す。前に保留したキーの文字は、`key_queue` が
     /// 届いた文書へ入れる）。
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn replay_key(
         &self,
         action: UserAction,
@@ -1318,6 +1361,7 @@ impl TextServiceFactory_Impl {
         tid: u32,
         sink: ITfCompositionSink,
         dm: usize,
+        digit_rule: bool,
     ) -> Option<bool> {
         use windows::core::Interface;
         let focused = self
@@ -1348,6 +1392,17 @@ impl TextServiceFactory_Impl {
             });
             return Some(false);
         }
+        // 数字キーの規則に従ったキーは、再生の時点で候補を選んでいるかで解釈し直す（設計書
+        // 6 節の試験 5）
+        let action = if digit_rule {
+            crate::engine::keymap::reresolve_digit_for_replay(
+                action,
+                vk,
+                crate::engine::state::session_is_selecting_fast(),
+            )
+        } else {
+            action
+        };
         let result = self.handle_action(action.clone(), ctx, tid, sink);
         match &result {
             Ok(ate) => diag::event(DiagEvent::KeyHandled {
@@ -1471,6 +1526,45 @@ fn log_key_diag(
 thread_local! {
     /// 直前の OnTestKeyDown の判定（仮想キーと、食べるか）。OnKeyDown が取り出す。
     static TEST_EAT: std::cell::Cell<Option<(u16, bool)>> = const { std::cell::Cell::new(None) };
+}
+
+/// キーの入口の判定（キーの解決の後。OnTestKeyDown と OnKeyDown で同じ規則。入力処理の
+/// 見直しの設計書 6 節の試験 1）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryGate {
+    /// 保留した文字がある間の文字キー: 食べて保留する（IME のオン・オフ・直接入力にかかわらず。
+    /// まだ入っていない文字を追い越さない）。
+    HoldChar,
+    /// 処理せずアプリへ渡す（IME オフ、または直接入力の間の、モードキー以外）。
+    Pass,
+    /// 食べて捨てる（直接入力に切り替わる前に押された、文字以外のキー。Enter・Backspace・
+    /// モードキーなど。救済で捨てるキーと同じ扱い。表の 12）。
+    Drop,
+    /// 次の判定へ進む（保留・食べる判定）。
+    Continue,
+}
+
+/// `pressed_before_fallback` は、直接入力の間に届いたキーが、切り替わる前（救済で UI の
+/// スレッドが止まっている間）に押されたか（`key_queue::pressed_before_direct_input`）。
+fn entry_gate(
+    action: &UserAction,
+    holds_char: bool,
+    ime_on: bool,
+    direct_fallback: bool,
+    pressed_before_fallback: bool,
+) -> EntryGate {
+    if holds_char {
+        EntryGate::HoldChar
+    } else if direct_fallback
+        && pressed_before_fallback
+        && crate::tsf::key_queue::typed_text(action).is_none()
+    {
+        EntryGate::Drop
+    } else if (!ime_on || direct_fallback) && !is_ime_mode_action(action) {
+        EntryGate::Pass
+    } else {
+        EntryGate::Continue
+    }
 }
 
 /// `OnKeyDown` の IME オフガード: このキーを処理せずアプリへ渡すか。
@@ -1937,7 +2031,8 @@ impl ITfDisplayAttributeProvider_Impl for TextServiceFactory_Impl {
 #[cfg(test)]
 mod key_should_eat_tests {
     use super::{
-        key_resolve, key_should_eat, keydown_ime_off_ignores, keydown_outcome, test_key_eat,
+        EntryGate, entry_gate, key_resolve, key_should_eat, keydown_ime_off_ignores,
+        keydown_outcome, test_key_eat,
     };
     use crate::engine::user_action::UserAction;
     use std::cell::RefCell;
@@ -1989,6 +2084,78 @@ mod key_should_eat_tests {
             Tab | Unknown => (false, false),
             _ => (false, true),
         }
+    }
+
+    #[test]
+    fn the_entry_gate_is_the_same_table_for_test_and_keydown() {
+        // 入口の判定の表（設計書 6 節の試験 1）。OnTestKeyDown は HoldChar で食べ、Pass で
+        // アプリへ渡す。OnKeyDown は Pass でアプリへ渡し、HoldChar は保留の列へ進む（食べる）。
+        // 両方が同じ関数を使うので、Test が食べたキーを KeyDown がアプリへ渡すことは無い
+        let text = UserAction::Input('a');
+        let enter = UserAction::CommitRaw;
+        let mode = UserAction::ImeToggle;
+        let cases = [
+            // (キー, 保留した文字, IME オン, 直接入力, 期待)
+            (&text, false, true, false, EntryGate::Continue),
+            (&enter, false, true, false, EntryGate::Continue),
+            (&mode, false, true, false, EntryGate::Continue),
+            // IME オフ: モードキー以外はアプリへ
+            (&text, false, false, false, EntryGate::Pass),
+            (&enter, false, false, false, EntryGate::Pass),
+            (&mode, false, false, false, EntryGate::Continue),
+            // 直接入力の間: モードキー以外はアプリへ
+            (&text, false, true, true, EntryGate::Pass),
+            (&enter, false, true, true, EntryGate::Pass),
+            (&mode, false, true, true, EntryGate::Continue),
+            (&text, false, false, true, EntryGate::Pass),
+            // 保留した文字がある間の文字キー: IME オフ・直接入力でも保留する
+            (&text, true, true, false, EntryGate::HoldChar),
+            (&text, true, false, false, EntryGate::HoldChar),
+            (&text, true, true, true, EntryGate::HoldChar),
+            (&text, true, false, true, EntryGate::HoldChar),
+        ];
+        for (action, holds, ime_on, fallback, expected) in cases {
+            assert_eq!(
+                entry_gate(action, holds, ime_on, fallback, false),
+                expected,
+                "{action:?} holds={holds} ime_on={ime_on} fallback={fallback}"
+            );
+            // IME オフのガード（今までの関数）と、保留した文字が無いときは一致する
+            if !holds && !fallback {
+                assert_eq!(
+                    expected == EntryGate::Pass,
+                    keydown_ime_off_ignores(action, ime_on)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn keys_pressed_before_direct_input_drop_all_but_characters() {
+        // 救済で止まっている間に押され、直接入力に切り替わった後に届いたキー: 文字はアプリへ
+        // （打った文字のまま入る）、Enter・Backspace・モードキーは捨てる（表の 12）
+        let cases = [
+            (UserAction::Input('a'), EntryGate::Pass),
+            (UserAction::FullWidthSpace, EntryGate::Pass),
+            (UserAction::CommitRaw, EntryGate::Drop),
+            (UserAction::Backspace, EntryGate::Drop),
+            (UserAction::ImeToggle, EntryGate::Drop),
+        ];
+        for (action, expected) in cases {
+            assert_eq!(entry_gate(&action, false, true, true, true), expected, "{action:?}");
+            // 切り替えの後に押したキーは今までどおり
+            assert_ne!(entry_gate(&action, false, true, true, false), EntryGate::Drop);
+        }
+        // 直接入力でなければ見ない
+        assert_eq!(
+            entry_gate(&UserAction::CommitRaw, false, true, false, true),
+            EntryGate::Continue
+        );
+        // 保留した文字がある間の文字キーは保留が先
+        assert_eq!(
+            entry_gate(&UserAction::Input('a'), true, true, true, true),
+            EntryGate::HoldChar
+        );
     }
 
     #[test]

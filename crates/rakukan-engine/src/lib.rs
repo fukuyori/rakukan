@@ -3127,6 +3127,69 @@ mod seed_tests {
     }
 
     #[test]
+    fn a_replayed_typing_keeps_the_typed_spelling_for_the_f_keys() {
+        // F-1・F-2: ホストを止めた後の Exact の流し直しは、打鍵をそのまま入れ直すので、
+        // 続けて打った文字も含めて打鍵ログは打ったとおり（F9 / F10 は打鍵の綴りで変換する）
+        let replayed = |before: &str, after: &str| {
+            let mut first = engine();
+            typed(&mut first, before);
+            // 新しいホストで journal（打鍵）を流し直し、続けて打つ
+            let mut e = engine();
+            typed(&mut e, before);
+            assert_eq!(e.hiragana_text(), first.hiragana_text());
+            typed(&mut e, after);
+            (e.hiragana_text().to_string(), e.romaji_log_str())
+        };
+        assert_eq!(
+            replayed("kanji", "a"),
+            ("かんじあ".to_string(), "kanjia".to_string())
+        );
+        assert_eq!(
+            replayed("kanjik", "a"),
+            ("かんじか".to_string(), "kanjika".to_string())
+        );
+    }
+
+    /// 試験 17（流し直しの費用）: 長い読みの流し直し（打鍵の再入力・種）の時間を測る。
+    /// 時間は環境で変わるので、通常の試験では走らせない。
+    /// `cargo test -p rakukan-engine --lib -- --ignored --nocapture replay_time` で測る。
+    #[test]
+    #[ignore]
+    fn replay_time_grows_with_the_journal_length() {
+        for n in [250usize, 500, 1000, 2000] {
+            let keys = "ka".repeat(n);
+            let started = std::time::Instant::now();
+            let mut e = engine();
+            typed(&mut e, &keys);
+            let typed_time = started.elapsed();
+            assert_eq!(e.hiragana_text().chars().count(), n);
+            let reading = e.hiragana_text().to_string();
+            let started = std::time::Instant::now();
+            let mut s = engine();
+            s.seed_preedit(&reading);
+            let seed_time = started.elapsed();
+            assert_eq!(s.hiragana_text(), reading);
+            println!(
+                "replay n={n} keys={} typed={:?} ({:.2} us/key) seed={:?}",
+                keys.len(),
+                typed_time,
+                typed_time.as_secs_f64() * 1e6 / keys.len() as f64,
+                seed_time
+            );
+        }
+    }
+
+    #[test]
+    fn a_partial_commit_remainder_is_spelled_from_its_seed() {
+        // F-7: 部分確定の残り「いいてんき」は種で入れる（5c-3 の引き継ぎ）ので、F10 は種の綴り
+        let mut e = engine();
+        e.seed_preedit("いいてんき");
+        assert_eq!(e.hiragana_text(), "いいてんき");
+        assert_eq!(e.romaji_log_str(), "iitenki");
+        assert_eq!(e.hiragana_from_romaji_log(), "いいてんき");
+    }
+
+    #[test]
     fn seed_spellings_follow_the_preferred_table_sokuon_and_hatsuon() {
         let spelled = |text: &str| {
             let mut e = engine();

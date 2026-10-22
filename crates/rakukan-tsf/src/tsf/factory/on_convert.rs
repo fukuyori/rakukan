@@ -281,6 +281,17 @@ fn show_selection(
     Ok(true)
 }
 
+/// RangeSelect から Esc / Backspace で戻るときの表示。ライブ変換から入ったときは元の
+/// preview、打った途中・候補選択中から入ったとき（preview が空）は全体の読みに戻す。
+/// 空のまま戻すと未確定の文字列が消える（2026-10-22 の実機で確認）。
+fn range_select_return_display(full_reading: &str, original_preview: &str) -> String {
+    if original_preview.is_empty() {
+        full_reading.to_string()
+    } else {
+        original_preview.to_string()
+    }
+}
+
 /// Selecting から読みに戻すとき（Backspace / Esc）の表示を決め、必要なら engine に書き戻す。
 ///
 /// Space 前の engine 状態（読み + 未確定ローマ字）がそのまま残っていれば engine の表示
@@ -2071,7 +2082,7 @@ impl super::TextServiceFactory_Impl {
                 } = &*sess
             {
                 let reading = full_reading.clone();
-                let preview = original_preview.clone();
+                let preview = range_select_return_display(full_reading, original_preview);
                 sess.set_live_conv(reading.clone(), preview.clone(), reading);
                 drop(sess);
                 candidate_window::hide();
@@ -2185,7 +2196,7 @@ impl super::TextServiceFactory_Impl {
                 } = &*sess
             {
                 let reading = full_reading.clone();
-                let preview = original_preview.clone();
+                let preview = range_select_return_display(full_reading, original_preview);
                 sess.set_live_conv(reading.clone(), preview.clone(), reading);
                 drop(sess);
                 candidate_window::hide();
@@ -2349,7 +2360,15 @@ fn catch_up_live_preview(
 
 #[cfg(test)]
 mod tests {
-    use super::is_weak_merge;
+    use super::{is_weak_merge, range_select_return_display};
+
+    #[test]
+    fn leaving_a_range_select_without_a_preview_shows_the_full_reading() {
+        // ライブ変換から入ったときは元の preview
+        assert_eq!(range_select_return_display("しかん", "歯科ん"), "歯科ん");
+        // 打った途中・候補選択中から入ったとき（preview が空）は全体の読み
+        assert_eq!(range_select_return_display("しかん", ""), "しかん");
+    }
 
     fn v(items: &[&str]) -> Vec<String> {
         items.iter().map(|s| s.to_string()).collect()

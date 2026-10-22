@@ -1652,8 +1652,9 @@ pub fn note_tsf_thread_activated() {
     }
     if threads.len() > 1 {
         tracing::warn!(
-            "multiple threads have activated the TSF text service in this process: {:?}",
-            *threads
+            "multiple threads have activated the TSF text service in this process: {:?} app={}",
+            *threads,
+            current_exe_name_lower()
         );
     }
 }
@@ -2987,8 +2988,9 @@ pub fn dispose_dm_resources(dm_ptr: usize) {
 
 /// このプロセスの exe 名（小文字）。`ime_off_apps` / `ime_on_apps` の照合用。
 ///
-/// TSF DLL はアプリのプロセス内で動くので、これが「今のアプリ」になる。
-fn current_exe_name_lower() -> &'static str {
+/// TSF DLL はアプリのプロセス内で動くので、これが「今のアプリ」になる。ログにも出す
+/// （どのアプリで起きたかを後から知るため）。
+pub(crate) fn current_exe_name_lower() -> &'static str {
     static NAME: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     NAME.get_or_init(|| {
         std::env::current_exe()

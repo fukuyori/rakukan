@@ -1995,6 +1995,105 @@ mod tests {
             assert!(state.generation.is_none(), "{label}");
         }
     }
+    /// 1 つのホスト（エンジンは 1 つ、所有者は 1 人）の簡単な模型（設計書 6 節の試験 13）。
+    /// TSF 側の送り方（`apply_via`・`restore_journal_via`・journal と照合点）は実物を通し、
+    /// ホスト側（照合・流し直し・所有権の移動）だけをこの模型で置き換える。実のホストの
+    /// 処理（台帳・保存した応答・エンジン）は確かめない。
+    /// 読みは、所有者の打った文字を並べたもの。所有者でない・世代が違う要求は拒否する。
+    /// `lose_next` なら、次の要求を適用してから応答を失う（結果不明）。
+    struct HostSim {
+        owner: RefCell<Option<Owner>>,
+        reading: RefCell<String>,
+        lose_next: std::cell::Cell<bool>,
+    }
+    impl HostSim {
+        fn new() -> Self {
+            Self {
+                owner: RefCell::new(None),
+                reading: RefCell::new(String::new()),
+                lose_next: std::cell::Cell::new(false),
+            }
+        }
+        fn apply(&self, request: &ChangeRequest) {
+            if let ChangeRequest::PushChar(c) = request {
+                self.reading.borrow_mut().push(char::from_u32(*c).unwrap());
+            }
+        }
+        fn edit(&self) -> EditState {
+            reading(&self.reading.borrow(), "")
+        }
+    }
+    impl CompositionRpc for HostSim {
+        fn abandon_for(&self, _owner: Owner) -> bool {
+            false
+        }
+        fn change(
+            &self,
+            expect: Expect,
+            request: ChangeRequest,
+        ) -> Result<ChangeReply, rakukan_engine_rpc::ChangeError> {
+            if *self.owner.borrow() != Some(expect.owner) || expect.engine_gen != generation() {
+                return Ok(ChangeReply::Rejected(Reason::OwnerMismatch));
+            }
+            self.apply(&request);
+            if self.lose_next.replace(false) {
+                return Err(rakukan_engine_rpc::ChangeError::Transport(anyhow::anyhow!(
+                    "reply lost"
+                )));
+            }
+            Ok(ChangeReply::Changed(ChangeOutcome::Unit {
+                edit: self.edit(),
+            }))
+        }
+        fn restore_journal(
+            &self,
+            owner: Owner,
+            _pre_effects: Vec<SideEffect>,
+            journal: Vec<ChangeRequest>,
+            _checkpoint: Option<Checkpoint>,
+        ) -> Result<RestoreJournalReply, rakukan_engine_rpc::ChangeError> {
+            // reset_preedit の後に journal を流し直し、所有権を移す
+            self.reading.borrow_mut().clear();
+            for request in &journal {
+                self.apply(request);
+            }
+            *self.owner.borrow_mut() = Some(owner);
+            Ok(restored(Replay::Exact, self.edit()))
+        }
+    }
+    #[test]
+    fn two_compositions_typing_in_turn_keep_their_own_readings() {
+        // 試験 13（K2 交錯）: 2 つの composition（A・B）が 1 つのホストに交互に打つ。所有権が
+        // 移るたびに流し直し、応答を失った打鍵も含めて、各読みは打ったとおりで二重にならない
+        let host = HostSim::new();
+        let mut a = RemoteComposition::new();
+        let mut b = RemoteComposition::new();
+        let type_into = |state: &mut RemoteComposition, c: char| {
+            apply_via(&host, state, ChangeRequest::PushChar(c as u32), true)
+        };
+        type_into(&mut a, 'k').unwrap();
+        type_into(&mut a, 'a').unwrap();
+        assert_eq!(host.reading.borrow().as_str(), "ka");
+        // B が打つ: 所有権が B に移り、ホストの読みは B のもの
+        type_into(&mut b, 'x').unwrap();
+        assert_eq!(host.reading.borrow().as_str(), "x");
+        // A に戻る: 拒否された後、A の journal を流し直して 1 回だけ送り直す
+        type_into(&mut a, 'n').unwrap();
+        assert_eq!(host.reading.borrow().as_str(), "kan");
+        // B に戻って `y`: 所有権を取り直して流し直した後、`y` は適用されたが応答を失う（結果不明）
+        host.lose_next.set(true);
+        assert!(type_into(&mut b, 'y').is_err());
+        assert_eq!(host.reading.borrow().as_str(), "xy");
+        // B の次のキー: 確かめていない `y` を含む journal を流し直し、`z` を 1 回だけ足す
+        type_into(&mut b, 'z').unwrap();
+        assert_eq!(host.reading.borrow().as_str(), "xyz");
+        // A に戻る: A の読みは A の打鍵だけ
+        type_into(&mut a, 'j').unwrap();
+        assert_eq!(host.reading.borrow().as_str(), "kanj");
+        // 手元の照合点も各自の打鍵どおり
+        assert_eq!(a.edit, reading("kanj", ""));
+        assert_eq!(b.edit, reading("xyz", ""));
+    }
     #[test]
     fn a_restore_without_pending_effects_sends_none() {
         let fake = rpc(vec![], vec![Ok(restored(Replay::Exact, reading("か", "")))]);

@@ -436,6 +436,33 @@ impl Keymap {
         self.resolve_action_with(vk, &Win32KeyState)
     }
 
+    /// このキーが、今の修飾キーの状態で「数字キーの規則（`resolve_action_with` の ②）」に
+    /// 従うか: Ctrl・Alt なしの 1–9 / テンキー 1–9（Shift は問わない）で、キーマップ（①）にも重要キー（①.5）にも
+    /// 当たらない。候補を選んでいれば候補番号、でなければ文字になるキー。保留したキーを
+    /// 再生するときに、再生の時点の状態で解釈し直してよいかの判定に使う（届いた時点で決める）。
+    pub fn follows_digit_rule(&self, vk: u16) -> bool {
+        self.follows_digit_rule_with(vk, &Win32KeyState)
+    }
+
+    pub(crate) fn follows_digit_rule_with(&self, vk: u16, keys: &impl KeyStateSource) -> bool {
+        let mods = keys.modifiers();
+        let space_down = keys.space_down();
+        let (vk, ctrl, shift, alt) = normalize_key_event(
+            vk,
+            mods.ctrl.is_pressed(),
+            mods.shift.is_pressed(),
+            mods.alt.is_pressed(),
+            space_down,
+        );
+        let mods = mods.masked(ctrl, shift, alt);
+        // ② と同じく Shift は見ない
+        !ctrl
+            && !alt
+            && candidate_digit(vk).is_some()
+            && self.resolve_mods(vk, mods).is_none()
+            && essential_fallback_action(vk).is_none()
+    }
+
     /// [`resolve_action`](Self::resolve_action) の本体。キーの状態の読み取りを `keys` から行う。
     ///
     /// 読み取りの順序と有無は、`Win32KeyState` で呼んだときの Win32 API の呼び出しと同じ。
@@ -471,15 +498,12 @@ impl Keymap {
 
         // ② 数字キー（修飾なし）→ 候補選択モード中のみ候補番号選択
         //    選択モード外では ToUnicode に落として通常文字として入力する
-        if !ctrl && !alt && keys.selecting() {
-            let n = match vk {
-                0x31..=0x39 => Some(vk - 0x30), // 1–9
-                0x61..=0x69 => Some(vk - 0x60), // テンキー 1–9
-                _ => None,
-            };
-            if let Some(n) = n {
-                return Some(UserAction::CandidateSelect(n as u8));
-            }
+        if !ctrl
+            && !alt
+            && keys.selecting()
+            && let Some(n) = candidate_digit(vk)
+        {
+            return Some(UserAction::CandidateSelect(n));
         }
 
         // ② テンキー記号 → ローマ字変換を経由せず直接入力（InputRaw）
@@ -1021,6 +1045,35 @@ pub(crate) fn normalize_key_event(
 /// `OnTestKeyDown` の keymap 取得失敗時（RefCell 競合）の両方で同じ集合を使う。
 /// 半角/全角（`VK_KANJI`）が入っているのは、keymap が壊れていても IME の ON/OFF だけは
 /// できるようにするため。
+/// 候補番号として扱う数字キー（1–9、テンキー 1–9）の番号。
+fn candidate_digit(vk: u16) -> Option<u8> {
+    match vk {
+        0x31..=0x39 => Some((vk - 0x30) as u8), // 1–9
+        0x61..=0x69 => Some((vk - 0x60) as u8), // テンキー 1–9
+        _ => None,
+    }
+}
+
+/// 保留したキーを再生するときに、数字キーを再生の時点の状態で解釈し直す（入力処理の見直しの
+/// 設計書 6 節の試験 5）。キーは届いた時点で解決して列に積むので、保留中に Space → `1` と
+/// 打つと、`1` は候補を選ぶ前の状態で文字（`Input('1')`）になっている。再生の時点で候補を
+/// 選んでいれば、② と同じく候補番号にする。呼び出し側は、届いた時点で数字キーの規則に従った
+/// キー（[`Keymap::follows_digit_rule`]。Ctrl・Alt 付き、キーマップで割り当てた数字は除く）だけに
+/// 使う。逆向き（届いた時点は候補番号で、再生の時点では候補を選んでいない）は直さない（文字に
+/// 戻すには押した時点の文字が要るため。設計書 7 節の制限）。
+pub(crate) fn reresolve_digit_for_replay(
+    action: UserAction,
+    vk: u16,
+    selecting: bool,
+) -> UserAction {
+    match (candidate_digit(vk), action) {
+        (Some(n), UserAction::Input(_) | UserAction::InputRaw(_)) if selecting => {
+            UserAction::CandidateSelect(n)
+        }
+        (_, other) => other,
+    }
+}
+
 pub(crate) fn essential_fallback_action(vk: u16) -> Option<UserAction> {
     match vk {
         0x0D => Some(UserAction::CommitRaw), // VK_RETURN
@@ -1125,6 +1178,77 @@ mod resolve_order_tests {
             Some(UserAction::ImeOff)
         );
         assert_eq!(keys.calls(), ["modifiers", "space_down"]);
+    }
+
+    #[test]
+    fn only_unmodified_unmapped_digits_follow_the_digit_rule() {
+        let keys = FakeKeys::new();
+        assert!(empty_keymap().follows_digit_rule_with(0x31, &keys));
+        assert!(empty_keymap().follows_digit_rule_with(0x69, &keys)); // テンキー 9
+        assert!(!empty_keymap().follows_digit_rule_with(0x30, &keys)); // 0 は候補番号にならない
+        assert!(!empty_keymap().follows_digit_rule_with(0x41, &keys)); // A
+        // Ctrl・Alt 付きは規則に従わない。Shift は ② と同じく問わない
+        let mut keys = FakeKeys::new();
+        keys.mods = ctrl();
+        assert!(!empty_keymap().follows_digit_rule_with(0x31, &keys));
+        let mut keys = FakeKeys::new();
+        keys.mods = Modifiers::from_bools(false, true, false);
+        assert!(empty_keymap().follows_digit_rule_with(0x31, &keys));
+        // キーマップで割り当てた数字キーは規則に従わない（今の設定のキー名では数字を書けない
+        // ので、表に直接入れる）
+        let mut map = empty_keymap();
+        map.table.insert(
+            KeySpec {
+                vk: 0x31,
+                ctrl: ModReq::Off,
+                shift: ModReq::Off,
+                alt: ModReq::Off,
+            },
+            KeyAction::CommitRaw,
+        );
+        assert!(!map.follows_digit_rule_with(0x31, &FakeKeys::new()));
+    }
+
+    #[test]
+    fn a_held_digit_is_resolved_again_for_the_state_at_replay() {
+        // 保留中に Space → `1`: 届いた時点は文字、再生の時点で候補を選んでいれば候補番号
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('1'), 0x31, true),
+            UserAction::CandidateSelect(1)
+        );
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('3'), 0x63, true),
+            UserAction::CandidateSelect(3)
+        );
+        // ② は Shift を見ない（Shift+1 の `!` も、選んでいれば候補番号）。キー配列が数字以外を
+        // 出しても同じ（AZERTY の 1 = `&`）
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('!'), 0x31, true),
+            UserAction::CandidateSelect(1)
+        );
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('&'), 0x31, true),
+            UserAction::CandidateSelect(1)
+        );
+        // 再生の時点で選んでいなければそのまま
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('1'), 0x31, false),
+            UserAction::Input('1')
+        );
+        // 逆向き（届いた時点は候補番号）は直さない（設計書 7 節の制限）
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::CandidateSelect(2), 0x32, false),
+            UserAction::CandidateSelect(2)
+        );
+        // 数字キーでない・0 はそのまま
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('a'), 0x41, true),
+            UserAction::Input('a')
+        );
+        assert_eq!(
+            reresolve_digit_for_replay(UserAction::Input('0'), 0x30, true),
+            UserAction::Input('0')
+        );
     }
 
     #[test]

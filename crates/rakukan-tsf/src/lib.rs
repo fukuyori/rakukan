@@ -589,9 +589,10 @@ fn init_logging() {
             tracing::warn!("tracing subscriber was not installed: {e}");
         }
         tracing::info!(
-            "rakukan TSF DLL loaded  build={} log={}",
+            "rakukan TSF DLL loaded  build={} log={} app={}",
             option_env!("RAKUKAN_BUILD_TIME").unwrap_or("unknown"),
-            log_stem
+            log_stem,
+            crate::engine::state::current_exe_name_lower()
         );
         match PIN_RESULT.get() {
             Some(Ok(())) => tracing::debug!("dll pinned for the life of the process"),

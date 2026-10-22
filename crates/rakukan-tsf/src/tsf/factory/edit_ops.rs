@@ -35,6 +35,25 @@ fn numeric_separator_after_digit(reading: &str, c: char) -> Option<char> {
     }
 }
 
+/// 打っている途中（`Preedit`、またはライブ変換の前で状態が `Idle` のまま）の未確定の文字列
+/// から、Shift+← / Shift+→ の範囲選択を始めてよいか。始めてよいときは読みを返す。
+/// ローマ字の未変換が残っているとき（表示「しかｎ」・読み「しか」）は始めない（キーは消費して
+/// 無視する。2026-10-22 の利用者の決定）。`min_chars` は範囲選択に要る読みの文字数。
+fn reading_for_range_start(
+    sess: &SessionState,
+    display: &str,
+    reading: &str,
+    min_chars: usize,
+) -> Option<String> {
+    if !matches!(sess, SessionState::Preedit { .. } | SessionState::Idle) {
+        return None;
+    }
+    if display != reading || reading.chars().count() < min_chars {
+        return None;
+    }
+    Some(reading.to_string())
+}
+
 /// 変換中なら、エンジンの読みを composition 全体の読みに戻す（F6〜F10 の前。範囲変換の
 /// 選択部分などの一時的な値のまま変換すると、その部分だけが変換される。入力処理の見直しの
 /// 段 7、設計書 4.8）。打鍵ログは全体を保っているので、F9 / F10 は全体の打鍵で変換する。
@@ -813,11 +832,12 @@ impl super::TextServiceFactory_Impl {
             return Ok(true);
         }
 
-        // Preedit → RangeSelect（末尾から 1 文字除いて選択）
-        if matches!(&*sess, SessionState::Preedit { .. }) {
-            let reading = engine.hiragana_text()?.to_string();
-            let char_count = reading.chars().count();
-            if char_count > 1 {
+        // Preedit / ライブ変換の前の Idle → RangeSelect（末尾から 1 文字除いて選択）
+        if matches!(&*sess, SessionState::Preedit { .. } | SessionState::Idle) {
+            let display = engine.preedit_display()?;
+            let reading = engine.hiragana_text()?;
+            if let Some(reading) = reading_for_range_start(&sess, &display, &reading, 2) {
+                let char_count = reading.chars().count();
                 sess.set_range_select(reading, char_count - 1, String::new());
                 let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
                 drop(sess);
@@ -956,10 +976,11 @@ impl super::TextServiceFactory_Impl {
             }
         }
 
-        // Preedit → RangeSelect（先頭 1 文字を選択して開始）
-        if matches!(&*sess, SessionState::Preedit { .. }) {
-            let reading = engine.hiragana_text()?.to_string();
-            if !reading.is_empty() {
+        // Preedit / ライブ変換の前の Idle → RangeSelect（先頭 1 文字を選択して開始）
+        if matches!(&*sess, SessionState::Preedit { .. } | SessionState::Idle) {
+            let display = engine.preedit_display()?;
+            let reading = engine.hiragana_text()?;
+            if let Some(reading) = reading_for_range_start(&sess, &display, &reading, 1) {
                 sess.set_range_select(reading, 1, String::new());
                 let (selected, unselected) = sess.range_select_parts().unwrap_or_default();
                 drop(sess);
@@ -972,5 +993,42 @@ impl super::TextServiceFactory_Impl {
         }
 
         Ok(!engine.preedit_is_empty()?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_range_starts_from_typed_kana_only_without_unconverted_romaji() {
+        let idle = SessionState::Idle;
+        let preedit = SessionState::Preedit {
+            text: "しかん".into(),
+        };
+        // ライブ変換の前（Idle）でも、打った途中（Preedit）でも、かなだけなら始める
+        assert_eq!(
+            reading_for_range_start(&idle, "しかん", "しかん", 2).as_deref(),
+            Some("しかん")
+        );
+        assert_eq!(
+            reading_for_range_start(&preedit, "しかん", "しかん", 2).as_deref(),
+            Some("しかん")
+        );
+        // ローマ字の未変換が残っていれば、どちらの状態でも始めない
+        assert_eq!(reading_for_range_start(&idle, "しかｎ", "しか", 1), None);
+        assert_eq!(reading_for_range_start(&preedit, "しかn", "しか", 1), None);
+        assert_eq!(reading_for_range_start(&idle, "しｋ", "し", 1), None);
+        // 文字数が足りなければ始めない（Shift+← は 2 文字、Shift+→ は 1 文字）
+        assert_eq!(reading_for_range_start(&preedit, "し", "し", 2), None);
+        assert_eq!(
+            reading_for_range_start(&preedit, "し", "し", 1).as_deref(),
+            Some("し")
+        );
+        assert_eq!(reading_for_range_start(&idle, "", "", 1), None);
+        // ほかの状態はこの判定の対象外
+        let mut range = SessionState::Idle;
+        range.set_range_select("しかん".into(), 1, String::new());
+        assert_eq!(reading_for_range_start(&range, "しかん", "しかん", 1), None);
     }
 }

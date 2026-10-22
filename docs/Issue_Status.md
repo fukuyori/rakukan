@@ -1,6 +1,6 @@
 # 開いている Issue の状況
 
-2026-10-11 時点。GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合して更新した。
+2026-10-22 時点。GitHub の一覧（`gh issue list --state open`、33 件）と [handoff.md](handoff.md) の記録を照合して更新した。
 最新リリースは 0.12.0（2026-10-10、タグ `0.12.0` = main `c15fefe`）。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。作業計画は [September_Late_Plan.md](September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
@@ -10,9 +10,9 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#71](https://github.com/fukuyori/rakukan/issues/71) | フォーカス移動で `ResetAll` が送られず、LLM の文脈が消えない（PR #68 以降） | 2026-10-10 起票。原因と直し方（照合と制約を含む）を記録、Codex CLI のレビュー済み | 0.12.0 に入れるかは未決 |
-| [#69](https://github.com/fukuyori/rakukan/issues/69) | ホストとの通信失敗時に、打鍵や確定する文字列が失われる経路を見直す | 2026-10-09 起票。v6 の条件に入れない。T2-3 の表示の食い違い（2026-10-10）も資料 | 「キーをどこまで処理したか」の定義から設計 |
-| [#70](https://github.com/fukuyori/rakukan/issues/70) | エンジンの準備前・ロック競合中に打ったキーがアプリへ素通りする | 2026-10-09 起票。v6 の条件に入れない | #69 と合わせて設計 |
+| [#71](https://github.com/fukuyori/rakukan/issues/71) | フォーカス移動で `ResetAll` が送られず、LLM の文脈が消えない（PR #68 以降） | 2026-10-10 起票。フェーズ 1 として `eee267e` で実装（2026-10-21）。完了条件の実機の確認は 2026-10-22 に合格（[October_Plan.md](October_Plan.md) の 2.2 節）。0.12.0 には入っていない | リリースはフェーズ 2・3 と合わせるかを決める |
+| [#69](https://github.com/fukuyori/rakukan/issues/69) | ホストとの通信失敗時に、打鍵や確定する文字列が失われる経路を見直す | フェーズ 2 として #70 と合わせて設計（[Input_Pipeline_Plan.md](Input_Pipeline_Plan.md)）・実装（2026-10-21〜22、`b28a36e`〜`3a2bc78`。一覧は [October_Plan.md](October_Plan.md) の 3.1 節）。実装は終わったが、フェーズ 2 の完了条件に残りがあり、完了としていない。T2-1・T2-3・試験 8・12 は 2026-10-22 の実機試験で合格（そこで見つけた 4 件の修正は未コミット） | フェーズ 2 の完了条件の残り（3.1 節の表）。リリースはフェーズ 3 と同じ版 |
+| [#70](https://github.com/fukuyori/rakukan/issues/70) | エンジンの準備前・ロック競合中に打ったキーがアプリへ素通りする | #69 と同じ（保留キー・回復できない場合の処置・救済。実装は終わったが完了としていない。ホストを起動できないときの試験 G は 2026-10-22 に合格） | #69 と同じ。エンジンの未準備（再起動直後の打鍵）は実機で確認。ロック競合を起こす補助の試験は未実施 |
 | [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ |
 | [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる | 運用ログで `unknown dm` / `skipped save for dead dm` の有無と回帰を見てクローズ |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
@@ -35,6 +35,9 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#81](https://github.com/fukuyori/rakukan/issues/81) | 候補ウィンドウがダークテーマに対応していない | 2026-10-11 起票。色はライト用のみで固定。入力モード表示は `SystemUsesLightTheme` で判定している | 判定に使う値・判定の時期・配色・config での選択・高コントラストの扱いを決める |
 | [#82](https://github.com/fukuyori/rakukan/issues/82) | モデルの定義をエンジン埋め込みの `models.toml` から config.toml の `[models]` に移す（karukan #111 方式） | 2026-10-11 起票。今はモデルの追加に再ビルドが要り、一覧が `install.ps1`・設定アプリ・config のコメントに重複 | 既定の定義の置き場所、engine へ渡す形（ABI 変更）、`model_variant` との互換を決める。#49 と合わせて設計 |
 | [#83](https://github.com/fukuyori/rakukan/issues/83) | Space 変換のビームサーチで、ステップごとに全系列を計算し直している（KV キャッシュの再利用） | 2026-10-11 起票。karukan `8d132a9`（#95）を参考に記録。効果は未計測 | まず所要時間を計測。次に上位 k 件の部分選択、その後に KV 再利用（旧方式へ戻せる設定、新旧比較の試験、3 variant での確認） |
+| [#84](https://github.com/fukuyori/rakukan/issues/84) | 単漢字（mozc `single_kanji.tsv`）を候補に加え、表示順（または種類の切り替え）を決める | 2026-10-21 起票 | 10 月の計画には入っていない。扱いを決める |
+| [#85](https://github.com/fukuyori/rakukan/issues/85) | 試験の自動化の基盤（試験用のアプリ・台本の実行器・ホストの故障の口） | 2026-10-22 起票。今後の改修・開発の基盤として計画する。フェーズ 2 には入れない（利用者の判断） | 10 月の計画には入っていない。着手の時期を決める |
+| [#86](https://github.com/fukuyori/rakukan/issues/86) | 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される | 2026-10-22 起票。重要度は低（利用者の判断）。メモ帳・Explorer は窓ごとに別のスレッドで Activate する。メモ帳は窓を移ると composition を終わらせるので起きない。起きるアプリは見つかっていない | ログのアプリ名（`app=`）で、当てはまるアプリを調べる。直し方は起きるアプリが見つかってから |
 | [#29](https://github.com/fukuyori/rakukan/issues/29) | ユーザー辞書エントリに `priority = "low"` を追加する | 保留 | 要望があれば再検討 |
 
 ## 3. 別計画で扱う

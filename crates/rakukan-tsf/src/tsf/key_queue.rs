@@ -46,6 +46,9 @@ pub(crate) struct HeldKey {
     /// キーが届いた文書（DM のポインタ）。
     pub dm: usize,
     pub at: Instant,
+    /// 届いた時点で数字キーの規則に従ったキーか（`Keymap::follows_digit_rule`）。再生のときに、
+    /// その時点で候補を選んでいれば候補番号に解釈し直す（設計書 6 節の試験 5）。
+    pub digit_rule: bool,
 }
 
 /// 列の中のキー（通し番号付き）。
@@ -81,6 +84,12 @@ thread_local! {
     static IN_REPLAY: Cell<bool> = const { Cell::new(false) };
     /// 回復できない場合の処置の後の直接入力（[`direct_fallback`]）。
     static DIRECT_FALLBACK: Cell<bool> = const { Cell::new(false) };
+    /// 処置を終えて直接入力に切り替えた時刻（`GetTickCount` の値と `Instant`）。
+    /// [`pressed_before_direct_input`] で使う。
+    static FALLBACK_STARTED: Cell<Option<(u32, Instant)>> = const { Cell::new(None) };
+    /// 直前に判定したキー（仮想キー・メッセージの時刻）と結果。OnTestKeyDown と OnKeyDown で
+    /// 同じキーの判定を食い違わせない（3 秒の境界をまたいでも同じ結果を返す）。
+    static PRESSED_BEFORE_LAST: Cell<Option<(u16, u32, bool)>> = const { Cell::new(None) };
     /// 回復できない場合の処置で、文書へ入れている文字列。
     static RESCUES: RefCell<Vec<Rescue>> = const { RefCell::new(Vec::new()) };
     /// 回復できない場合の処置の途中（文字を入れ終わるまで）。この間のキーはアプリへ渡さず、
@@ -506,12 +515,13 @@ pub(crate) fn pump_for(current: Option<u64>) {
             tid,
             sink,
             dm,
+            digit_rule,
             ..
         } = key;
         IN_REPLAY.with(|r| r.set(true));
         let replayed = {
             let _current = CurrentKeyScope::enter(seq, kept.clone());
-            factory.replay_key(action, vk, ctx, tid, sink, dm)
+            factory.replay_key(action, vk, ctx, tid, sink, dm, digit_rule)
         };
         IN_REPLAY.with(|r| r.set(false));
         let Some(ate) = replayed else {
@@ -585,7 +595,7 @@ fn engine_unavailable() -> bool {
 }
 
 /// 文字キーが出す文字（打った文字のまま。回復できない場合の処置で文書へ入れる）。
-fn typed_text(action: &UserAction) -> Option<char> {
+pub(crate) fn typed_text(action: &UserAction) -> Option<char> {
     match action {
         UserAction::Input(c) | UserAction::InputRaw(c) | UserAction::Punctuate(c) => Some(*c),
         UserAction::FullWidthSpace => Some(' '),
@@ -752,6 +762,7 @@ fn give_up(first: HeldKey) {
     // 状態と表示を先に決める（入れられなかった通知を、この表示で上書きしない。締め切りの
     // 後の表示の要求を止める）
     DIRECT_FALLBACK.with(|d| d.set(true));
+    FALLBACK_STARTED.with(|f| f.set(None));
     RESCUE_ACTIVE.with(|a| a.set(true));
     crate::tsf::candidate_window::start_key_queue_timer();
     watch_link();
@@ -945,6 +956,7 @@ fn check_rescues() {
         }
         if RESCUES.with(|r| r.borrow().is_empty()) && RESCUE_EXTRA.with(|e| e.borrow().is_empty()) {
             RESCUE_ACTIVE.with(|a| a.set(false));
+            mark_fallback_started();
             tracing::info!("rescue: finished (keys go to the app while direct input)");
             rescue_finished();
         }
@@ -1303,8 +1315,63 @@ fn unwatch_link() {
     }
 }
 
+/// 処置を終えて直接入力に切り替えた直後に、それより前に押されたキーを見分ける幅。処置の
+/// 間は UI のスレッドが止まり（最初のキーで切断を知るまでの待ち）、その間に押したキーは
+/// 処置の後に届く（2026-10-22 の実機で、`ka` の直後の Enter が改行としてアプリへ渡った）。
+const PRESSED_BEFORE_WINDOW: Duration = Duration::from_secs(3);
+
+fn mark_fallback_started() {
+    let tick = unsafe { windows::Win32::System::SystemInformation::GetTickCount() };
+    FALLBACK_STARTED.with(|f| f.set(Some((tick, Instant::now()))));
+    PRESSED_BEFORE_LAST.with(|p| p.set(None));
+}
+
+/// 直接入力の間に届いたキーが、直接入力に切り替わる前に押されたか（そのキーのメッセージの
+/// 時刻 `GetMessageTime` で見る）。切り替えから [`PRESSED_BEFORE_WINDOW`] を過ぎたら見ない
+/// （時刻を読み違えても影響を切り替えの直後に限る）。見たときは判定をログに残す。
+pub(crate) fn pressed_before_direct_input(vk: u16) -> bool {
+    if !DIRECT_FALLBACK.with(|d| d.get()) {
+        return false;
+    }
+    let Some((cutoff, at)) = FALLBACK_STARTED.with(|f| f.get()) else {
+        return false;
+    };
+    let msg_time = unsafe { windows::Win32::UI::WindowsAndMessaging::GetMessageTime() } as u32;
+    // 同じキー（OnTestKeyDown の後の OnKeyDown）なら、先の判定を使う
+    if let Some((last_vk, last_time, last)) = PRESSED_BEFORE_LAST.with(|p| p.get())
+        && last_vk == vk
+        && last_time == msg_time
+    {
+        return last;
+    }
+    let elapsed = at.elapsed();
+    if elapsed > PRESSED_BEFORE_WINDOW {
+        return false;
+    }
+    let before = pressed_before(msg_time, cutoff, elapsed);
+    PRESSED_BEFORE_LAST.with(|p| p.set(Some((vk, msg_time, before))));
+    tracing::info!(
+        "key_queue: key after the rescue vk={vk:#04x} msg_time={msg_time} cutoff={cutoff} now={} elapsed_ms={} pressed_before={before}",
+        unsafe { windows::Win32::System::SystemInformation::GetTickCount() },
+        elapsed.as_millis()
+    );
+    before
+}
+
+/// 直前の判定を消す（OnKeyDown の判定の後。OnTestKeyDown の判定は次の OnKeyDown 1 回
+/// だけが引き継ぐ）。
+pub(crate) fn forget_pressed_before() {
+    PRESSED_BEFORE_LAST.with(|p| p.set(None));
+}
+
+/// `msg_time` が `cutoff` より前か（どちらも起動からのミリ秒。一周しても差で比べる）。
+fn pressed_before(msg_time: u32, cutoff: u32, elapsed: Duration) -> bool {
+    elapsed <= PRESSED_BEFORE_WINDOW && (msg_time.wrapping_sub(cutoff) as i32) < 0
+}
+
 fn end_direct_fallback() {
     DIRECT_FALLBACK.with(|d| d.set(false));
+    FALLBACK_STARTED.with(|f| f.set(None));
     LINK_UP_NOTED.with(|n| n.set(false));
     unwatch_link();
     crate::tsf::mode_indicator::hide();
@@ -1380,6 +1447,25 @@ pub(crate) fn discard_all(reason: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_key_is_pressed_before_direct_input_only_by_its_message_time() {
+        let soon = Duration::from_millis(10);
+        // 切り替えより前の時刻なら前
+        assert!(pressed_before(9_000, 10_000, soon));
+        // 同じ時刻・後の時刻は後（今までどおりアプリへ渡す）
+        assert!(!pressed_before(10_000, 10_000, soon));
+        assert!(!pressed_before(10_500, 10_000, soon));
+        // 起動からのミリ秒が一周しても差で比べる
+        assert!(pressed_before(u32::MAX - 5, 3, soon));
+        assert!(!pressed_before(3, u32::MAX - 5, soon));
+        // 切り替えから幅を過ぎたら見ない
+        assert!(!pressed_before(
+            9_000,
+            10_000,
+            PRESSED_BEFORE_WINDOW + Duration::from_millis(1)
+        ));
+    }
 
     #[test]
     fn a_commit_is_retried_at_most_three_times() {

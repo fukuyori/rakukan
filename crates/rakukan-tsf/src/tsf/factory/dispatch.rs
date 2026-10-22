@@ -109,18 +109,19 @@ impl super::TextServiceFactory_Impl {
             }
             // 再生の中で確定がエンジンを取れなかった場合の止まった印は、確定のものなので消す
             let commit_not_run = crate::tsf::key_queue::take_suspended();
-            match committed {
-                // 確定できなかった（エンジンを取れなかったなど）: 上限を少し超えるが、この
-                // キーは今までどおり実行する（次の文字キーでもう一度確定を試す）
-                Err(e) => tracing::warn!("length limit: commit failed; key handled as is: {e}"),
-                Ok(_) if commit_not_run => {
-                    tracing::warn!("length limit: commit not run (engine busy); key handled as is")
-                }
-                Ok(_) if crate::tsf::commit_txn::commit_pending() => {
-                    crate::tsf::key_queue::suspend_current();
-                    return Ok(true);
-                }
-                Ok(_) => {}
+            if let Err(e) = &committed {
+                tracing::warn!("length limit: commit failed; key handled as is: {e}");
+            } else if commit_not_run {
+                tracing::warn!("length limit: commit not run (engine busy); key handled as is");
+            }
+            if after_limit_commit(
+                committed.is_ok(),
+                commit_not_run,
+                crate::tsf::commit_txn::commit_pending(),
+            ) == LimitStep::Hold
+            {
+                crate::tsf::key_queue::suspend_current();
+                return Ok(true);
             }
             // エンジンを取り直せなければ、このキーを止めて列に戻し、後で実行する
             guard = match engine_try_get_or_create() {
@@ -736,9 +737,42 @@ fn at_limit(len: usize) -> Option<usize> {
     (len >= READING_LIMIT).then_some(len)
 }
 
+/// 読みの長さの上限で確定した後に、このキーをどうするか。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LimitStep {
+    /// このキーを続けて実行する。
+    Continue,
+    /// 確定の結果を待つ: このキーを止めて列に戻し、結果の後で実行する。
+    Hold,
+}
+
+/// `committed` は確定の処理が `Ok` を返したか、`not_run` は確定がエンジンを取れずに
+/// 実行されなかったか、`pending` は確定の結果を待っているか。
+fn after_limit_commit(committed: bool, not_run: bool, pending: bool) -> LimitStep {
+    if committed && !not_run && pending {
+        LimitStep::Hold
+    } else {
+        LimitStep::Continue
+    }
+}
+
 #[cfg(test)]
 mod length_limit_tests {
     use super::*;
+
+    #[test]
+    fn the_key_after_the_limit_commit_waits_only_for_a_pending_commit() {
+        // 読みの長さの上限で確定した後のキー（設計書 6 節の試験 35。表示を待たずに確定する
+        // 実装）: 確定の結果を待っているときだけ止めて列に戻し、結果の後で実行する（打った
+        // 文字を失わない）。確定できなかった・実行されなかったときは、上限を少し超えても
+        // このキーをそのまま実行する（文字を失わない。次の文字キーでもう一度確定を試す）
+        assert_eq!(after_limit_commit(true, false, false), LimitStep::Continue);
+        assert_eq!(after_limit_commit(true, false, true), LimitStep::Hold);
+        assert_eq!(after_limit_commit(true, true, false), LimitStep::Continue);
+        assert_eq!(after_limit_commit(true, true, true), LimitStep::Continue);
+        assert_eq!(after_limit_commit(false, false, true), LimitStep::Continue);
+        assert_eq!(after_limit_commit(false, false, false), LimitStep::Continue);
+    }
 
     #[test]
     fn only_text_input_at_the_limit_commits_first() {
