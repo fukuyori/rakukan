@@ -400,6 +400,7 @@ impl super::TextServiceFactory_Impl {
                     set_preedit: true,
                     bg_start: true,
                     live_notify: false,
+                    retry: false,
                 },
             )?;
         } else {

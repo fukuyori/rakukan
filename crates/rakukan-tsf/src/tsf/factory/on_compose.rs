@@ -379,6 +379,9 @@ pub(super) struct PartialPlan {
     pub bg_start: bool,
     /// BG 変換を始めたら、ライブ変換のタイマーを始める。
     pub live_notify: bool,
+    /// 確定してから入力するキー（CommitThenInput）。確定しなかったら、そのキーを列に戻して
+    /// 確定からやり直す（入力処理の見直しの 5c-2、設計書 4.6 の `CommitThenInput`）。
+    pub retry: bool,
 }
 
 /// EditSession の中のホストへの引き継ぎ（H）の結果。後処理（`commit_txn::set_after`）で使う。
@@ -772,8 +775,15 @@ pub(super) fn commit_then_start_composition(
     });
     // 後処理（保留したキーの再生より前）
     let after_ctx = ctx.clone();
-    let bg_start = plan.bg_start;
-    let live_notify = plan.live_notify;
+    let after = AfterPartial {
+        bg_start: plan.bg_start,
+        live_notify: plan.live_notify,
+        // 確定しなかったら列に戻すキー（今処理しているキー）
+        retry_key: plan
+            .retry
+            .then(crate::tsf::key_queue::current_key)
+            .flatten(),
+    };
     crate::tsf::commit_txn::set_after(
         &cell,
         Box::new(move |result, keep| {
@@ -784,8 +794,7 @@ pub(super) fn commit_then_start_composition(
                 after_ctx,
                 tid,
                 sink,
-                bg_start,
-                live_notify,
+                after,
             )
         }),
     );
@@ -818,9 +827,68 @@ pub(super) fn commit_then_start_composition(
     Ok(())
 }
 
+/// 部分確定の後処理の指定（[`after_partial`]）。
+struct AfterPartial {
+    bg_start: bool,
+    live_notify: bool,
+    /// 確定しなかったら列に戻すキー（CommitThenInput のキーの通し番号と写し。5c-2）。
+    retry_key: Option<(u64, crate::tsf::key_queue::HeldKey)>,
+}
+
+/// 確定しなかった、確定してから入力するキーの扱い（5c-2）。
+#[derive(Debug, PartialEq, Eq)]
+enum RetryStep {
+    /// やり直さない（確定した・やり直す対象のキーでない）。
+    None,
+    /// 列に戻してやり直す。`redisplay` なら、先に表示を作り直す（範囲が縮めた文字列のまま）。
+    Retry { redisplay: bool },
+}
+
+/// 結果から、確定してから入力するキーをやり直すかを決める。確定しなかった（文書にも
+/// ホストにも触れていない）ときは、composition が残っているかにかかわらず、打った文字を
+/// 捨てずにやり直す（再生で今の状態から処理し直す。フォーカスが移っていれば元の文書へ入れる）。
+fn retry_step(result: &crate::tsf::commit_txn::DocResult, has_key: bool) -> RetryStep {
+    use crate::tsf::commit_txn::DocResult;
+    match result {
+        _ if !has_key => RetryStep::None,
+        DocResult::Aborted { changed, .. } => RetryStep::Retry {
+            redisplay: *changed,
+        },
+        DocResult::NotRun(_) => RetryStep::Retry { redisplay: false },
+        _ => RetryStep::None,
+    }
+}
+
+/// 変換中のセッションの表示を、composition に書き直す要求を出す（確定しなかったが範囲が
+/// 縮めた文字列のまま残ったとき。5c-2）。変換中でなければ何もしない。
+fn redisplay_conversion(ctx: ITfContext, tid: u32, sink: ITfCompositionSink) {
+    let parts = crate::engine::state::session_get().ok().and_then(|sess| {
+        if sess.is_block_selecting() {
+            sess.block_selecting_composition_parts()
+        } else if sess.is_selecting() {
+            let text = sess
+                .current_candidate()
+                .or_else(|| sess.original_preedit())
+                .unwrap_or("")
+                .to_string();
+            Some((
+                sess.selecting_prefix_clone(),
+                text,
+                sess.selecting_remainder_clone(),
+            ))
+        } else {
+            None
+        }
+    });
+    if let Some((prefix, text, remainder)) = parts
+        && let Err(e) = update_composition_candidate_parts(ctx, tid, sink, prefix, text, remainder)
+    {
+        tracing::warn!("commit_then_start: redisplay request failed: {e}");
+    }
+}
+
 /// 部分確定の後処理（EditSession の後、保留したキーの再生より前。設計書 4.6 の部分確定の
 /// 文書先行）。
-#[allow(clippy::too_many_arguments)]
 fn after_partial(
     result: &crate::tsf::commit_txn::DocResult,
     keep: bool,
@@ -828,10 +896,35 @@ fn after_partial(
     ctx: ITfContext,
     tid: u32,
     sink: ITfCompositionSink,
-    bg_start: bool,
-    live_notify: bool,
+    after: AfterPartial,
 ) {
     use crate::tsf::commit_txn::DocResult;
+    let AfterPartial {
+        bg_start,
+        live_notify,
+        retry_key,
+    } = after;
+    // 確定してから入力するキー: 確定しなかったら列に戻してやり直す（5c-2）
+    match retry_step(result, retry_key.is_some()) {
+        RetryStep::Retry { redisplay } => {
+            let (seq, key) = retry_key.expect("checked");
+            if redisplay {
+                redisplay_conversion(ctx.clone(), tid, sink.clone());
+            }
+            if !crate::tsf::key_queue::retry_after_commit(seq, key) {
+                tracing::warn!(
+                    "commit_then_start: commit not done after {} retries; key dropped seq={seq}",
+                    crate::tsf::key_queue::COMMIT_RETRY_LIMIT
+                );
+                crate::tsf::mode_indicator::show("文書へ書き込めません", 0, 0);
+            }
+        }
+        RetryStep::None => {
+            if let Some((seq, _)) = &retry_key {
+                crate::tsf::key_queue::forget_commit_retries(*seq);
+            }
+        }
+    }
     match (result, handoff) {
         (
             DocResult::Committed { .. },
@@ -1862,4 +1955,58 @@ pub(super) fn commit_text(ctx: ITfContext, tid: u32, text: String) -> Result<()>
             .map_err(|e| anyhow::anyhow!("RequestEditSession commit: {e}"));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tsf::commit_txn::DocResult;
+
+    #[test]
+    fn a_commit_then_input_key_is_retried_only_when_not_committed() {
+        // 確定しなかった: やり直す。範囲が縮めた文字列のまま残ったら表示を作り直す
+        assert_eq!(
+            retry_step(
+                &DocResult::Aborted {
+                    why: "EndComposition",
+                    changed: true
+                },
+                true
+            ),
+            RetryStep::Retry { redisplay: true }
+        );
+        assert_eq!(
+            retry_step(
+                &DocResult::Aborted {
+                    why: "GetRange",
+                    changed: false
+                },
+                true
+            ),
+            RetryStep::Retry { redisplay: false }
+        );
+        assert_eq!(
+            retry_step(&DocResult::NotRun("engine busy"), true),
+            RetryStep::Retry { redisplay: false }
+        );
+        // 確定した・確定に失敗して composition を手放した: やり直さない
+        assert_eq!(
+            retry_step(
+                &DocResult::Committed {
+                    text: "漢字".into()
+                },
+                true
+            ),
+            RetryStep::None
+        );
+        assert_eq!(
+            retry_step(&DocResult::Failed("direct commit"), true),
+            RetryStep::None
+        );
+        // やり直す対象のキーでない（Enter・番号キー・RangeSelect）
+        assert_eq!(
+            retry_step(&DocResult::NotRun("timeout"), false),
+            RetryStep::None
+        );
+    }
 }

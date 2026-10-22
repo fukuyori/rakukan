@@ -27,6 +27,11 @@ impl super::TextServiceFactory_Impl {
         // 結果が出たまま後処理されていない確定があれば、先に後処理する（入力処理の見直しの
         // 段 5。通常は WM_APP_COMMIT_DONE で済んでいる。メッセージを送れなかった場合の保険）
         crate::tsf::commit_txn::finish_completed();
+        // その後処理で、前のキーの確定をやり直すために列に戻した（5c-2）: このキーは止め、
+        // 前のキーの後で実行する（追い越さない）
+        if crate::tsf::key_queue::yielding() {
+            return Ok(true);
+        }
         // このキーで確定して確定しなかったときに戻すため、入口のセッションの状態を控える
         // （段 5 の 5c の残り）
         let _key_session = crate::tsf::commit_txn::KeySession::enter();
@@ -97,6 +102,11 @@ impl super::TextServiceFactory_Impl {
             drop(guard);
             let committed =
                 self.handle_action(UserAction::CommitRaw, ctx.clone(), tid, sink.clone());
+            // 入れ子の入口の後処理で、前のキーの確定をやり直すために列に戻した（5c-2）: この
+            // キーも止めて、前のキーの後で実行する（止まった印を下で消費しても追い越さない）
+            if crate::tsf::key_queue::yielding() {
+                return Ok(true);
+            }
             // 再生の中で確定がエンジンを取れなかった場合の止まった印は、確定のものなので消す
             let commit_not_run = crate::tsf::key_queue::take_suspended();
             match committed {

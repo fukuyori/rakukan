@@ -1019,6 +1019,28 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
                         || crate::engine::state::session_is_selecting_fast(),
                 )
             });
+            // 処理中のキーを控える（確定してから入力するキーの確定をやり直すとき、列に戻す
+            // ため。入力処理の見直しの 5c-2）
+            let _current = {
+                use windows::core::Interface;
+                use windows_core::IUnknownImpl;
+                let dm = unsafe { ctx.GetDocumentMgr() }
+                    .map(|d| d.as_raw() as usize)
+                    .unwrap_or(0);
+                crate::tsf::key_queue::CurrentKeyScope::enter(
+                    entry.seq(),
+                    crate::tsf::key_queue::HeldKey {
+                        factory: self.to_object(),
+                        action: action.clone(),
+                        vk,
+                        ctx: ctx.clone(),
+                        tid,
+                        sink: sink.clone(),
+                        dm,
+                        at: std::time::Instant::now(),
+                    },
+                )
+            };
             let result = crate::tsf::key_queue::run_exclusive(|| {
                 self.handle_action(action.clone(), ctx, tid, sink)
             });

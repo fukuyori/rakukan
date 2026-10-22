@@ -18,7 +18,7 @@
 //! 文字以外のキーは捨てて WARN を残す。
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
@@ -60,6 +60,14 @@ type ExtraChar = (u64, usize, ITfContext, u32, char);
 type TextBatch = (usize, ITfContext, u32, String);
 
 thread_local! {
+    /// 処理中のキー（通し番号と、列に戻すための写し）。確定してから入力するキーの確定を
+    /// やり直すときに使う（[`retry_after_commit`]。入力処理の見直しの 5c-2）。
+    static CURRENT_KEY: RefCell<Option<(u64, HeldKey)>> = const { RefCell::new(None) };
+    /// 確定しなかったために列に戻した回数（通し番号ごと）。
+    static COMMIT_RETRIES: RefCell<BTreeMap<u64, u32>> = const { RefCell::new(BTreeMap::new()) };
+    /// 処理中のキーを、前のキーの確定のやり直しを追い越さないために止めた（[`yielding`]）。
+    /// 処理した側がキーを列に戻すまで（[`take_suspended`]）残す。
+    static YIELDING: Cell<bool> = const { Cell::new(false) };
     static QUEUE: RefCell<VecDeque<Queued>> = const { RefCell::new(VecDeque::new()) };
     static REPLAYING: Cell<bool> = const { Cell::new(false) };
     /// OnKeyDown の入口に入り、まだ受け付け（[`admit`]）を終えていないキーの数。
@@ -123,6 +131,7 @@ pub(crate) fn take_suspended() -> bool {
 }
 
 fn take_suspension() -> Option<Suspension> {
+    YIELDING.with(|y| y.set(false));
     SUSPENDED.with(|s| s.replace(None))
 }
 
@@ -177,6 +186,79 @@ fn link_down() -> bool {
         rakukan_engine_rpc::host_link().state,
         rakukan_engine_rpc::LinkState::Disconnected(_)
     )
+}
+
+/// キーを処理している間、そのキーを控える（[`current_key`]）。抜けたら（Drop）前の値に戻す
+/// （処理の途中の再生の入れ子にも対応する）。
+pub(crate) struct CurrentKeyScope(Option<(u64, HeldKey)>);
+
+impl CurrentKeyScope {
+    pub(crate) fn enter(seq: u64, key: HeldKey) -> Self {
+        Self(CURRENT_KEY.with(|c| c.replace(Some((seq, key)))))
+    }
+}
+
+impl Drop for CurrentKeyScope {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        CURRENT_KEY.with(|c| *c.borrow_mut() = prev);
+    }
+}
+
+/// 処理中のキー（通し番号と写し）。キーの処理の外なら `None`。
+pub(crate) fn current_key() -> Option<(u64, HeldKey)> {
+    CURRENT_KEY.with(|c| c.borrow().clone())
+}
+
+/// 確定してから入力するキーの確定をやり直す回数の上限（設計書 4.6 の `CommitThenInput`、R1）。
+pub(crate) const COMMIT_RETRY_LIMIT: u32 = 3;
+
+/// `n` 回目の確定のやり直しをしてよいか。
+fn commit_retry_allowed(n: u32) -> bool {
+    n <= COMMIT_RETRY_LIMIT
+}
+
+/// 確定しなかった、確定してから入力するキーを、もう一度実行するために列に戻す（入力処理の
+/// 見直しの 5c-2）。そのキーの処理の中（確定が同期で実行された）なら止めて、処理した側が
+/// 列に戻す（[`suspend_current`]）。処理の後（確定が後で実行された）なら、通し番号の順の位置に
+/// 戻す（その間に保留した後のキーより先に実行する）。後のキーの処理の中（その入口の後処理）
+/// なら、そのキーも止めて列に戻させ、戻したキーを追い越させない（[`suspended`]）。上限を
+/// 超えたら戻さず `false`。
+pub(crate) fn retry_after_commit(seq: u64, key: HeldKey) -> bool {
+    let n = COMMIT_RETRIES.with(|r| {
+        let mut r = r.borrow_mut();
+        let n = r.entry(seq).or_insert(0);
+        *n += 1;
+        *n
+    });
+    if !commit_retry_allowed(n) {
+        forget_commit_retries(seq);
+        return false;
+    }
+    let current = CURRENT_KEY.with(|c| c.borrow().as_ref().map(|(s, _)| *s));
+    tracing::warn!("key_queue: commit not done; retrying the key seq={seq} attempt={n}");
+    match current {
+        Some(s) if s == seq => suspend_current(),
+        Some(_) => {
+            put_back(seq, key);
+            suspend_current();
+            YIELDING.with(|y| y.set(true));
+        }
+        None => put_back(seq, key),
+    }
+    true
+}
+
+/// 処理中のキーを、前のキーの確定のやり直しを追い越さないために止めたか（印は消さない）。
+/// 立っていれば、そのキーの処理を続けずに戻る（処理した側が列に戻す）。入れ子の処理
+/// （読みの長さの上限の確定）が止まった印を消費した後も、外側が分かるように別に持つ。
+pub(crate) fn yielding() -> bool {
+    YIELDING.with(|y| y.get())
+}
+
+/// 確定のやり直しの回数を消す（確定できた・やり直しをやめた）。
+pub(crate) fn forget_commit_retries(seq: u64) {
+    COMMIT_RETRIES.with(|r| r.borrow_mut().remove(&seq));
 }
 
 /// 止まったキーを、通し番号の順の位置に戻す（上限は数えない）。
@@ -427,7 +509,10 @@ pub(crate) fn pump_for(current: Option<u64>) {
             ..
         } = key;
         IN_REPLAY.with(|r| r.set(true));
-        let replayed = factory.replay_key(action, vk, ctx, tid, sink, dm);
+        let replayed = {
+            let _current = CurrentKeyScope::enter(seq, kept.clone());
+            factory.replay_key(action, vk, ctx, tid, sink, dm)
+        };
         IN_REPLAY.with(|r| r.set(false));
         let Some(ate) = replayed else {
             // フォーカスが別の文書へ移っていた: 文字は届いた文書へ入れる（前提の決定 2）
@@ -453,12 +538,18 @@ pub(crate) fn pump_for(current: Option<u64>) {
                 tracing::warn!(
                     "key_queue: held key could not run within {MAX_AGE:?}; dropped seq={seq} vk={vk:#04x}"
                 );
+                forget_commit_retries(seq);
                 continue;
             }
             // 止まった（確定の結果待ち・エンジンを取れない）: 先頭に戻し、この回の再生は
             // ここでやめる（結果の通知かタイマーで続ける）
             put_back(seq, kept);
             break;
+        }
+        // 止まらずに処理した: 確定の結果待ちが無ければ、確定のやり直しの回数は要らない（結果
+        // 待ちがあれば、その後処理が成功なら消し、失敗なら数える。5c-2）
+        if !crate::tsf::commit_txn::commit_pending() {
+            forget_commit_retries(seq);
         }
         if !ate && current != Some(seq) {
             // 前に保留したキーはアプリへ渡せない: 文字は文書へ入れる（IME がオフだった・
@@ -523,6 +614,7 @@ const INSERT_ATTEMPTS: u32 = 3;
 /// IME が扱わなかった、前に保留したキー: 文字キーは打った文字のまま届いた文書へ入れる。
 /// 届いた文書が破棄されていた・文字以外のキーは捨てて WARN。
 fn divert(seq: u64, key: HeldKey, reason: &str) {
+    forget_commit_retries(seq);
     let Some(c) = typed_text(&key.action) else {
         tracing::warn!(
             "key_queue: held key dropped ({reason}) seq={seq} vk={:#04x} action={:?}",
@@ -652,6 +744,8 @@ const RESCUE_TIMEOUT: Duration = Duration::from_secs(2);
 /// 成功するまで直接入力にする（[`direct_fallback`]）。入れた結果は [`pump`] で確かめる
 /// （[`check_rescues`]）。
 fn give_up(first: HeldKey) {
+    // 列のキーはすべてここで処置するので、確定のやり直しの回数も要らない
+    COMMIT_RETRIES.with(|r| r.borrow_mut().clear());
     let tid = first.tid;
     let mut keys = vec![first];
     keys.extend(QUEUE.with(|q| q.borrow_mut().drain(..).map(|e| e.key).collect::<Vec<_>>()));
@@ -1252,6 +1346,7 @@ pub(crate) fn run_exclusive<R>(f: impl FnOnce() -> R) -> R {
 
 /// 保留したキーをすべて捨てる（Deactivate）。捨てた数を返す。
 pub(crate) fn discard_all(reason: &str) -> usize {
+    COMMIT_RETRIES.with(|r| r.borrow_mut().clear());
     // 文字を入れる要求は失効させ（後で実行されても文書に触れない）、入れられなかった
     // ものとして記録する
     // 取り出し中・要求中の要求にも届くよう、失効の世代を進める
@@ -1285,6 +1380,14 @@ pub(crate) fn discard_all(reason: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_commit_is_retried_at_most_three_times() {
+        assert!(commit_retry_allowed(1));
+        assert!(commit_retry_allowed(COMMIT_RETRY_LIMIT));
+        assert!(!commit_retry_allowed(COMMIT_RETRY_LIMIT + 1));
+        assert_eq!(COMMIT_RETRY_LIMIT, 3);
+    }
 
     #[test]
     fn input_remains_after_a_partial_commit_or_held_keys() {

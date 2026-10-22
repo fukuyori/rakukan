@@ -202,6 +202,7 @@ impl super::TextServiceFactory_Impl {
                         set_preedit: true,
                         bg_start: true,
                         live_notify: true,
+                        retry: true,
                     },
                 )?;
                 return Ok(true);
@@ -267,6 +268,7 @@ impl super::TextServiceFactory_Impl {
                         set_preedit: false,
                         bg_start: true,
                         live_notify: false,
+                        retry: true,
                     },
                 )?;
                 return Ok(true);
@@ -420,6 +422,7 @@ impl super::TextServiceFactory_Impl {
                         set_preedit: false,
                         bg_start: true,
                         live_notify: false,
+                        retry: true,
                     },
                 )?;
                 return Ok(true);
