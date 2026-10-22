@@ -210,3 +210,9 @@ v6 のリリース条件（`docs/handoff.md` 0 章「2026-10-10 の更新」）�
 - フェーズ 1 の 2.0（October_Plan.md）: `log_level = "trace"` で起動し直したホストの `rakukan-engine-dll.log`（25,468 行。LLM の変換を含む）に `tokenizers::` の行は 0 件、rakukan の TRACE は 9,119 件。合格。
 - フェーズ 1 の 2.1（#71）: ユーザーの環境変数 `RUST_LOG=info,rakukan_engine_rpc=debug` でサインインし直し、メモ帳で「今日はいい天気」を確定した後、`asita` を未確定のまま別の窓をクリックした。ホストのログに `change ResetAll seq=37 result=applied … committed_empty before=false after=true`（期待と今の Owner・世代が一致）。取り消して閉じたときも `result=applied … before=true after=true`。合格。試験の後に `RUST_LOG` を消した。
 - 観察（調べていない）: ホストを起動できない状態で、最初のキーの待ちが 3.6 s になったことがある（`Transport` → `HostMissing` → `Suppressed`）。
+
+## 2026-10-22 の結果（続き: F-1・F-2・T2-4。`de31d6a` と同じ内容の開発ビルド）
+
+- F-1（Input_Pipeline_Plan.md 4.8）: ホストを止めて繋ぎ直した後（08:51:10 UTC）、「かんじあ」→ F9 × 3 → F10 → F6 で「ｋａｎｊｉａ」→「ＫＡＮＪＩＡ」→「Ｋａｎｊｉａ」→「Kanjia」→「かんじあ」。合格。
+- T2-4: メモ帳で言語バーの「エンジン再起動」→ `trigger=ManualRestart force=true`・`rpc: Shutdown acknowledged by host`（08:52:38）、ホストのログに `Shutdown requested, exiting host process` の後の起動（08:52:39）。直後に打ったキーは `engine not ready … Input held` で保留され、「感じ」が確定した。合格。
+- F-2: ホストを止めて繋ぎ直した後（08:54:57 UTC）、`kanjik` → `a` で「かんじか」、F10 で「kanjika」。合格。
