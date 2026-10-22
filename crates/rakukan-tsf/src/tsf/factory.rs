@@ -599,6 +599,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         diag::event(DiagEvent::Deactivate);
         // 保留したキーは、Deactivate の中では文書へ書けないので捨てる（設計書 4.2）
         crate::tsf::key_queue::discard_all("deactivate");
+        // 未実行の表示の要求も、Deactivate の後に適用しない（設計書 4.5）
+        on_compose::advance_display_epoch();
         let inner = self
             .inner
             .try_borrow()
@@ -688,6 +690,10 @@ impl ITfCompositionSink_Impl for TextServiceFactory_Impl {
         if is_current {
             let _ = composition_set(None);
             if !replacing {
+                // 終わった composition に向けて要求した表示を、終わった後に適用しない
+                // （設計書 4.5）。置き換えの途中は、置き換えの EditSession が新しい
+                // composition を書くので進めない
+                on_compose::advance_display_epoch();
                 // 候補ウィンドウと選択状態をクリア
                 candidate_window::hide();
                 candidate_window::stop_live_timer(); // LiveConv タイマーも停止
@@ -1378,6 +1384,18 @@ pub(crate) fn rescue_composition(
     on_compose::rescue_composition(ctx, tid, identity, shown, target, last, still_valid)
 }
 
+/// 表示の世代を進める（確定トランザクションを作るとき。設計書 4.5 の `display_epoch`）。
+/// 進める前の世代を返す。
+pub(crate) fn advance_display_epoch() -> u64 {
+    on_compose::advance_display_epoch()
+}
+
+/// 確定の結果に合わせて、世代が進んだために実行しなかった表示の要求を扱う（`prior` はその
+/// 確定が進める前の世代。`keep` なら、その世代の要求をもう一度出す）。
+pub(crate) fn settle_voided_display(prior: u64, keep: bool) {
+    on_compose::settle_voided_display(prior, keep);
+}
+
 /// 救済の締め切り: 未実行の表示の要求を失効させ、締め切りの時点の表示を返す。
 pub(crate) fn cut_off_display(identity: usize) -> String {
     on_compose::void_pending_display();
@@ -1785,6 +1803,9 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         if prev_ptr == next_ptr {
             return Ok(());
         }
+        // 別の文書へ移った: 前の文書に向けて要求した表示を、移った後に適用しない
+        // （設計書 4.5）。thread-local の数を進めるだけなので、msctf への再入は無い
+        on_compose::advance_display_epoch();
 
         // 世代はここ（キューに積む時点）で確定する（Issue #50）。台帳は thread-local
         // なので COM 再入もロックも無い。台帳に無い ptr は登録しない（死んだ扱い）。

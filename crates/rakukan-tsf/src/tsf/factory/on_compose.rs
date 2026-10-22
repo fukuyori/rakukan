@@ -38,6 +38,128 @@ pub(crate) fn void_pending_display() {
     DISPLAY_EPOCH.with(|e| e.set(e.get() + 1));
 }
 
+/// 世代が進んだために実行しなかった表示の要求（最後の 1 件）。確定しなかったために
+/// composition を残すとき、もう一度出す（入力処理の見直しの 5c の残り、設計書 4.5 の
+/// `display_epoch`）。
+struct VoidedDisplay {
+    /// 要求の時点の世代（どの確定の前の表示かを見分ける）。
+    epoch: u64,
+    request: VoidedRequest,
+}
+
+enum VoidedRequest {
+    Plain {
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        text: String,
+    },
+    Parts {
+        ctx: ITfContext,
+        tid: u32,
+        sink: ITfCompositionSink,
+        prefix: String,
+        converted: String,
+        suffix: String,
+        caret: CaretPlacement,
+    },
+}
+
+thread_local! {
+    static VOIDED: std::cell::RefCell<Option<VoidedDisplay>> = const { std::cell::RefCell::new(None) };
+    /// 表示の要求の通し番号（要求の順）。
+    static DISPLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// 最後に SetText が成功した表示の要求の番号。これより古い要求は、後から実行されても
+    /// 書かない（要求の順に実行されない場合に、古い表示が新しい表示を上書きしない）。
+    static APPLIED_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// 確定（進める前の世代 `prior`）の後に、ほかに世代が進んでいないか（今の世代が `now`）。
+fn reissue_allowed(prior: u64, now: u64) -> bool {
+    now == prior + 1
+}
+
+/// 表示の要求の番号を取る。
+fn next_display_seq() -> u64 {
+    DISPLAY_SEQ.with(|s| {
+        let n = s.get() + 1;
+        s.set(n);
+        n
+    })
+}
+
+/// 番号 `seq` の表示の要求を書いてよいか（それより新しい要求をまだ書いていない）。
+fn display_is_newest(seq: u64) -> bool {
+    APPLIED_SEQ.with(|a| a.get()) < seq
+}
+
+/// 番号 `seq` の表示の要求を書いた。
+fn note_applied(seq: u64) {
+    APPLIED_SEQ.with(|a| a.set(a.get().max(seq)));
+}
+
+/// 表示の世代を進める（確定トランザクションを作るとき・入力を閉じるとき・composition が
+/// 終わったとき・フォーカスが別の文書へ移ったとき。設計書 4.5）。それより前に要求され、
+/// まだ実行されていない表示は、実行されても composition を作らず SetText もしない。
+/// 進める前の世代を返す。控えた、実行しなかった表示の要求はここでは捨てない（COM の参照を
+/// 放さない。確定の結果の後処理が、世代を見て出すか捨てる）。
+pub(crate) fn advance_display_epoch() -> u64 {
+    let prior = display_epoch();
+    void_pending_display();
+    prior
+}
+
+/// 実行しなかった表示の要求を控える（世代が進んだため。救済の途中は控えない）。
+fn note_voided(epoch: u64, request: VoidedRequest) {
+    if crate::tsf::key_queue::rescue_active() {
+        return;
+    }
+    VOIDED.with(|v| *v.borrow_mut() = Some(VoidedDisplay { epoch, request }));
+}
+
+/// 確定の結果に合わせて、控えた表示の要求を扱う。`prior` は、その確定が世代を進める前の
+/// 世代。控えがその世代の要求（その確定の直前に要求して実行しなかった表示）なら、`keep`
+/// （確定しなかったために composition を残した）で、その確定の後に世代が進んでいない
+/// （フォーカスの移動・入力を閉じた・composition の終了が無い）ときだけもう一度出し、
+/// そうでなければ捨てる。それより古い控えは捨て、新しい控え（後の確定の前の表示）は残す。
+pub(crate) fn settle_voided_display(prior: u64, keep: bool) {
+    let Some(voided) = VOIDED.with(|v| v.borrow_mut().take()) else {
+        return;
+    };
+    if voided.epoch > prior {
+        VOIDED.with(|v| *v.borrow_mut() = Some(voided));
+        return;
+    }
+    if voided.epoch < prior || !keep {
+        return;
+    }
+    if !reissue_allowed(prior, display_epoch()) {
+        tracing::debug!("display epoch advanced after the commit; voided display dropped");
+        return;
+    }
+    tracing::info!("display request voided by the commit is requested again");
+    let result = match voided.request {
+        VoidedRequest::Plain {
+            ctx,
+            tid,
+            sink,
+            text,
+        } => update_composition(ctx, tid, sink, text),
+        VoidedRequest::Parts {
+            ctx,
+            tid,
+            sink,
+            prefix,
+            converted,
+            suffix,
+            caret,
+        } => update_composition_parts_impl(ctx, tid, sink, prefix, converted, suffix, caret),
+    };
+    if let Err(e) = result {
+        tracing::warn!("reissuing the voided display failed: {e}");
+    }
+}
+
 fn display_epoch() -> u64 {
     DISPLAY_EPOCH.with(|e| e.get())
 }
@@ -205,6 +327,7 @@ pub(super) fn update_composition(
         return Ok(());
     }
     let epoch = display_epoch();
+    let seq = next_display_seq();
     let existing = composition_clone()?;
     // M1.8 T-MID2: stale check 用に外側 snapshot のポインタを記録。
     // EditSession クロージャは TF_ES_READWRITE で遅延実行されるため、
@@ -219,9 +342,24 @@ pub(super) fn update_composition(
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
 
-        // 救済の締め切りで失効した・救済の途中: composition を作らず、SetText もしない
+        // 世代が進んだ（確定・入力を閉じた・救済の締め切り）・救済の途中: composition を
+        // 作らず、SetText もしない。確定しなかったときにもう一度出すため控える
         if !display_allowed(epoch) {
-            tracing::debug!("update_composition: display request voided by a rescue");
+            tracing::debug!("update_composition: display request voided");
+            note_voided(
+                epoch,
+                VoidedRequest::Plain {
+                    ctx: ctx.clone(),
+                    tid,
+                    sink: sink.clone(),
+                    text: preedit.clone(),
+                },
+            );
+            return Ok(());
+        }
+        // 後に要求した表示を先に書いた: 古い表示で上書きしない
+        if !display_is_newest(seq) {
+            tracing::debug!("update_composition: a newer display is already shown; skipped");
             return Ok(());
         }
 
@@ -303,6 +441,7 @@ pub(super) fn update_composition(
                 .SetText(ec, 0, &preedit_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
             note_shown(&comp_for_shown, &preedit);
+            note_applied(seq);
         }
 
         // アンダーライン属性をセット
@@ -1441,6 +1580,7 @@ fn update_composition_parts_impl(
         return Ok(());
     }
     let epoch = display_epoch();
+    let seq = next_display_seq();
     let existing = composition_clone()?;
     // M1.8 T-MID2: update_composition と同じ stale check を入れる
     let existing_ptr = existing.as_ref().map(|c| c.as_raw() as usize).unwrap_or(0);
@@ -1449,16 +1589,36 @@ fn update_composition_parts_impl(
     let ctx_req = ctx.clone();
     let full = format!("{prefix}{converted}{suffix}");
     let prefix_utf16: i32 = prefix.encode_utf16().count() as i32;
+    // 実行しなかったときにもう一度出すための写し
+    let parts = (prefix.clone(), converted.clone(), suffix.clone());
 
     let session = EditSession::new(move |ec| unsafe {
         use windows::Win32::UI::TextServices::{
             ITfContextComposition, TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
         };
 
-        // 救済の締め切りで失効した・救済の途中: composition を作らず、SetText もしない
+        // 世代が進んだ・救済の途中: composition を作らず、SetText もしない（控える）
         if !display_allowed(epoch) {
+            tracing::debug!("update_composition_candidate_parts: display request voided");
+            let (prefix, converted, suffix) = parts.clone();
+            note_voided(
+                epoch,
+                VoidedRequest::Parts {
+                    ctx: ctx.clone(),
+                    tid,
+                    sink: sink.clone(),
+                    prefix,
+                    converted,
+                    suffix,
+                    caret,
+                },
+            );
+            return Ok(());
+        }
+        // 後に要求した表示を先に書いた: 古い表示で上書きしない
+        if !display_is_newest(seq) {
             tracing::debug!(
-                "update_composition_candidate_parts: display request voided by a rescue"
+                "update_composition_candidate_parts: a newer display is already shown; skipped"
             );
             return Ok(());
         }
@@ -1530,6 +1690,7 @@ fn update_composition_parts_impl(
                 .SetText(ec, 0, &full_w)
                 .map_err(|e| windows::core::Error::new(E_FAIL, format!("SetText: {e}")))?;
             note_shown(&comp_for_shown, &full);
+            note_applied(seq);
         }
 
         // ── Step2: 属性セット ──
@@ -1824,6 +1985,8 @@ pub(super) fn end_composition(ctx: ITfContext, tid: u32, text: String) -> Result
     // 確定はライブ変換の世代を進める（commit_then_start_composition と同じ理由）。
     // 確定前に積まれた Phase1A/1B の遅延 SetText を gen 不一致で棄却させる。
     crate::tsf::live_session::conv_gen_bump();
+    // 入力を閉じる: それより前に要求した表示を、閉じた後に適用しない（設計書 4.5）
+    advance_display_epoch();
     // composition_take() をセッション内に移動する。
     // セッション外で take すると COMPOSITION=None になった直後に次のキー入力が来たとき、
     // update_composition が existing=None を見て誤った位置から新 composition を開始してしまう。
@@ -1961,6 +2124,34 @@ pub(super) fn commit_text(ctx: ITfContext, tid: u32, text: String) -> Result<()>
 mod tests {
     use super::*;
     use crate::tsf::commit_txn::DocResult;
+
+    #[test]
+    fn a_display_requested_before_an_epoch_advance_is_not_applied() {
+        // 要求の時点の世代のままなら実行し、世代が進んだら実行しない（設計書 4.5）
+        let before = display_epoch();
+        assert!(display_allowed(before));
+        advance_display_epoch();
+        assert!(!display_allowed(before));
+        assert!(display_allowed(display_epoch()));
+        // 確定トランザクションを作ると世代が進む
+        let requested = display_epoch();
+        let cell = crate::tsf::commit_txn::begin("確定".into(), Default::default());
+        assert!(!display_allowed(requested));
+        crate::tsf::commit_txn::mark_not_run(&cell, "test");
+        crate::tsf::commit_txn::finish_completed();
+        // 控えが無ければ、もう一度出す処理は何もしない
+        settle_voided_display(requested, true);
+        assert!(VOIDED.with(|v| v.borrow().is_none()));
+        // 確定の後にほかに世代が進んでいれば、もう一度出さない
+        assert!(reissue_allowed(5, 6));
+        assert!(!reissue_allowed(5, 7));
+        // 書いた要求より古い番号の要求は書かない
+        let older = next_display_seq();
+        let newer = next_display_seq();
+        note_applied(newer);
+        assert!(!display_is_newest(older));
+        assert!(display_is_newest(next_display_seq()));
+    }
 
     #[test]
     fn a_commit_then_input_key_is_retried_only_when_not_committed() {

@@ -109,6 +109,8 @@ struct PendingCommit {
     /// 後処理の最後に行う処理（部分確定。[`set_after`]）。引数は結果と、composition と
     /// ホストの読みを残すか（`keep`）。
     after: Option<AfterCommit>,
+    /// この確定が進める前の表示の世代（確定の直前に要求して実行しなかった表示を見分ける）。
+    display_epoch: u64,
 }
 
 /// 確定の後処理の最後に行う処理（[`set_after`]）。
@@ -141,6 +143,9 @@ impl Drop for KeySession {
 
 /// 確定を計画し、EditSession に渡す状態の箱を返す。
 pub(crate) fn begin(planned: String, effects: CommitEffects) -> ReqCell {
+    // 確定より前に要求され、まだ実行されていない表示を、確定の後に適用しない（設計書 4.5 の
+    // `display_epoch`）
+    let display_epoch = crate::tsf::factory::advance_display_epoch();
     let cell: ReqCell = Rc::new(RefCell::new(ReqState::Pending));
     let id = NEXT_ID.with(|n| {
         let id = n.get();
@@ -160,6 +165,7 @@ pub(crate) fn begin(planned: String, effects: CommitEffects) -> ReqCell {
                 restore: KEY_SESSION.with(|k| k.borrow().clone()),
                 target: crate::engine::state::composition_key_and_ref(),
                 after: None,
+                display_epoch,
             },
         )
     });
@@ -280,6 +286,9 @@ fn finish_one(id: u64, mut commit: PendingCommit, result: &DocResult) {
     if keep {
         restore_session(id, commit.restore.as_ref());
     }
+    // 確定の直前に要求して実行しなかった表示は、composition を残したならもう一度出し、
+    // そうでなければ捨てる
+    crate::tsf::factory::settle_voided_display(commit.display_epoch, keep);
     let plan = plan_for_result(&commit.effects, &commit.planned, result, keep);
     send_effects(id, &plan);
     if let Some(after) = commit.after.take() {

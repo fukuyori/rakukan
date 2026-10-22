@@ -187,3 +187,12 @@ v6 のリリース条件（`docs/handoff.md` 0 章「2026-10-10 の更新」）�
 - `kanji` → Space → テンキーの `/` → Enter: 合格（候補が確定し、「／」が続く）。
 - テンキーの `3` `.` `1` `4` → Enter: 合格（「3.14」）。
 - メインのキーボードの `/` `.` → Enter: 合格（今までどおり「・。」）。
+
+## 2026-10-22 の結果（続き: CommitThenInput の確定の再試行 5c-2 と表示の世代 `display_epoch`。開発ビルド `bdc6130` + 未コミットの 2 つ）
+
+`cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入し、メモ帳で 3 つの試験を行った。TSF のログで、確定のやり直し（`retrying the key`）・表示の出し直し（`requested again`）・古い表示の飛ばし（`newer display`）・composition の保持し直しが出ていないことを確かめた。
+
+- 試験 1（通常の入力と Selecting 中の文字）: `kyouhaiitenkidesu` → Enter、`kanji` → Space → `a` `i` を速めに → Enter。合格（`commit_then_start[session]: commit="感じ" then=InputChar`）。
+- 試験 2（部分確定の残りの経路）: BlockSelecting 中の文字・Selecting の Enter の残りあり・番号キーの残りあり・RangeSelect の部分確定・テンキーの `-`。合格（引き継ぎはそれぞれ `InputChar` / `SeedPreedit{"こう"}` × 3 / `PushRaw(45)`）。
+- 試験 3（確定・取り消し・フォーカスの移動の直後）: `k` → Enter × 3（「k」が 3 個。`commit_full` 3 回）、`ka` → Esc × 3（何も残らない。`end_composition` 3 回）、`kanji` のまま別のアプリをクリック → 戻って `a` → Enter（メモ帳がフォーカスを失った時点で composition を終わらせ、表示中の「かんじ」を確定した。`OnCompositionTerminated current=true`。今までと同じアプリ側の動作。戻った後の入力は通常どおり）、テンキーの `/` `.` `3` `.` `1` `4` → Enter（「／．3.14」）。合格。
+- メモ帳では表示の要求がその場で実行されるため、`display_epoch` が古い要求を失効させる場面そのもの、と確定に失敗してやり直す経路は、起こせていない（未確認）。
