@@ -23,6 +23,18 @@ pub(crate) fn ascii_to_fullwidth_symbol(c: char) -> char {
     }
 }
 
+/// テンキーの記号キー（`InputRaw`）で、未確定 composition へ直接追加する記号。
+///
+/// テンキーは文字種の入力なので、`/` と `.` も ・ や 。 にせず、`*` `+` と同じく全角の記号に
+/// する（`／` `．`）。`-` は今までどおり記号にせず、読みにそのまま入れる。
+pub(crate) fn numpad_symbol(c: char) -> Option<char> {
+    match c {
+        '-' => None,
+        '/' | '.' | '*' | '+' => char::from_u32(c as u32 - 0x21 + 0xFF01),
+        _ => direct_input_symbol(c),
+    }
+}
+
 /// 入力時に再変換を起動せず、未確定 composition へ直接追加する記号。
 ///
 /// `-` は長音符入力としてローマ字ルールに委ねるため、ここでは扱わない。
@@ -895,6 +907,18 @@ pub fn contains_kuten(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn numpad_symbols_are_fullwidth_not_japanese_punctuation() {
+        assert_eq!(numpad_symbol('/'), Some('／'));
+        assert_eq!(numpad_symbol('.'), Some('．'));
+        assert_eq!(numpad_symbol('*'), Some('＊'));
+        assert_eq!(numpad_symbol('+'), Some('＋'));
+        assert_eq!(numpad_symbol('-'), None);
+        // テンキー以外のキーは今までどおり
+        assert_eq!(direct_input_symbol('/'), Some('・'));
+        assert_eq!(direct_input_symbol('.'), Some('。'));
+    }
 
     #[test]
     fn katakana_from_hiragana() {

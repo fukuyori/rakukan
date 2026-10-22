@@ -29,7 +29,8 @@ fn numeric_separator_after_digit(reading: &str, c: char) -> Option<char> {
     }
     match c {
         '、' | ',' => Some(','),
-        '。' | '.' => Some('.'),
+        // `．` はテンキーの `.`（数字の後では小数点にする）
+        '。' | '.' | '．' => Some('.'),
         _ => None,
     }
 }

@@ -613,7 +613,8 @@ impl super::TextServiceFactory_Impl {
                 }
             }
             UserAction::InputRaw(c) => {
-                if let Some(symbol) = text_util::direct_input_symbol(c) {
+                // テンキーの記号は ・ や 。 にしない（全角の記号。`-` は読みへ）
+                if let Some(symbol) = text_util::numpad_symbol(c) {
                     self.on_punctuate(symbol, ctx, tid, sink, guard)
                 } else {
                     self.on_input_raw(c, ctx, tid, sink, guard)
