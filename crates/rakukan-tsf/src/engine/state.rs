@@ -1230,6 +1230,23 @@ pub fn current_composition_identity_for(dm: usize) -> usize {
     }
 }
 
+/// 今保持している composition の文書と同一性（`(dm, composition_identity)`）。無い・終了済み・
+/// ロックが取れず確かめられないときは `None`（ブロックしない）。
+pub fn composition_key() -> Option<(usize, usize)> {
+    composition_key_and_ref().map(|(key, _)| key)
+}
+
+/// [`composition_key`] と、その composition の参照（同じロックの下で取る）。参照を持って
+/// いる間はオブジェクトが解放されないので、同一性（ポインタ値）が別の composition に
+/// 使い直されない。
+pub fn composition_key_and_ref() -> Option<((usize, usize), ITfComposition)> {
+    let g = composition_try_get().ok()?;
+    match (&g.comp, g.stale) {
+        (Some(comp), false) => Some(((g.dm_ptr, composition_identity(comp)), comp.clone())),
+        _ => None,
+    }
+}
+
 /// 今保持している composition を始めた文書（`composition_set_with_dm` の値）。無ければ 0。
 pub fn composition_dm() -> usize {
     COMPOSITION
@@ -1647,6 +1664,14 @@ pub fn note_tsf_thread_deactivated() {
     if let Ok(mut threads) = TSF_THREADS.lock() {
         threads.retain(|t| *t != me);
     }
+}
+
+/// 待たずにセッションの状態を取る（取れなければ `Err`）。確定の結果の後処理のように、
+/// 呼び出し元がロックを持っているか分からない場所で使う。
+pub fn session_try_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
+    SESSION_STATE
+        .try_lock()
+        .map_err(|_| anyhow::anyhow!("session_state busy"))
 }
 
 pub fn session_get() -> anyhow::Result<MutexGuard<'static, SessionState>> {
@@ -2277,6 +2302,19 @@ impl SessionState {
     }
 
     #[allow(dead_code)]
+    /// 控えておいた状態に戻す（確定しなかったとき。入力処理の見直しの段 5 の 5c の残り）。
+    /// 選択中の印（`SESSION_SELECTING`）も合わせる。
+    pub fn restore_from(&mut self, snapshot: SessionState) {
+        *self = snapshot;
+        let selecting = matches!(
+            self,
+            SessionState::Selecting { .. }
+                | SessionState::BlockSelecting { .. }
+                | SessionState::RangeSelect { .. }
+        );
+        SESSION_SELECTING.store(selecting, std::sync::atomic::Ordering::Release);
+    }
+
     /// 候補の LLM 待ちを外す（復元の後。設計書 4.7。候補はそのまま）。
     pub fn clear_llm_pending(&mut self) {
         if let SessionState::Selecting { llm_pending, .. } = self {

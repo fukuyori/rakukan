@@ -27,6 +27,9 @@ impl super::TextServiceFactory_Impl {
         // 結果が出たまま後処理されていない確定があれば、先に後処理する（入力処理の見直しの
         // 段 5。通常は WM_APP_COMMIT_DONE で済んでいる。メッセージを送れなかった場合の保険）
         crate::tsf::commit_txn::finish_completed();
+        // このキーで確定して確定しなかったときに戻すため、入口のセッションの状態を控える
+        // （段 5 の 5c の残り）
+        let _key_session = crate::tsf::commit_txn::KeySession::enter();
         let mut guard = match engine_try_get_or_create() {
             Ok(guard) => guard,
             Err(e) => {

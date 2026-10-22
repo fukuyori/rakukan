@@ -1297,6 +1297,8 @@ pub(super) fn commit_full(
         TF_ANCHOR_END, TF_SELECTION, TF_SELECTIONSTYLE, TfActiveSelEnd,
     };
     crate::tsf::live_session::conv_gen_bump();
+    // 確定しなかったときに composition を保持し直すか（IME の切り替えの前の確定は手放す）
+    let keep_on_abort = !effects.close_on_abort;
     let cell = crate::tsf::commit_txn::begin(text.clone(), effects);
     let session_cell = cell.clone();
     let ctx2 = ctx.clone();
@@ -1315,8 +1317,28 @@ pub(super) fn commit_full(
         let _apply_guard = crate::engine::state::COMPOSITION_APPLY_LOCK
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        // 確定しなかったときに保持し直すため、取り出す前に文書を控える
+        let comp_dm = crate::engine::state::composition_dm();
         let comp = composition_take().unwrap_or(None);
         let text_w: Vec<u16> = text.encode_utf16().collect();
+        // 確定しなかった: composition を保持し直す（入力処理の見直しの段 5 の 5c の残り、
+        // 設計書 4.6 の「取り出した composition は確定しなかった結果で必ず戻す」）
+        let keep = |comp: windows::Win32::UI::TextServices::ITfComposition,
+                    why: &'static str,
+                    changed: bool| {
+            if !keep_on_abort {
+                // composition は今までどおり手放す
+                return DocResult::Failed(why);
+            }
+            match composition_set_with_dm(Some(comp), comp_dm) {
+                Ok(()) => DocResult::Aborted { why, changed },
+                Err(e) => {
+                    // 保持し直せなかった: composition を手放した扱いで後処理する
+                    tracing::warn!("commit_full: re-hold composition failed after {why}: {e}");
+                    DocResult::Failed(why)
+                }
+            }
+        };
         let Some(comp) = comp else {
             tracing::debug!("commit_full: no composition, inserting text directly");
             if text.is_empty() {
@@ -1341,13 +1363,15 @@ pub(super) fn commit_full(
             Ok(range) => range,
             Err(e) => {
                 tracing::warn!("commit_full: GetRange failed text={text:?}: {e}");
-                finish(DocResult::Failed("GetRange"));
+                finish(keep(comp, "GetRange", false));
                 return Err(windows::core::Error::new(E_FAIL, format!("GetRange: {e}")));
             }
         };
         // 置き換えに失敗したときに確定する文字列（表示中の文字列）を知るため、先に読む
         let original = range_text(ec, &range);
         let mut committed = Some(text.clone());
+        // 範囲を置き換えたか（確定しなかったときに元の文字列へ戻す必要があるか）
+        let mut replaced = true;
         if let Err(e) = range.SetText(ec, 0, &text_w) {
             // 0x80040209 は TS_E_READONLY（end_composition と同じ。1 回だけ再試行）
             if let Err(e2) = range.SetText(ec, 0, &text_w) {
@@ -1362,6 +1386,7 @@ pub(super) fn commit_full(
                 // （end_composition と同じ）。確定した文字列は読めた元の文字列（読めて
                 // いなければ分からない）
                 committed = original.clone();
+                replaced = false;
             }
         }
         if let Ok(cursor) = range.Clone() {
@@ -1377,8 +1402,14 @@ pub(super) fn commit_full(
         }
         if let Err(e) = comp.EndComposition(ec) {
             tracing::warn!("commit_full: EndComposition failed text={text:?}: {e}");
-            // composition は今までどおり手放す
-            finish(DocResult::Failed("EndComposition"));
+            // 確定しなかった: 置き換えた範囲を元の文字列へ戻し、composition を保持し直す。
+            // 戻せなければ、置き換えた文字列のまま残る（表示が古い）
+            let changed = replaced
+                && !original.as_ref().is_some_and(|o| {
+                    let o_w: Vec<u16> = o.encode_utf16().collect();
+                    range.SetText(ec, 0, &o_w).is_ok()
+                });
+            finish(keep(comp, "EndComposition", changed));
             return Err(windows::core::Error::new(
                 E_FAIL,
                 format!("EndComposition: {e}"),

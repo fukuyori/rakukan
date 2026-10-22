@@ -208,6 +208,7 @@ impl super::TextServiceFactory_Impl {
                 context: true,
                 reset_preedit: true,
                 bg_start: None,
+                close_on_abort: false,
             },
         )?;
         Ok(true)
@@ -503,6 +504,8 @@ impl super::TextServiceFactory_Impl {
                 context: true,
                 reset_preedit: true,
                 bg_start: None,
+                // 切り替えた後に composition を残さない
+                close_on_abort: true,
             },
         )
     }

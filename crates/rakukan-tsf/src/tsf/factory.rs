@@ -1231,6 +1231,7 @@ fn engine_commit_hiragana(ctx: ITfContext, tid: u32) -> Result<()> {
             context: true,
             reset_preedit: true,
             bg_start: None,
+            close_on_abort: false,
         },
     )
 }

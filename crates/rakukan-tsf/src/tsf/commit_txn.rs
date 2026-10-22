@@ -12,10 +12,11 @@
 //! 実行する（段 5 の 5c）。要求が [`COMMIT_TIMEOUT`] たっても実行されなければ失効させ
 //! （[`expire_overdue`]）、実行されなかったものとして扱う。
 //!
-//! 確定に失敗した（文書が確定されたか分からない）ときの文書の扱いは今までと同じ
-//! （composition は手放す）。ホストには BG の回収と編集状態を閉じる処理だけを送り、
-//! 学習と文脈は送らない。composition を保持し直してホストの読みを残す扱いは、
-//! セッションの状態（候補・選択・句読点の保留）を戻す仕組みと一緒に後の段で入れる。
+//! 確定しなかったとき（[`DocResult::Aborted`]・[`DocResult::NotRun`]）は、composition を保持し
+//! 直し（EditSession の中）、ホストには何も送らずに読みを残し、キーの入口で控えたセッションの
+//! 状態（候補・選択・句読点の保留）に戻す（段 5 の 5c の残り、設計書 4.6）。確定の操作が
+//! 途中まで進んで composition を手放した（[`DocResult::Failed`]）ときは今までどおり、
+//! BG の回収と編集状態を閉じる処理だけを送る。
 
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
@@ -48,6 +49,9 @@ pub(crate) struct CommitEffects {
     pub reset_preedit: bool,
     /// 最後に、この読みで BG 変換を始める（`start_live_bg_if_ready`。部分確定の残り）。
     pub bg_start: Option<String>,
+    /// 確定しなかったときも composition を手放し、編集状態を閉じる（今までの扱い）。IME の
+    /// 切り替えの前の確定で使う（切り替えた後に composition を残さないため）。
+    pub close_on_abort: bool,
 }
 
 /// 文書の結果。
@@ -60,6 +64,9 @@ pub(crate) enum DocResult {
     CommittedUnknown,
     /// 確定の操作に失敗した。composition は手放した（今までと同じ）。
     Failed(&'static str),
+    /// 確定しなかった。composition は保持し直した。`changed` なら、範囲を元の文字列に戻せず、
+    /// 置き換えた文字列のまま残っている（表示が古い）。
+    Aborted { why: &'static str, changed: bool },
     /// 実行されなかった（要求の失敗・拒否・時間切れ）。
     NotRun(&'static str),
 }
@@ -86,11 +93,41 @@ struct PendingCommit {
     /// 部分確定の「composition の置き換え待ち」の印（`set_pending_replacement`）。失効させる
     /// ときに消す。
     replacement: Option<u64>,
+    /// 確定しなかったときに戻すセッションの状態（キーの入口で控えたもの。キーの処理の外の
+    /// 確定では `None`）。
+    restore: Option<crate::engine::state::SessionState>,
+    /// 確定を要求した時点の composition（`composition_key`。文書と同一性）と、その参照。
+    /// 確定しなかったときに、この composition がまだ保持されている場合だけ読みを残す。
+    /// 参照は、終えるまでの間に同一性が別の composition に使い直されないために持つ。
+    target: Option<(
+        (usize, usize),
+        windows::Win32::UI::TextServices::ITfComposition,
+    )>,
 }
 
 thread_local! {
     static PENDING: RefCell<BTreeMap<u64, PendingCommit>> = const { RefCell::new(BTreeMap::new()) };
     static NEXT_ID: Cell<u64> = const { Cell::new(1) };
+    /// 処理中のキーの入口のセッションの状態（[`KeySession`]）。
+    static KEY_SESSION: RefCell<Option<crate::engine::state::SessionState>> = const { RefCell::new(None) };
+}
+
+/// キーの処理の間、入口のセッションの状態を控える（確定しなかったときに戻すため）。
+/// 処理を抜けたら（Drop）前の値に戻す（再生の中の入れ子にも対応する）。
+pub(crate) struct KeySession(Option<crate::engine::state::SessionState>);
+
+impl KeySession {
+    pub(crate) fn enter() -> Self {
+        let now = crate::engine::state::session_get().ok().map(|s| s.clone());
+        Self(KEY_SESSION.with(|k| k.replace(now)))
+    }
+}
+
+impl Drop for KeySession {
+    fn drop(&mut self) {
+        let prev = self.0.take();
+        KEY_SESSION.with(|k| *k.borrow_mut() = prev);
+    }
 }
 
 /// 確定を計画し、EditSession に渡す状態の箱を返す。
@@ -111,6 +148,8 @@ pub(crate) fn begin(planned: String, effects: CommitEffects) -> ReqCell {
                 at: Instant::now(),
                 leaves_input: false,
                 replacement: None,
+                restore: KEY_SESSION.with(|k| k.borrow().clone()),
+                target: crate::engine::state::composition_key_and_ref(),
             },
         )
     });
@@ -207,17 +246,72 @@ fn finish_one(id: u64, commit: &PendingCommit, result: &DocResult) {
             commit.planned
         );
     }
-    let plan = plan_for_result(&commit.effects, &commit.planned, result);
+    // 全体の確定で確定しなかった: ホストの読みを残し、セッションの状態を入口の値に戻す。
+    // 部分確定は、文脈・編集状態を閉じる処理・残りの引き継ぎを文書より先に送っているので
+    // 戻せない（今までどおり）
+    let keep = kept_composition(
+        result,
+        commit.target.as_ref().map(|(key, _)| *key),
+        crate::engine::state::composition_key(),
+    ) && !commit.leaves_input
+        && !commit.effects.close_on_abort;
+    if keep {
+        restore_session(id, commit.restore.as_ref());
+    }
+    let plan = plan_for_result(&commit.effects, &commit.planned, result, keep);
     send_effects(id, &plan);
+}
+
+/// 確定しなかったので、確定の対象だった composition が残っている結果か。
+/// `target` は要求した時点の composition、`current` は今の composition（`composition_key`）。
+/// 一致するときだけ残っている扱い。composition が無かった（直接の挿入）・別の文書や別の
+/// composition に替わった・確かめられないときは、残っていない扱い（今までどおり閉じる）。
+fn kept_composition(
+    result: &DocResult,
+    target: Option<(usize, usize)>,
+    current: Option<(usize, usize)>,
+) -> bool {
+    matches!(result, DocResult::Aborted { .. } | DocResult::NotRun(_))
+        && target.is_some()
+        && target == current
+}
+
+/// セッションの状態を戻す。ロックが取れなければ戻さない（WARN）。
+fn restore_session(id: u64, snapshot: Option<&crate::engine::state::SessionState>) {
+    let Some(snapshot) = snapshot else {
+        tracing::warn!("commit {id}: not committed; no session state to restore");
+        return;
+    };
+    match crate::engine::state::session_try_get() {
+        Ok(mut sess) => {
+            sess.restore_from(snapshot.clone());
+            tracing::info!("commit {id}: not committed; session state restored");
+        }
+        Err(_) => tracing::warn!("commit {id}: not committed; session busy, state not restored"),
+    }
 }
 
 /// 文書の結果に対して送る後処理を決める。確定した文字列が分かるときだけ学習と文脈を
 /// 送る。BG の回収・編集状態を閉じる処理・新しい読みの BG 変換の開始は、結果によらず
 /// 送る（composition は手放しているので、ホストの読みを残すと次の入力が古い読みに
 /// 続いてしまう。BG の開始は今までどおり）。
-fn plan_for_result(effects: &CommitEffects, planned: &str, result: &DocResult) -> EffectPlan {
+/// `keep` は、composition とホストの読みを残す（全体の確定で確定しなかった）とき。
+fn plan_for_result(
+    effects: &CommitEffects,
+    planned: &str,
+    result: &DocResult,
+    keep: bool,
+) -> EffectPlan {
     match result {
         DocResult::Committed { text } => plan_effects(effects, planned, text),
+        // 確定しなかった: composition もホストの読みも残すので、何も送らない
+        _ if keep => EffectPlan {
+            bg_reclaim: false,
+            learn: None,
+            context: None,
+            reset_preedit: false,
+            bg_start: None,
+        },
         _ => EffectPlan {
             bg_reclaim: effects.bg_reclaim,
             learn: None,
@@ -383,6 +477,7 @@ mod tests {
             context: true,
             reset_preedit: true,
             bg_start: None,
+            close_on_abort: false,
         }
     }
 
@@ -468,12 +563,13 @@ mod tests {
 
     #[test]
     fn a_failed_or_unknown_commit_closes_the_host_state_without_learning_or_context() {
-        for result in [
-            DocResult::Failed("EndComposition"),
-            DocResult::CommittedUnknown,
-            DocResult::NotRun("request failed"),
+        for (result, keep) in [
+            (DocResult::Failed("EndComposition"), false),
+            (DocResult::CommittedUnknown, false),
+            // 部分確定の確定しなかった結果は、今までどおり閉じる
+            (DocResult::NotRun("request failed"), false),
         ] {
-            let plan = plan_for_result(&effects(), "漢字", &result);
+            let plan = plan_for_result(&effects(), "漢字", &result, keep);
             assert_eq!(
                 plan,
                 EffectPlan {
@@ -486,6 +582,53 @@ mod tests {
                 "{result:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_full_commit_that_did_not_happen_keeps_the_host_state() {
+        // 全体の確定で確定しなかった（composition を保持し直した・要求が実行されなかった）:
+        // 何も送らず、ホストの読みを残す
+        for result in [
+            DocResult::Aborted {
+                why: "EndComposition",
+                changed: false,
+            },
+            DocResult::NotRun("timeout"),
+        ] {
+            assert!(kept_composition(&result, Some((1, 10)), Some((1, 10))));
+            let plan = plan_for_result(&effects(), "漢字", &result, true);
+            assert_eq!(
+                plan,
+                EffectPlan {
+                    bg_reclaim: false,
+                    learn: None,
+                    context: None,
+                    reset_preedit: false,
+                    bg_start: None,
+                },
+                "{result:?}"
+            );
+        }
+        let key = Some((1, 10));
+        assert!(!kept_composition(
+            &DocResult::Failed("direct insert"),
+            key,
+            key
+        ));
+        let not_run = DocResult::NotRun("timeout");
+        // composition が無かった（直接の挿入）: 閉じる
+        assert!(!kept_composition(&not_run, None, None));
+        assert!(!kept_composition(&not_run, None, key));
+        // 今は無い・確かめられない: 閉じる
+        assert!(!kept_composition(&not_run, key, None));
+        // 別の composition・別の文書に替わった: 閉じる
+        assert!(!kept_composition(&not_run, key, Some((1, 11))));
+        assert!(!kept_composition(&not_run, key, Some((2, 10))));
+        let aborted = DocResult::Aborted {
+            why: "GetRange",
+            changed: false,
+        };
+        assert!(!kept_composition(&aborted, key, Some((1, 11))));
     }
 
     fn learn_only() -> CommitEffects {
@@ -585,12 +728,13 @@ mod tests {
             &DocResult::Committed {
                 text: "漢字".into(),
             },
+            false,
         );
         assert!(apply_plan(&mut target, &plan));
         assert_eq!(target.calls, vec!["learn 漢字", "bg_start のこり"]);
         // 確定に失敗しても、BG 変換は今までどおり始める（学習は送らない）
         let mut target = FakeTarget::default();
-        let plan = plan_for_result(&e, "漢字", &DocResult::Failed("EndComposition"));
+        let plan = plan_for_result(&e, "漢字", &DocResult::Failed("EndComposition"), false);
         assert!(apply_plan(&mut target, &plan));
         assert_eq!(target.calls, vec!["bg_start のこり"]);
         // 全体の確定: 学習 → 文脈 → 編集状態を閉じる
@@ -601,6 +745,7 @@ mod tests {
             &DocResult::Committed {
                 text: "漢字".into(),
             },
+            false,
         );
         assert!(!apply_plan(&mut target, &plan));
         assert_eq!(
