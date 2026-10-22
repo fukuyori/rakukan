@@ -991,8 +991,7 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
             // （IME のモードキー以外はアプリへ渡す）。OnTestKeyDown と同じ規則（`entry_gate`）
             let ime_on = crate::engine::state::ime_mode_get_atomic().is_on();
             let fallback = crate::tsf::key_queue::direct_fallback();
-            let pressed_before =
-                fallback && crate::tsf::key_queue::pressed_before_direct_input(vk);
+            let pressed_before = fallback && crate::tsf::key_queue::pressed_before_direct_input(vk);
             crate::tsf::key_queue::forget_pressed_before();
             match entry_gate(&action, hold_char, ime_on, fallback, pressed_before) {
                 EntryGate::Pass => {
@@ -2142,9 +2141,16 @@ mod key_should_eat_tests {
             (UserAction::ImeToggle, EntryGate::Drop),
         ];
         for (action, expected) in cases {
-            assert_eq!(entry_gate(&action, false, true, true, true), expected, "{action:?}");
+            assert_eq!(
+                entry_gate(&action, false, true, true, true),
+                expected,
+                "{action:?}"
+            );
             // 切り替えの後に押したキーは今までどおり
-            assert_ne!(entry_gate(&action, false, true, true, false), EntryGate::Drop);
+            assert_ne!(
+                entry_gate(&action, false, true, true, false),
+                EntryGate::Drop
+            );
         }
         // 直接入力でなければ見ない
         assert_eq!(

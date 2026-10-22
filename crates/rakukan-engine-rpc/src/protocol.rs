@@ -22,7 +22,8 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - v7: 入力処理の見直し（#69 / #70、docs/Input_Pipeline_Plan.md 5 節）。`RestoreJournal` /
 ///   `RestoredJournal`、`ChangeRequest::SeedPreedit` / `RetainRange`、`SideEffect`、
 ///   `Reason::ConfigStale` / `ConfigUnusable`（#66 用に予約。v7 のホストは返さない）を追加。
-///   v6（0.12.0）とは繋がらないので、古いホストを止めるインストーラー（フェーズ 3）と同じ版で出す
+///   v6（0.12.0）とは繋がらない。0.13.0 で出す（古いホストを止めるインストーラーはフェーズ 3。
+///   それまでは、サインアウト → サインインの後に rakukan を使わずにインストールする手順で避ける）
 pub const PROTOCOL_VERSION: u32 = 7;
 
 /// ホストプロセスの起動インスタンス識別子。
