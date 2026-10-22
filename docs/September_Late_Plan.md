@@ -16,8 +16,8 @@
 
 ## 1. 出発点（2026-09-17、GitHub API とローカルで確認）
 
-- main は `62eb01c`（origin と一致）。最新リリースは 0.11.7（2026-09-14）。次は 0.11.9（0.11.8 は欠番）
-- 未リリースの変更: #51 の段 1（`[input] ime_off_apps` / `ime_on_apps`、PR #52）
+- main は `62eb01c`（origin と一致）。直前の版は 0.11.7（2026-09-14、タグ `0.11.7`）。次は 0.11.9（0.11.8 は欠番）
+- 0.11.7 の後の変更（0.11.9 に含まれる）: #51 の段 1（`[input] ime_off_apps` / `ime_on_apps`、PR #52）
 - 開いている PR は無い。開いている Issue は 15 件（うち #33 / #46 / #51 段 2 はインストーラー改修側）
 - **#45 の PR は依頼済み**。#45 自体はコメント 0 件だが、[#40 の 9/12 返信](https://github.com/fukuyori/rakukan/issues/40#issuecomment-5644968036)でタイマー再張り抑止と 400ms 上限の修正を依頼している。原案の「依頼が出ていない」は誤り。引継書の「PR 待ち」が正しい
 - #40 の 2（候補末尾にひらがな・カタカナを添える）も、[9/12 に Step 12 完了を通知済み](https://github.com/fukuyori/rakukan/issues/40#issuecomment-5645505140)で PR 待ち
@@ -279,7 +279,7 @@ Issue 全体のクローズと、今回の対応範囲の完了を分ける。
 
 ### 2026-09-17 計画の改訂
 
-- GitHub API で main `62eb01c2042de4b9359e13460261c2821f8b5680` とローカル HEAD の一致、[最新リリース 0.11.7](https://github.com/fukuyori/rakukan/releases/tag/0.11.7)、open Issue 15 件、open PR 0 件を確認
+- GitHub API で main `62eb01c2042de4b9359e13460261c2821f8b5680` とローカル HEAD の一致、[0.11.7 のリリース](https://github.com/fukuyori/rakukan/releases/tag/0.11.7)、open Issue 15 件、open PR 0 件を確認
 - #40 のコメント全件を確認し、[#45 の PR 依頼済み](https://github.com/fukuyori/rakukan/issues/40#issuecomment-5644968036)を原案へ訂正。#45 自体のコメント数から依頼の有無を判断しない
 - [PR #31](https://github.com/fukuyori/rakukan/pull/31)の本文・コメント・状態を確認し、取り下げ済みへ訂正。[PR #52](https://github.com/fukuyori/rakukan/pull/52)の本文・変更ファイル一覧・マージ状態と、[#51 の段 2 が残る記録](https://github.com/fukuyori/rakukan/issues/51#issuecomment-5679768760)も確認
 - [#53](https://github.com/fukuyori/rakukan/issues/53)、[#54](https://github.com/fukuyori/rakukan/issues/54)、[#55](https://github.com/fukuyori/rakukan/issues/55)、[#49](https://github.com/fukuyori/rakukan/issues/49)、[#50](https://github.com/fukuyori/rakukan/issues/50)、[#16](https://github.com/fukuyori/rakukan/issues/16)、[#35](https://github.com/fukuyori/rakukan/issues/35)の本文を確認。現行の `digits.rs`、RPC client / server、TSF config・DM・deferred 処理と照合して設計条件を補強
@@ -2147,7 +2147,7 @@ akukan-tsf-*.log`（680 ファイル）を、行頭の時刻で日付ごとに�
 - 以前の基準値（旧 `rakukan.log` の 1 日 73,033 行・9,736,860 バイト、#54 起票時）との比較は、ログ方式が違うので
   同じ土俵ではないが、通常日はそれより少なく、試験日は同程度〜上回る。**#54 の残件（1 日分のログ量の確認）はこれで完了**。
   レモンの判断で 2026-09-24 に #54 をクローズした（https://github.com/fukuyori/rakukan/issues/54#issuecomment-5808769991 ）。
-  修正 `a981b07` は未リリース（0.11.9 に含める）
+  修正 `a981b07`（0.11.9 に含まれる）
 
 ### 2026-09-24 #50 破棄済み DM ポインタの再挿入: 調査と詳細設計（案、3-2）
 

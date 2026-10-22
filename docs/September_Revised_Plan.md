@@ -1157,7 +1157,7 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 
 実測（0.11.6）: 辞書は `dict::store: ready` までロードされているのに、3 秒後の変換が `engine::merge: dict_store=None dict_cands=[]` になり、`learn_force: dict_store not initialized` が出た。DLL ログには 2026-09-12 にも同じ WARN が 4 件あり、以前から起きていた。
 
-#### 修正（0.11.6 の後、未リリース）
+#### 修正（0.11.6 の後。0.11.7 に含まれる）
 
 - `6ccb9e0`: `dispatch_engine`（エンジン要求の唯一の funnel、engine mutex 下）の冒頭で host 側が必ず注入を試みる。TSF のラッチ・reload 経路・ホストが入れ替わった理由に依存しなくなる。注入済みなら `is_*_ready()` の判定だけで終わり RPC も増えない。あわせて `engine_reload` の skip 経路でも `reset_ready_latches()` を呼び、辞書未注入のまま `Learn` / `LearnForce` が来たら host ログへ WARN（`dict_status` 付き）。
 - `481e5bf`: エンジン DLL のログレベルを `config.toml` の `log_level` に追随させる。DLL の filter は `RAKUKAN_LOG`（既定 info）だけで決まり、config を上げても `engine::merge` や `conv candidate confidence` が取れず、今回の調査で障害になった。TSF が config を読んだ時点で rpc クライアントへ預け、ホスト spawn 時に子の環境変数として渡す。既に `RAKUKAN_LOG` があるときは触らない（手動設定を壊さない）。判定は純関数 `spawn_log_env` に切り出してテスト 2 件。
@@ -1173,7 +1173,7 @@ Issue #18 の返信後、nick20002005 氏の統合ブランチ `nick/local/all-f
 
 ### Step 13 実装（2026-09-14）
 
-13-1（再試行）・13-2（計測）・13-3（復帰、#43）を実装した。未リリース、実機確認は未実施。テスト 435 件成功、`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` クリーン。
+13-1（再試行）・13-2（計測）・13-3（復帰、#43）を実装した（`c3bedc3`、0.11.7 に含まれる）。この時点では実機確認は未実施。テスト 435 件成功、`cargo clippy --workspace --all-targets -- -D warnings` / `cargo fmt --all -- --check` クリーン。
 
 #### 13-1 再試行（#39）
 
@@ -1360,7 +1360,7 @@ Step 9 と Step 11 は完了、Step 10 以降が残っている。順序は変�
 | 4 | Step 14 リリースと再計測 | なし | 対応するステップの実機確認後 |
 | 5 | インストール・更新・削除の再設計 | #33（PR #30 の方式を採用）、#46 | `docs/Installer_Redesign_Plan.md` の Step 1〜6。着手時期は未定（Step 10〜13 の後）。#33 は 2026-09-12 に範囲を広げ、インストール先を `%LOCALAPPDATA%` から `%ProgramFiles%` へ移す件、`install.ps1` の exe コピー失敗（`already exists`）、transcript 追記型ログの肥大化対策を追加した |
 | 判断待ち | リーダー記号の入力方式 | #35 | 方式（Space 変換の候補 / `z` 系キー列）と文字の割り当てが未決。PR #31 は保留 |
-| 完了 / 一部残り | 新しい入力欄の IME 状態（H） | #36、#51 | **#36 は完了（2026-09-15、PR #52 / `8940bb0` `928e066`、未リリース）**。`[input]` の `ime_on_apps` / `ime_off_apps` で設定する形にし、ターミナル判定の直書きを廃止。**#51 の段 2（設定アプリでの編集）が残る**。関連で #50 |
+| 完了 / 一部残り | 新しい入力欄の IME 状態（H） | #36、#51 | **#36 は完了（2026-09-15、PR #52 / `8940bb0` `928e066`、0.11.9 に含まれる）**。`[input]` の `ime_on_apps` / `ime_off_apps` で設定する形にし、ターミナル判定の直書きを廃止。**#51 の段 2（設定アプリでの編集）が残る**。関連で #50 |
 | 判断待ち | 候補・予測の品質（D） | #40、#45 | 1・3 は main で再現せず、7 は #45 に切り出して PR 待ち、2 は Step 12 後に縮小版の PR を受ける（依頼済み）、4 は見送り |
 | 判断待ち | かな run の辞書参照（Step 9 残件） | #16 | `DictLookup` API（#32 側）の転用可能性を含めて設計が必要。2026-09-14 に具体例を確認: `はんは` は辞書に見出しが無く（`はん` は 43 件）、助詞を含む読みからは辞書に到達できない |
 | 判断待ち | 文節変換 | #32 | `docs/Segment_Edit_Plan.md`。統合ブランチ側の自動分割案（#18 の A）との方式比較が未着手 |

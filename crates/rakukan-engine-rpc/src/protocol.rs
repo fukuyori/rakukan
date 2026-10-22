@@ -18,7 +18,7 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 /// - (v4 のまま) `MergeCandidates` を廃止して `_ReservedMergeCandidates` に。
 ///   ホストは `Error` を返す（TSF 側の呼び出しは同時に削除済み）
 /// - v6: Issue #56 の host / engine / owner 識別子と変更要求・復元・終了応答の形を追加
-///   （(b) で BG 系の応答型と編集状態の同梱、照合付きの読み取り `Read` を追加。v6 は未リリースなので版は上げない）
+///   （(b) で BG 系の応答型と編集状態の同梱、照合付きの読み取り `Read` を追加。v6 を出す前の変更なので版は上げない）
 /// - v7: 入力処理の見直し（#69 / #70、docs/Input_Pipeline_Plan.md 5 節）。`RestoreJournal` /
 ///   `RestoredJournal`、`ChangeRequest::SeedPreedit` / `RetainRange`、`SideEffect`、
 ///   `Reason::ConfigStale` / `ConfigUnusable`（#66 用に予約。v7 のホストは返さない）を追加。

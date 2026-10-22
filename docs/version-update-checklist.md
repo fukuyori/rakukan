@@ -53,7 +53,9 @@
 cargo check --workspace --all-targets
 # 3. 表記漏れの確認（旧バージョン番号が残っていないか。生成物とテスト固定値は除く）
 git grep -n "0\.10\.4" -- ':!*.deps.json' ':!Cargo.lock' ':!docs/*' ':!CHANGELOG.md'
-# 4. 空白チェック
+# 4. リリースの状態の書き込みが無いか（版の番号・コミットで書く。docs/archive は除く）
+git grep -n "未リリース\|最新リリース" -- ':!docs/archive/*' ':!docs/version-update-checklist.md'
+# 5. 空白チェック
 git diff --check
 ```
 
