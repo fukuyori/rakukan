@@ -1,11 +1,12 @@
-//! 直接入力の間の接続の確認（入力処理の見直しの段 6、docs/Input_Pipeline_Plan.md 4.2 の
+//! ホストとの接続の背景の確認（入力処理の見直しの段 6、docs/Input_Pipeline_Plan.md 4.2 の
 //! 「直接入力」の外す条件）。
 //!
-//! 回復できない場合の処置の後、直接入力にしたスレッドの窓を登録する（[`watch`]）。確認の
+//! 回復できない場合の処置の後に直接入力にしたスレッドと、切断の間にキーを保留している
+//! スレッド（UI のスレッドでは繋ぎ直しを待たない）の窓を登録する（[`watch`]）。確認の
 //! スレッドが 5 s ごとに `RAKUKAN_ENGINE` を `try_lock` で取り（取れなければその回は飛ばす）、
 //! エンジンの口が無ければ初期化を促し、あれば `probe()` を送る。成功したら、その時点の
-//! `HostLink` の世代と登録の番号を付けて、登録した窓へ `WM_APP_LINK_UP` を送る。外すか
-//! どうかは UI のスレッドが決める（`key_queue::on_link_up`）。登録が無くなったらスレッドを
+//! `HostLink` の世代と登録の番号を付けて、登録した窓へ `WM_APP_LINK_UP` を送る。直接入力を
+//! 外すか・保留したキーを再生するかは UI のスレッドが決める（`key_queue::on_link_up`）。登録が無くなったらスレッドを
 //! 終える。
 //!
 //! 送信は登録と同じロックの中で行い、送る直前に登録が残っていることを確かめる。登録を
@@ -104,13 +105,24 @@ fn check() -> Option<u64> {
         // 誰かが使っている: この回は飛ばす
         Err(TryLockError::WouldBlock) => return None,
     };
+    // ロックを持った時間を記録する（UI のスレッドがこのロックを待つことがあるため。診断用）
+    let locked_at = std::time::Instant::now();
     let Some(engine) = guard.0.as_ref() else {
         // 口が無い: 初期化を促す（次の回で確かめる）
         drop(guard);
         super::state::engine_start_bg_init();
         return None;
     };
-    match engine.probe() {
+    let result = engine.probe();
+    drop(guard);
+    let held = locked_at.elapsed();
+    if held >= std::time::Duration::from_millis(200) {
+        tracing::info!(
+            "host_probe: held the engine lock for {} ms",
+            held.as_millis()
+        );
+    }
+    match result {
         Ok(health) => {
             let link = rakukan_engine_rpc::host_link();
             tracing::info!(

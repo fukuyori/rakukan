@@ -223,7 +223,8 @@ const WM_APP_OPENCLOSE_CHANGED: u32 = WM_APP + 2;
 /// 確定の EditSession が終わった（入力処理の見直しの段 5）。ホストへの後処理を、
 /// EditSession の外（このメッセージの処理）で行う。
 const WM_APP_COMMIT_DONE: u32 = WM_APP + 3;
-/// 直接入力の間の接続の確認が成功した（入力処理の見直しの段 6。`host_probe` が送る）。
+/// 背景の接続の確認が成功した（入力処理の見直しの段 6。直接入力の間・切断中の保留の間に
+/// `host_probe` が送る）。
 /// WPARAM は確認の時点の接続の世代、LPARAM は登録の番号。
 pub(crate) const WM_APP_LINK_UP: u32 = WM_APP + 4;
 
@@ -338,7 +339,7 @@ unsafe extern "system" fn wnd_proc(
             crate::tsf::key_queue::pump();
             LRESULT(0)
         }
-        // 直接入力の間の接続の確認が成功した（入力処理の見直しの段 6）
+        // 背景の接続の確認が成功した（入力処理の見直しの段 6）
         m if m == WM_APP_LINK_UP => {
             crate::tsf::key_queue::on_link_up(wparam.0 as u64, lparam.0 as u64);
             LRESULT(0)

@@ -10,5 +10,6 @@ pub(crate) mod key_queue;
 pub(crate) mod language_bar;
 pub(crate) mod live_session;
 pub(crate) mod mode_indicator;
+pub(crate) mod notice;
 pub(crate) mod settings_launcher;
 pub(crate) mod tray_ipc;

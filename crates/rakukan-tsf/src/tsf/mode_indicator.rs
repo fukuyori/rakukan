@@ -200,6 +200,12 @@ fn get_caret_screen_pos() -> Option<(i32, i32)> {
     }
 }
 
+/// キャレットの位置（スクリーン座標、y はキャレット下端）。取れなければ `None`
+/// （知らせの窓 `notice` が使う）。
+pub(crate) fn caret_screen_pos() -> Option<(i32, i32)> {
+    get_caret_screen_pos()
+}
+
 /// モードインジケーターを表示する。
 ///
 /// `mode_char`: 表示文字（"あ", "ア", "A"）

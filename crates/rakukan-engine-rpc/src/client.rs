@@ -196,6 +196,9 @@ pub enum DisconnectKind {
     VersionMismatch,
     /// `Hello` の応答がエラー・想定外だった（版の違いを除く）。
     HelloError,
+    /// 自分でホストを起動しようとして、起動できなかった（実行ファイルが無い・起動の失敗）。
+    /// 待っても戻らない（入力処理の見直しの段 6、設計書 4.2 の第 9 版の案）。
+    HostMissing,
     /// `Create` の応答がエラー・想定外だった。
     CreateError,
 }
@@ -1103,7 +1106,16 @@ impl RpcEngine {
     /// 応答を受け取れたら成功（ホストの健全性の値を返す）。`engine_health` と違い、通信の
     /// 失敗（`Hello` の版の照合を含む）を隠さない。結果は [`host_link`] にも残る。
     pub fn probe(&self) -> Result<String> {
-        self.call_string(Request::EngineHealth)
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
+        // 切断中でも繋ぎ直しを試す（繋ぎ直しはこの確認が担う）
+        match guard.send(Request::EngineHealth, true)? {
+            Response::String(s) => Ok(s),
+            Response::Error(e) => bail!("rpc error: {e}"),
+            other => bail!("unexpected response: {:?}", other),
+        }
     }
 
     pub fn dict_status(&self) -> String {
@@ -1395,8 +1407,25 @@ impl<T: HostTransport> Connection<T> {
 
     /// 1 回の RPC。所要時間を計測して区間カウンタへ足し、閾値を超えたら WARN を
     /// 出す（Step 13-2）。再接続のリトライも含めた実時間を測る。
+    ///
+    /// 切断中（`HostLink` が `Disconnected`）で接続が無ければ、繋ぎ直しを試さずにすぐ失敗する
+    /// （接続の状態は変えない。入力処理の見直しの段 6）。UI のスレッドの処理（キー・タイマー・
+    /// 言語バーの表示など）が、そのたびに繋ぎ直しを待って数秒ずつ止まらないため。繋がっていた
+    /// 接続がこの要求の中で切れた場合は、今までどおり繋ぎ直して再送する（ホストの入れ替えを
+    /// その場で越える）。切断中の繋ぎ直しは、背景の接続確認（[`RpcEngine::probe`]）が担う。
     fn call_with_retry(&mut self, req: Request) -> Result<Response> {
+        self.send(req, false)
+    }
+
+    /// `reconnect_when_down` なら、切断中でも繋ぎ直しを試す（`probe` だけが使う）。
+    fn send(&mut self, req: Request, reconnect_when_down: bool) -> Result<Response> {
         let label = crate::server::request_label(&req);
+        if !reconnect_when_down
+            && self.stream.is_none()
+            && matches!(self.link.get().state, LinkState::Disconnected(_))
+        {
+            bail!("host link down; {label} not sent");
+        }
         let started = Instant::now();
         let result = self.call_with_retry_inner(req);
         self.link.note(result.as_ref().map(|_| ()));
@@ -1405,7 +1434,12 @@ impl<T: HostTransport> Connection<T> {
         if let Some(threshold) = rpc_slow_threshold_ms(label)
             && elapsed_us / 1000 >= threshold
         {
-            tracing::warn!("rpc SLOW {label} elapsed_us={elapsed_us}");
+            let thread = std::thread::current();
+            tracing::warn!(
+                "rpc SLOW {label} elapsed_us={elapsed_us} thread={:?}/{}",
+                thread.id(),
+                thread.name().unwrap_or("-")
+            );
         }
         result
     }
@@ -1529,17 +1563,18 @@ impl<T: HostTransport> Connection<T> {
                 match self.with_guard(|g| g.can_spawn(now_ms)) {
                     Ok(()) => {
                         let spawn = self.transport.spawn();
-                        if let Err(e) = &spawn {
-                            // 起動できなくても接続待ちは続ける（別プロセスが起動した
-                            // ホストへ繋がれば成功扱い）。診断ログだけ残す。
+                        // 起動できなくても接続は試す（別プロセスが起動したホストへ繋がれば
+                        // 成功扱い）。ただし自分の起動が失敗したなら、起動を待つ長い待ちは
+                        // しない（UI のスレッドを止めないため。入力処理の見直しの段 6）
+                        let wait_ms = if let Err(e) = &spawn {
                             tracing::warn!("spawn_host failed: {e}");
-                        }
+                            CONNECT_WHILE_BLOCKED_MS
+                        } else {
+                            CONNECT_AFTER_SPAWN_MS
+                        };
                         ctx.spawn = Some(spawn.map_err(|e| e.to_string()));
                         let spawned_at_ms = self.transport.now_ms();
-                        match self
-                            .transport
-                            .connect(Duration::from_millis(CONNECT_AFTER_SPAWN_MS))
-                        {
+                        match self.transport.connect(Duration::from_millis(wait_ms)) {
                             Ok(s) => {
                                 ctx.spawn_to_connect_ms =
                                     Some(self.transport.now_ms().saturating_sub(spawned_at_ms));
@@ -1740,6 +1775,9 @@ impl<T: HostTransport> Connection<T> {
                 }
                 // 失敗の段階から分類して付ける（`HostLink` の分類に使う。設計書 4.9）
                 let kind = match failure.stage {
+                    AttemptStage::ConnectAfterSpawn if matches!(ctx.spawn, Some(Err(_))) => {
+                        DisconnectKind::HostMissing
+                    }
                     AttemptStage::ConnectAfterSpawn => DisconnectKind::Transport,
                     AttemptStage::ConnectWhileBlocked => DisconnectKind::Suppressed,
                     AttemptStage::Hello => DisconnectKind::HelloError,
@@ -2292,9 +2330,24 @@ mod tests {
         assert_eq!(guard_state(&conn), (1, None));
         assert_eq!(conn.transport.spawn_calls, 1);
         assert_eq!(
-            conn.transport.connect_timeouts.len(),
-            2,
-            "spawn 失敗でも接続待ちに進む"
+            conn.transport.connect_timeouts,
+            vec![INITIAL_CONNECT_MS, CONNECT_WHILE_BLOCKED_MS],
+            "spawn 失敗でも接続は試すが、起動を待つ長い待ちはしない"
+        );
+        assert_eq!(
+            conn.link.get().state,
+            LinkState::Unknown,
+            "try_connect_once は接続の状態を変えない"
+        );
+        // ensure_connected を通ると、起動できなかったことが分類に残る
+        let mut conn = connection(FakeTransport {
+            spawns: VecDeque::from([Err("missing"), Err("missing")]),
+            ..Default::default()
+        });
+        conn.ensure_connected().expect_err("no host");
+        assert_eq!(
+            conn.link.get().state,
+            LinkState::Disconnected(DisconnectKind::HostMissing)
         );
     }
 
@@ -2368,6 +2421,39 @@ mod tests {
         let third = conn.link.get();
         assert_eq!(third.state, LinkState::Connected);
         assert_eq!(third.epoch, 3);
+    }
+
+    #[test]
+    fn requests_are_not_sent_while_the_link_is_down_except_the_probe() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Err("a"), Err("b"), Err("c"), Err("d")]),
+            ..Default::default()
+        });
+        // 一度繋がらずに切断になる
+        conn.ensure_connected().expect_err("no host");
+        let down = conn.link.get();
+        assert!(matches!(down.state, LinkState::Disconnected(_)));
+        let tried = conn.transport.connect_timeouts.len();
+        // 要求は繋ぎ直しを試さずに失敗し、接続の状態も変えない
+        conn.call_with_retry(Request::BackendLabel)
+            .expect_err("skipped");
+        assert_eq!(conn.transport.connect_timeouts.len(), tried);
+        assert_eq!(conn.link.get(), down);
+        // 背景の接続確認は繋ぎ直しを試す
+        conn.send(Request::EngineHealth, true)
+            .expect_err("still no host");
+        assert!(conn.transport.connect_timeouts.len() > tried);
+        // 繋がっていれば（または未接続の初回なら）今までどおり送る
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[
+                hello_ok(),
+                Response::Unit,
+                Response::String("CUDA".into()),
+            ]))]),
+            ..Default::default()
+        });
+        let r = conn.call_with_retry(Request::BackendLabel).expect("sent");
+        assert!(matches!(r, Response::String(ref s) if s == "CUDA"), "{r:?}");
     }
 
     #[test]

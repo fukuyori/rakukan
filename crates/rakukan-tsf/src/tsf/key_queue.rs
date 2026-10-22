@@ -69,8 +69,6 @@ thread_local! {
     static OUTCOMES: RefCell<Vec<(u64, bool)>> = const { RefCell::new(Vec::new()) };
     /// 処理中のキーが止まった（[`suspend_current`]・[`suspend_unrecoverable`]）。
     static SUSPENDED: Cell<Option<Suspension>> = const { Cell::new(None) };
-    /// ホストが応えない間に、最後に保留したキーを再生した時刻（[`LINK_RETRY`] ごとに試す）。
-    static LAST_LINK_RETRY: Cell<Option<Instant>> = const { Cell::new(None) };
     /// 保留したキーを再生している（[`pump`] の中で `replay_key` を呼んでいる間）。
     static IN_REPLAY: Cell<bool> = const { Cell::new(false) };
     /// 回復できない場合の処置の後の直接入力（[`direct_fallback`]）。
@@ -89,6 +87,9 @@ thread_local! {
     /// composition の救済（`RescueTxn`）。回復できない場合の処置の締め切りで composition が
     /// あったときだけ。
     static COMP_RESCUE: RefCell<Option<CompRescue>> = const { RefCell::new(None) };
+    /// 背景の接続の確認に登録できなかったときに、切断中に再生を試した時刻
+    /// （[`UNWATCHED_RETRY`] ごとに試す）。
+    static LAST_UNWATCHED_RETRY: Cell<Option<Instant>> = const { Cell::new(None) };
     /// 接続の確認（`host_probe`）への登録の番号（0 なら未登録）。
     static WATCH_TOKEN: Cell<u64> = const { Cell::new(0) };
     /// 処置の途中に接続の回復の通知を受けた（処置の終わりに読み直す。設計書 4.2 の W2）。
@@ -125,9 +126,50 @@ fn take_suspension() -> Option<Suspension> {
     SUSPENDED.with(|s| s.replace(None))
 }
 
-/// ホストが応えない間に、保留したキーの再生を試す間隔（再生のたびに再接続の待ちで UI の
-/// スレッドを止めないため）。
-const LINK_RETRY: Duration = Duration::from_secs(1);
+/// 背景の接続の確認に登録できない（窓・スレッドを作れない）ときに、切断中の再生を試す間隔。
+/// 再生は UI のスレッドで繋ぎ直しを待つが、回復を知る手段がほかに無いので、間を空けて試す。
+const UNWATCHED_RETRY: Duration = Duration::from_secs(5);
+
+/// 切断・救済・直接入力・保留の間の状態の要約（診断のログ用）。どれにも当たらなければ `None`。
+pub(crate) fn outage_diag() -> Option<String> {
+    let rescue = RESCUE_ACTIVE.with(|a| a.get());
+    let fallback = DIRECT_FALLBACK.with(|d| d.get());
+    let queued = QUEUE.with(|q| q.try_borrow().map_or(usize::MAX, |q| q.len()));
+    let inserting = INSERTING.with(|i| i.try_borrow().map_or(true, |i| i.is_some()));
+    let comp = COMP_RESCUE.with(|c| c.try_borrow().map_or(true, |c| c.is_some()));
+    if !(rescue || fallback || queued > 0 || inserting || comp) {
+        return None;
+    }
+    let rescues = RESCUES.with(|r| r.try_borrow().map_or(usize::MAX, |r| r.len()));
+    let extra = RESCUE_EXTRA.with(|e| e.try_borrow().map_or(usize::MAX, |e| e.len()));
+    let link = rakukan_engine_rpc::host_link();
+    Some(format!(
+        "rescue_active={rescue} direct_fallback={fallback} queued={queued} inserting={inserting} comp_rescue={comp} rescues={rescues} extra={extra} watch={} link={:?}/{}",
+        WATCH_TOKEN.with(|w| w.get()),
+        link.state,
+        link.epoch
+    ))
+}
+
+/// 待っても戻らないと分かる切断か（版の違うホスト・起動できない・起動の失敗が続いて抑止に
+/// 入った）。保留したキーは保持の上限を待たずに回復できない場合の処置に進む（設計書 4.2 の
+/// 第 9 版の案）。一時的な切断もありうる分類（`Transport` など）は含めない。
+fn link_unrecoverable() -> bool {
+    use rakukan_engine_rpc::{DisconnectKind, LinkState};
+    matches!(
+        rakukan_engine_rpc::host_link().state,
+        LinkState::Disconnected(
+            DisconnectKind::VersionMismatch
+                | DisconnectKind::HostMissing
+                | DisconnectKind::Suppressed
+        )
+    )
+}
+
+/// 直接入力の間か（言語バーの表示に使う。副作用の無い読み取り）。
+pub(crate) fn in_direct_fallback() -> bool {
+    DIRECT_FALLBACK.with(|d| d.get())
+}
 
 /// ホストとの接続が切れているか（直近の接続・RPC が失敗した）。
 fn link_down() -> bool {
@@ -344,15 +386,31 @@ pub(crate) fn pump_for(current: Option<u64>) {
         if check_inserting() {
             break;
         }
-        // ホストが応えない間は、[`LINK_RETRY`] ごとに 1 回だけ試す
-        if link_down() {
-            if LAST_LINK_RETRY
+        // ホストが応えない間は、UI のスレッドで再生しない（再生のたびに繋ぎ直しを待って
+        // UI のスレッドが数秒ずつ止まるため）。回復は背景の接続確認（`host_probe`）で知り、
+        // 繋がったら再生する（[`on_link_up`]）。保持の上限は先頭のキーの時刻で判断する
+        if link_down() && QUEUE.with(|q| !q.borrow().is_empty()) {
+            let first_age = QUEUE.with(|q| q.borrow().front().map(|e| e.key.at.elapsed()));
+            // 待っても戻らないと分かる状態なら、保持の上限を待たない
+            if link_unrecoverable() || first_age.is_some_and(|age| age >= MAX_AGE) {
+                if let Some(Queued { key, .. }) = QUEUE.with(|q| q.borrow_mut().pop_front()) {
+                    // 回復できない場合の処置（列の文字キーを打った文字のまま入れ、直接入力に
+                    // 切り替える）
+                    give_up(key);
+                }
+                break;
+            }
+            if watch_link() {
+                break;
+            }
+            // 背景の確認に登録できない: 回復を知る手段がほかに無いので、間を空けて再生を試す
+            if LAST_UNWATCHED_RETRY
                 .with(|t| t.get())
-                .is_some_and(|t| t.elapsed() < LINK_RETRY)
+                .is_some_and(|t| t.elapsed() < UNWATCHED_RETRY)
             {
                 break;
             }
-            LAST_LINK_RETRY.with(|t| t.set(Some(Instant::now())));
+            LAST_UNWATCHED_RETRY.with(|t| t.set(Some(Instant::now())));
         }
         let Some(Queued { seq, key }) = QUEUE.with(|q| q.borrow_mut().pop_front()) else {
             break;
@@ -379,15 +437,9 @@ pub(crate) fn pump_for(current: Option<u64>) {
         };
         if let Some(suspension) = take_suspension() {
             // ホストの版が違う（古いホストが動いている）なら、待っても回復しない
-            let version_mismatch = matches!(
-                rakukan_engine_rpc::host_link().state,
-                rakukan_engine_rpc::LinkState::Disconnected(
-                    rakukan_engine_rpc::DisconnectKind::VersionMismatch
-                )
-            );
             let unavailable = engine_unavailable();
             if suspension == Suspension::Unrecoverable
-                || (version_mismatch && unavailable)
+                || (link_unrecoverable() && unavailable)
                 || (kept.at.elapsed() >= MAX_AGE && (unavailable || link_down()))
             {
                 // エンジンが使えない・ホストが応えないまま保持の上限を過ぎた（版の違い・
@@ -607,9 +659,14 @@ fn give_up(first: HeldKey) {
     // 後の表示の要求を止める）
     DIRECT_FALLBACK.with(|d| d.set(true));
     RESCUE_ACTIVE.with(|a| a.set(true));
-    crate::tsf::factory::show_engine_waiting();
     crate::tsf::candidate_window::start_key_queue_timer();
     watch_link();
+    // 何が起きたかと戻し方を知らせる（原因ごとに文面を分けない。ログには分類を残す）
+    tracing::warn!(
+        "key_queue: Japanese input unavailable; link={:?}",
+        rakukan_engine_rpc::host_link().state
+    );
+    crate::tsf::notice::show(crate::tsf::notice::UNAVAILABLE);
     let epoch = RESCUE_EPOCH.with(|e| e.get());
     if let Some(rescue) = cut_off_composition(&mut keys, tid) {
         request_comp_rescue(rescue, epoch, false);
@@ -718,6 +775,12 @@ fn request_rescue(mut rescue: Rescue, epoch: u64) {
     });
     rescue.state =
         crate::tsf::factory::insert_text_direct(&rescue.ctx, rescue.tid, &rescue.text, still_valid);
+    tracing::info!(
+        "rescue: insert requested attempt={} chars={} state={:?}",
+        rescue.attempts,
+        rescue.text.chars().count(),
+        rescue.state.get()
+    );
     if RESCUE_EPOCH.with(|e| e.get()) != epoch {
         expire_rescue(&rescue, "deactivated");
         return;
@@ -757,7 +820,13 @@ fn check_rescues() {
             rescue.state.set(state);
         }
         match state {
-            InsertState::Inserted => {}
+            InsertState::Inserted => {
+                tracing::info!(
+                    "rescue: inserted chars={} attempts={}",
+                    rescue.text.chars().count(),
+                    rescue.attempts
+                );
+            }
             InsertState::Pending | InsertState::Running => {
                 RESCUES.with(|r| r.borrow_mut().push(rescue));
             }
@@ -782,6 +851,7 @@ fn check_rescues() {
         }
         if RESCUES.with(|r| r.borrow().is_empty()) && RESCUE_EXTRA.with(|e| e.borrow().is_empty()) {
             RESCUE_ACTIVE.with(|a| a.set(false));
+            tracing::info!("rescue: finished (keys go to the app while direct input)");
             rescue_finished();
         }
     }
@@ -905,6 +975,11 @@ fn request_comp_rescue(mut rescue: CompRescue, epoch: u64, last: bool) {
         last,
         still_valid,
     );
+    tracing::info!(
+        "rescue: composition rescue requested attempts={} last={last} state={:?}",
+        rescue.attempts,
+        rescue.state.borrow()
+    );
     if RESCUE_EPOCH.with(|e| e.get()) != epoch {
         expire_comp_rescue(rescue, "deactivated");
         return;
@@ -935,7 +1010,10 @@ fn check_comp_rescue(epoch: u64) {
         RescueStep::Pending | RescueStep::Running => {
             COMP_RESCUE.with(|c| *c.borrow_mut() = Some(rescue));
         }
-        RescueStep::Done(outcome) => settle_comp_rescue(rescue, outcome, Some(epoch)),
+        RescueStep::Done(outcome) => {
+            tracing::info!("rescue: composition rescue done: {outcome:?}");
+            settle_comp_rescue(rescue, outcome, Some(epoch))
+        }
     }
 }
 
@@ -1081,7 +1159,8 @@ fn link_up_action(
 }
 
 /// 接続の確認が成功した（`WM_APP_LINK_UP`。`epoch` は確認の時点の接続の世代、`token` は
-/// 通知の宛先の登録の番号）。今の登録への通知でなければ捨てる。
+/// 通知の宛先の登録の番号）。今の登録への通知でなければ捨てる。直接入力でなければ（切断の
+/// 間に保留したキーがある）、登録を外して再生する。
 pub(crate) fn on_link_up(epoch: u64, token: u64) {
     if token == 0 || WATCH_TOKEN.with(|w| w.get()) != token {
         tracing::debug!("key_queue: link-up notice for another registration ({token}); ignored");
@@ -1093,7 +1172,10 @@ pub(crate) fn on_link_up(epoch: u64, token: u64) {
         rakukan_engine_rpc::host_link(),
         Some(epoch),
     ) {
-        LinkUp::Ignore => unwatch_link(),
+        LinkUp::Ignore => {
+            unwatch_link();
+            pump();
+        }
         LinkUp::Note => LINK_UP_NOTED.with(|n| n.set(true)),
         LinkUp::Release => end_direct_fallback(),
         LinkUp::Keep => {
@@ -1133,6 +1215,7 @@ fn end_direct_fallback() {
     unwatch_link();
     crate::tsf::mode_indicator::hide();
     tracing::info!("key_queue: host is back; direct input ended");
+    crate::tsf::notice::show(crate::tsf::notice::RECOVERED);
 }
 
 /// 直接入力（回復できない場合の処置の後）。IME のモードキー以外はアプリへ渡す。文字を

@@ -657,6 +657,7 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
         // sink 解除中は DM の破棄を観測できないので、生存中の DM を全部失効させる（Issue #50）
         crate::engine::state::doc_mode_deactivate();
         crate::tsf::mode_indicator::destroy();
+        crate::tsf::notice::destroy();
         if let Ok(mut sess) = session_get() {
             sess.set_idle();
         }
@@ -732,78 +733,91 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         wparam: WPARAM,
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
-        let vk = normalize_key_event_vk(wparam.0 as u16);
-        // 前のキーの判定を消す（最後の判定まで進んだときだけ残す。早期 return の経路で
-        // 古い判定を OnKeyDown に使わせない）
-        TEST_EAT.with(|t| t.set(None));
-        // 回復できない場合の処置の途中: IME のオン・オフ、割り当ての有無にかかわらず、
-        // すべて食べる（文字は後で文書へ入れ、それ以外は捨てる。OnKeyDown と同じ）
-        if crate::tsf::key_queue::rescue_active() {
-            return Ok(TRUE);
-        }
-        // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
-        // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
-        let resolved = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|g| g.keymap.resolve_action(vk));
-        let Some(action) = key_resolve(resolved, vk) else {
-            return Ok(FALSE);
-        };
-        // 保留した文字がある間の文字キーは、IME のオン・オフにかかわらず食べる（OnKeyDown で
-        // 積む。入力処理の見直しの段 6）
-        if crate::tsf::key_queue::holds_typed_char(&action) {
-            return Ok(TRUE);
-        }
-        // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
-        // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
-        // その場でアプリへ渡す
-        if crate::engine::state::ime_mode_get_atomic().is_on() {
-            // 回復できない場合の処置の後の直接入力: IME のモードキーだけを食べる
-            if crate::tsf::key_queue::direct_fallback() {
-                return Ok(if is_ime_mode_action(&action) {
-                    TRUE
-                } else {
-                    FALSE
-                });
+        // 切断・救済・直接入力・保留の間だけ、判断と状態を記録する（診断用）
+        let diag_vk = normalize_key_event_vk(wparam.0 as u16);
+        let diag_before = crate::tsf::key_queue::outage_diag();
+        let diag_started = std::time::Instant::now();
+        let outcome = (|| -> windows::core::Result<BOOL> {
+            let vk = normalize_key_event_vk(wparam.0 as u16);
+            // 前のキーの判定を消す（最後の判定まで進んだときだけ残す。早期 return の経路で
+            // 古い判定を OnKeyDown に使わせない）
+            TEST_EAT.with(|t| t.set(None));
+            // 回復できない場合の処置の途中: IME のオン・オフ、割り当ての有無にかかわらず、
+            // すべて食べる（文字は後で文書へ入れ、それ以外は捨てる。OnKeyDown と同じ）
+            if crate::tsf::key_queue::rescue_active() {
+                return Ok(TRUE);
             }
-            if crate::tsf::key_queue::should_hold() {
-                let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
-                return Ok(if eat { TRUE } else { FALSE });
+            // 重要キーは、keymap 取得に失敗しても確実に動かす（RefCell 競合対策）。
+            // 集合は resolve_action ①.5 と同じ（keymap.rs の essential_fallback_action）。
+            let resolved = self
+                .inner
+                .try_borrow()
+                .ok()
+                .and_then(|g| g.keymap.resolve_action(vk));
+            let Some(action) = key_resolve(resolved, vk) else {
+                return Ok(FALSE);
+            };
+            // 保留した文字がある間の文字キーは、IME のオン・オフにかかわらず食べる（OnKeyDown で
+            // 積む。入力処理の見直しの段 6）
+            if crate::tsf::key_queue::holds_typed_char(&action) {
+                return Ok(TRUE);
             }
-        }
+            // 確定の結果待ち・保留中のキーがある間は、確定の後の状態で IME が食べるキーを食べて
+            // 保留する（入力処理の見直しの段 5 の 5c。OnKeyDown で積む）。食べないキーは
+            // その場でアプリへ渡す
+            if crate::engine::state::ime_mode_get_atomic().is_on() {
+                // 回復できない場合の処置の後の直接入力: IME のモードキーだけを食べる
+                if crate::tsf::key_queue::direct_fallback() {
+                    return Ok(if is_ime_mode_action(&action) {
+                        TRUE
+                    } else {
+                        FALSE
+                    });
+                }
+                if crate::tsf::key_queue::should_hold() {
+                    let eat = key_should_eat(&action, crate::tsf::key_queue::input_after_pending());
+                    return Ok(if eat { TRUE } else { FALSE });
+                }
+            }
 
-        // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
-        // コンパートメントは内部状態から導出して書く「通知」であり、真の状態ではない。
-        // 起動直後はコンパートメントが 0（オフ）のまま内部が On になる場合があり、
-        // コンパートメントを参照すると ImeToggle が逆方向に動くバグを引き起こす。
-        // → 内部状態のアトミックのみを正とし、コンパートメントは参照しない。
-        let eat = test_key_eat(
-            &action,
-            crate::engine::state::ime_mode_get_atomic().is_on(),
-            || {
-                engine_try_get_or_create()
-                    .ok()
-                    .and_then(|g| {
-                        g.as_ref().map(|e| match e.preedit_is_empty() {
-                            Ok(empty) => !empty,
-                            Err(_) => {
-                                crate::engine::state::composition_clone().is_ok_and(|c| c.is_some())
-                            }
+            // ロックなし高速チェック: アトミックでモード取得（try_lock 失敗でも正確）
+            // コンパートメントは内部状態から導出して書く「通知」であり、真の状態ではない。
+            // 起動直後はコンパートメントが 0（オフ）のまま内部が On になる場合があり、
+            // コンパートメントを参照すると ImeToggle が逆方向に動くバグを引き起こす。
+            // → 内部状態のアトミックのみを正とし、コンパートメントは参照しない。
+            let eat = test_key_eat(
+                &action,
+                crate::engine::state::ime_mode_get_atomic().is_on(),
+                || {
+                    engine_try_get_or_create()
+                        .ok()
+                        .and_then(|g| {
+                            g.as_ref().map(|e| match e.preedit_is_empty() {
+                                Ok(empty) => !empty,
+                                Err(_) => crate::engine::state::composition_clone()
+                                    .is_ok_and(|c| c.is_some()),
+                            })
                         })
-                    })
-                    // エンジンを取れないときは、KeyDown（handle_action の入口）と同じく
-                    // composition の有無で判定する（確かめられなければ、あるものとする）
-                    .unwrap_or_else(|| crate::engine::state::composition_held().unwrap_or(true))
-            },
-            // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
-            // AtomicBool でロックなし高速チェック
-            session_is_selecting_fast,
+                        // エンジンを取れないときは、KeyDown（handle_action の入口）と同じく
+                        // composition の有無で判定する（確かめられなければ、あるものとする）
+                        .unwrap_or_else(|| crate::engine::state::composition_held().unwrap_or(true))
+                },
+                // 選択モード中はプリエディットありと同じ扱い（候補操作キーを消費するため）
+                // AtomicBool でロックなし高速チェック
+                session_is_selecting_fast,
+            );
+            // OnKeyDown で処理が失敗したときの判定に使う（`KeyOutcome`）
+            TEST_EAT.with(|t| t.set(Some((vk, eat))));
+            Ok(if eat { TRUE } else { FALSE })
+        })();
+        log_key_diag(
+            "OnTestKeyDown",
+            diag_vk,
+            &outcome,
+            diag_before,
+            diag_started,
         );
-        // OnKeyDown で処理が失敗したときの判定に使う（`KeyOutcome`）
-        TEST_EAT.with(|t| t.set(Some((vk, eat))));
-        Ok(if eat { TRUE } else { FALSE })
+        outcome
     }
 
     fn OnKeyDown(
@@ -812,237 +826,248 @@ impl ITfKeyEventSink_Impl for TextServiceFactory_Impl {
         wparam: WPARAM,
         _: LPARAM,
     ) -> windows::core::Result<BOOL> {
-        // 届いた順の通し番号を取り、受け付けを終えるまで後のキーの再生を止める（入口の処理
-        // の途中で別のキーが割り込んでも、追い越させない。入力処理の見直しの段 5 の 5c）
-        let mut entry = crate::tsf::key_queue::enter();
-        // バックエンド初期化完了フラグを確認して言語バー表示を更新
-        if crate::engine::state::langbar_update_take() {
-            self.notify_langbar_update();
-        }
-        let _t = diag::span("OnKeyDown");
-        let vk = normalize_key_event_vk(wparam.0 as u16);
-        // 同じキーの OnTestKeyDown の判定（前のキーのものは捨てる）
-        let tested_eat = TEST_EAT
-            .with(|t| t.take())
-            .filter(|(tested_vk, _)| *tested_vk == vk)
-            .map(|(_, eat)| eat);
-
-        tracing::trace!("OnKeyDown vk={:#04x}", vk);
-
-        // Ctrl+Shift+F12: 診断ダンプ
-        if vk == 0x7B {
-            let ctrl = unsafe { GetKeyState(0x11) as u16 & 0x8000 != 0 };
-            let shift = unsafe { GetKeyState(0x10) as u16 & 0x8000 != 0 };
-            if ctrl && shift {
-                diag::dump_snapshot();
-                return Ok(TRUE);
+        // 切断・救済・直接入力・保留の間だけ、判断と状態を記録する（診断用）
+        let diag_vk = normalize_key_event_vk(wparam.0 as u16);
+        let diag_before = crate::tsf::key_queue::outage_diag();
+        let diag_started = std::time::Instant::now();
+        let outcome = (|| -> windows::core::Result<BOOL> {
+            // 届いた順の通し番号を取り、受け付けを終えるまで後のキーの再生を止める（入口の処理
+            // の途中で別のキーが割り込んでも、追い越させない。入力処理の見直しの段 5 の 5c）
+            let mut entry = crate::tsf::key_queue::enter();
+            // バックエンド初期化完了フラグを確認して言語バー表示を更新
+            if crate::engine::state::langbar_update_take() {
+                self.notify_langbar_update();
             }
-        }
+            let _t = diag::span("OnKeyDown");
+            let vk = normalize_key_event_vk(wparam.0 as u16);
+            // 同じキーの OnTestKeyDown の判定（前のキーのものは捨てる）
+            let tested_eat = TEST_EAT
+                .with(|t| t.take())
+                .filter(|(tested_vk, _)| *tested_vk == vk)
+                .map(|(_, eat)| eat);
 
-        let resolved = self
-            .inner
-            .try_borrow()
-            .ok()
-            .and_then(|g| g.keymap.resolve_action(vk));
-        // keymap を借用できない・解決できない場合は、OnTestKeyDown と同じく重要キーの
-        // fallback を使う。Test が食べると判断した Enter などを、KeyDown で
-        // unmapped としてアプリへ渡さない（入力処理の見直しの段 2）。
-        let action = match key_resolve(resolved, vk) {
-            Some(a) => a,
-            None => {
-                tracing::debug!(
-                    "OnKeyDown vk={:#04x} → unmapped (try_borrow={:?})",
-                    vk,
-                    self.inner.try_borrow().is_ok()
-                );
-                diag::event(DiagEvent::KeyIgnored {
-                    vk,
-                    reason: "unmapped",
-                });
-                // 回復できない場合の処置の途中は、割り当ての無いキー（Delete など）も
-                // アプリへ渡さず捨てる（入れていない文字より先に文書を変えないように）
-                if crate::tsf::key_queue::rescue_active() {
-                    tracing::warn!(
-                        "key_queue: unmapped key dropped while inserting typed characters vk={vk:#04x}"
-                    );
+            tracing::trace!("OnKeyDown vk={:#04x}", vk);
+
+            // Ctrl+Shift+F12: 診断ダンプ
+            if vk == 0x7B {
+                let ctrl = unsafe { GetKeyState(0x11) as u16 & 0x8000 != 0 };
+                let shift = unsafe { GetKeyState(0x10) as u16 & 0x8000 != 0 };
+                if ctrl && shift {
+                    diag::dump_snapshot();
                     return Ok(TRUE);
                 }
-                return Ok(FALSE);
             }
-        };
-        let ctx = match pic {
-            Some(c) => c.clone(),
-            None => {
-                diag::event(DiagEvent::KeyIgnored {
-                    vk,
-                    reason: "no_ctx",
-                });
-                // 保留した文字がある間の文字キーは、保留できなくてもアプリへ渡さない
-                // （OnTestKeyDown は食べている。まだ入っていない文字を追い越さない）
-                if crate::tsf::key_queue::holds_typed_char(&action) {
-                    tracing::warn!(
-                        "key_queue: character key dropped while held characters remain (no context) vk={vk:#04x}"
+
+            let resolved = self
+                .inner
+                .try_borrow()
+                .ok()
+                .and_then(|g| g.keymap.resolve_action(vk));
+            // keymap を借用できない・解決できない場合は、OnTestKeyDown と同じく重要キーの
+            // fallback を使う。Test が食べると判断した Enter などを、KeyDown で
+            // unmapped としてアプリへ渡さない（入力処理の見直しの段 2）。
+            let action = match key_resolve(resolved, vk) {
+                Some(a) => a,
+                None => {
+                    tracing::debug!(
+                        "OnKeyDown vk={:#04x} → unmapped (try_borrow={:?})",
+                        vk,
+                        self.inner.try_borrow().is_ok()
                     );
-                    return Ok(TRUE);
+                    diag::event(DiagEvent::KeyIgnored {
+                        vk,
+                        reason: "unmapped",
+                    });
+                    // 回復できない場合の処置の途中は、割り当ての無いキー（Delete など）も
+                    // アプリへ渡さず捨てる（入れていない文字より先に文書を変えないように）
+                    if crate::tsf::key_queue::rescue_active() {
+                        tracing::warn!(
+                            "key_queue: unmapped key dropped while inserting typed characters vk={vk:#04x}"
+                        );
+                        return Ok(TRUE);
+                    }
+                    return Ok(FALSE);
                 }
-                return Ok(FALSE);
-            }
-        };
-        let tid = self.inner.try_borrow().map(|g| g.client_id).unwrap_or(0);
-        let sink: ITfCompositionSink = match unsafe { self.cast() } {
-            Ok(s) => s,
-            Err(_) => {
-                diag::event(DiagEvent::KeyIgnored {
-                    vk,
-                    reason: "no_sink",
-                });
-                // 保留した文字がある間の文字キー: 上の no_ctx と同じ
-                if crate::tsf::key_queue::holds_typed_char(&action) {
-                    tracing::warn!(
-                        "key_queue: character key dropped while held characters remain (no sink) vk={vk:#04x}"
-                    );
-                    return Ok(TRUE);
+            };
+            let ctx = match pic {
+                Some(c) => c.clone(),
+                None => {
+                    diag::event(DiagEvent::KeyIgnored {
+                        vk,
+                        reason: "no_ctx",
+                    });
+                    // 保留した文字がある間の文字キーは、保留できなくてもアプリへ渡さない
+                    // （OnTestKeyDown は食べている。まだ入っていない文字を追い越さない）
+                    if crate::tsf::key_queue::holds_typed_char(&action) {
+                        tracing::warn!(
+                            "key_queue: character key dropped while held characters remain (no context) vk={vk:#04x}"
+                        );
+                        return Ok(TRUE);
+                    }
+                    return Ok(FALSE);
                 }
-                return Ok(FALSE);
-            }
-        };
+            };
+            let tid = self.inner.try_borrow().map(|g| g.client_id).unwrap_or(0);
+            let sink: ITfCompositionSink = match unsafe { self.cast() } {
+                Ok(s) => s,
+                Err(_) => {
+                    diag::event(DiagEvent::KeyIgnored {
+                        vk,
+                        reason: "no_sink",
+                    });
+                    // 保留した文字がある間の文字キー: 上の no_ctx と同じ
+                    if crate::tsf::key_queue::holds_typed_char(&action) {
+                        tracing::warn!(
+                            "key_queue: character key dropped while held characters remain (no sink) vk={vk:#04x}"
+                        );
+                        return Ok(TRUE);
+                    }
+                    return Ok(FALSE);
+                }
+            };
 
-        tracing::trace!("OnKeyDown vk={vk:#04x} action={action:?}");
+            tracing::trace!("OnKeyDown vk={vk:#04x} action={action:?}");
 
-        // モードインジケーターを非表示（キー入力があれば消す）
-        crate::tsf::mode_indicator::hide();
+            // モードインジケーターを非表示（キー入力があれば消す）
+            crate::tsf::mode_indicator::hide();
 
-        // 回復できない場合の処置の途中: IME のオン・オフにかかわらず、モードキー以外は
-        // 文字を入れ終わるまでアプリへ渡さず、文字キーは打った文字として、届いた順に後で
-        // 入れる（入力処理の見直しの段 6。後の入力が入れていない文字を追い越さないように）
-        if crate::tsf::key_queue::rescue_active() && !is_ime_mode_action(&action) {
-            use windows::core::Interface;
-            let dm = unsafe { ctx.GetDocumentMgr() }
-                .map(|d| d.as_raw() as usize)
-                .unwrap_or(0);
-            crate::tsf::key_queue::absorb_into_rescue(entry.seq(), &action, dm, &ctx, tid);
-            return Ok(TRUE);
-        }
-
-        // 保留した文字がある間の文字キー: IME がオフでも保留する（まだ入っていない文字を
-        // 追い越さない。入力処理の見直しの段 6）。再生で IME がオフなら、今のキーはアプリへ渡す
-        let hold_char = crate::tsf::key_queue::holds_typed_char(&action);
-
-        // ── IME オフガード（最終防衛線）───────────────────────────────────
-        // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
-        // アトミックなのでロック競合なし。
-        if !hold_char
-            && keydown_ime_off_ignores(&action, crate::engine::state::ime_mode_get_atomic().is_on())
-        {
-            diag::event(DiagEvent::KeyIgnored {
-                vk,
-                reason: "ime_off",
-            });
-            return Ok(FALSE);
-        }
-
-        // 回復できない場合の処置の後の直接入力: IME のモードキー以外はアプリへ渡す
-        if crate::tsf::key_queue::direct_fallback() && !is_ime_mode_action(&action) {
-            return Ok(FALSE);
-        }
-
-        // 確定の結果待ちの間に届いたキーは保留し、結果の後処理の後で届いた順に実行する
-        // （入力処理の見直しの段 5 の 5c）。確定の後の状態で IME が食べないキー（全体の
-        // 確定の後の Home など）は、保留せずその場でアプリへ渡す（OnTestKeyDown と同じ判定）
-        let admitted = crate::tsf::key_queue::admit(
-            &mut entry,
-            |input_after| hold_char || key_should_eat(&action, input_after),
-            || {
+            // 回復できない場合の処置の途中: IME のオン・オフにかかわらず、モードキー以外は
+            // 文字を入れ終わるまでアプリへ渡さず、文字キーは打った文字として、届いた順に後で
+            // 入れる（入力処理の見直しの段 6。後の入力が入れていない文字を追い越さないように）
+            if crate::tsf::key_queue::rescue_active() && !is_ime_mode_action(&action) {
                 use windows::core::Interface;
-                use windows_core::IUnknownImpl;
                 let dm = unsafe { ctx.GetDocumentMgr() }
                     .map(|d| d.as_raw() as usize)
                     .unwrap_or(0);
-                crate::tsf::key_queue::HeldKey {
-                    factory: self.to_object(),
-                    action: action.clone(),
-                    vk,
-                    ctx: ctx.clone(),
-                    tid,
-                    sink: sink.clone(),
-                    dm,
-                    at: std::time::Instant::now(),
-                }
-            },
-        );
-        match admitted {
-            crate::tsf::key_queue::Admit::Direct => {}
-            crate::tsf::key_queue::Admit::PassToApp => return Ok(FALSE),
-            crate::tsf::key_queue::Admit::Held(seq) => {
-                // 今のキーまで実行できたら、その結果（IME がオフだった・IME が使わなかった）
-                // でアプリへ渡すかを決める。実行できなければ列に残り、食べたものとして後で
-                // 実行する
-                crate::tsf::key_queue::pump_for(seq);
-                let ate = seq
-                    .and_then(crate::tsf::key_queue::take_outcome)
-                    .unwrap_or(true);
-                return Ok(if ate { TRUE } else { FALSE });
+                crate::tsf::key_queue::absorb_into_rescue(entry.seq(), &action, dm, &ctx, tid);
+                return Ok(TRUE);
             }
-        }
 
-        // 止まった場合（読みの長さの上限で確定し、その結果を待つ）に列へ戻すための写し
-        let (ctx_resume, sink_resume) = (ctx.clone(), sink.clone());
-        // IME が食べると決めたキーか。処理が失敗しても、食べると決めたキーはアプリへ渡さない
-        // （設計書 4.1 の `KeyOutcome`、入力処理の見直しの段 6）。同じキーの OnTestKeyDown の
-        // 判定を使い、無ければ（OnKeyDown だけが呼ばれた）composition の有無で判定する
-        let decided_eat = tested_eat.unwrap_or_else(|| {
-            key_should_eat(
-                &action,
-                crate::engine::state::composition_held().unwrap_or(true)
-                    || crate::engine::state::session_is_selecting_fast(),
-            )
-        });
-        let result = crate::tsf::key_queue::run_exclusive(|| {
-            self.handle_action(action.clone(), ctx, tid, sink)
-        });
-        if crate::tsf::key_queue::take_suspended() {
-            use windows::core::Interface;
-            use windows_core::IUnknownImpl;
-            let dm = unsafe { ctx_resume.GetDocumentMgr() }
-                .map(|d| d.as_raw() as usize)
-                .unwrap_or(0);
-            crate::tsf::key_queue::put_back(
-                entry.seq(),
-                crate::tsf::key_queue::HeldKey {
-                    factory: self.to_object(),
-                    action: action.clone(),
+            // 保留した文字がある間の文字キー: IME がオフでも保留する（まだ入っていない文字を
+            // 追い越さない。入力処理の見直しの段 6）。再生で IME がオフなら、今のキーはアプリへ渡す
+            let hold_char = crate::tsf::key_queue::holds_typed_char(&action);
+
+            // ── IME オフガード（最終防衛線）───────────────────────────────────
+            // OnTestKeyDown が FALSE を返してもターミナル等が OnKeyDown を直接呼ぶ場合がある。
+            // アトミックなのでロック競合なし。
+            if !hold_char
+                && keydown_ime_off_ignores(
+                    &action,
+                    crate::engine::state::ime_mode_get_atomic().is_on(),
+                )
+            {
+                diag::event(DiagEvent::KeyIgnored {
                     vk,
-                    ctx: ctx_resume,
-                    tid,
-                    sink: sink_resume,
-                    dm,
-                    at: std::time::Instant::now(),
+                    reason: "ime_off",
+                });
+                return Ok(FALSE);
+            }
+
+            // 回復できない場合の処置の後の直接入力: IME のモードキー以外はアプリへ渡す
+            if crate::tsf::key_queue::direct_fallback() && !is_ime_mode_action(&action) {
+                return Ok(FALSE);
+            }
+
+            // 確定の結果待ちの間に届いたキーは保留し、結果の後処理の後で届いた順に実行する
+            // （入力処理の見直しの段 5 の 5c）。確定の後の状態で IME が食べないキー（全体の
+            // 確定の後の Home など）は、保留せずその場でアプリへ渡す（OnTestKeyDown と同じ判定）
+            let admitted = crate::tsf::key_queue::admit(
+                &mut entry,
+                |input_after| hold_char || key_should_eat(&action, input_after),
+                || {
+                    use windows::core::Interface;
+                    use windows_core::IUnknownImpl;
+                    let dm = unsafe { ctx.GetDocumentMgr() }
+                        .map(|d| d.as_raw() as usize)
+                        .unwrap_or(0);
+                    crate::tsf::key_queue::HeldKey {
+                        factory: self.to_object(),
+                        action: action.clone(),
+                        vk,
+                        ctx: ctx.clone(),
+                        tid,
+                        sink: sink.clone(),
+                        dm,
+                        at: std::time::Instant::now(),
+                    }
                 },
             );
-        }
-        // 処理の途中で割り込んで保留されたキーがあれば、続けて実行する
-        crate::tsf::key_queue::pump();
-        match &result {
-            Ok(ate) => {
-                diag::event(DiagEvent::KeyHandled {
-                    vk,
-                    action: action_name(&action),
-                    ate: *ate,
-                });
+            match admitted {
+                crate::tsf::key_queue::Admit::Direct => {}
+                crate::tsf::key_queue::Admit::PassToApp => return Ok(FALSE),
+                crate::tsf::key_queue::Admit::Held(seq) => {
+                    // 今のキーまで実行できたら、その結果（IME がオフだった・IME が使わなかった）
+                    // でアプリへ渡すかを決める。実行できなければ列に残り、食べたものとして後で
+                    // 実行する
+                    crate::tsf::key_queue::pump_for(seq);
+                    let ate = seq
+                        .and_then(crate::tsf::key_queue::take_outcome)
+                        .unwrap_or(true);
+                    return Ok(if ate { TRUE } else { FALSE });
+                }
             }
-            Err(e) => {
-                diag::event(DiagEvent::Error {
-                    site: "handle_action",
-                    msg: e.to_string(),
-                });
-                tracing::warn!("handle_action: {e}");
+
+            // 止まった場合（読みの長さの上限で確定し、その結果を待つ）に列へ戻すための写し
+            let (ctx_resume, sink_resume) = (ctx.clone(), sink.clone());
+            // IME が食べると決めたキーか。処理が失敗しても、食べると決めたキーはアプリへ渡さない
+            // （設計書 4.1 の `KeyOutcome`、入力処理の見直しの段 6）。同じキーの OnTestKeyDown の
+            // 判定を使い、無ければ（OnKeyDown だけが呼ばれた）composition の有無で判定する
+            let decided_eat = tested_eat.unwrap_or_else(|| {
+                key_should_eat(
+                    &action,
+                    crate::engine::state::composition_held().unwrap_or(true)
+                        || crate::engine::state::session_is_selecting_fast(),
+                )
+            });
+            let result = crate::tsf::key_queue::run_exclusive(|| {
+                self.handle_action(action.clone(), ctx, tid, sink)
+            });
+            if crate::tsf::key_queue::take_suspended() {
+                use windows::core::Interface;
+                use windows_core::IUnknownImpl;
+                let dm = unsafe { ctx_resume.GetDocumentMgr() }
+                    .map(|d| d.as_raw() as usize)
+                    .unwrap_or(0);
+                crate::tsf::key_queue::put_back(
+                    entry.seq(),
+                    crate::tsf::key_queue::HeldKey {
+                        factory: self.to_object(),
+                        action: action.clone(),
+                        vk,
+                        ctx: ctx_resume,
+                        tid,
+                        sink: sink_resume,
+                        dm,
+                        at: std::time::Instant::now(),
+                    },
+                );
             }
-        }
-        Ok(if keydown_outcome(&result, decided_eat) {
-            TRUE
-        } else {
-            FALSE
-        })
+            // 処理の途中で割り込んで保留されたキーがあれば、続けて実行する
+            crate::tsf::key_queue::pump();
+            match &result {
+                Ok(ate) => {
+                    diag::event(DiagEvent::KeyHandled {
+                        vk,
+                        action: action_name(&action),
+                        ate: *ate,
+                    });
+                }
+                Err(e) => {
+                    diag::event(DiagEvent::Error {
+                        site: "handle_action",
+                        msg: e.to_string(),
+                    });
+                    tracing::warn!("handle_action: {e}");
+                }
+            }
+            Ok(if keydown_outcome(&result, decided_eat) {
+                TRUE
+            } else {
+                FALSE
+            })
+        })();
+        log_key_diag("OnKeyDown", diag_vk, &outcome, diag_before, diag_started);
+        outcome
     }
 
     fn OnTestKeyUp(
@@ -1377,6 +1402,31 @@ fn test_key_eat(
     key_should_eat(action, has_preedit || is_selecting)
 }
 
+/// キーの判断の診断ログ（切断・救済・直接入力・保留の前後どちらかに当たるときだけ）。
+fn log_key_diag(
+    site: &str,
+    vk: u16,
+    outcome: &windows::core::Result<BOOL>,
+    before: Option<String>,
+    started: std::time::Instant,
+) {
+    let after = crate::tsf::key_queue::outage_diag();
+    if before.is_none() && after.is_none() {
+        return;
+    }
+    let decision = match outcome {
+        Ok(b) if b.as_bool() => "eat",
+        Ok(_) => "pass",
+        Err(_) => "error",
+    };
+    tracing::info!(
+        "key_diag: {site} vk={vk:#04x} -> {decision} in {} ms; before=[{}] after=[{}]",
+        started.elapsed().as_millis(),
+        before.as_deref().unwrap_or("-"),
+        after.as_deref().unwrap_or("-"),
+    );
+}
+
 thread_local! {
     /// 直前の OnTestKeyDown の判定（仮想キーと、食べるか）。OnKeyDown が取り出す。
     static TEST_EAT: std::cell::Cell<Option<(u16, bool)>> = const { std::cell::Cell::new(None) };
@@ -1498,6 +1548,13 @@ impl ITfLangBarItem_Impl for TextServiceFactory_Impl {
         Ok(())
     }
     fn GetTooltipString(&self) -> windows::core::Result<BSTR> {
+        // 直接入力の間（日本語入力を使えない）は、知らせと同じ文を出す
+        if crate::tsf::key_queue::in_direct_fallback() {
+            return Ok(BSTR::from(format!(
+                "rakukan: {}",
+                crate::tsf::notice::UNAVAILABLE.text
+            )));
+        }
         let label = current_backend_label();
         Ok(BSTR::from(format!("rakukan [{}]", label)))
     }

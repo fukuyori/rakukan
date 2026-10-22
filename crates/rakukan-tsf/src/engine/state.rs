@@ -311,15 +311,35 @@ pub fn engine_try_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
 }
 
 /// 非ホットパス用（Activate, BG スレッド）: ブロックあり。poison 回復あり。
+///
+/// 待った時間が [`ENGINE_WAIT_WARN`] を超えたら、呼び出し元とスレッドを WARN に残す
+/// （切断中に UI のスレッドが止まる原因を調べるための診断）。
+#[track_caller]
 pub fn engine_get() -> anyhow::Result<MutexGuard<'static, EngineWrapper>> {
-    match RAKUKAN_ENGINE.lock() {
-        Ok(g) => Ok(g),
+    let caller = std::panic::Location::caller();
+    let started = std::time::Instant::now();
+    let guard = match RAKUKAN_ENGINE.lock() {
+        Ok(g) => g,
         Err(p) => {
             tracing::warn!("engine mutex poisoned, recovering");
-            Ok(p.into_inner())
+            p.into_inner()
         }
+    };
+    let waited = started.elapsed();
+    if waited >= ENGINE_WAIT_WARN {
+        let thread = std::thread::current();
+        tracing::warn!(
+            "engine_get waited {} ms for the engine lock at {caller} thread={:?}/{}",
+            waited.as_millis(),
+            thread.id(),
+            thread.name().unwrap_or("-")
+        );
     }
+    Ok(guard)
 }
+
+/// [`engine_get`] がロックを待った時間をログに残す閾値。
+const ENGINE_WAIT_WARN: std::time::Duration = std::time::Duration::from_millis(200);
 
 /// ホットパス用: エンジンを取得するだけ（DLL ロードしない）。
 /// ただしエンジンが未ロードなら、ここで初めて bg init を「1 回だけ」スポーンする。
