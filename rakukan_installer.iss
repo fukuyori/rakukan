@@ -3,24 +3,37 @@
 ; =============================================================================
 ; 使用方法:
 ;   1. Inno Setup 6 をインストール: https://jrsoftware.org/isinfo.php
-;   2. ビルド済み成果物を dist\ フォルダに配置（後述の構成を参照）
-;   3. このスクリプトを Inno Setup IDE か ISCC.exe でコンパイル
+;   2. scripts\build-installer.ps1 で dist\ を組み立て、このスクリプトを ISCC.exe でコンパイルする
+;
+; 方式（docs/Installer_Redesign_Plan.md の 2 章・4.1）:
+;   - 配置は %ProgramFiles%\rakukan（マシン単位、管理者）。64 ビットのモードで動かす。
+;   - 旧ホストは止めない。使用中のファイルは次の Windows の起動時に置き換え・削除する
+;     （restartreplace / uninsrestartdelete）。インストール・アンインストールの完了には再起動が要る。
+;   - TSF の登録は [Run] の regsvr32 で行い、成否は登録の状態（レジストリ）で決める。
+;   - キーボードの一覧への追加は、インストーラーを起動したユーザーの権限で行う。
+;     入らなかった場合は、サインインのときにトレイが補う（版ごとに 1 回）。
 ;
 ; dist\ フォルダの構成（このスクリプトと同じディレクトリに置く）:
 ;   dist\rakukan_tsf.dll
 ;   dist\rakukan_engine_cpu.dll
 ;   dist\rakukan_engine_vulkan.dll  (省略可)
 ;   dist\rakukan_engine_cuda.dll    (省略可)
+;   dist\rakukan-engine-host.exe
+;   dist\rakukan-tray.exe
+;   dist\settings-ui\
 ;   dist\rakukan.dict
 ;   dist\config.toml
-;   dist\models\                    (省略可)
+;   dist\register-tip.ps1 / unregister-tip.ps1
+;   dist\LICENSE / LICENSE_AGREEMENT.txt / NOTICE / THIRD_PARTY_LICENSES.md
 ;
+; 終了コード: 登録の状態を確かめられなかったときは 20（ExitCodeRegistrationFailed）。
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
 #define MyAppVersion   "0.13.0"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
+#define TsfClsid       "{C0DDF8B0-1F1E-4C2D-A9E3-5F7B8D6E2A4C}"
 
 [Setup]
 AppId={{B7C4E2A1-3F8D-4C91-B5A0-D2E6F9183047}
@@ -32,9 +45,11 @@ AppPublisherURL={#MyAppURL}
 AppSupportURL={#MyAppURL}/issues
 AppUpdatesURL={#MyAppURL}/releases
 
-; インストール先は Code セクションで動的に決定する
-; (管理者昇格時でも元ユーザーの LOCALAPPDATA\rakukan\ になるよう制御)
-DefaultDirName={code:GetInstallDir}
+; 64 ビットのモード（{sys} が System32、{autopf} が Program Files を指す）
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+
+DefaultDirName={autopf}\rakukan
 DisableDirPage=yes
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
@@ -58,12 +73,16 @@ InternalCompressLevel=ultra64
 ; UI設定
 WizardStyle=modern
 
-; 管理者権限を要求 (regsvr32 に必要)
+; 管理者権限を要求（HKLM への登録、restartreplace / uninsrestartdelete に必要）
 PrivilegesRequired=admin
 
-; DLL使用中プロセスの終了ダイアログを抑制
-; (regsvr32 /u で登録解除済みのため強制終了不要)
+; 使用中のファイルを持つアプリは閉じない（旧ホストも止めない）。
+; 置き換えられなかったファイルは、次の Windows の起動時に置き換える。
 CloseApplications=no
+
+; インストール・アンインストールの完了には再起動が要る
+AlwaysRestart=yes
+UninstallRestartComputer=yes
 
 ; ログ
 SetupLogging=yes
@@ -83,34 +102,48 @@ Name: "english";  MessagesFile: "compiler:Default.isl"
 japanese.WelcomeLabel1=rakukan IME セットアップへようこそ
 japanese.WelcomeLabel2=このウィザードは rakukan IME をインストールします。%nWindows 日本語入力メソッドです。%n%nセットアップを続行するには [次へ] をクリックしてください。
 japanese.FinishedHeadingLabel=rakukan IME のインストール完了
-japanese.FinishedLabel=rakukan IME のインストールが完了しました。%n%n言語バーに表示されない場合は、一度サインアウトして再度ログインしてください。
+; 再起動が要るときの完了の画面（FinishedRestartLabel）と、無人の実行での確認（FinishedRestartMessage）
+japanese.FinishedRestartLabel=インストールを完了するには、PC を再起動してください。再起動するまでは、Rakukan による日本語入力ができないことがあります。%n%n今すぐ再起動しますか?
+japanese.FinishedRestartMessage=インストールを完了するには、PC を再起動してください。再起動するまでは、Rakukan による日本語入力ができないことがあります。%n%n今すぐ再起動しますか?
+; /NORESTART で再起動を求めない場合の完了の画面
+japanese.FinishedLabelNoIcons=インストールを完了するには、PC を再起動してください。再起動するまでは、Rakukan による日本語入力ができないことがあります。
+english.FinishedRestartLabel=To complete the installation, please restart your PC. Until you restart, Japanese input with Rakukan may not be available.%n%nWould you like to restart now?
+english.FinishedRestartMessage=To complete the installation, please restart your PC. Until you restart, Japanese input with Rakukan may not be available.%n%nWould you like to restart now?
+english.FinishedLabelNoIcons=To complete the installation, please restart your PC. Until you restart, Japanese input with Rakukan may not be available.
+
+[Dirs]
+; 全ユーザーで共有するモデルの置き場所。どのユーザーのホストも取得・読み込みできるようにする
+Name: "{commonappdata}\rakukan\models"; Permissions: users-modify; Flags: uninsneveruninstall
 
 [Files]
+; 使用中のファイルは次の Windows の起動時に置き換える（restartreplace）。
+; アンインストールで消せないものは次の起動時に消す（uninsrestartdelete）。
+
 ; ----- アイコン -----
-Source: "dist\rakukan.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\rakukan.ico"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; ----- TSF DLL -----
-Source: "dist\rakukan_tsf.dll"; DestDir: "{app}"; Flags: ignoreversion
-
-; ----- アイコン -----
-Source: "dist\rakukan.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\rakukan_tsf.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; ----- Engine DLLs -----
-Source: "dist\rakukan_engine_cpu.dll";    DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\rakukan_engine_vulkan.dll"; DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
-Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\rakukan_engine_cpu.dll";    DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\rakukan_engine_vulkan.dll"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete skipifsourcedoesntexist
+Source: "dist\rakukan_engine_cuda.dll";   DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete skipifsourcedoesntexist
 
 ; ----- Engine Host (out-of-process) -----
 ; TSF DLL からは engine DLL をロードせず、このホストプロセスへ Named Pipe で RPC する。
 ; これにより Zoom / Dropbox 等のホストアプリに llama.cpp を持ち込まない。
-Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\rakukan-engine-host.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+
+; ----- トレイ（ログの掃除・キーボードの一覧の補い） -----
+Source: "dist\rakukan-tray.exe"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; ----- Settings GUI (WinUI 3) -----
-Source: "dist\settings-ui\*"; DestDir: "{app}\settings-ui"; Flags: ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist
+Source: "dist\settings-ui\*"; DestDir: "{app}\settings-ui"; Flags: ignoreversion restartreplace uninsrestartdelete recursesubdirs createallsubdirs skipifsourcedoesntexist
 
 ; ----- 辞書 -----
-Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion
-Source: "dist\rakukan.dict.build.json"; DestDir: "{app}\dict"; Flags: ignoreversion skipifsourcedoesntexist
+Source: "dist\rakukan.dict"; DestDir: "{app}\dict"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\rakukan.dict.build.json"; DestDir: "{app}\dict"; Flags: ignoreversion restartreplace uninsrestartdelete skipifsourcedoesntexist
 
 ; ----- デフォルト設定ファイル (既存は上書きしない) -----
 ; config.toml は %APPDATA%\rakukan\ に配置する（rakukan が読む場所）
@@ -120,40 +153,47 @@ Source: "dist\config.toml"; DestDir: "{code:GetRoamingConfigDir}"; Flags: onlyif
 Source: "dist\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 ; ----- TIP 登録スクリプト -----
-Source: "dist\register-tip.ps1";   DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\unregister-tip.ps1"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\register-tip.ps1";   DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\unregister-tip.ps1"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
 
 ; ----- ライセンス・帰属表示 -----
-Source: "dist\LICENSE";                 DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\LICENSE_AGREEMENT.txt";   DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\NOTICE";                  DestDir: "{app}"; Flags: ignoreversion
-Source: "dist\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\LICENSE";                 DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\LICENSE_AGREEMENT.txt";   DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\NOTICE";                  DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+Source: "dist\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
+
+[Registry]
+; トレイを、どのユーザーのサインインでも起動する（HKLM の Run）。アンインストールで消す
+Root: HKLM; Subkey: "Software\Microsoft\Windows\CurrentVersion\Run"; ValueType: string; ValueName: "rakukan-tray"; ValueData: """{app}\rakukan-tray.exe"""; Flags: uninsdeletevalue
 
 [Run]
+; postinstall の項目は再起動が要るときに実行されないので使わない。
+; ここの項目はインストールの終わり（完了の画面の前）に、書いた順に実行される。
+
 ; ----- COM/TSF 登録 -----
+; 成否は終了コードでは決めず、CurStepChanged(ssPostInstall) で登録の状態を確かめる
 Filename: "{sys}\regsvr32.exe"; \
     Parameters: "/s ""{app}\rakukan_tsf.dll"""; \
     Flags: runhidden waituntilterminated; \
     StatusMsg: "TSF コンポーネントを登録中..."
 
-; ----- キーボードリストへ追加 (WinUserLanguageList) -----
-; postinstall: インストーラー終了後にユーザー権限で実行 (管理者権限では言語リストを正しく操作できない)
+; ----- キーボードリストへ追加（HKCU への TIP の写しを含む） -----
+; インストーラーを起動したユーザーの権限で行う。昇格した端末から起動した場合は効かず、
+; そのときはトレイがサインインのときに補う。
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-ExecutionPolicy Bypass -File ""{app}\register-tip.ps1"""; \
-    Flags: postinstall runhidden waituntilterminated; \
-    StatusMsg: "キーボードリストに rakukan を追加中..."; \
-    Description: "キーボードリストに rakukan を追加する"
+    Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\register-tip.ps1"""; \
+    Flags: runasoriginaluser runhidden waituntilterminated; \
+    StatusMsg: "キーボードリストに rakukan を追加中..."
 
-; ----- HKCU へ TIP キーをミラー (Windows 11 対応) -----
-Filename: "{sys}\reg.exe"; \
-    Parameters: "COPY ""HKLM\Software\Microsoft\CTF\TIP"" ""HKCU\Software\Microsoft\CTF\TIP"" /s /f"; \
-    Flags: runhidden waituntilterminated; \
-    StatusMsg: "入力メソッド設定を反映中..."
+; ----- トレイの起動 -----
+Filename: "{app}\rakukan-tray.exe"; \
+    Flags: runasoriginaluser nowait
 
 [UninstallRun]
-; ----- キーボードリストから削除 -----
+; ----- キーボードリストから削除（HKCU への TIP の写しを含む） -----
+; [UninstallRun] では runasoriginaluser を使えないので、アンインストーラーの権限で実行する
 Filename: "{sys}\WindowsPowerShell\v1.0\powershell.exe"; \
-    Parameters: "-ExecutionPolicy Bypass -File ""{app}\unregister-tip.ps1"""; \
+    Parameters: "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ""{app}\unregister-tip.ps1"""; \
     Flags: runhidden waituntilterminated; \
     RunOnceId: "RemoveTIP"
 
@@ -163,42 +203,19 @@ Filename: "{sys}\regsvr32.exe"; \
     Flags: runhidden waituntilterminated; \
     RunOnceId: "UnregisterTSF"
 
-; ----- HKCU の TIP キーを削除 -----
-Filename: "{sys}\reg.exe"; \
-    Parameters: "DELETE ""HKCU\Software\Microsoft\CTF\TIP"" /f"; \
-    Flags: runhidden waituntilterminated; \
-    RunOnceId: "CleanupHKCUTip"
-
 [UninstallDelete]
-Type: files;          Name: "{app}\rakukan_tsf.dll"
-Type: files;          Name: "{app}\rakukan_engine_cpu.dll"
-Type: files;          Name: "{app}\rakukan_engine_vulkan.dll"
-Type: files;          Name: "{app}\rakukan_engine_cuda.dll"
-Type: files;          Name: "{app}\rakukan-engine-host.exe"
-Type: files;          Name: "{app}\rakukan-engine-host.log"
-Type: files;          Name: "{app}\rakukan-settings.exe"
 Type: filesandordirs; Name: "{app}\settings-ui"
 Type: filesandordirs; Name: "{app}\dict"
 ; config.toml・models は残す（ユーザーデータ）
 
 [Code]
-// =========================================================================
-// インストール先を「インストーラーを起動した元ユーザー」の
-// LOCALAPPDATA\rakukan\ に固定する。
-// PrivilegesRequired=admin で UAC 昇格すると {localappdata} が
-// 管理者アカウントのパスになるため、USERPROFILE から組み立てる。
-// =========================================================================
+const
+  // 登録の状態を確かめられなかったときの終了コード（Inno Setup の既定の終了コードと重ならない値）
+  ExitCodeRegistrationFailed = 20;
+  TsfClsid = '{#TsfClsid}';
 
-function GetUserLocalAppData(): String;
 var
-  UserProfile: String;
-begin
-  UserProfile := GetEnv('USERPROFILE');
-  if UserProfile <> '' then
-    Result := UserProfile + '\AppData\Local'
-  else
-    Result := GetEnv('LOCALAPPDATA');
-end;
+  RegistrationFailed: Boolean;
 
 // config.toml の配置先: %APPDATA%\rakukan\
 // rakukan は APPDATA (Roaming) の config.toml を読む
@@ -218,13 +235,7 @@ begin
     CreateDir(Result);
 end;
 
-// DefaultDirName={code:GetInstallDir} から呼ばれる
-function GetInstallDir(Param: String): String;
-begin
-  Result := GetUserLocalAppData() + '\rakukan';
-end;
-
-// 64-bit チェック・必須モジュール確認
+// 必須モジュール確認
 function InitializeSetup(): Boolean;
 var
   MissingDlls: String;
@@ -232,13 +243,6 @@ var
   HasVulkanEngine: Boolean;
   Msg: String;
 begin
-  // 64-bit チェック
-  if not IsWin64 then begin
-    MsgBox('rakukan IME は 64-bit Windows でのみ動作します。', mbError, MB_OK);
-    Result := False;
-    Exit;
-  end;
-
   // Visual C++ Redistributable チェック（必須）
   MissingDlls := '';
   if not FileExists(ExpandConstant('{sys}\VCRUNTIME140.dll')) then
@@ -247,12 +251,12 @@ begin
     MissingDlls := MissingDlls + '  - MSVCP140.dll' + #13#10;
 
   if MissingDlls <> '' then begin
-    MsgBox(
+    SuppressibleMsgBox(
       'Visual C++ 再頒布可能パッケージ (2015-2022) が見つかりません。' + #13#10 +
       '不足しているファイル:' + #13#10 + MissingDlls + #13#10 +
       '以下からインストールしてください:' + #13#10 +
       'https://aka.ms/vs/17/release/vc_redist.x64.exe',
-      mbError, MB_OK);
+      mbError, MB_OK, IDOK);
     Result := False;
     Exit;
   end;
@@ -275,7 +279,7 @@ begin
         '  CUDA Toolkit 13.x の bin\x64\ から' + #13#10 +
         '  C:\Windows\System32 へコピー（管理者権限が必要）' + #13#10 + #13#10 +
         'インストールを続行しますか？';
-      if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDNO then begin
+      if SuppressibleMsgBox(Msg, mbConfirmation, MB_YESNO, IDYES) = IDNO then begin
         Result := False;
         Exit;
       end;
@@ -290,7 +294,7 @@ begin
         'Vulkan バックエンドに必要な vulkan-1.dll が見つかりません。' + #13#10 +
         'Vulkan を使用しない場合はそのままインストールを続行できます。' + #13#10 + #13#10 +
         'インストールを続行しますか？';
-      if MsgBox(Msg, mbConfirmation, MB_YESNO) = IDNO then begin
+      if SuppressibleMsgBox(Msg, mbConfirmation, MB_YESNO, IDYES) = IDNO then begin
         Result := False;
         Exit;
       end;
@@ -300,166 +304,55 @@ begin
   Result := True;
 end;
 
-// バックアップ保存先（ロールバック用）
+// 登録の状態: CLSID の InprocServer32 がインストール先の TSF DLL を指し、TIP のキーがある
+function TsfRegistered(): Boolean;
 var
-  BackupDll: String;
-  InstallFailed: Boolean;
-
-// インストール失敗時のロールバック処理
-// ※ CurStepChanged より前に定義する必要あり（前方参照不可）
-procedure InstallFail;
-var
-  ResultCode: Integer;
-  InstallDir: String;
-  NewDll: String;
+  Path: String;
 begin
-  InstallFailed := True;
-  InstallDir := GetUserLocalAppData() + '\rakukan';
-  NewDll     := InstallDir + '\rakukan_tsf.dll';
-
-  // 新 DLL の登録を解除（中途半端に登録された可能性）
-  if FileExists(NewDll) then
-    Exec(ExpandConstant('{sys}\regsvr32.exe'),
-         '/s /u "' + NewDll + '"',
-         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-
-  // バックアップから旧 DLL を復元
-  if FileExists(BackupDll) then begin
-    CopyFile(BackupDll, NewDll, False);
-    DeleteFile(BackupDll);
-    // 旧 DLL を再登録
-    Exec(ExpandConstant('{sys}\regsvr32.exe'),
-         '/s "' + NewDll + '"',
-         '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  end;
-
-  // 失敗メッセージを表示
-  MsgBox(
-    'インストールに失敗しました。' + #13#10 + #13#10 +
-    '前のバージョンに戻しました。引き続きご使用いただけます。' + #13#10 + #13#10 +
-    '【原因】' + #13#10 +
-    '  rakukan の DLL が使用中のためコピーできませんでした。' + #13#10 + #13#10 +
-    '【再インストールの手順】' + #13#10 +
-    '  1. 言語バーで rakukan 以外の IME（例：Microsoft IME）に切り替える' + #13#10 +
-    '  2. ［スタート］→ アカウント名 → ［サインアウト］を選択する' + #13#10 +
-    '  3. 再度サインインする' + #13#10 +
-    '  4. インストーラーを再度実行する' + #13#10 + #13#10 +
-    '※ PC の再起動は不要です。サインアウト→サインインで解決します。',
-    mbError, MB_OK);
+  Result :=
+    RegQueryStringValue(HKLM, 'Software\Classes\CLSID\' + TsfClsid + '\InprocServer32', '', Path) and
+    (CompareText(Path, ExpandConstant('{app}\rakukan_tsf.dll')) = 0) and
+    RegKeyExists(HKLM, 'Software\Microsoft\CTF\TIP\' + TsfClsid);
+  if not Result then
+    Log('TSF registration check failed: InprocServer32=' + Path);
 end;
 
-// インストール前に旧 DLL をバックアップ＆登録解除する
-// インストール失敗時のロールバックに使用
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   OldDll: String;
-  InstallDir: String;
 begin
-  InstallDir := GetUserLocalAppData() + '\rakukan';
-  OldDll     := InstallDir + '\rakukan_tsf.dll';
-
   if CurStep = ssInstall then begin
-    InstallFailed := False;
-
+    // 前の版の登録を解除しておく。旧版の DLL では解除が失敗・異常終了することがある
+    // （0.12.0 より前の DllMain の作り）ので、結果にかかわらず続ける。
+    OldDll := ExpandConstant('{app}\rakukan_tsf.dll');
     if FileExists(OldDll) then begin
-      // 旧 DLL をバックアップ
-      BackupDll := InstallDir + '\rakukan_tsf.dll.backup';
-      CopyFile(OldDll, BackupDll, False);
-
-      // 旧 DLL を登録解除
-      Exec(ExpandConstant('{sys}\regsvr32.exe'),
-           '/s /u "' + OldDll + '"',
-           '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-      Sleep(1500);
+      if Exec(ExpandConstant('{sys}\regsvr32.exe'), '/s /u "' + OldDll + '"',
+              '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+        Log(Format('old TSF DLL unregister: exit code %d (ignored)', [ResultCode]))
+      else
+        Log('old TSF DLL unregister: could not run regsvr32 (ignored)');
     end;
   end;
 
   if CurStep = ssPostInstall then begin
-    // インストール後に TSF DLL が存在するか確認
-    // DLL が消えていれば確実に失敗
-    if not FileExists(InstallDir + '\rakukan_tsf.dll') then begin
-      InstallFail;
+    // [Run] の regsvr32 はこの前に終わっている。終了コード 0 は登録の成功を示さないので、
+    // レジストリの状態で確かめる。
+    if not TsfRegistered() then begin
+      RegistrationFailed := True;
+      SuppressibleMsgBox(
+        'rakukan の登録を確かめられませんでした。' + #13#10 +
+        'PC を再起動してから、もう一度インストールしてください。' + #13#10 +
+        '直らない場合は、セットアップのログ（%TEMP%\Setup Log *.txt）を添えて報告してください。',
+        mbError, MB_OK, IDOK);
     end;
   end;
-
-  if CurStep = ssDone then begin
-    // インストール成功時：バックアップを削除
-    if (not InstallFailed) and FileExists(BackupDll) then
-      DeleteFile(BackupDll);
-  end;
 end;
 
-// Inno Setup の標準失敗コールバック
-procedure CancelButtonClick(CurPageID: Integer; var Cancel, Confirm: Boolean);
+function GetCustomSetupExitCode(): Integer;
 begin
-  // キャンセル時もロールバックを実行
-  if InstallFailed then begin
-    Confirm := False;
-  end;
-end;
-
-
-// インストール前チェック：旧 DLL がロックされていないか確認
-// wpSelectTasks（追加タスク選択）ページ表示時に実行する
-var
-  DllLockChecked: Boolean; // 重複チェック防止フラグ
-
-procedure CheckDllLock;
-var
-  OldDll: String;
-  TempFile: String;
-  Attempts: Integer;
-  Locked: Boolean;
-  ResultCode: Integer;
-begin
-  if DllLockChecked then Exit;
-  DllLockChecked := True;
-
-  OldDll := GetUserLocalAppData() + '\rakukan\rakukan_tsf.dll';
-  if not FileExists(OldDll) then Exit; // 初回インストール：チェック不要
-
-  // regsvr32 /u で登録解除を先行実行
-  Exec(ExpandConstant('{sys}\regsvr32.exe'),
-       '/s /u "' + OldDll + '"',
-       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
-  Sleep(1500);
-
-  // リネームでロック確認（最大3回）
-  TempFile := OldDll + '.bak_setup';
-  Locked := True;
-  for Attempts := 1 to 3 do begin
-    if RenameFile(OldDll, TempFile) then begin
-      RenameFile(TempFile, OldDll);
-      Locked := False;
-      Break;
-    end;
-    Sleep(1000);
-  end;
-
-  if Locked then begin
-    MsgBox(
-      'rakukan の DLL が使用中のため、このままではインストールできません。' + #13#10 + #13#10 +
-      '【対処方法】' + #13#10 +
-      '  1. 言語バーで rakukan 以外の IME（例：Microsoft IME）に切り替える' + #13#10 +
-      '  2. ［スタート］→ アカウント名 → ［サインアウト］を選択する' + #13#10 +
-      '  3. 再度サインインしてからインストーラーを再実行する' + #13#10 + #13#10 +
-      '※ PC の再起動は不要です。サインアウト→サインインで解決します。' + #13#10 + #13#10 +
-      'このままインストールを続行することもできますが、' + #13#10 +
-      'DLL の上書きに失敗する可能性があります。',
-      mbError, MB_OK);
-  end;
-end;
-
-procedure CurPageChanged(CurPageID: Integer);
-begin
-  if CurPageID = wpSelectTasks then
-    CheckDllLock;
-end;
-
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-begin
-  Result := '';
-  NeedsRestart := False;
-  // DLL ロックチェックは wpSelectTasks ページで実施済み
+  if RegistrationFailed then
+    Result := ExitCodeRegistrationFailed
+  else
+    Result := 0;
 end;

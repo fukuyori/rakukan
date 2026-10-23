@@ -144,6 +144,15 @@ if (Test-Path $engineHost) {
     Write-Warning "rakukan-engine-host.exe が見つかりません ($engineHost) — cargo make install が古い可能性があります"
 }
 
+# トレイ（ログの掃除・キーボードの一覧の補い。#33・#74）
+$tray = Join-Path $InstallDir "rakukan-tray.exe"
+if (-not (Test-Path $tray)) {
+    Write-Error "rakukan-tray.exe が $InstallDir に見つかりません。先に cargo make install を実行してください。"
+    exit 1
+}
+Copy-Item $tray "$distDir\rakukan-tray.exe" -Force
+Write-Host "  -> rakukan-tray.exe"
+
 # Settings GUI (WinUI 3 app folder)
 $settingsDir = Join-Path $InstallDir "settings-ui"
 if (Test-Path $settingsDir) {

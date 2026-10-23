@@ -103,14 +103,15 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - `ArchitecturesAllowed=x64compatible` と `ArchitecturesInstallIn64BitMode=x64compatible` を足す（現行は 32 ビットのモードで動き、`{sys}` が SysWOW64、`{autopf}` が `Program Files (x86)` になる。7 章）。
 - `[Files]` のファイルに `ignoreversion restartreplace uninsrestartdelete` を付ける。`config.toml` の初期配置（`onlyifdoesntexist uninsneveruninstall`）は維持。
 - `AlwaysRestart=yes`、`UninstallRestartComputer=yes`。
-- 完了の案内（実際に表示されるメッセージ。`[Icons]` が無い場合は `FinishedLabelNoIcons`）を 2 章の文言にする。英語版も同様。
+- 完了の案内を 2 章の文言にする。英語版も同様。再起動が要るときの完了の画面は `FinishedRestartLabel`、無人の実行（`/SILENT`）での確認は `FinishedRestartMessage`、`/NORESTART` のときは `FinishedLabelNoIcons`（`[Icons]` が無いため）が使われる（Inno Setup のソース `Setup.MainForm.pas`）ので、3 つとも替える。
 - 旧ホストを止める処理は作らない。
 - 独自の戻し（`CheckDllLock`、`InstallFail` とそのサインアウト案内、`.backup`）を削除し、Inno の動作に任せる（7 章）。
 - 登録: Inno の `regserver` フラグは使わず、`[Run]` の `regsvr32` で登録する。`ssInstall` での旧 DLL の登録解除は、失敗しても更新を止めない形で残す（7 章、4.3a）。
-- キーボードリストへの追加: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も同じ扱いにする。トレイがサインインのときに一覧を確かめ、無ければ足す（7 章）。
+- キーボードリストへの追加: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も `register-tip.ps1` の中で行い、写すのは rakukan の CLSID の分だけにする（今までは TIP 全体を写し、アンインストールで HKCU の TIP 全体を消していた）。トレイがサインインのときに `register-tip.ps1` を実行して、無ければ足す。行うのは**版ごとに 1 回**で、済んだ版を HKCU の `Software\rakukan` の `TipListedVersion` に記録する（2026-10-23 決定。利用者が一覧から外した場合に、同じ版では足し直さない）。`unregister-tip.ps1` は一覧からの削除・HKCU の写しの削除・この記録の削除を行う（7 章）。
 - `[Dirs]` で `{commonappdata}\rakukan\models` に `Permissions: users-modify` を付ける（7 章）。
 - 移行処理: `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll` が存在すれば、登録解除し、旧配置のファイルは再起動時の削除を予約する。旧ディレクトリの `dict\`（`registered.txt` も同様）も同じ。
-- `[UninstallRun]` は現行どおり（unregister-tip → regsvr32 /u）。ファイルには `uninsrestartdelete` を付ける。
+- `[UninstallRun]` は unregister-tip → regsvr32 /u。`[UninstallRun]` では `runasoriginaluser` を使えない（Inno Setup のヘルプ `[Run]`）ので、アンインストーラーの権限で実行する。ファイルには `uninsrestartdelete` を付ける。
+- 登録の状態（CLSID の InprocServer32 が `{app}\rakukan_tsf.dll` を指し、TIP のキーがある）を確かめられなかったときは、エラーを表示し（`/SUPPRESSMSGBOXES` では出さない）、終了コード 20 を返す（`GetCustomSetupExitCode`）。`postinstall` でない `[Run]` は `CurStepChanged(ssPostInstall)` より前に実行される（`Setup.MainForm.pas`）ので、確かめるのは `ssPostInstall`。
 - サイレント実行ではダイアログに依存せず、失敗を終了コードとログで通知する。
 - 使用許諾の画面（`LicenseFile`）を出す（2026-10-23 決定）。設定アプリが同梱する Windows App SDK の実行時の部品は、配布するときに「配布者・利用者に、Microsoft をこの契約と同等以上に保護する条件へ同意させる」ことが条件になっている（パッケージの `license.txt` の 3(b)）。設定アプリが同梱する Windows SDK の .NET 向けの部品（`Microsoft.Windows.SDK.NET.dll`・`WinRT.Runtime.dll`）の条項にも、同じ種類の条件（ほかに自分の著作権の表示を出すこと）がある。中身は 1 つの文書にまとめる: 見出しの文（`docs/licenses/license-agreement-header.txt`）、rakukan 本体の MIT License（著作権の表示を含む）、Windows App SDK と Windows SDK の Microsoft Software License Terms の全文と、CUDA 版の engine DLL が静的にリンクする CUDA ランタイムの読み込み用のライブラリ（CUDA 13 の hybrid。ランタイムの本体はディスプレイドライバから読み込む）の NVIDIA の EULA の全文（`docs/licenses/`。EULA の配布の条件は、配布の条件を EULA と食い違わないものにすること・NVIDIA の知的財産の保護を含む）。`build-installer.ps1` が `dist\LICENSE_AGREEMENT.txt` に組み立てる。この形で条件を満たせるかの法的な判断は行っておらず、Microsoft を補償する義務は残る。部品そのものを配布物から無くす方法は #88 で扱う。
 
@@ -146,7 +147,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 `docs/Log_Redesign_Plan.md` の検討で出た、インストールの経路で扱う事項。
 
-- **トレイ**: 現行の `.iss` は `rakukan-tray.exe` を配布・起動・Run 登録していない（`scripts/install.ps1` だけが HKCU の Run に登録して起動する）。インストーラーで配布し、利用者の権限で起動・Run 登録し、アンインストールで解除する。ログの掃除（Log_Redesign_Plan.md の段 3）はトレイが行うので、これが無いと `.iss` で入れた環境ではログが掃除されない。
+- **トレイ**: 現行の `.iss` は `rakukan-tray.exe` を配布・起動・Run 登録していない（`scripts/install.ps1` だけが HKCU の Run に登録して起動する）。インストーラーで配布し、利用者の権限で起動し、**HKLM の Run** に登録し（2026-10-23 決定。マシン単位の配置に合わせ、別のユーザーのサインインでも起動する。アンインストーラーがそのまま消せる）、アンインストールで解除する。トレイはセッションごとに 1 つだけ動く（名前付きの mutex）。旧配置の `install.ps1` が HKCU の Run に書いた値は、Step 3 の移行で消す。ログの掃除（Log_Redesign_Plan.md の段 3）はトレイが行うので、これが無いと `.iss` で入れた環境ではログが掃除されない。
 - **登録の成否の判定**: regsvr32 の終了コード 0 は、登録の成功も解除の成功も示さない（`DllRegisterServer` の後に DLL を外す段階で落ちうる。`unregister_server()` は各解除のエラーを捨てて常に成功を返す）。インストーラーは、終了コードだけでなく登録の状態（CLSID / TIP のレジストリ）を確かめて成否を決める。
 - **旧版での登録解除**: 更新時の旧 DLL での `/u` は旧版の `DllMain` で動くので、0.12.0 以前の DLL ではスレッドの寿命の問題（解除後に落ちる）を持ち込む。旧版の解除が失敗・クラッシュしても更新を止めない扱いと、その確認を含める。
 
@@ -231,7 +232,8 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
   - 残る点: 置き換えが再起動まで延びた場合は、古い DLL で登録される。パス・CLSID・登録の内容が新旧で同じなら結果は同じと見込む（※推測。6 章で確かめる）。登録の内容を変える版では、別の手当てが要る。
 - **キーボードリストへの追加**
   - 確かめた結果: `postinstall` の項目は、再起動が要る場合に実行されない（ヘルプ `[Run]`）。`runasoriginaluser` は、Setup を昇格した状態で起動した場合は効かない。現行の HKCU への `reg COPY` は管理者の権限で動く。
-  - 決めたこと: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も同じ扱いにする。トレイがサインインのときに一覧を確かめ、無ければ足す。
+  - 決めたこと: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も同じ扱いにする。トレイがサインインのときに一覧を確かめ、無ければ足す（版ごとに 1 回。4.1）。
+  - 確かめた結果（2026-10-23）: `[UninstallRun]` では `runasoriginaluser` を使えない（ヘルプ `[Run]`）。
 - **失敗と戻し**
   - 確かめた結果: アンインストーラーを保存した後のエラーでは戻さない（ヘルプ「Installation Order」）。それより前の段階で何が戻るか、`restartreplace` の予約が戻るかは、ヘルプに書かれていない。現行の `InstallFail` / `.backup` / `CheckDllLock` は `%LOCALAPPDATA%\rakukan` 固定で、サインアウトを案内し、`FileExists` による成功判定は旧 DLL が残っていても成功とみなす。`CheckDllLock` はどこからも呼ばれていない。
   - 決めたこと: 独自の戻しを外し、Inno の動作に任せる。成否は終了コードとレジストリの状態で決める。旧 DLL の `/u` は、失敗しても更新を止めない形で残す（4.3a）。予約がどう残るかは 6 章で確かめる。

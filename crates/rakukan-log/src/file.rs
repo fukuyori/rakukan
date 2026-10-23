@@ -14,19 +14,27 @@ use std::path::{Path, PathBuf};
 pub const LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
 pub const LOG_ROTATE_GENERATIONS: usize = 5;
 
-/// ログ全体の保持目安。
-///
-/// **厳密な上限ではない。** 使用中のログは消さないので、使用中の分だけで
-/// これを超えることがある（その場合は超過を許容する）。
-// 掃除は #74 でトレイへ移し、条件を日数・件数に改める。それまで呼び出し元は無い。
-pub const LOG_TOTAL_BUDGET_BYTES: u64 = 256 * 1024 * 1024;
+/// 掃除で消す条件の日数（#74）。インスタンスの最後の書き込みからの日数で判定する。
+pub const LOG_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(90 * 24 * 60 * 60);
 
-/// TSF のログの接頭辞。旧方式の `rakukan.log` / `.1`〜`.5` は接頭辞が違うので
-/// 掃除の対象にならない（自動削除は新方式のログだけに適用する）。
+/// 掃除で消す条件のファイルの数（#74）。本体・退避世代・`.tmp`・`.lock` を含む。
+/// 合計の容量には上限を設けない。
+pub const LOG_MAX_FILES: usize = 30_000;
+
+/// TSF のログの接頭辞。
 pub const TSF_PREFIX: &str = "rakukan-tsf-";
 
 /// エンジンホストのログの接頭辞（#75）。
 pub const HOST_PREFIX: &str = "rakukan-engine-host-";
+
+/// トレイのログの接頭辞（#74）。
+pub const TRAY_PREFIX: &str = "rakukan-tray-";
+
+/// 掃除の対象にする起動インスタンスごとのログの接頭辞。
+pub const CLEANUP_PREFIXES: [&str; 3] = [TSF_PREFIX, HOST_PREFIX, TRAY_PREFIX];
+
+/// 0.11.8 までの全プロセス共有のログ。`.lock` が無いので、日数の条件だけで消す。
+pub const LEGACY_LOG_NAME: &str = "rakukan.log";
 
 /// `.lock` を排他で取れなかったときに、起動識別子を変えて試し直す回数（#73）。
 pub const LOCK_RETRIES: u128 = 4;
@@ -363,103 +371,205 @@ pub fn startup_id_of(stem: &str) -> u128 {
         .unwrap_or(0)
 }
 
+/// ファイル名 `<接頭辞><PID>-<起動識別子>.lock` から `<stem>` を取り出す。
+fn lock_stem_of<'a>(prefix: &str, file_name: &'a str) -> Option<&'a str> {
+    let stem = file_name.strip_prefix(prefix)?.strip_suffix(".lock")?;
+    let (pid, id) = stem.rsplit_once('-')?;
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    (numeric(pid) && numeric(id)).then_some(stem)
+}
+
 /// 掃除で数える起動インスタンス 1 件分。
 struct LogInstance {
+    prefix: &'static str,
+    stem: String,
     startup_id: u128,
-    bytes: u64,
-    files: Vec<PathBuf>,
+    /// 本体・退避世代・`.tmp` の最終更新日時の最大値。読めなければ `None`（日数では消さない）。
+    last_write: Option<std::time::SystemTime>,
+    logs: Vec<PathBuf>,
+    has_lock: bool,
 }
 
 impl LogInstance {
-    fn new(startup_id: u128) -> Self {
-        Self {
-            startup_id,
-            bytes: 0,
-            files: Vec::new(),
-        }
+    fn file_count(&self) -> usize {
+        self.logs.len() + usize::from(self.has_lock)
     }
 }
 
-/// 使用の終わったログを古い順に消して、全体を保持目安へ近づける（Issue #60）。
+/// 掃除の結果。トレイのログに残す。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct CleanupReport {
+    /// 消した起動インスタンスの数
+    pub removed_instances: usize,
+    /// 消したファイルの数（`.lock` と旧方式のログを含む）
+    pub removed_files: usize,
+    /// 条件に当たったが、使用中か判定できないので残したインスタンスの数
+    pub kept_instances: usize,
+    /// 掃除の後に残ったファイルの数（旧方式のログを除く）
+    pub remaining_files: usize,
+}
+
+/// 使用の終わったログを消す（#74）。トレイの起動時に、UI のスレッドとは別のスレッドで呼ぶ。
+///
+/// 条件（どちらか一方でも超えたら古いインスタンスから消す。日数の後で数え直す）:
+/// - 日数: 最後の書き込みから [`LOG_MAX_AGE`] を超えたインスタンス
+/// - 件数: ファイルの数が [`LOG_MAX_FILES`] を超えた分（起動識別子の古い順）
 ///
 /// 削除してよいかは、起動インスタンスごとのロックを排他で取得できるかだけで決める。
 /// PID の生存では判断しない（PID の再利用と、確認してから消すまでの状態変化を
 /// 避けるため）。取得できない場合と、ロックが無くて判定できない場合は残す。
-/// 削除が終わるまでロックのハンドルを保持する。
-///
-/// 使用中のログだけで目安を超える場合は何も消さない。目安は厳密な上限ではない。
-pub fn cleanup_logs(prefix: &str, dir: &Path, own_stem: &str) {
-    cleanup_logs_with_budget(prefix, dir, own_stem, LOG_TOTAL_BUDGET_BYTES);
+/// ログが無くロックだけ残ったインスタンスは、ロックを排他で取れたら消す。
+/// 旧方式の `rakukan.log` / `.1`〜`.5` は、日数の条件だけで消す。
+/// `own` は呼び出し元自身のインスタンス（接頭辞, stem）で、消さない。
+pub fn cleanup_logs(dir: &Path, own: (&str, &str)) -> CleanupReport {
+    cleanup_logs_with(
+        dir,
+        own,
+        std::time::SystemTime::now(),
+        LOG_MAX_AGE,
+        LOG_MAX_FILES,
+    )
 }
 
-pub fn cleanup_logs_with_budget(prefix: &str, dir: &Path, own_stem: &str, budget: u64) {
-    use std::collections::HashMap;
-
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
+pub fn cleanup_logs_with(
+    dir: &Path,
+    own: (&str, &str),
+    now: std::time::SystemTime,
+    max_age: std::time::Duration,
+    max_files: usize,
+) -> CleanupReport {
+    let mut report = CleanupReport::default();
+    let mut instances = collect_instances(dir);
+    let is_old = |t: Option<std::time::SystemTime>| {
+        t.and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > max_age)
     };
-    let mut total: u64 = 0;
-    let mut instances: HashMap<String, LogInstance> = HashMap::new();
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Some(stem) = path
-            .file_name()
-            .and_then(|s| s.to_str())
-            .and_then(|name| instance_stem_of(prefix, name))
-        else {
-            continue;
-        };
-        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
-        total = total.saturating_add(len);
-        let slot = instances
-            .entry(stem.to_string())
-            .or_insert_with(|| LogInstance::new(startup_id_of(stem)));
-        slot.bytes = slot.bytes.saturating_add(len);
-        slot.files.push(path);
-    }
-    if total <= budget {
-        return;
-    }
+    let is_own = |inst: &LogInstance| inst.prefix == own.0 && inst.stem == own.1;
 
-    let mut victims: Vec<(String, LogInstance)> = instances
-        .into_iter()
-        .filter(|(stem, _)| stem != own_stem)
-        .collect();
-    victims.sort_by_key(|(_, inst)| inst.startup_id); // 古い順
-
-    for (stem, inst) in victims {
-        if total <= budget {
-            break;
+    // ロックだけ残ったものと、日数の条件に当たったもの
+    let mut survivors = Vec::new();
+    for inst in instances.drain(..) {
+        let target = !is_own(&inst) && (inst.logs.is_empty() || is_old(inst.last_write));
+        if target {
+            if let Some(rest) = remove_instance(dir, inst, &mut report) {
+                survivors.push(rest);
+            }
+        } else {
+            survivors.push(inst);
         }
-        let lock = instance_lock_path(prefix, dir, &stem);
-        // 排他で取れたときだけ「使用が終わっている」と判断する。
-        // ロックが無い（create=false で開けない）インスタンスは判定不能として残す。
-        let Ok(guard) = open_exclusive(&lock, false) else {
+    }
+
+    // 件数の条件（数え直してから、古い順に）
+    let mut total: usize = survivors.iter().map(LogInstance::file_count).sum();
+    survivors.sort_by_key(|inst| inst.startup_id);
+    let mut kept = Vec::new();
+    for inst in survivors {
+        if total <= max_files || is_own(&inst) {
+            kept.push(inst);
             continue;
-        };
-        let mut removed: u64 = 0;
-        let mut all_removed = true;
-        for f in &inst.files {
-            let len = std::fs::metadata(f).map(|m| m.len()).unwrap_or(0);
-            if std::fs::remove_file(f).is_ok() {
-                removed = removed.saturating_add(len);
-            } else {
-                all_removed = false;
+        }
+        let before = inst.file_count();
+        match remove_instance(dir, inst, &mut report) {
+            None => total = total.saturating_sub(before),
+            Some(rest) => {
+                total = total.saturating_sub(before - rest.file_count());
+                kept.push(rest);
             }
         }
-        drop(guard); // 削除が終わってから手放す
-        // **ログが残ったらロックも残す。** 先にロックだけ消すと、次回は
-        // 「ロックが無いので判定できない」分岐に入り、消せる状態になっても
-        // 二度と回収されなくなる。
-        if all_removed {
-            let _ = std::fs::remove_file(&lock);
-        }
-        total = total.saturating_sub(removed);
-        tracing::debug!(
-            "log cleanup: removed instance {stem} ({} bytes)",
-            inst.bytes
-        );
     }
+    report.remaining_files = total;
+
+    // 旧方式の共有のログ
+    let legacy = std::iter::once(dir.join(LEGACY_LOG_NAME))
+        .chain((1..=LOG_ROTATE_GENERATIONS).map(|g| dir.join(format!("{LEGACY_LOG_NAME}.{g}"))));
+    for path in legacy {
+        let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
+        if is_old(modified) && std::fs::remove_file(&path).is_ok() {
+            report.removed_files += 1;
+        }
+    }
+    report
+}
+
+/// `dir` の起動インスタンスごとのログとロックを、接頭辞と stem ごとにまとめる。
+fn collect_instances(dir: &Path) -> Vec<LogInstance> {
+    use std::collections::HashMap;
+    let mut map: HashMap<(&'static str, String), LogInstance> = HashMap::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        for prefix in CLEANUP_PREFIXES {
+            let (stem, is_lock) = if let Some(stem) = instance_stem_of(prefix, name) {
+                (stem, false)
+            } else if let Some(stem) = lock_stem_of(prefix, name) {
+                (stem, true)
+            } else {
+                continue;
+            };
+            let slot = map
+                .entry((prefix, stem.to_string()))
+                .or_insert_with(|| LogInstance {
+                    prefix,
+                    stem: stem.to_string(),
+                    startup_id: startup_id_of(stem),
+                    last_write: None,
+                    logs: Vec::new(),
+                    has_lock: false,
+                });
+            if is_lock {
+                slot.has_lock = true;
+            } else {
+                let modified = entry.metadata().and_then(|m| m.modified()).ok();
+                slot.last_write = match (slot.last_write, modified) {
+                    (Some(a), Some(b)) => Some(a.max(b)),
+                    (a, b) => a.or(b),
+                };
+                slot.logs.push(entry.path());
+            }
+            break;
+        }
+    }
+    map.into_values().collect()
+}
+
+/// 1 件のインスタンスを消す。消し切れなかったときは、残ったものを返す。
+fn remove_instance(
+    dir: &Path,
+    mut inst: LogInstance,
+    report: &mut CleanupReport,
+) -> Option<LogInstance> {
+    let lock = instance_lock_path(inst.prefix, dir, &inst.stem);
+    // 排他で取れたときだけ「使用が終わっている」と判断する。
+    // ロックが無い（create=false で開けない）インスタンスは判定不能として残す。
+    let Ok(guard) = open_exclusive(&lock, false) else {
+        report.kept_instances += 1;
+        return Some(inst);
+    };
+    inst.logs.retain(|f| {
+        if std::fs::remove_file(f).is_ok() {
+            report.removed_files += 1;
+            false
+        } else {
+            true
+        }
+    });
+    drop(guard); // 削除が終わってから手放す
+    // **ログが残ったらロックも残す。** 先にロックだけ消すと、次回は
+    // 「ロックが無いので判定できない」分岐に入り、消せる状態になっても
+    // 二度と回収されなくなる。
+    if inst.logs.is_empty() && std::fs::remove_file(&lock).is_ok() {
+        report.removed_files += 1;
+        report.removed_instances += 1;
+        tracing::debug!("log cleanup: removed instance {}{}", inst.prefix, inst.stem);
+        return None;
+    }
+    report.kept_instances += 1;
+    Some(inst)
 }
 
 #[cfg(test)]
@@ -625,12 +735,84 @@ mod log_rotation_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    pub(crate) const DAY: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+    /// 使用の終わったインスタンス（本体とロック）を作る。
+    pub(crate) fn finished_instance(dir: &Path, prefix: &str, stem: &str) {
+        write_file(&instance_log_path(prefix, dir, stem), 10);
+        drop(open_exclusive(&instance_lock_path(prefix, dir, stem), true).expect("lock"));
+    }
+
+    /// 最終更新日時を `days` 日前にする。
+    pub(crate) fn age(path: &Path, days: u32) {
+        let t = std::time::SystemTime::now() - DAY * days;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(path)
+            .expect("open")
+            .set_modified(t)
+            .expect("set_modified");
+    }
+
+    fn cleanup(dir: &Path, max_files: usize) -> CleanupReport {
+        cleanup_logs_with(
+            dir,
+            (TSF_PREFIX, "9-999"),
+            std::time::SystemTime::now(),
+            DAY * 90,
+            max_files,
+        )
+    }
+
     #[test]
-    fn cleanup_does_nothing_under_the_budget() {
-        let dir = temp_dir("under");
-        write_file(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 100);
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 1_000);
+    fn cleanup_keeps_recent_instances_under_the_file_limit() {
+        let dir = temp_dir("recent");
+        finished_instance(&dir, TSF_PREFIX, "1-100");
+        let report = cleanup(&dir, 100);
         assert!(instance_log_path(TSF_PREFIX, &dir, "1-100").exists());
+        assert_eq!(report.removed_files, 0);
+        assert_eq!(report.remaining_files, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_removes_instances_older_than_the_age_limit() {
+        let dir = temp_dir("age");
+        for prefix in CLEANUP_PREFIXES {
+            finished_instance(&dir, prefix, "1-100");
+            finished_instance(&dir, prefix, "1-200");
+            age(&instance_log_path(prefix, &dir, "1-100"), 91);
+            age(&instance_log_path(prefix, &dir, "1-200"), 89);
+        }
+        let report = cleanup(&dir, 1_000);
+        for prefix in CLEANUP_PREFIXES {
+            assert!(
+                !instance_log_path(prefix, &dir, "1-100").exists(),
+                "{prefix}: 91 日前のログが残った"
+            );
+            assert!(
+                !instance_lock_path(prefix, &dir, "1-100").exists(),
+                "{prefix}: ロックが残った"
+            );
+            assert!(
+                instance_log_path(prefix, &dir, "1-200").exists(),
+                "{prefix}: 89 日前のログを消した"
+            );
+        }
+        assert_eq!(report.removed_instances, 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_judges_age_by_the_newest_file_of_an_instance() {
+        let dir = temp_dir("newest");
+        finished_instance(&dir, TSF_PREFIX, "1-100");
+        let gen1 = rotated_log_path(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 1).expect("gen");
+        write_file(&gen1, 10);
+        // 退避世代は古いが、本体は新しい（長く動いたプロセス）
+        age(&gen1, 200);
+        cleanup(&dir, 1_000);
+        assert!(gen1.exists(), "新しい本体のあるインスタンスを消した");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -639,14 +821,16 @@ mod log_rotation_tests {
         let dir = temp_dir("held");
         // 使用中のインスタンス（ロックを保持したまま）
         write_file(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 400);
+        age(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 100);
         let held =
             open_exclusive(&instance_lock_path(TSF_PREFIX, &dir, "1-100"), true).expect("lock");
 
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 100);
+        let report = cleanup(&dir, 0);
 
-        // 使用中なので消えない。目安を超えたままでも消さない
+        // 使用中なので、日数・件数の条件に当たっても消さない
         assert!(instance_log_path(TSF_PREFIX, &dir, "1-100").exists());
-        assert!(total_len(&dir) > 100);
+        assert!(total_len(&dir) > 0);
+        assert!(report.kept_instances >= 1);
         drop(held);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -656,27 +840,41 @@ mod log_rotation_tests {
         let dir = temp_dir("nolock");
         // ロックが無い = 判定できない → 残す
         write_file(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 400);
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 100);
+        age(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 100);
+        cleanup(&dir, 0);
         assert!(instance_log_path(TSF_PREFIX, &dir, "1-100").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn cleanup_removes_finished_instances_oldest_first() {
+    fn cleanup_removes_a_lock_left_without_logs() {
+        let dir = temp_dir("lockonly");
+        drop(open_exclusive(&instance_lock_path(HOST_PREFIX, &dir, "1-100"), true).expect("lock"));
+        // 使用中のロック（起動の途中で、まだ本体が無い）は残す
+        let held =
+            open_exclusive(&instance_lock_path(HOST_PREFIX, &dir, "1-200"), true).expect("lock");
+        let report = cleanup(&dir, 1_000);
+        assert!(!instance_lock_path(HOST_PREFIX, &dir, "1-100").exists());
+        assert!(instance_lock_path(HOST_PREFIX, &dir, "1-200").exists());
+        assert_eq!(report.removed_instances, 1);
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_removes_finished_instances_oldest_first_over_the_file_limit() {
         let dir = temp_dir("oldest");
-        for (stem, len) in [("1-100", 200), ("1-200", 200), ("1-300", 200)] {
-            write_file(&instance_log_path(TSF_PREFIX, &dir, stem), len);
-            // 使用が終わったインスタンスはロックだけ残る
-            drop(open_exclusive(&instance_lock_path(TSF_PREFIX, &dir, stem), true).expect("lock"));
+        for stem in ["1-100", "1-200", "1-300"] {
+            finished_instance(&dir, TSF_PREFIX, stem);
         }
         // 退避世代も同じインスタンスの分として数える
         write_file(
             &rotated_log_path(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 1).expect("gen"),
-            100,
+            10,
         );
 
-        // 合計 700 を 450 以下にする → 古い 1-100（300）だけ消せば足りる
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 450);
+        // ファイルは 7 個（1-100 が 3、ほかが 2 ずつ）。4 以下にする → 古い 1-100 だけで足りる
+        let report = cleanup(&dir, 4);
 
         assert!(
             !instance_log_path(TSF_PREFIX, &dir, "1-100").exists(),
@@ -700,25 +898,50 @@ mod log_rotation_tests {
             instance_log_path(TSF_PREFIX, &dir, "1-300").exists(),
             "消しすぎている"
         );
+        assert_eq!(report.remaining_files, 4);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn cleanup_never_touches_its_own_instance_or_legacy_logs() {
+    fn cleanup_never_touches_its_own_instance() {
         let dir = temp_dir("own");
-        write_file(&instance_log_path(TSF_PREFIX, &dir, "9-999"), 400);
-        drop(open_exclusive(&instance_lock_path(TSF_PREFIX, &dir, "9-999"), true).expect("lock"));
-        // 旧方式のログ（接頭辞が違う）
-        write_file(&dir.join("rakukan.log"), 400);
-        write_file(&dir.join("rakukan.log.1"), 400);
+        finished_instance(&dir, TSF_PREFIX, "9-999");
+        age(&instance_log_path(TSF_PREFIX, &dir, "9-999"), 100);
+        // 同じ stem でも接頭辞が違えば別のインスタンス
+        finished_instance(&dir, TRAY_PREFIX, "9-999");
+        age(&instance_log_path(TRAY_PREFIX, &dir, "9-999"), 100);
 
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 10);
+        cleanup(&dir, 0);
 
         // 自分のインスタンスはロックが空いていても対象外
         assert!(instance_log_path(TSF_PREFIX, &dir, "9-999").exists());
-        // 旧方式は自動削除の対象外
-        assert!(dir.join("rakukan.log").exists());
-        assert!(dir.join("rakukan.log.1").exists());
+        assert!(!instance_log_path(TRAY_PREFIX, &dir, "9-999").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cleanup_removes_legacy_logs_only_by_age() {
+        let dir = temp_dir("legacy");
+        write_file(&dir.join("rakukan.log"), 400);
+        write_file(&dir.join("rakukan.log.1"), 400);
+        write_file(&dir.join("rakukan.log.5"), 400);
+        age(&dir.join("rakukan.log.1"), 91);
+        age(&dir.join("rakukan.log.5"), 91);
+        // 0.12・0.13 の固定名のログは対象外
+        write_file(&dir.join("rakukan-engine-host.log"), 400);
+        age(&dir.join("rakukan-engine-host.log"), 91);
+
+        // 件数の条件では消さない
+        let report = cleanup(&dir, 0);
+
+        assert!(
+            dir.join("rakukan.log").exists(),
+            "新しい旧方式のログを消した"
+        );
+        assert!(!dir.join("rakukan.log.1").exists());
+        assert!(!dir.join("rakukan.log.5").exists());
+        assert!(dir.join("rakukan-engine-host.log").exists());
+        assert_eq!(report.removed_files, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
@@ -726,7 +949,7 @@ mod log_rotation_tests {
 #[cfg(test)]
 mod log_rotation_failure_tests {
     //! 異常系（レビュー指摘 1〜4 の再発防止）
-    use super::log_rotation_tests::{temp_dir, write_file};
+    use super::log_rotation_tests::{DAY, age, finished_instance, temp_dir, write_file};
     use super::*;
     use std::io::Write;
 
@@ -934,10 +1157,17 @@ mod log_rotation_failure_tests {
         let log = instance_log_path(TSF_PREFIX, &dir, stem);
         write_file(&log, 400);
         drop(open_exclusive(&instance_lock_path(TSF_PREFIX, &dir, stem), true).expect("lock"));
+        age(&log, 100);
         // 削除できない状態にする
         let held = hold_without_delete_share(&log);
 
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 100);
+        cleanup_logs_with(
+            &dir,
+            (TSF_PREFIX, "9-999"),
+            std::time::SystemTime::now(),
+            DAY * 90,
+            1_000,
+        );
 
         assert!(log.exists(), "消えないはずのログが消えた");
         // ロックを消すと、次回は「ロックが無いので判定できない」に落ちて
@@ -988,10 +1218,17 @@ mod log_rotation_failure_tests {
         let dir = temp_dir("unrelated");
         let keep = dir.join("rakukan-tsf-1-100.log.backup");
         write_file(&keep, 400);
-        write_file(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 400);
-        drop(open_exclusive(&instance_lock_path(TSF_PREFIX, &dir, "1-100"), true).expect("lock"));
+        age(&keep, 100);
+        finished_instance(&dir, TSF_PREFIX, "1-100");
+        age(&instance_log_path(TSF_PREFIX, &dir, "1-100"), 100);
 
-        cleanup_logs_with_budget(TSF_PREFIX, &dir, "9-999", 10);
+        cleanup_logs_with(
+            &dir,
+            (TSF_PREFIX, "9-999"),
+            std::time::SystemTime::now(),
+            DAY * 90,
+            0,
+        );
 
         assert!(keep.exists(), ".log.backup が消された");
         let _ = std::fs::remove_dir_all(&dir);

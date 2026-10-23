@@ -1783,6 +1783,9 @@ name = "rakukan-tray"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "rakukan-log",
+ "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 

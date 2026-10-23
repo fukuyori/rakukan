@@ -35,6 +35,8 @@ use windows::Win32::{
 use windows::core::GUID;
 use windows::core::PCWSTR;
 
+mod upkeep;
+
 const MAP_NAME: &str = "Local\\rakukan.mode";
 const EVT_NAME: &str = "Local\\rakukan.mode.changed";
 const RELOAD_EVT_NAME: &str = "Local\\rakukan.engine.reload";
@@ -246,6 +248,15 @@ fn delete_notify_icon(hwnd: HWND) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if upkeep::another_instance_running() {
+        return Ok(());
+    }
+    // ログはプロセスが終わるまで持つ（書き込み用のスレッドとロック）
+    let log = upkeep::init_logging();
+    tracing::info!("tray started");
+    upkeep::spawn_startup_work(log.as_ref().map(|(_, stem)| stem.clone()));
+    let _log = log;
+
     unsafe {
         let class = to_wide_z("rakukan.tray");
         let wc = WNDCLASSW {
