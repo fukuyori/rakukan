@@ -12,6 +12,8 @@
 ;   - TSF の登録は [Run] の regsvr32 で行い、成否は登録の状態（レジストリ）で決める。
 ;   - キーボードの一覧への追加は、インストーラーを起動したユーザーの権限で行う。
 ;     入らなかった場合は、サインインのときにトレイが補う（版ごとに 1 回）。
+;   - 旧配置（%LOCALAPPDATA%\rakukan）があれば、登録を解除し、旧版が置いたファイルを消す
+;     （使用中のものは次の Windows の起動時に消す）。
 ;
 ; dist\ フォルダの構成（このスクリプトと同じディレクトリに置く）:
 ;   dist\rakukan_tsf.dll
@@ -51,6 +53,9 @@ ArchitecturesInstallIn64BitMode=x64compatible
 
 DefaultDirName={autopf}\rakukan
 DisableDirPage=yes
+; 同じ AppId の旧版は %LOCALAPPDATA%\rakukan に入っている。前回のインストール先を使い回すと
+; そこへ入れてしまうので使わない（旧配置は ssInstall で片付ける）
+UsePreviousAppDir=no
 DefaultGroupName={#MyAppName}
 DisableProgramGroupPage=yes
 
@@ -317,12 +322,124 @@ begin
     Log('TSF registration check failed: InprocServer32=' + Path);
 end;
 
+// ---------------------------------------------------------------------------
+// 旧配置（%LOCALAPPDATA%\rakukan、0.13.0 までのインストーラーと install.ps1）からの移行
+// （docs/Installer_Redesign_Plan.md の Step 3）
+//
+// 旧配置の TSF DLL の登録を解除し、旧版が置いたファイルを消す。使用中のもの（動いている
+// アプリの TSF DLL、旧ホスト、旧トレイ、設定アプリ）は、次の Windows の起動時に消す予約をする。
+// 消すのは旧版が置いた名前のファイルと settings-ui\・dict\ だけで、ログ・etw\・設定のファイル
+// など、それ以外は残す。対象はインストーラーを実行したユーザーの %LOCALAPPDATA%。
+// ---------------------------------------------------------------------------
+
+function OldInstallDir(): String;
+begin
+  Result := ExpandConstant('{localappdata}\rakukan');
+end;
+
+// 消す。消せなければ次の Windows の起動時に消す予約をする
+procedure DeleteNowOrAtRestart(const Path: String);
+begin
+  if DeleteFile(Path) then begin
+    Log('migration: removed ' + Path);
+    Exit;
+  end;
+  try
+    RestartReplace(Path, '');
+    Log('migration: delete at restart ' + Path);
+  except
+    Log('migration: cannot remove ' + Path + ': ' + GetExceptionMessage);
+  end;
+end;
+
+// フォルダーの中身を消してから、フォルダーを消す。予約は中身が先、フォルダーが後になる
+// （起動時の削除は登録した順に行われ、フォルダーは空のときだけ消える）
+procedure DeleteTreeNowOrAtRestart(const Dir: String);
+var
+  FindRec: TFindRec;
+begin
+  if not DirExists(Dir) then
+    Exit;
+  if FindFirst(Dir + '\*', FindRec) then begin
+    try
+      repeat
+        if (FindRec.Name <> '.') and (FindRec.Name <> '..') then begin
+          if (FindRec.Attributes and FILE_ATTRIBUTE_DIRECTORY) <> 0 then
+            DeleteTreeNowOrAtRestart(Dir + '\' + FindRec.Name)
+          else
+            DeleteNowOrAtRestart(Dir + '\' + FindRec.Name);
+        end;
+      until not FindNext(FindRec);
+    finally
+      FindClose(FindRec);
+    end;
+  end;
+  if RemoveDir(Dir) then
+    Log('migration: removed ' + Dir)
+  else begin
+    try
+      RestartReplace(Dir, '');
+      Log('migration: delete at restart ' + Dir);
+    except
+      Log('migration: cannot remove ' + Dir + ': ' + GetExceptionMessage);
+    end;
+  end;
+end;
+
+procedure MigrateOldInstall();
+var
+  OldDir, OldDll, RunValue: String;
+  ResultCode, I: Integer;
+  Names: TArrayOfString;
+begin
+  OldDir := OldInstallDir();
+  if (CompareText(OldDir, ExpandConstant('{app}')) = 0) or not DirExists(OldDir) then
+    Exit;
+
+  OldDll := OldDir + '\rakukan_tsf.dll';
+  if FileExists(OldDll) then begin
+    // 新しい DLL の登録（[Run]）より前に行う。CLSID が同じなので、後で解除すると新しい登録まで消える。
+    // 旧版の DLL では解除が失敗・異常終了することがある（0.12.0 より前の DllMain の作り）ので、
+    // 結果にかかわらず続ける。
+    if Exec(ExpandConstant('{sys}\regsvr32.exe'), '/s /u "' + OldDll + '"',
+            '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+      Log(Format('migration: old TSF DLL unregister %s: exit code %d (ignored)', [OldDll, ResultCode]))
+    else
+      Log('migration: could not run regsvr32 for ' + OldDll + ' (ignored)');
+  end;
+
+  // install.ps1 が HKCU の Run に書いたトレイ（旧配置を指すものだけ）。今は HKLM の Run から起動する
+  if RegQueryStringValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'rakukan-tray', RunValue) and
+     (Pos(Lowercase(OldDir + '\'), Lowercase(RunValue)) > 0) then begin
+    if RegDeleteValue(HKCU, 'Software\Microsoft\Windows\CurrentVersion\Run', 'rakukan-tray') then
+      Log('migration: removed HKCU Run rakukan-tray (' + RunValue + ')');
+  end;
+
+  // 旧版のインストーラーと install.ps1 が置いたファイル
+  Names := [
+    'rakukan_tsf.dll', 'rakukan_tsf.dll.backup',
+    'rakukan_engine_cpu.dll', 'rakukan_engine_vulkan.dll', 'rakukan_engine_cuda.dll',
+    'rakukan-engine-host.exe', 'rakukan-tray.exe', 'rakukan-tray.exe.new',
+    'rakukan-dict-builder.exe', 'rakukan-settings.exe', 'rakukan.ico',
+    'register-tip.ps1', 'unregister-tip.ps1', 'registered.txt',
+    'LICENSE', 'LICENSE_AGREEMENT.txt', 'NOTICE', 'THIRD_PARTY_LICENSES.md',
+    'unins000.exe', 'unins000.dat', 'unins000.msg'];
+  for I := 0 to GetArrayLength(Names) - 1 do begin
+    if FileExists(OldDir + '\' + Names[I]) then
+      DeleteNowOrAtRestart(OldDir + '\' + Names[I]);
+  end;
+  DeleteTreeNowOrAtRestart(OldDir + '\settings-ui');
+  DeleteTreeNowOrAtRestart(OldDir + '\dict');
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
   ResultCode: Integer;
   OldDll: String;
 begin
   if CurStep = ssInstall then begin
+    MigrateOldInstall();
+
     // 前の版の登録を解除しておく。旧版の DLL では解除が失敗・異常終了することがある
     // （0.12.0 より前の DllMain の作り）ので、結果にかかわらず続ける。
     OldDll := ExpandConstant('{app}\rakukan_tsf.dll');

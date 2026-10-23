@@ -110,6 +110,11 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - キーボードリストへの追加: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も `register-tip.ps1` の中で行い、写すのは rakukan の CLSID の分だけにする（今までは TIP 全体を写し、アンインストールで HKCU の TIP 全体を消していた）。トレイがサインインのときに `register-tip.ps1` を実行して、無ければ足す。行うのは**版ごとに 1 回**で、済んだ版を HKCU の `Software\rakukan` の `TipListedVersion` に記録する（2026-10-23 決定。利用者が一覧から外した場合に、同じ版では足し直さない）。`unregister-tip.ps1` は一覧からの削除・HKCU の写しの削除・この記録の削除を行う（7 章）。
 - `[Dirs]` で `{commonappdata}\rakukan\models` に `Permissions: users-modify` を付ける（7 章）。
 - 移行処理: `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll` が存在すれば、登録解除し、旧配置のファイルは再起動時の削除を予約する。旧ディレクトリの `dict\`（`registered.txt` も同様）も同じ。
+  - 行う時期は `ssInstall`（新しい DLL を登録する `[Run]` より前）。CLSID が新旧で同じなので、後で旧 DLL の登録を解除すると、新しい登録まで消える。
+  - 消すのは、旧版のインストーラーと `install.ps1` が置いた名前のファイル（TSF DLL・engine DLL・ホスト・トレイ・`rakukan-dict-builder.exe`・アイコン・TIP のスクリプト・`registered.txt`・ライセンスの文書・旧版のアンインストーラー `unins000.*` など）と、`settings-ui\`・`dict\` だけ。ログ・`etw\`・`register_debug.log`・`config.toml` など、それ以外のものは残す。消せないもの（使用中）は `RestartReplace` で次の起動時に消す。フォルダーは中身の後に予約し、空になっていれば消える。
+  - `install.ps1` が HKCU の Run に書いた `rakukan-tray` は、旧配置を指していれば消す（トレイは HKLM の Run から起動する）。
+  - 旧版と AppId が同じなので、`UsePreviousAppDir=no` にする（既定の yes では、前回のインストール先の `%LOCALAPPDATA%\rakukan` へ入れてしまう。ヘルプ `[Setup]: UsePreviousAppDir`）。
+  - 対象は、インストーラーを実行したユーザーの `%LOCALAPPDATA%` だけ（`{localappdata}`）。別のユーザーが `install.ps1` で入れた旧配置は扱わない。
 - `[UninstallRun]` は unregister-tip → regsvr32 /u。`[UninstallRun]` では `runasoriginaluser` を使えない（Inno Setup のヘルプ `[Run]`）ので、アンインストーラーの権限で実行する。ファイルには `uninsrestartdelete` を付ける。
 - 登録の状態（CLSID の InprocServer32 が `{app}\rakukan_tsf.dll` を指し、TIP のキーがある）を確かめられなかったときは、エラーを表示し（`/SUPPRESSMSGBOXES` では出さない）、終了コード 20 を返す（`GetCustomSetupExitCode`）。`postinstall` でない `[Run]` は `CurStepChanged(ssPostInstall)` より前に実行される（`Setup.MainForm.pas`）ので、確かめるのは `ssPostInstall`。
 - サイレント実行ではダイアログに依存せず、失敗を終了コードとログで通知する。

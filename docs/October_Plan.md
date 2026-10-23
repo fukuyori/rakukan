@@ -185,18 +185,23 @@ RPC protocol に要求を足す場合（#69 の A の案）は、protocol の版
 
 **アンインストールを含む確認の前に、ログを退避する**
 
-アンインストールでは `rakukan-engine-host.log` が消される（`rakukan_installer.iss` の `[UninstallDelete]`）。ホストのログは、#57 の運用確認とログの再計測（7 節）の材料なので、消えると取り戻せない。Step の試験、リリース作業の T4、公開後の winget での削除の確認など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-host.log*`・`rakukan-engine-dll.log*`）を別の場所へ写す。
+ログは、#57 の運用確認とログの再計測（7 節）の材料なので、消えると取り戻せない。ログが消える場面は次のとおり。
+- 0.13.0 までのアンインストーラー: `rakukan-engine-host.log` を消す（その版の `rakukan_installer.iss` の `[UninstallDelete]`）。
+- フェーズ 3 の Step 2 からのトレイ: サインインのたびに、90 日を超えたログと、30000 ファイルを超えた分を古い順に消す（#74）。
+- Step 2 からのインストーラー・アンインストーラーは、ログを消さない。ログの置き場所は、インストール先を `%ProgramFiles%` へ移しても `%LOCALAPPDATA%\rakukan` のまま（Test_Procedure.md の S1-5 で確かめた）。
+
+Step の試験、リリース作業の T4、公開後の winget での削除の確認など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-*.log*`・`rakukan-tray-*.log*`）を別の場所へ写す。
 
 ```powershell
 $bk = "$env:APPDATA\rakukan\log-backup-$(Get-Date -Format yyyyMMdd-HHmmss)"
 New-Item -ItemType Directory $bk | Out-Null
 Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
-  Where-Object { ($_.Name -like 'rakukan-tsf-*.log*' -or $_.Name -like 'rakukan-engine-*.log*') -and $_.Name -notlike '*.lock' } |
+  Where-Object { ($_.Name -like 'rakukan-tsf-*.log*' -or $_.Name -like 'rakukan-engine-*.log*' -or $_.Name -like 'rakukan-tray-*.log*') -and $_.Name -notlike '*.lock' } |
   Copy-Item -Destination $bk
 (Get-ChildItem $bk).Count
 ```
 
-見る点: 写したファイルの数が、元のログの数（`.lock` を除く）と同じ。インストール先を `%ProgramFiles%` へ移した後（Step の途中から）は、ログの置き場所が変わるかを確かめ、上の写す元を合わせる。
+見る点: 写したファイルの数が、元のログの数（`.lock` を除く）と同じ。
 
 **リリース作業**（Step 6。配布前の完了の後に行う。版の番号は、このときに決める）
 

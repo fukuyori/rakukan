@@ -15,6 +15,7 @@
 | T3 設定を変えてからの入れ替え | 設定の読み込み・再接続の処理を変えたとき | それ以外 | 開発ビルド |
 | T4 インストール・更新・アンインストール | すべてのリリースの前（前の版からの更新を含む） | 開発中 | `-Sign` 付きの配布物 |
 | S1 フェーズ 3 の Step 1（配置に依存しない形・ログ・ETW） | フェーズ 3 の Step 1 を終えたとき（`docs/Installer_Redesign_Plan.md` 5 章の実機確認の 1 回目） | それ以外 | 開発ビルド |
+| S2 フェーズ 3 の Step 2・3（新しいインストーラー・旧配置からの移行） | フェーズ 3 の Step 3 を終えたとき（同 5 章の実機確認の 2 回目） | それ以外 | 開発ビルドから `-Sign` 付きで作ったインストーラー |
 
 - 変更のたびではなく、まとまった変更（段・フェーズ）が終わったときに 1 回行う。
 - リリースの前: T4 は必ず行う。T1〜T3 は、前のリリースの後に当てはまる変更があり、その変更の後にまだ行っていないものだけを行う。
@@ -253,6 +254,151 @@
 3. サインアウト → サインイン → 管理者の PowerShell で `Remove-Item "$env:ProgramFiles\rakukan" -Recurse -Force`。
 
 戻した後に見る点: `Get-Process rakukan-engine-host | Format-Table Id, Path` の `Path` が `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe`。メモ帳で変換できる。`%ProgramFiles%\rakukan` が無い。
+
+## S2. フェーズ 3 の Step 2・3（新しいインストーラー・旧配置からの移行）
+
+`docs/Installer_Redesign_Plan.md` 5 章の Step 2・3 の完了条件と、6 章の検証項目を確かめる。今の開発の配置（`%LOCALAPPDATA%\rakukan`、`sudo cargo make install`）を旧配置として、新しいインストーラーで `%ProgramFiles%\rakukan` へ移し、上書きの更新・サイレント実行・アンインストールを行い、最後に開発の配置へ戻す。
+
+試験の範囲の外: protocol / engine ABI の版が違う組み合わせ（旧版と新版が同じ版なので作れない。6 章の Hello の失敗の経路）、0.12.0 より前の DLL での登録の解除。別のユーザーでの確認（S2-6）は、別のアカウントがある場合だけ行う。
+
+### S2-0 準備
+1. 0 の 1（設定のバックアップ）と 2（ログのレベルを `"debug"`）。
+2. **0.13.0 の配布物を写しておく**（新しいインストーラーは同じ名前 `output\rakukan-0.13.0-setup.exe` で作られ、上書きされるため）:
+   ```powershell
+   New-Item -ItemType Directory output\oldversion -Force | Out-Null
+   Copy-Item output\rakukan-0.13.0-setup.exe output\oldversion\rakukan-0.13.0-release-setup.exe
+   Get-FileHash output\rakukan-0.13.0-setup.exe, output\oldversion\rakukan-0.13.0-release-setup.exe | Format-Table Hash, Path
+   ```
+   見る点: 2 つのハッシュが同じ。
+3. ログを退避する（`docs/October_Plan.md` 4 節の「アンインストールを含む確認の前に、ログを退避する」の手順）。新しいアンインストーラーはログを消さないが、4 で入る新しいトレイが起動時に古いログを掃除するので、その前に写しておく。
+4. 0 の 3（`cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install`）。これが旧配置になる。
+5. 利用者が、新しいインストーラーを `-Sign` 付きで作る（`output\rakukan-0.13.0-setup.exe`）。
+6. 状態を見るコマンド（以下「状態の確認」。各試験で使う）を PowerShell に貼る:
+   ```powershell
+   function Show-RakukanState {
+     $c = '{c0ddf8b0-1f1e-4c2d-a9e3-5f7b8d6e2a4c}'
+     "CLSID:      " + (Get-ItemProperty "Registry::HKEY_LOCAL_MACHINE\SOFTWARE\Classes\CLSID\$c\InprocServer32" -ErrorAction SilentlyContinue).'(default)'
+     "TIP HKLM:   " + (Test-Path "HKLM:\SOFTWARE\Microsoft\CTF\TIP\$c")
+     "TIP HKCU:   " + (Test-Path "HKCU:\Software\Microsoft\CTF\TIP\$c")
+     "TIP WOW64:  " + (Test-Path "HKLM:\SOFTWARE\WOW6432Node\Microsoft\CTF\TIP\$c")
+     "Run HKLM:   " + (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name rakukan-tray -ErrorAction SilentlyContinue).'rakukan-tray'
+     "Run HKCU:   " + (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name rakukan-tray -ErrorAction SilentlyContinue).'rakukan-tray'
+     "TipListed:  " + (Get-ItemProperty 'HKCU:\Software\rakukan' -Name TipListedVersion -ErrorAction SilentlyContinue).TipListedVersion
+     "Keyboard:   " + ((Get-WinUserLanguageList | Where-Object LanguageTag -like 'ja*').InputMethodTips -join ', ')
+     "--- processes"; Get-Process rakukan-engine-host, rakukan-tray, rakukan-settings -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path, StartTime
+     "--- pending (rakukan)"; (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations | Select-String rakukan
+     "--- $env:ProgramFiles\rakukan"; Get-ChildItem "$env:ProgramFiles\rakukan" -ErrorAction SilentlyContinue | Format-Table Name, Length
+     "--- $env:LOCALAPPDATA\rakukan (logs excluded)"; Get-ChildItem "$env:LOCALAPPDATA\rakukan" -ErrorAction SilentlyContinue | Where-Object { $_.Name -notmatch '\.(log|lock)(\.\d+|\.tmp)?$' } | Format-Table Mode, Name, Length
+   }
+   Show-RakukanState
+   ```
+   見る点（旧配置の状態として控える）: `CLSID` が `…\AppData\Local\rakukan\rakukan_tsf.dll`。`Run HKCU` が `…\AppData\Local\rakukan\rakukan-tray.exe`。`%ProgramFiles%\rakukan` が無い。
+7. セットアップのログの見方（各インストールの後に使う）:
+   ```powershell
+   $setupLog = Get-ChildItem $env:TEMP -Filter 'Setup Log*.txt' | Sort-Object LastWriteTime | Select-Object -Last 1
+   $setupLog.Name; Select-String -LiteralPath $setupLog.FullName -Pattern 'migration:|old TSF DLL|TSF registration|Need to restart|exit code|Exception' | ForEach-Object { $_.Line }
+   ```
+
+### S2-1 旧配置から新しいインストーラーで更新する（移行。旧 TSF・旧ホストが動いたまま）
+1. メモ帳で `kanji` → Space → Enter（旧 TSF と旧ホストが動いている状態にする）。メモ帳は閉じない。
+2. サインアウトせずに、`output\rakukan-0.13.0-setup.exe` を実行する（UAC を承認）。
+   - 使用許諾の画面: 「同意しない」を選んで「次へ」が押せないことを確かめてから、「同意する」で進む。
+   - 完了の画面: 「後で再起動する」を選んで完了する。
+3. メモ帳に戻り、`kanji` → Space → Enter、続けて `abc` → Enter。
+4. PowerShell で `Show-RakukanState` と、2 のセットアップのログ（S2-0 の 7）。
+
+見る点:
+- 2: 使用許諾の画面に、日本語と英語の見出しの文と [1]〜[4]（rakukan の MIT License、Windows App SDK、Windows SDK、NVIDIA CUDA の EULA）が崩れずに出て、最後までスクロールできる。「同意しない」では先へ進めない。サインアウトを求められずに完走する。完了の画面に「インストールを完了するには、PC を再起動してください。再起動するまでは、Rakukan による日本語入力ができないことがあります。」と出る。
+- 3: メモ帳が落ちない。変換できない場合でも、打った文字は失われない（直接入力になる、など）。起きたことを記録する（再起動までの制限として受け入れる）。
+- 4: `CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`、`TIP HKLM` が `True`。`Run HKLM` が `"C:\Program Files\rakukan\rakukan-tray.exe"`、`Run HKCU` が空。`%ProgramFiles%\rakukan` に `rakukan-tray.exe`・`LICENSE`・`LICENSE_AGREEMENT.txt`・`NOTICE`・`THIRD_PARTY_LICENSES.md` があり、`.gguf` が無い。`%LOCALAPPDATA%\rakukan` に残っているのは、使用中で消せなかった旧版のファイル（TSF DLL・ホスト・トレイ・engine DLL など）と、ログ・`etw`・`config.toml`・`rakukan.toml`・`*.bak` などの旧版が置いたのではないもの。消せなかったものは `pending (rakukan)` に `…\AppData\Local\rakukan\…` として出る。セットアップのログに `migration: old TSF DLL unregister`、`migration: removed HKCU Run rakukan-tray`、`migration: removed` / `delete at restart` の行があり、`TSF registration check failed` が無い。
+- 記録する: `TIP WOW64` の値（Step 3 の実装の時点で、旧配置で `True` だった。共有のキーか、残ったものかを見る）。
+
+5. PC を再起動し、サインインする。
+6. メモ帳で `kanjiwohenkan` → Space → Enter。言語バーのメニューから設定アプリを開き、左の欄の下の版と著作権の表示を見て、閉じる。
+7. PowerShell で `Show-RakukanState`、続けて:
+   ```powershell
+   $host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   Get-Content $host_log.FullName -TotalCount 1
+   Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|mozc_path|dict load failed' | Select-Object -First 3 | ForEach-Object { $_.Line }
+   $tray_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-tray-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   Get-Content $tray_log.FullName | Select-Object -First 6
+   icacls "$env:ProgramData\rakukan\models"
+   Get-WinEvent -FilterHashtable @{ LogName = 'Application'; Id = 1000; StartTime = (Get-Date).AddHours(-2) } -ErrorAction SilentlyContinue | Format-Table TimeCreated, Message -Wrap
+   ```
+
+見る点:
+- 6: 変換できる。設定アプリが開き、「rakukan v0.13.0」と「Copyright (c) 2024-2026 rakukan Contributors」が出る。
+- 7: ホスト・トレイ・設定アプリ（開いていれば）の `Path` が `C:\Program Files\rakukan\…`。ホストのログの `exe=`・`engine DLL loaded: path=`・`mozc_path` が `C:\Program Files\rakukan\…`。`pending (rakukan)` が空。`%LOCALAPPDATA%\rakukan` に旧版のファイル・`settings-ui`・`dict` が無く、ログ・`etw`・`config.toml` などは残っている。`Keyboard` に `0411:{C0DDF8B0-…}{C0DDF8B1-…}` があり、`TipListed` が `0.13.0`。トレイのログの 1 行目が `rakukan log header: component=tray exe=C:\Program Files\rakukan\rakukan-tray.exe …` で、`log cleanup: removed_instances=… remaining_files=…` と `keyboard list checked for 0.13.0` がある。`icacls` に `BUILTIN\Users:(OI)(CI)(M)`（または `Users` の変更の権限）がある。イベントログ（Id 1000、アプリの異常終了）に、試験の時間の explorer・notepad・rakukan のものが無い。`%APPDATA%\rakukan` の設定のハッシュが S2-0 の 1 と同じ（学習履歴は変わりうる）。
+
+戻す操作: なし（S2-2 へ続ける。最後に S2-5 で戻す）。
+
+### S2-2 新しい配置のまま上書きで更新する（TSF・ホストが使用中）
+1. メモ帳で `kanji` → Space → Enter。メモ帳は閉じない。
+2. `output\rakukan-0.13.0-setup.exe` をもう一度実行し、完了の画面で「後で再起動する」を選ぶ。
+3. メモ帳で `kanji` → Space → Enter。
+4. PowerShell で `Show-RakukanState` とセットアップのログ。
+5. PC を再起動し、サインインする。メモ帳で `kanjiwohenkan` → Space → Enter。PowerShell で `Show-RakukanState`。
+
+見る点:
+- 2: 完走する。
+- 3: メモ帳が落ちない。打った文字は失われない（起きたことを記録する）。
+- 4: `pending (rakukan)` に `C:\Program Files\rakukan\…`（使用中の TSF DLL・ホスト・トレイなど）が出る。`CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`。セットアップのログに `old TSF DLL unregister: exit code …` があり、`TSF registration check failed` が無い。
+- 5: 変換できる。`pending (rakukan)` が空。`CLSID`・`TIP HKLM` が 4 と同じ。
+
+戻す操作: なし（S2-3 へ続ける）。
+
+### S2-3 サイレント実行（winget と同じ引数）
+1. 管理者の PowerShell で:
+   ```powershell
+   $p = Start-Process .\output\rakukan-0.13.0-setup.exe -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010' -Wait -PassThru
+   "exit code: $($p.ExitCode)"
+   ```
+2. 同じく `/RESTARTEXITCODE` を付けずに実行し、終了コードを見る:
+   ```powershell
+   $p = Start-Process .\output\rakukan-0.13.0-setup.exe -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+   "exit code: $($p.ExitCode)"
+   ```
+3. PowerShell で `Show-RakukanState` とセットアップのログ。
+4. PC を再起動し、サインインする。メモ帳で `kanji` → Space → Enter。
+
+見る点: 1・2 とも、画面に何も出ず（使用許諾の画面も出ない）、再起動もされない。1 の終了コードが `3010`、2 が `0`（再起動が要る成功。`AlwaysRestart=yes` なので毎回再起動が要る扱い）。3 で `CLSID` が変わらず、セットアップのログに `Need to restart Windows? Yes` がある。4 で変換できる。
+
+戻す操作: なし（S2-4 へ続ける）。
+
+### S2-4 アンインストール
+1. ログを退避する（S2-0 の 3 と同じ）。
+2. 「設定」→「アプリ」→「インストールされているアプリ」から Rakukan IME をアンインストールする。再起動を求められたら「後で」を選ぶ。
+3. PowerShell で `Show-RakukanState`。
+4. PC を再起動し、サインインする。PowerShell で `Show-RakukanState`、続けて `Test-Path "$env:ProgramData\rakukan\models"`、`Get-ChildItem "$env:APPDATA\rakukan" | Format-Table Name`。
+
+見る点:
+- 2: 完走し、再起動を求める表示が出る。
+- 3: `CLSID` が空、`TIP HKLM`・`TIP HKCU` が `False`、`Run HKLM` が空、`TipListed` が空、`Keyboard` に rakukan が無い。`pending (rakukan)` に、使用中だった `C:\Program Files\rakukan\…` が出る。
+- 4: `%ProgramFiles%\rakukan` が無い（またはファイルが残っていない）。`pending (rakukan)` が空。`%ProgramData%\rakukan\models` が残っている（`True`）。`%APPDATA%\rakukan` の設定・ユーザー辞書・学習履歴が残っている。`%LOCALAPPDATA%\rakukan` のログが残っている。
+
+戻す操作: S2-5。
+
+### S2-5 開発の配置に戻す
+Step 4（経路の一本化）までは、開発の導入は今までの `sudo cargo make install`（`%LOCALAPPDATA%\rakukan`）で行うので、その状態に戻す。
+1. サインアウト → サインイン → `sudo cargo make install`。
+2. キーボードの一覧に Rakukan を戻す（S2-4 のアンインストールで外れ、`install.ps1` は一覧に足さない。移行で `%LOCALAPPDATA%` の `register-tip.ps1` も消えるので、トレイも補わない）: PowerShell で
+   ```powershell
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\register-tip.ps1; "exit code: $LASTEXITCODE"
+   ```
+3. メモ帳で `kanjiwohenkan` → Space → Enter。
+4. PowerShell で `Show-RakukanState`。
+
+戻した後に見る点: 2 の終了コードが `0`。変換できる。`Keyboard` に `0411:{C0DDF8B0-…}{C0DDF8B1-…}` がある。`CLSID` が `…\AppData\Local\rakukan\rakukan_tsf.dll`、`TIP HKLM` が `True`。`Run HKCU` が `…\AppData\Local\rakukan\rakukan-tray.exe`、`Run HKLM` が空。`%ProgramFiles%\rakukan` が無い。ホストの `Path` が `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe`。`output\rakukan-0.13.0-setup.exe` は新しいインストーラーのままなので、0.13.0 の配布物が要るときは `output\oldversion\rakukan-0.13.0-release-setup.exe` を使う（ハッシュは S2-0 の 2 で控えたもの）。
+
+### S2-6（任意）別のユーザー
+別のアカウントがある場合だけ、S2-1 の後（新しい配置が入っている間）に行う。
+1. 別のアカウントでサインインする。
+2. 「設定」→「時刻と言語」→「言語と地域」→ 日本語の「言語のオプション」→「キーボードの追加」に Rakukan があれば足す（トレイが足していれば、すでにある）。
+3. メモ帳で `kanji` → Space → Enter。新しいモデルを取得させる場合は、設定アプリでまだ取得していないモデルに替えて保存し、言語バーの「エンジン再起動」を行ってから `kanji` → Space。
+
+見る点: キーボードの一覧に Rakukan がある（トレイが補った場合は、そのユーザーの `HKCU\Software\rakukan` の `TipListedVersion` が `0.13.0`）。変換できる。モデルが `%ProgramData%\rakukan\models` から読まれる（ホストのログに `Using shared model`）。新しく取得させた場合は `Downloaded to "C:\ProgramData\rakukan\models\…"` が出る（取得の失敗で `.cache\huggingface` へ取り直していない）。
+
+戻す操作: 別のアカウントからサインアウトする。
 
 ## 5. 後始末
 
