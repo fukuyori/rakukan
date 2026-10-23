@@ -32,7 +32,7 @@ fn legacy_hf_cache_dir() -> Option<PathBuf> {
 /// Returns the local path to the downloaded file.
 /// 探す順: 共有の置き場所（[`shared_model_dir`]）→ 以前の取得先（`install.ps1` が先に
 /// 取得した `snapshots\main`、hf-hub のキャッシュ）。どこにも無ければ共有の置き場所へ取得する。
-/// 共有の置き場所を作れない場合は、以前の取得先へ取得する。
+/// 共有の置き場所を作れない場合と、そこへの取得に失敗した場合は、以前の取得先へ取得する。
 ///
 /// # Arguments
 /// * `repo_id` - HuggingFace repository ID
@@ -70,23 +70,46 @@ pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
         }
     }
 
-    // Check for HF_TOKEN environment variable
+    let shared = shared.filter(|dir| match std::fs::create_dir_all(dir) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(
+                "cannot create {:?} ({e}); downloading to the user cache",
+                dir
+            );
+            false
+        }
+    });
+    let Some(shared) = shared else {
+        return fetch(legacy, &hub_repo, repo_id, filename);
+    };
+    // 共有の置き場所が既にあっても、別のユーザーが作ったものなどで書けないことがある。
+    // そのときは以前の取得先へ取り直す。
+    match fetch(Some(shared.clone()), &hub_repo, repo_id, filename) {
+        Ok(path) => Ok(path),
+        Err(e) if legacy.is_some() => {
+            tracing::warn!(
+                "download to {:?} failed ({e}); retrying in the user cache",
+                shared
+            );
+            fetch(legacy, &hub_repo, repo_id, filename)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+/// `cache_dir`（`None` なら hf-hub の既定）へ取得する。
+fn fetch(
+    cache_dir: Option<PathBuf>,
+    hub_repo: &Repo,
+    repo_id: &str,
+    filename: &str,
+) -> Result<PathBuf> {
     let mut builder = ApiBuilder::new();
-    let cache_dir = shared
-        .filter(|dir| match std::fs::create_dir_all(dir) {
-            Ok(()) => true,
-            Err(e) => {
-                tracing::warn!(
-                    "cannot create {:?} ({e}); downloading to the user cache",
-                    dir
-                );
-                false
-            }
-        })
-        .or(legacy);
     if let Some(dir) = cache_dir {
         builder = builder.with_cache_dir(dir);
     }
+    // Check for HF_TOKEN environment variable
     if let Ok(token) = std::env::var("HF_TOKEN") {
         builder = builder.with_token(Some(token));
     }
@@ -94,7 +117,7 @@ pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
         .build()
         .map_err(|e| KanjiError::Download(e.into()))?;
 
-    let repo = api.repo(hub_repo);
+    let repo = api.repo(hub_repo.clone());
 
     tracing::info!("Downloading {} from {}...", filename, repo_id);
 

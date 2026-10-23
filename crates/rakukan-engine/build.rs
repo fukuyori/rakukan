@@ -10,6 +10,7 @@ include!("../../build-support/git_info.rs");
 /// 使われない。そこで `cudart_static.lib` をこの crate の `OUT_DIR` に `cudart.lib` の名前で写し、
 /// 検索先に足す。llama-cpp-sys-2 の `cudart` の指定は、検索先の並びでこちらに解決される。
 /// 実際にどちらが使われたかは、リンカーのコマンドライン（`--print link-args`）と MAP で確かめる。
+/// 使用許諾の文書は `cudart_static.lib` を使う前提なので、写せないときはビルドを失敗させる。
 fn link_cudart_static_on_windows() {
     let cuda = std::env::var_os("CARGO_FEATURE_CUDA").is_some();
     let windows = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows");
@@ -18,10 +19,7 @@ fn link_cudart_static_on_windows() {
     }
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     let Some(root) = std::env::var_os("CUDA_PATH") else {
-        println!(
-            "cargo:warning=CUDA_PATH is not set; linking cudart.lib as llama-cpp-sys-2 requests"
-        );
-        return;
+        panic!("CUDA_PATH is not set; cannot link cudart_static.lib (#90)");
     };
     let src = std::path::PathBuf::from(root)
         .join("lib")
@@ -29,13 +27,13 @@ fn link_cudart_static_on_windows() {
         .join("cudart_static.lib");
     let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").expect("OUT_DIR"));
     println!("cargo:rerun-if-changed={}", src.display());
-    match std::fs::copy(&src, out.join("cudart.lib")) {
-        Ok(_) => println!("cargo:rustc-link-search=native={}", out.display()),
-        Err(e) => println!(
-            "cargo:warning=cannot copy {} ({e}); linking cudart.lib as llama-cpp-sys-2 requests",
+    if let Err(e) = std::fs::copy(&src, out.join("cudart.lib")) {
+        panic!(
+            "cannot copy {} ({e}); cannot link cudart_static.lib (#90)",
             src.display()
-        ),
+        );
     }
+    println!("cargo:rustc-link-search=native={}", out.display());
 }
 
 fn main() {

@@ -447,12 +447,16 @@ impl DynEngine {
         // engine_create の後は DLL のスレッド（変換のワーカーなど）が DLL のコードを実行しうる。
         // backend の切り替えで古い DynEngine を捨てても DLL が外れないよう、プロセスが
         // 終わるまで固定する（#64 の方針。1 つのホストの中では engine DLL を外さない）。
-        pin_module(vtable.create as *const (), dll_path);
+        let lib = Arc::new(lib);
+        if !pin_module(vtable.create as *const (), dll_path) {
+            // 固定できなかったときは参照を 1 つ捨てて、`FreeLibrary` が呼ばれないようにする
+            std::mem::forget(Arc::clone(&lib));
+        }
 
         let engine = DynEngine {
             handle,
             vtable,
-            _lib: Arc::new(lib),
+            _lib: lib,
         };
         engine.log_build_info(dll_path);
         Ok(engine)
@@ -1266,9 +1270,10 @@ pub fn local_data_dir() -> Option<PathBuf> {
 }
 
 /// `anchor` のアドレスを含むモジュールを、プロセスが終わるまで外れないようにする
-/// （`GetModuleHandleExW` の PIN）。失敗してもエンジンは使えるので、ログに残すだけにする。
+/// （`GetModuleHandleExW` の PIN）。固定できたら `true`。失敗した場合は呼び出し元が
+/// `Library` を手放さないようにする。
 #[cfg(target_os = "windows")]
-fn pin_module(anchor: *const (), dll_path: &Path) {
+fn pin_module(anchor: *const (), dll_path: &Path) -> bool {
     use windows::Win32::Foundation::HMODULE;
     use windows::Win32::System::LibraryLoader::{
         GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
@@ -1282,16 +1287,27 @@ fn pin_module(anchor: *const (), dll_path: &Path) {
         )
     };
     match pinned {
-        Ok(()) => tracing::info!(
-            "engine DLL pinned for the life of the host: {}",
-            dll_path.display()
-        ),
-        Err(e) => tracing::warn!("engine DLL pin failed: {} ({e})", dll_path.display()),
+        Ok(()) => {
+            tracing::info!(
+                "engine DLL pinned for the life of the host: {}",
+                dll_path.display()
+            );
+            true
+        }
+        Err(e) => {
+            tracing::warn!(
+                "engine DLL pin failed: {} ({e}); keeping the library loaded instead",
+                dll_path.display()
+            );
+            false
+        }
     }
 }
 
 #[cfg(not(target_os = "windows"))]
-fn pin_module(_anchor: *const (), _dll_path: &Path) {}
+fn pin_module(_anchor: *const (), _dll_path: &Path) -> bool {
+    true
+}
 
 /// `anchor` のアドレスを含むモジュールのファイルがあるディレクトリ。
 #[cfg(target_os = "windows")]
