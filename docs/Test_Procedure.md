@@ -171,13 +171,13 @@
 
 見る点: 今のモデルは、既存の HF のキャッシュ（`Using pre-downloaded model` か `Using previously downloaded model`）から読まれ、取得し直していない（`Downloading` が無い）。`%ProgramData%\rakukan\models` は、新しく取得していなければ作られていない（`False`）。
 
-（任意）新しく取得する先の確認: 設定アプリでモデルを、まだ取得していないもの（例: `jinen-v2-xsmall-q5`）に替えて保存し、メモ帳で `kanji` → Space。
+（任意）新しく取得する先の確認: 設定アプリでモデルを、まだ取得していないもの（例: `jinen-v2-xsmall-q5`）に替えて保存し、言語バーの「エンジン再起動」を行ってから、メモ帳で `kanji` → Space（保存だけではモデルが替わらない。#49）。新しいホストのログを読むので、`$host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1` で取り直してから、上の `Select-String` を行う。
 - 見る点: ホストのログに `Downloading …` と `Downloaded to "C:\ProgramData\rakukan\models\models--…"`。
-- 戻す操作: 設定アプリでモデルを元に戻して保存し、メモ帳で `kanji` → Space。
+- 戻す操作: 設定アプリでモデルを元に戻して保存し、言語バーの「エンジン再起動」を行ってから、メモ帳で `kanji` → Space。
 - 戻した後に見る点: `Using … model` が元のモデルを指す。取得したファイルは `%ProgramData%\rakukan\models` に残る（消さなくてよい）。
 
 ### S1-3 backend の切り替え（engine DLL のピン止め #64・CUDA の読み込み用のライブラリ #90）
-1. 設定アプリで、今の `gpu_backend` を控え、CUDA が使える PC なら `cuda` に替えて保存する（使えない PC は `vulkan`）。
+1. 設定アプリで、今の `gpu_backend` を控え、CUDA が使える PC なら `cuda` に替えて保存する（使えない PC は `vulkan`）。言語バーの「エンジン再起動」を行う（`gpu_backend` だけの変更は保存では反映されない。#49）。
 2. メモ帳で `kanjiwohenkan` → Space → Enter。
 3. PowerShell で:
    ```powershell
@@ -188,7 +188,7 @@
 
 見る点: 選んだ backend の DLL が読み込まれ、`engine DLL pinned` が出る。変換できる。CUDA の DLL の import に `cudart64_*.dll` が無く、`cublas64_*.dll` だけがある（`llvm-objdump` が無ければ、この項目は飛ばす）。
 
-戻す操作: 設定アプリで `gpu_backend` を 1 で控えた値に戻して保存し、メモ帳で `kanji` → Space → Enter。
+戻す操作: 設定アプリで `gpu_backend` を 1 で控えた値に戻して保存し、言語バーの「エンジン再起動」を行ってから、メモ帳で `kanji` → Space → Enter。
 戻した後に見る点: ホストのログの最後の `engine DLL loaded` が元の backend の DLL を指す。変換できる。
 
 ### S1-4 ETW（管理者の PowerShell）
@@ -204,41 +204,53 @@
 - `export` の表示に欠落（Lost）の数が出る。
 - 読めない場合（`tracerpt` が TraceLogging の項目を書き出せない場合）は、その旨を記録する（PerfView か WPA の手順に改める）。
 
-戻す操作: `.\scripts\etw-trace.ps1 status` でセッションが動いていないことを確かめる。CSV には入力した読みが入るので、確かめた後に `%LOCALAPPDATA%\rakukan\etw` の CSV と ETL を消す。
+戻す操作: `.\scripts\etw-trace.ps1 status` でセッションが動いていないことを確かめる。CSV には入力した読みが入るので、確かめた後に `%LOCALAPPDATA%\rakukan\etw` の CSV・要約（`*-summary.txt`）・ETL を消す。
 戻した後に見る点: `status` が「動いていません」。
 
 ### S1-5 `%ProgramFiles%` に手で置く
 今の配置（`%LOCALAPPDATA%\rakukan`）から `%ProgramFiles%\rakukan` へ写し、登録を付け替えて動くかを確かめる。ログ・設定の置き場所は変わらない。
 
-1. 管理者の PowerShell で:
+登録の付け替えは、`regsvr32` の表示だけでなく、登録先のレジストリと `register_debug.log`（`%LOCALAPPDATA%\rakukan`。登録・解除のたびに時刻・`dll_path`・各段階の結果を追記する）で確かめる。登録先が消したフォルダを指したままになると、IME が選べなくなる（直し方は戻す操作の 2）。
+
+1. 管理者の PowerShell で（タイトルバーに「管理者」と出ている窓）:
    ```powershell
    $src = "$env:LOCALAPPDATA\rakukan"; $dst = "$env:ProgramFiles\rakukan"
-   regsvr32 /s /u "$src\rakukan_tsf.dll"
+   regsvr32 /u "$src\rakukan_tsf.dll"
    New-Item -ItemType Directory $dst -Force | Out-Null
    Copy-Item "$src\rakukan_tsf.dll", "$src\rakukan-engine-host.exe" $dst
    Copy-Item "$src\rakukan_engine_*.dll" $dst
    Copy-Item "$src\dict", "$src\settings-ui" $dst -Recurse
-   regsvr32 /s "$dst\rakukan_tsf.dll"
+   regsvr32 "$dst\rakukan_tsf.dll"
    Get-ChildItem $dst | Format-Table Name, Length
+   (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\CLSID\{c0ddf8b0-1f1e-4c2d-a9e3-5f7b8d6e2a4c}\InprocServer32").'(default)'
+   Get-Content "$src\register_debug.log" -Tail 13
    ```
+   見る点: `regsvr32` の表示が 2 回出る（`…\AppData\Local\rakukan\rakukan_tsf.dll の DllUnregisterServer は成功しました。` と `C:\Program Files\rakukan\rakukan_tsf.dll の DllRegisterServer は成功しました。`）。登録先が `C:\Program Files\rakukan\rakukan_tsf.dll`。`register_debug.log` の最後に、今の時刻の `unregister OK` × 3 と、`dll_path: C:\Program Files\rakukan\rakukan_tsf.dll` の `register OK` × 3・`DllRegisterServer success` がある。
 2. サインアウト → サインイン（動いているアプリの古い TSF と古いホストを外すため）。
-3. メモ帳で `kanjiwohenkan` → Space → Enter。言語バーの Rakukan のメニューから設定アプリを開き、閉じる。
+3. メモ帳で `kanjiwohenkan` → Space → Enter。言語バーの Rakukan のメニューから設定アプリを開き、開いたままにする。
 4. PowerShell で:
    ```powershell
-   Get-Process rakukan-engine-host | Format-Table Id, Path
+   Get-Process rakukan-engine-host, rakukan-settings | Format-Table Id, Path
    $host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
    Get-Content $host_log.FullName -TotalCount 1
    Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|dict' | Select-Object -First 5 | ForEach-Object { $_.Line }
    ```
+5. 設定アプリを閉じる。
 
-見る点: ホストの `Path` が `C:\Program Files\rakukan\rakukan-engine-host.exe`。ヘッダーの `exe=` も同じ。`engine DLL loaded: path=C:\Program Files\rakukan\…`。辞書が読めて変換できる（`dict load failed` が無い）。ログは `%LOCALAPPDATA%\rakukan` に書かれる。設定アプリが開く。
+見る点: ホストの `Path` が `C:\Program Files\rakukan\rakukan-engine-host.exe`。ヘッダーの `exe=` も同じ。`engine DLL loaded: path=C:\Program Files\rakukan\…`。辞書が読めて変換できる（`dict load failed` が無い）。ログは `%LOCALAPPDATA%\rakukan` に書かれる。設定アプリが開き、その `Path` が `C:\Program Files\rakukan\settings-ui\rakukan-settings.exe`。
 
-戻す操作（管理者の PowerShell）:
-```powershell
-regsvr32 /s /u "$dst\rakukan_tsf.dll"
-regsvr32 /s "$src\rakukan_tsf.dll"
-```
-→ サインアウト → サインイン → 管理者の PowerShell で `Remove-Item "$env:ProgramFiles\rakukan" -Recurse -Force`。
+戻す操作:
+1. 管理者の PowerShell で:
+   ```powershell
+   $src = "$env:LOCALAPPDATA\rakukan"; $dst = "$env:ProgramFiles\rakukan"
+   regsvr32 /u "$dst\rakukan_tsf.dll"
+   regsvr32 "$src\rakukan_tsf.dll"
+   (Get-ItemProperty "Registry::HKEY_CLASSES_ROOT\CLSID\{c0ddf8b0-1f1e-4c2d-a9e3-5f7b8d6e2a4c}\InprocServer32").'(default)'
+   Get-Content "$src\register_debug.log" -Tail 13
+   ```
+   見る点: `regsvr32` の成功の表示が 2 回出る。登録先が `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll`（`C:\Users\<ユーザー名>\AppData\Local\rakukan\rakukan_tsf.dll`）。`register_debug.log` の最後に、今の時刻の `unregister OK` × 3 と、`dll_path: …\AppData\Local\rakukan\rakukan_tsf.dll` の `register OK` × 3・`DllRegisterServer success` がある。**登録先と記録がこのとおりのときだけ** 3 に進む。
+2. 1 の見る点のとおりでない場合（登録先が `C:\Program Files\…` のまま、または記録が増えていない）は、管理者の PowerShell で `regsvr32 "$env:LOCALAPPDATA\rakukan\rakukan_tsf.dll"` をやり直し、1 の 2 行（レジストリと `register_debug.log`）で確かめる。
+3. サインアウト → サインイン → 管理者の PowerShell で `Remove-Item "$env:ProgramFiles\rakukan" -Recurse -Force`。
 
 戻した後に見る点: `Get-Process rakukan-engine-host | Format-Table Id, Path` の `Path` が `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe`。メモ帳で変換できる。`%ProgramFiles%\rakukan` が無い。
 
@@ -350,3 +362,15 @@ regsvr32 /s "$src\rakukan_tsf.dll"
 - T1・T2: 0.13.0 で TSF・RPC・ホストを変えたので行った。開発ビルドで合格（この文書の 2026-10-22 の各節。T2-1〜T2-4 と、F の試験・ホストを起動できないときの試験を含む）。配布物は同じファイルを詰めたもので、インストーラーと配置は変えていないので、配布物ではやり直していない（試験を行う時期の決まり）。
 - T3: 設定の読み込み・再接続の処理は変えていないので行っていない。
 - 10 月の計画の試験 30（配布物での統合試験）は、フェーズ 3 の変更（配置・ログ）を含まない 0.13.0 では、T4 で足りるとした。
+
+## 2026-10-23 の結果（S1: フェーズ 3 の Step 1。開発ビルド `500d161`）
+
+`cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install` で導入。ホストと engine DLL がどちらも `500d161acd1a`・ABI 12 で読み込まれた。
+
+- S1-1: 合格。ホストのログは `rakukan-engine-host-<PID>-<起動識別子>.log` で 1 行目がヘッダー、`engine DLL pinned`、engine DLL の行は target `rakukan_engine_dll`。`ETW provider … not available` は無い。TSF のログのヘッダーとスレッド ID、`.lock` もある。
+- S1-2: 合格。今のモデルは既存の HF のキャッシュから読まれた。任意の確認で `jinen-v2-xsmall-q5` を `C:\ProgramData\rakukan\models` に取得できた。ただし、モデルを替えて保存しただけでは、ホストが前のモデルのまま動いた（`converter reclaimed from conv_cache (no reload)` → `ShutdownIfConfigDiffers: config unchanged`）。言語バーの「エンジン再起動」で反映された（#49 のコメント）。手順に「エンジン再起動」を加えた。
+- S1-3: 合格。`gpu_backend` だけを替えて保存しても反映されない（`engine_json_changed=false`。#49 のコメント）。手順に「エンジン再起動」を加えた。候補数も一緒に替えて、同じホストの中で CUDA 版から Vulkan 版に替わった場合は、ピン止めでホストは落ちなかったが、変換が 4.5〜12.4 s かかった（Vulkan 版だけのホストでは 50〜155 ms。#64 のコメント）。CUDA 版の DLL の import に `cudart64_*.dll` は無く、CUDA のものは `cublas64_13.dll` だけ（#90）。
+- S1-4: 合格。`Rakukan.Tsf` 1035 件・`Rakukan.Host` 56 件、欠落 0。`tracerpt` の CSV で `level`・`target`・`message` が読めた（`target` が `rakukan_engine_dll` のものを含む）。打鍵は遅くならなかった。CSV・要約・ETL は確かめた後に消した。
+- S1-5: 合格。設定アプリ・ホスト・engine DLL・辞書が `C:\Program Files\rakukan` から動き、ログは `%LOCALAPPDATA%\rakukan` に書かれた。設定アプリの左の欄の下とファイルのプロパティに「Copyright (c) 2024-2026 rakukan Contributors」がある（#88）。
+  - 1 回目の戻す操作は管理者でない PowerShell で行い、登録が付け替わらないまま `%ProgramFiles%\rakukan` を消したため、IME が選べなくなった（`register_debug.log` に `create CLSID key: アクセスが拒否されました。 (0x80070005)`）。2 回目は、戻す操作の `regsvr32` が `register_debug.log` に記録を残さず（登録・解除の処理まで届いていない）、同じく選べなくなった。2 回目の原因は未確認。どちらも管理者の PowerShell で `regsvr32 "$env:LOCALAPPDATA\rakukan\rakukan_tsf.dll"` をやり直して戻った。手順を、`/s` を外し、登録先のレジストリと `register_debug.log` を確かめてから消す形に改めた。
+- 後始末: `config.toml`・`keymap.toml`・`user_dict.toml` は試験の前のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログのレベルは `trace` のまま。
