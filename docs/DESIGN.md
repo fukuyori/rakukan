@@ -972,6 +972,8 @@ cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名な�
 
 どのログも `.lock` を排他で取れたプロセスだけが書く（取れなければ起動識別子を変えて 4 回まで試し、それでも取れなければログなしで続ける）。各ファイルの 1 行目はヘッダー `rakukan log header: component=... exe=... package=... pid=... instance=... build=...` で、ローテーションで新しい本体を開くたびに書く。各行には時刻（UTC）・レベル・スレッド ID・target が付く。書き込みは専用のスレッドで行い、呼び出し元は上限つきのキューに入れるだけにする。キューが満杯のときは捨て、次に書けたときに `rakukan-log: N lines dropped (queue full)` を 1 行書く。プロセスの終了時・異常終了時にキューに残った行は失われうる（ホストは終了時と panic 時に 0.5 秒まで書き出しを待つ）。
 
+調査用に ETW へも同じイベントを出す（provider `Rakukan.Tsf` / `Rakukan.Host`。engine DLL のイベントは `Rakukan.Host`）。セッションは管理者の PowerShell で `scripts/etw-trace.ps1 start` → 再現 → `stop` → `export` と手で行う。セッションが無い間はイベントを組み立てない。
+
 ログレベル: TSF は `RAKUKAN_LOG` → `config.toml` の `log_level` → `debug`（最初の Activate のときに決まる）。ホストは `RUST_LOG` → `info`、engine DLL は `RAKUKAN_LOG` → `info`（どちらもホストの起動時に決まる）。
 
 ログは退避して 5 世代を保持する（各ファイルの本体が 16 MiB を超える書き込みの前に退避）。

@@ -2,6 +2,7 @@ using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using System.Collections.ObjectModel;
+using System.Diagnostics;
 using System.IO;
 using System.Reflection;
 using System.Runtime.InteropServices;
@@ -29,8 +30,14 @@ public sealed partial class MainWindow : Window
         ResizeToDefaultSize();
         AppWindow.Closing += AppWindow_Closing;
 
-        var ver = Assembly.GetEntryAssembly()?.GetName().Version;
+        var entry = Assembly.GetEntryAssembly();
+        var ver = entry?.GetName().Version;
         VersionText.Text = ver is { } v ? $"rakukan v{v.Major}.{v.Minor}.{v.Build}" : "rakukan";
+        // 著作権の表示（csproj の Copyright）。Windows SDK の条項の 2.a.ii（#88）
+        var copyright = entry?.GetCustomAttribute<AssemblyCopyrightAttribute>()?.Copyright ?? "";
+        CopyrightText.Text = copyright;
+        AboutVersionText.Text = VersionText.Text;
+        AboutCopyrightText.Text = copyright;
 
         _keyFields = new Dictionary<ManagedKeyAction, TextBox>
         {
@@ -372,6 +379,33 @@ public sealed partial class MainWindow : Window
         catch (Exception ex)
         {
             await ShowDialogAsync("config.toml を開けませんでした", ex.Message);
+        }
+    }
+
+    private async void OpenLicenseButton_Click(object sender, RoutedEventArgs e) =>
+        await OpenInstalledDocumentAsync("LICENSE");
+
+    private async void OpenThirdPartyLicensesButton_Click(object sender, RoutedEventArgs e) =>
+        await OpenInstalledDocumentAsync("THIRD_PARTY_LICENSES.md");
+
+    /// <summary>インストール先（settings-ui の親）にある文書をメモ帳で開く。</summary>
+    private async Task OpenInstalledDocumentAsync(string name)
+    {
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", name));
+        try
+        {
+            if (!File.Exists(path))
+            {
+                throw new FileNotFoundException("ファイルが見つかりません", path);
+            }
+            Process.Start(new ProcessStartInfo("notepad.exe", $"\"{path}\"")
+            {
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex)
+        {
+            await ShowDialogAsync($"{name} を開けませんでした", $"{ex.Message}\n{path}");
         }
     }
 

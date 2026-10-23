@@ -4,14 +4,17 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "rakukan のログのファイル（起動インスタンスごとの名前・ローテーション・ヘッダー・書き込み用のスレッド）"
 
 [dependencies]
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# ヘッダーのパッケージファミリー名（GetCurrentPackageFamilyName）
+# ヘッダーのパッケージファミリー名（GetCurrentPackageFamilyName）。
+# tracelogging_dynamic（MIT）: 調査用の ETW provider（#76）
 [target.'cfg(windows)'.dependencies]
+tracelogging_dynamic = "1.2.4"
 windows = { version = "0.58.0", features = [
     "Win32_Foundation",
     "Win32_Storage_Packaging_Appx",

@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish.workspace = true
 
 description = "辞書パーサー・ユーザー辞書管理（mozc binary + user）"
 

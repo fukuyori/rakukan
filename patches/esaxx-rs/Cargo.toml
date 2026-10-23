@@ -2,6 +2,9 @@
 name = "esaxx-rs"
 version = "0.1.10"
 edition = "2021"
+# Same as upstream esaxx-rs 0.1.10 on crates.io. The bundled C++ (esa.hxx, sais.hxx) carries MIT notices.
+license = "Apache-2.0"
+repository = "https://github.com/Narsil/esaxx-rs"
 description = "esaxx-rs patched: static_crt(false) for /MD compatibility with llama-cpp-sys-2"
 
 [lib]

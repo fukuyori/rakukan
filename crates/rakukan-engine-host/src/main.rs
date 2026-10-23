@@ -54,15 +54,35 @@ fn init_tracing(build: &rakukan_engine_abi::HostBuildId) -> Option<rakukan_log::
     // ロックは書き込み用のスレッドが持ち、プロセスが終わるまで離さない
     let log = rakukan_log::AsyncLog::spawn("rakukan-log-writer", file, instance.lock).ok()?;
     let _ = LOG_FLUSHER.set(log.flusher());
-    let _ = tracing_subscriber::fmt()
-        .with_writer(log.clone())
-        .with_ansi(false)
-        .with_thread_ids(true)
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .try_init();
+    // 調査用の ETW（#76）。engine DLL のイベントも callback を通ってここへ出る
+    let etw = rakukan_log::etw::EtwLayer::register(rakukan_log::etw::HOST_PROVIDER);
+    let (etw_layer, etw_error) = match etw {
+        Ok(layer) => (Some(layer), None),
+        Err(e) => (None, Some(e)),
+    };
+    {
+        use tracing_subscriber::layer::SubscriberExt;
+        use tracing_subscriber::util::SubscriberInitExt;
+        let _ = tracing_subscriber::registry()
+            .with(
+                tracing_subscriber::EnvFilter::try_from_default_env()
+                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+            )
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .with_writer(log.clone())
+                    .with_ansi(false)
+                    .with_thread_ids(true),
+            )
+            .with(etw_layer)
+            .try_init();
+    }
+    if let Some(e) = etw_error {
+        tracing::warn!(
+            "ETW provider {} not available: {e}",
+            rakukan_log::etw::HOST_PROVIDER
+        );
+    }
     Some(log)
 }
 

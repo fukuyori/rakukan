@@ -167,17 +167,33 @@ fn init_logging() {
                     .map(|log| (instance.stem, log))
             })
         };
-        let Some((log_stem, log)) = writer else {
-            // ロックを取れない・スレッドを起動できない: ログなしで続ける
-            return;
+        // ロックを取れない・スレッドを起動できないときはファイルのログなしで続ける
+        let (log_stem, log) = match writer {
+            Some((stem, log)) => (stem, Some(log)),
+            None => ("none".to_string(), None),
         };
-        let init = tracing_subscriber::fmt()
-            .compact()
-            .with_env_filter(make_filter())
-            .with_ansi(false)
-            .with_thread_ids(true)
-            .with_writer(log)
-            .try_init();
+        let file_layer = log.map(|log| {
+            tracing_subscriber::fmt::layer()
+                .compact()
+                .with_ansi(false)
+                .with_thread_ids(true)
+                .with_writer(log)
+        });
+        // 調査用の ETW（#76）。DLL は上の pin_dll で外れないので、登録したまま使う
+        let (etw_layer, etw_error) =
+            match rakukan_log::etw::EtwLayer::register(rakukan_log::etw::TSF_PROVIDER) {
+                Ok(layer) => (Some(layer), None),
+                Err(e) => (None, Some(e)),
+            };
+        let init = {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            tracing_subscriber::registry()
+                .with(make_filter())
+                .with(file_layer)
+                .with(etw_layer)
+                .try_init()
+        };
         // 失敗するのは別の subscriber が既に設定されている場合なので、そちらへ記録される
         if let Err(e) = init {
             tracing::warn!("tracing subscriber was not installed: {e}");
@@ -192,6 +208,12 @@ fn init_logging() {
             Some(Ok(())) => tracing::debug!("dll pinned for the life of the process"),
             Some(Err(e)) => tracing::warn!("dll pin failed: {e}"),
             None => {}
+        }
+        if let Some(e) = etw_error {
+            tracing::warn!(
+                "ETW provider {} not available: {e}",
+                rakukan_log::etw::TSF_PROVIDER
+            );
         }
         // 古いログの掃除は DLL の中では行わない（Issue #72）。トレイへ移す（#74）。
     }

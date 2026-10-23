@@ -48,6 +48,8 @@ SetupIconFile=dist\rakukan.ico
 
 ; 出力設定
 OutputDir=output
+; 使用許諾の画面。build-installer.ps1 が docs\licenses から作る（設定アプリが同梱する Microsoft の部品の条項を含む）
+LicenseFile=dist\LICENSE_AGREEMENT.txt
 OutputBaseFilename=rakukan-{#MyAppVersion}-setup
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -122,6 +124,8 @@ Source: "dist\register-tip.ps1";   DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\unregister-tip.ps1"; DestDir: "{app}"; Flags: ignoreversion
 
 ; ----- ライセンス・帰属表示 -----
+Source: "dist\LICENSE";                 DestDir: "{app}"; Flags: ignoreversion
+Source: "dist\LICENSE_AGREEMENT.txt";   DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\NOTICE";                  DestDir: "{app}"; Flags: ignoreversion
 Source: "dist\THIRD_PARTY_LICENSES.md"; DestDir: "{app}"; Flags: ignoreversion
 

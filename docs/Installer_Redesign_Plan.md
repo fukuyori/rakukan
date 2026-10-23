@@ -112,6 +112,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - 移行処理: `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll` が存在すれば、登録解除し、旧配置のファイルは再起動時の削除を予約する。旧ディレクトリの `dict\`（`registered.txt` も同様）も同じ。
 - `[UninstallRun]` は現行どおり（unregister-tip → regsvr32 /u）。ファイルには `uninsrestartdelete` を付ける。
 - サイレント実行ではダイアログに依存せず、失敗を終了コードとログで通知する。
+- 使用許諾の画面（`LicenseFile`）を出す（2026-10-23 決定）。設定アプリが同梱する Windows App SDK の実行時の部品は、配布するときに「配布者・利用者に、Microsoft をこの契約と同等以上に保護する条件へ同意させる」ことが条件になっている（パッケージの `license.txt` の 3(b)）。設定アプリが同梱する Windows SDK の .NET 向けの部品（`Microsoft.Windows.SDK.NET.dll`・`WinRT.Runtime.dll`）の条項にも、同じ種類の条件（ほかに自分の著作権の表示を出すこと）がある。中身は 1 つの文書にまとめる: 見出しの文（`docs/licenses/license-agreement-header.txt`）、rakukan 本体の MIT License（著作権の表示を含む）、Windows App SDK と Windows SDK の Microsoft Software License Terms の全文と、CUDA 版の engine DLL が静的にリンクする CUDA ランタイムの読み込み用のライブラリ（CUDA 13 の hybrid。ランタイムの本体はディスプレイドライバから読み込む）の NVIDIA の EULA の全文（`docs/licenses/`。EULA の配布の条件は、配布の条件を EULA と食い違わないものにすること・NVIDIA の知的財産の保護を含む）。`build-installer.ps1` が `dist\LICENSE_AGREEMENT.txt` に組み立てる。この形で条件を満たせるかの法的な判断は行っておらず、Microsoft を補償する義務は残る。部品そのものを配布物から無くす方法は #88 で扱う。
 
 ### 4.2 コード
 
@@ -208,6 +209,14 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - 登録・解除の成否を、regsvr32 の終了コードではなくレジストリの状態で確かめる。0.12.0 以前の版からの更新で、旧 DLL の `/u` が失敗・クラッシュしても更新が完了する（4.3a）。
 - トレイが配布・起動・Run 登録され、アンインストールで解除される（4.3a）。
 - ホストの中で backend を切り替えた後（設定が合わない `Create` で別の engine DLL を読み込み、ピン止めした古い DLL も残っている状態。Step 1）に、更新・アンインストールする。どちらの DLL も使用中として扱われ、インストーラーが止まらずに完走し、再起動の後に置き換え・削除されている。
+- 第三者のライセンス（4.1 の使用許諾の画面、`THIRD_PARTY_LICENSES.md`）:
+  - 配布物を作るときに、`build-installer.ps1` の確認（`gen-third-party-licenses.ps1 -Check`、`check-bundled-licenses.ps1 -Files`）が通る。
+  - 使用許諾の画面が出て、日本語と英語の見出しの文と [1]〜[4]（rakukan の MIT License、Windows App SDK、Windows SDK、NVIDIA CUDA の EULA）が崩れずに読め、最後までスクロールできる。「同意しない」では先へ進めない。
+  - サイレント実行（`/VERYSILENT`）で、使用許諾の画面に止まらずに完走する。
+  - インストール先に `LICENSE`・`LICENSE_AGREEMENT.txt`・`NOTICE`・`THIRD_PARTY_LICENSES.md` がある。モデル（`.gguf`）が同梱されていない。
+  - 設定アプリの左の欄の下と「補足」の「バージョン情報」に、版と著作権の表示（`Copyright (c) 2024-2026 rakukan Contributors`）が出る。「LICENSE を開く」「第三者のライセンスを開く」でインストール先の文書が開く。`rakukan-settings.exe` のプロパティの著作権の欄に同じ表示がある（#88）。
+  - CUDA 版の engine DLL（`cudart_static.lib` を使う形、#90）で変換が動く。DLL の import に `cudart64_*.dll` が無い。
+  - push の後に、CI の License Check（`cargo deny check licenses`）と Third-Party Licenses（一覧の `-Check` と NuGet のパッケージの確認）が通る。
 
 ## 7. 着手前に確認すること
 

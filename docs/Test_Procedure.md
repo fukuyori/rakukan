@@ -1,6 +1,6 @@
 # 統合試験・実機試験の手順（2026-10-10 に v6 用として作成。2026-10-22 に版によらない手順に改め、`V6_Test_Procedure.md` から改名）
 
-自動のテスト（`cargo test`・CI）では確かめられない、実際のアプリ・プロセスをまたぐ動き・画面・インストーラーの動作を、手で確かめる試験。各試験は「操作 → 見る点 → 戻す操作 → 戻した後に見る点」の順。ログは `%LOCALAPPDATA%\rakukan\` の `rakukan-tsf-<PID>-<起動識別子>.log`（アプリごと）と `rakukan-engine-host.log`。時刻順にまとめるときは `scripts/merge-logs.ps1`。
+自動のテスト（`cargo test`・CI）では確かめられない、実際のアプリ・プロセスをまたぐ動き・画面・インストーラーの動作を、手で確かめる試験。各試験は「操作 → 見る点 → 戻す操作 → 戻した後に見る点」の順。ログは `%LOCALAPPDATA%\rakukan\` の `rakukan-tsf-<PID>-<起動識別子>.log`（アプリごと）と `rakukan-engine-host-<PID>-<起動識別子>.log`（ホスト。engine DLL の行を含む。フェーズ 3 の Step 1 より前のビルドでは `rakukan-engine-host.log` と `rakukan-engine-dll.log`）。時刻順にまとめるときは `scripts/merge-logs.ps1`。
 
 **共通の注意**: アプリからフォーカスが外れると、未確定の文字はアプリ側で確定される（PowerShell に移った時点で確定する）。未確定の文字を保ったままホストを入れ替える試験（T2・T3）は、PowerShell で**遅らせてから**ホストを止め、その間にアプリへ戻って操作する。PowerShell での確認は、アプリでの操作をすべて終えてから行う。
 
@@ -14,6 +14,7 @@
 | T2 ホストの入れ替え | RPC・ホスト・復元・保留キーの処理を変えたとき | TSF の表示だけの変更 | 開発ビルド |
 | T3 設定を変えてからの入れ替え | 設定の読み込み・再接続の処理を変えたとき | それ以外 | 開発ビルド |
 | T4 インストール・更新・アンインストール | すべてのリリースの前（前の版からの更新を含む） | 開発中 | `-Sign` 付きの配布物 |
+| S1 フェーズ 3 の Step 1（配置に依存しない形・ログ・ETW） | フェーズ 3 の Step 1 を終えたとき（`docs/Installer_Redesign_Plan.md` 5 章の実機確認の 1 回目） | それ以外 | 開発ビルド |
 
 - 変更のたびではなく、まとまった変更（段・フェーズ）が終わったときに 1 回行う。
 - リリースの前: T4 は必ず行う。T1〜T3 は、前のリリースの後に当てはまる変更があり、その変更の後にまだ行っていないものだけを行う。
@@ -33,7 +34,7 @@
    見る点: 4 ファイル（無いものは除く）とハッシュが表示される。
 2. **ログのレベル**: 設定アプリ、または `config.toml` の `[general] log_level` を `"debug"` にする（元の値を控える）。反映はホストの起動し直しの後。
 3. **開発ビルドの導入**: `cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install`。
-   見る点: `rakukan-engine-host.log` の起動時のビルドの一致の検査が通っている（`dll_git` と `host_git` が同じ）。メモ帳で変換できる。
+   見る点: ホストのログの起動時のビルドの一致の検査が通っている（`dll_git` と `host_git` が同じ）。メモ帳で変換できる。
 4. 試験に使うアプリ: メモ帳、EmEditor（2 つ以上の別プロセス）。
 
 ## T1. 通常の入力（実 DLL を通した `Change` / `Read`）
@@ -131,6 +132,115 @@
 2. 見る点: キーボードの一覧に Rakukan が無い。`%APPDATA%\rakukan` が残っている。
 3. 戻す操作: 新しい版のパッケージを再インストール（現在の手順）。
 4. 戻した後に見る点: T1 の 1 が通る。設定が残っている。
+
+## S1. フェーズ 3 の Step 1（配置に依存しない形・ログ・ETW）
+
+`docs/Installer_Redesign_Plan.md` 5 章の Step 1 の完了条件と、`docs/Log_Redesign_Plan.md` 7 章の「ETW」「ログのファイル」の行を確かめる。0 の準備（開発ビルドの導入を含む）の後に行う。`cargo make build-engine` で cpu・vulkan・cuda の 3 つをビルドしておく。
+
+### S1-1 ログのファイル（今の配置）
+1. メモ帳で `kanjiwohenkan` → Space → Enter。
+2. PowerShell で:
+   ```powershell
+   $d = "$env:LOCALAPPDATA\rakukan"
+   $host_log = Get-ChildItem $d -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   $tsf_log  = Get-ChildItem $d -Filter 'rakukan-tsf-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   $host_log.Name; Get-Content $host_log.FullName -TotalCount 1
+   Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|engine DLL pinned|rakukan_engine_dll|ETW provider|STDERR' | Select-Object -First 8 | ForEach-Object { $_.Line }
+   $tsf_log.Name; Get-Content $tsf_log.FullName -TotalCount 1
+   Select-String -LiteralPath $tsf_log.FullName -Pattern 'ETW provider|dll pinned' | Select-Object -First 3 | ForEach-Object { $_.Line }
+   Get-ChildItem $d -Filter '*.lock' | Sort-Object LastWriteTime | Select-Object -Last 3 Name
+   Get-Item "$d\rakukan-engine-dll.log" -ErrorAction SilentlyContinue | Format-Table Name, LastWriteTime
+   ```
+
+見る点:
+- ホストのログの名前が `rakukan-engine-host-<PID>-<起動識別子>.log` で、1 行目が `rakukan log header: component=host exe=…rakukan-engine-host.exe … pid=… instance=… build=0.13.0@…`。
+- `engine DLL loaded: path=…` の後に `engine DLL pinned for the life of the host: …` がある。
+- engine DLL の行が target `rakukan_engine_dll` で入っている（変換の `beam conversion done` など）。`rakukan-engine-dll.log` は、無いか、最終更新が導入より前（伸びていない）。
+- `ETW provider … not available` の行が無い。
+- TSF のログの 1 行目が `rakukan log header: component=tsf exe=…notepad.exe …`。各行にスレッド ID（`ThreadId(…)`）が付く。
+- ログごとに同じ名前の `.lock` がある。
+
+戻す操作: なし。
+
+### S1-2 モデルの探す順
+1. PowerShell で:
+   ```powershell
+   Select-String -LiteralPath $host_log.FullName -Pattern 'Using (shared|pre-downloaded|previously downloaded) model|Downloading|Downloaded to' | ForEach-Object { $_.Line }
+   Test-Path "$env:ProgramData\rakukan\models"
+   ```
+
+見る点: 今のモデルは、既存の HF のキャッシュ（`Using pre-downloaded model` か `Using previously downloaded model`）から読まれ、取得し直していない（`Downloading` が無い）。`%ProgramData%\rakukan\models` は、新しく取得していなければ作られていない（`False`）。
+
+（任意）新しく取得する先の確認: 設定アプリでモデルを、まだ取得していないもの（例: `jinen-v2-xsmall-q5`）に替えて保存し、メモ帳で `kanji` → Space。
+- 見る点: ホストのログに `Downloading …` と `Downloaded to "C:\ProgramData\rakukan\models\models--…"`。
+- 戻す操作: 設定アプリでモデルを元に戻して保存し、メモ帳で `kanji` → Space。
+- 戻した後に見る点: `Using … model` が元のモデルを指す。取得したファイルは `%ProgramData%\rakukan\models` に残る（消さなくてよい）。
+
+### S1-3 backend の切り替え（engine DLL のピン止め #64・CUDA の読み込み用のライブラリ #90）
+1. 設定アプリで、今の `gpu_backend` を控え、CUDA が使える PC なら `cuda` に替えて保存する（使えない PC は `vulkan`）。
+2. メモ帳で `kanjiwohenkan` → Space → Enter。
+3. PowerShell で:
+   ```powershell
+   $host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|engine DLL pinned|Selected backend' | Select-Object -Last 4 | ForEach-Object { $_.Line }
+   & "C:\Program Files\LLVM\bin\llvm-objdump.exe" -p "$env:LOCALAPPDATA\rakukan\rakukan_engine_cuda.dll" | Select-String 'DLL Name: (cud|cublas)'
+   ```
+
+見る点: 選んだ backend の DLL が読み込まれ、`engine DLL pinned` が出る。変換できる。CUDA の DLL の import に `cudart64_*.dll` が無く、`cublas64_*.dll` だけがある（`llvm-objdump` が無ければ、この項目は飛ばす）。
+
+戻す操作: 設定アプリで `gpu_backend` を 1 で控えた値に戻して保存し、メモ帳で `kanji` → Space → Enter。
+戻した後に見る点: ホストのログの最後の `engine DLL loaded` が元の backend の DLL を指す。変換できる。
+
+### S1-4 ETW（管理者の PowerShell）
+1. 管理者の PowerShell で、リポジトリのフォルダから `.\scripts\etw-trace.ps1 start`。
+   見る点: `開始しました: rakukan-etw -> …\rakukan.etl`。
+2. メモ帳で `kanjiwohenkan` → Space → Enter を 3 回。打鍵が遅くならないか見る。
+3. `.\scripts\etw-trace.ps1 stop` → `.\scripts\etw-trace.ps1 export`。
+4. 書き出した CSV を開き、`Rakukan.Tsf` と `Rakukan.Host` のイベントを探す。
+
+見る点:
+- 2 で打鍵と変換の速さが、セッションを始める前と変わらない。
+- CSV に両方の provider のイベントがあり、`level`・`target`・`message` の値が読める（`target` が `rakukan_engine_dll` のものを含む）。フィールドは `message` の後ろに ` name=value` の形で入る。
+- `export` の表示に欠落（Lost）の数が出る。
+- 読めない場合（`tracerpt` が TraceLogging の項目を書き出せない場合）は、その旨を記録する（PerfView か WPA の手順に改める）。
+
+戻す操作: `.\scripts\etw-trace.ps1 status` でセッションが動いていないことを確かめる。CSV には入力した読みが入るので、確かめた後に `%LOCALAPPDATA%\rakukan\etw` の CSV と ETL を消す。
+戻した後に見る点: `status` が「動いていません」。
+
+### S1-5 `%ProgramFiles%` に手で置く
+今の配置（`%LOCALAPPDATA%\rakukan`）から `%ProgramFiles%\rakukan` へ写し、登録を付け替えて動くかを確かめる。ログ・設定の置き場所は変わらない。
+
+1. 管理者の PowerShell で:
+   ```powershell
+   $src = "$env:LOCALAPPDATA\rakukan"; $dst = "$env:ProgramFiles\rakukan"
+   regsvr32 /s /u "$src\rakukan_tsf.dll"
+   New-Item -ItemType Directory $dst -Force | Out-Null
+   Copy-Item "$src\rakukan_tsf.dll", "$src\rakukan-engine-host.exe" $dst
+   Copy-Item "$src\rakukan_engine_*.dll" $dst
+   Copy-Item "$src\dict", "$src\settings-ui" $dst -Recurse
+   regsvr32 /s "$dst\rakukan_tsf.dll"
+   Get-ChildItem $dst | Format-Table Name, Length
+   ```
+2. サインアウト → サインイン（動いているアプリの古い TSF と古いホストを外すため）。
+3. メモ帳で `kanjiwohenkan` → Space → Enter。言語バーの Rakukan のメニューから設定アプリを開き、閉じる。
+4. PowerShell で:
+   ```powershell
+   Get-Process rakukan-engine-host | Format-Table Id, Path
+   $host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   Get-Content $host_log.FullName -TotalCount 1
+   Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|dict' | Select-Object -First 5 | ForEach-Object { $_.Line }
+   ```
+
+見る点: ホストの `Path` が `C:\Program Files\rakukan\rakukan-engine-host.exe`。ヘッダーの `exe=` も同じ。`engine DLL loaded: path=C:\Program Files\rakukan\…`。辞書が読めて変換できる（`dict load failed` が無い）。ログは `%LOCALAPPDATA%\rakukan` に書かれる。設定アプリが開く。
+
+戻す操作（管理者の PowerShell）:
+```powershell
+regsvr32 /s /u "$dst\rakukan_tsf.dll"
+regsvr32 /s "$src\rakukan_tsf.dll"
+```
+→ サインアウト → サインイン → 管理者の PowerShell で `Remove-Item "$env:ProgramFiles\rakukan" -Recurse -Force`。
+
+戻した後に見る点: `Get-Process rakukan-engine-host | Format-Table Id, Path` の `Path` が `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe`。メモ帳で変換できる。`%ProgramFiles%\rakukan` が無い。
 
 ## 5. 後始末
 

@@ -150,6 +150,9 @@ if (Test-Path $settingsDir) {
     New-Item -ItemType Directory -Force -Path "$distDir\settings-ui" | Out-Null
     Copy-Item "$settingsDir\*" "$distDir\settings-ui\" -Recurse -Force
     Write-Host "  -> settings-ui\\"
+    # 設定アプリが同梱する部品のライセンス（docs/licenses/bundled-components.json と突き合わせる）
+    & (Join-Path $repoRoot "scripts\check-bundled-licenses.ps1") -Files "$distDir\settings-ui"
+    if ($LASTEXITCODE -ne 0) { throw "settings-ui に、ライセンスを確かめていない部品があります（上の NG を参照）" }
 } else {
     Write-Warning "settings-ui が見つかりません ($settingsDir)"
 }
@@ -170,8 +173,11 @@ if (Test-Path $dict) {
     Write-Warning "rakukan.dict が見つかりません ($dict)"
 }
 
-# ライセンス・帰属表示
+# ライセンス・帰属表示。Rust の crate の一覧が依存と合っているかを先に確かめる
+& (Join-Path $repoRoot "scripts\gen-third-party-licenses.ps1") -Check
+if ($LASTEXITCODE -ne 0) { throw "THIRD_PARTY_LICENSES.md が依存と合っていません（scripts\gen-third-party-licenses.ps1 を実行）" }
 foreach ($entry in @(
+    @{ Name = "LICENSE"; Source = (Join-Path $repoRoot "LICENSE") }
     @{ Name = "NOTICE"; Source = (Join-Path $repoRoot "NOTICE") }
     @{ Name = "THIRD_PARTY_LICENSES.md"; Source = (Join-Path $repoRoot "docs\THIRD_PARTY_LICENSES.md") }
 )) {
@@ -185,6 +191,30 @@ foreach ($entry in @(
     }
 }
 
+# 使用許諾の画面（rakukan_installer.iss の LicenseFile）。見出しの文、rakukan の MIT License、
+# 設定アプリが同梱する Microsoft の部品の条項をつないで 1 つの文書にする（docs/licenses）
+$agreementParts = @(
+    @{ Title = $null; Path = (Join-Path $repoRoot "docs\licenses\license-agreement-header.txt") }
+    @{ Title = "[1] rakukan - MIT License"; Path = (Join-Path $repoRoot "LICENSE") }
+    @{ Title = "[2] Microsoft Windows App SDK 1.6.250205002 - Microsoft Software License Terms"; Path = (Join-Path $repoRoot "docs\licenses\microsoft-windows-app-sdk-1.6.250205002.txt") }
+    @{ Title = "[3] Microsoft Windows SDK (Microsoft.Windows.SDK.NET.Ref 10.0.19041.57) - Microsoft Software License Terms"; Path = (Join-Path $repoRoot "docs\licenses\microsoft-windows-sdk.txt") }
+    @{ Title = "[4] NVIDIA CUDA Toolkit 13.3 - End User License Agreement"; Path = (Join-Path $repoRoot "docs\licenses\nvidia-cuda-13.3-eula.txt") }
+)
+$agreement = [System.Text.StringBuilder]::new()
+foreach ($part in $agreementParts) {
+    if (-not (Test-Path $part.Path)) { throw "使用許諾の文書の部品がありません: $($part.Path)" }
+    if ($part.Title) {
+        [void]$agreement.AppendLine()
+        [void]$agreement.AppendLine(('=' * 78))
+        [void]$agreement.AppendLine($part.Title)
+        [void]$agreement.AppendLine(('=' * 78))
+        [void]$agreement.AppendLine()
+    }
+    [void]$agreement.AppendLine((Get-Content -LiteralPath $part.Path -Raw -Encoding utf8).TrimEnd())
+}
+[System.IO.File]::WriteAllText("$distDir\LICENSE_AGREEMENT.txt", ($agreement.ToString() -replace "`r?`n", "`r`n"), [System.Text.UTF8Encoding]::new($true))
+Write-Host "  -> LICENSE_AGREEMENT.txt"
+
 # config.toml (デフォルト値が入ったもの)
 $configSrc = "$PSScriptRoot\..\config\config.toml"
 if (-not (Test-Path $configSrc)) {
@@ -196,9 +226,14 @@ if (Test-Path $configSrc) {
 }
 
 # モデル (.gguf) をコピー (存在する場合)
+# jinen のモデルは CC-BY-SA-4.0 で、同梱するなら帰属の表示とライセンスを載せる必要がある。
+# THIRD_PARTY_LICENSES.md には載せていないので、同梱しない（インストール先の models に .gguf を置かない）
 $modelsDir = Join-Path $InstallDir "models"
 if (Test-Path $modelsDir) {
     $ggufFiles = Get-ChildItem -Path $modelsDir -Filter "*.gguf"
+    if ($ggufFiles) {
+        Write-Warning "モデル（CC-BY-SA-4.0）を同梱します。THIRD_PARTY_LICENSES.md に帰属の表示とライセンスが無いので、同梱しない場合は $modelsDir の .gguf を外して作り直してください"
+    }
     foreach ($f in $ggufFiles) {
         Copy-Item $f.FullName "$distDir\models\" -Force
         Write-Host "  -> models\$($f.Name)"

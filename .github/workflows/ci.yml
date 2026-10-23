@@ -62,3 +62,33 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+
+  # ── 配布物にリンクする crate のライセンス（deny.toml。一覧は scripts/gen-third-party-licenses.ps1）──
+  licenses:
+    name: License Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check licenses
+
+  # ── 第三者のライセンスの一覧（Rust の crate と、設定アプリの NuGet のパッケージ）──
+  third-party:
+    name: Third-Party Licenses (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo-about を入れる
+        run: cargo install cargo-about --locked --version 0.9.2 --features cli
+      - name: crate のソースを取る
+        run: cargo fetch
+      - name: Rust の crate の一覧が依存と合っているか
+        shell: pwsh
+        run: ./scripts/gen-third-party-licenses.ps1 -Check
+      - name: 設定アプリの NuGet のパッケージが許可の一覧と合っているか
+        shell: pwsh
+        run: |
+          dotnet restore apps/rakukan-settings-winui/Rakukan.Settings.WinUI.csproj --configfile apps/rakukan-settings-winui/NuGet.Config -p:Platform=x64
+          ./scripts/check-bundled-licenses.ps1

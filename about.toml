@@ -1,0 +1,21 @@
+# cargo-about の設定（scripts/gen-third-party-licenses.ps1 が使う）。
+# 配布物（TSF DLL・エンジンホスト・engine DLL・トレイ）にリンクする crate のライセンスを集める。
+accepted = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CDLA-Permissive-2.0",
+]
+targets = ["x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+# rakukan 自身の crate（publish = false）は集めない
+private = { ignore = true }
