@@ -13,15 +13,18 @@ path = "src/main.rs"
 [dependencies]
 rakukan-engine-abi = { path = "../rakukan-engine-abi" }
 rakukan-engine-rpc = { path = "../rakukan-engine-rpc" }
+rakukan-log = { path = "../rakukan-log" }
 anyhow   = { workspace = true }
 tracing  = { workspace = true }
 tracing-subscriber = { workspace = true }
 
-# サイレント死の診断: Win32 stderr を log ファイルへリダイレクトするのに使う。
+# サイレント死の診断: Win32 stderr をパイプで受けてログへ流すのに使う（Console・Pipes・Security）。
 # Win32_System_Threading: named mutex による多重起動防止に使う。
 [target.'cfg(windows)'.dependencies]
 windows = { version = "0.58.0", features = [
     "Win32_Foundation",
+    "Win32_Security",
     "Win32_System_Console",
+    "Win32_System_Pipes",
     "Win32_System_Threading",
 ] }

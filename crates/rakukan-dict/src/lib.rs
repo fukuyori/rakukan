@@ -4,7 +4,7 @@
 //! 1. ユーザー登録語（user_dict.toml）
 //! 2. mozc バイナリ辞書（rakukan.dict, インストール時にビルド）
 //!
-//! 辞書ファイルは %LOCALAPPDATA%\rakukan\dict\ に配置する。
+//! 辞書ファイルはインストール先（engine DLL と同じディレクトリ）の `dict\` に配置する。
 
 pub mod mozc_dict;
 pub mod store;
@@ -53,22 +53,60 @@ pub use store::DictStore;
 
 use std::path::PathBuf;
 
-/// 辞書ディレクトリ（%LOCALAPPDATA%\rakukan\dict）
+/// 辞書ディレクトリ（インストール先の `dict`）
+///
+/// この関数を含むモジュール（engine DLL）のディレクトリの `dict`。辞書はインストール先に
+/// 置くので、配置（`%LOCALAPPDATA%\rakukan` / `%ProgramFiles%\rakukan`）に依存しない（#33）。
+#[cfg(target_os = "windows")]
 pub fn dict_dir() -> Option<PathBuf> {
-    #[cfg(target_os = "windows")]
-    if let Ok(localappdata) = std::env::var("LOCALAPPDATA") {
-        return Some(PathBuf::from(localappdata).join("rakukan").join("dict"));
+    module_dir_of(dict_dir as *const ()).map(|d| d.join("dict"))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn dict_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join(".config")
+            .join("rakukan")
+            .join("dict"),
+    )
+}
+
+/// `anchor` のアドレスを含むモジュールのファイルがあるディレクトリ。
+#[cfg(target_os = "windows")]
+fn module_dir_of(anchor: *const ()) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let mut module = HMODULE::default();
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            windows::core::PCWSTR(anchor as *const u16),
+            &mut module,
+        )
     }
-    #[cfg(not(target_os = "windows"))]
-    if let Ok(home) = std::env::var("HOME") {
-        return Some(
-            PathBuf::from(home)
-                .join(".config")
-                .join("rakukan")
-                .join("dict"),
-        );
+    .ok()?;
+    // 長いパスに備え、切り詰められたらバッファを広げて取り直す
+    let mut buf = vec![0u16; 1024];
+    loop {
+        let len = unsafe { GetModuleFileNameW(module, &mut buf) } as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < buf.len() {
+            let path = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+            return path.parent().map(std::path::Path::to_path_buf);
+        }
+        if buf.len() >= 32 * 1024 {
+            return None;
+        }
+        buf.resize(buf.len() * 2, 0);
     }
-    None
 }
 
 /// ユーザー辞書ファイルパス（%APPDATA%\rakukan\user_dict.toml）
@@ -118,7 +156,7 @@ pub fn learn_history_path() -> Option<PathBuf> {
     None
 }
 
-/// rakukan.dict のパス（%LOCALAPPDATA%\rakukan\dict\rakukan.dict）
+/// rakukan.dict のパス（インストール先の `dict\rakukan.dict`）
 pub fn find_mozc_dict() -> Option<PathBuf> {
     let p = dict_dir()?.join("rakukan.dict");
     Some(p)

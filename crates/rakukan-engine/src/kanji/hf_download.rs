@@ -6,13 +6,33 @@
 use super::error::KanjiError;
 use super::model_config::{ModelFamily, VariantConfig, registry};
 type Result<T> = super::error::Result<T>;
-use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+use hf_hub::{Cache, Repo, RepoType, api::sync::ApiBuilder};
 use std::path::PathBuf;
+
+/// 全ユーザーで共有するモデルの置き場所（`%ProgramData%\rakukan\models`、#33）。
+/// hf-hub のキャッシュと同じ形（`models--<repo>\snapshots\...`）で置く。
+fn shared_model_dir() -> Option<PathBuf> {
+    let base = std::env::var_os("ProgramData")?;
+    Some(PathBuf::from(base).join("rakukan").join("models"))
+}
+
+/// 以前の取得先（`%USERPROFILE%\.cache\huggingface\hub`）。読むだけにし、書き込み・削除はしない。
+fn legacy_hf_cache_dir() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    Some(
+        PathBuf::from(home)
+            .join(".cache")
+            .join("huggingface")
+            .join("hub"),
+    )
+}
 
 /// Download a GGUF model from HuggingFace Hub
 ///
 /// Returns the local path to the downloaded file.
-/// The file is cached in the HuggingFace cache directory (~/.cache/huggingface/hub/).
+/// 探す順: 共有の置き場所（[`shared_model_dir`]）→ 以前の取得先（`install.ps1` が先に
+/// 取得した `snapshots\main`、hf-hub のキャッシュ）。どこにも無ければ共有の置き場所へ取得する。
+/// 共有の置き場所を作れない場合は、以前の取得先へ取得する。
 ///
 /// # Arguments
 /// * `repo_id` - HuggingFace repository ID
@@ -21,13 +41,21 @@ use std::path::PathBuf;
 /// # Environment Variables
 /// * `HF_TOKEN` - HuggingFace API token (required for private repositories)
 pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
-    // Check snapshots/main/ fallback first (pre-downloaded by install.ps1)
-    if let Some(home) = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME")) {
+    let hub_repo = Repo::new(repo_id.to_string(), RepoType::Model);
+    let shared = shared_model_dir();
+    if let Some(path) = shared
+        .as_ref()
+        .and_then(|dir| Cache::new(dir.clone()).repo(hub_repo.clone()).get(filename))
+    {
+        tracing::info!("Using shared model: {:?}", path);
+        return Ok(path);
+    }
+
+    let legacy = legacy_hf_cache_dir();
+    if let Some(hub) = &legacy {
+        // install.ps1 が先に取得した置き方（snapshots/main/）
         let repo_slug = repo_id.replace('/', "--");
-        let candidate = std::path::PathBuf::from(home)
-            .join(".cache")
-            .join("huggingface")
-            .join("hub")
+        let candidate = hub
             .join(format!("models--{}", repo_slug))
             .join("snapshots")
             .join("main")
@@ -36,10 +64,29 @@ pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
             tracing::info!("Using pre-downloaded model: {:?}", candidate);
             return Ok(candidate);
         }
+        if let Some(path) = Cache::new(hub.clone()).repo(hub_repo.clone()).get(filename) {
+            tracing::info!("Using previously downloaded model: {:?}", path);
+            return Ok(path);
+        }
     }
 
     // Check for HF_TOKEN environment variable
     let mut builder = ApiBuilder::new();
+    let cache_dir = shared
+        .filter(|dir| match std::fs::create_dir_all(dir) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(
+                    "cannot create {:?} ({e}); downloading to the user cache",
+                    dir
+                );
+                false
+            }
+        })
+        .or(legacy);
+    if let Some(dir) = cache_dir {
+        builder = builder.with_cache_dir(dir);
+    }
     if let Ok(token) = std::env::var("HF_TOKEN") {
         builder = builder.with_token(Some(token));
     }
@@ -47,7 +94,7 @@ pub fn download_gguf(repo_id: &str, filename: &str) -> Result<PathBuf> {
         .build()
         .map_err(|e| KanjiError::Download(e.into()))?;
 
-    let repo = api.repo(Repo::new(repo_id.to_string(), RepoType::Model));
+    let repo = api.repo(hub_repo);
 
     tracing::info!("Downloading {} from {}...", filename, repo_id);
 

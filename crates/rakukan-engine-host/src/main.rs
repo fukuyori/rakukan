@@ -11,115 +11,141 @@
 #![windows_subsystem = "windows"]
 
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use anyhow::Result;
 use rakukan_engine_rpc::server::{HostShared, SharedEngine, serve};
 
-fn log_path() -> PathBuf {
-    rakukan_engine_abi::install_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("rakukan-engine-host.log")
+/// ログの置き場所（`%LOCALAPPDATA%\rakukan`）。インストール先とは分ける。
+fn log_dir() -> PathBuf {
+    rakukan_engine_abi::local_data_dir().unwrap_or_else(|| std::path::PathBuf::from("."))
 }
 
-const LOG_ROTATE_MAX_BYTES: u64 = 16 * 1024 * 1024;
-const LOG_ROTATE_GENERATIONS: usize = 5;
+/// 書き込み用のスレッドのキューを書き出すのを待つ口（終了時・panic 時）。
+static LOG_FLUSHER: std::sync::OnceLock<rakukan_log::Flusher> = std::sync::OnceLock::new();
 
-fn rotated_log_path(path: &std::path::Path, generation: usize) -> Option<PathBuf> {
-    let mut file_name = path.file_name()?.to_os_string();
-    file_name.push(format!(".{generation}"));
-    Some(path.with_file_name(file_name))
-}
+/// 終了時・panic 時に、キューに残った行を書き出すまで待つ上限。
+const LOG_FLUSH_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 
-fn rotate_log_if_needed(path: &std::path::Path) {
-    let Ok(meta) = std::fs::metadata(path) else {
-        return;
-    };
-    if meta.len() <= LOG_ROTATE_MAX_BYTES {
-        return;
-    }
-
-    for generation in (1..=LOG_ROTATE_GENERATIONS).rev() {
-        let Some(dst) = rotated_log_path(path, generation) else {
-            return;
-        };
-        if generation == LOG_ROTATE_GENERATIONS {
-            let _ = std::fs::remove_file(&dst);
-        }
-        let src = if generation == 1 {
-            path.to_path_buf()
-        } else {
-            let Some(src) = rotated_log_path(path, generation - 1) else {
-                return;
-            };
-            src
-        };
-        if src.exists() {
-            let _ = std::fs::rename(src, dst);
-        }
+fn flush_log() {
+    if let Some(flusher) = LOG_FLUSHER.get() {
+        flusher.flush(LOG_FLUSH_TIMEOUT);
     }
 }
 
-fn init_tracing(log_path: &std::path::Path) {
-    // ログは %LOCALAPPDATA%\rakukan\rakukan-engine-host.log に書き出す。
-    // ファイル作成に失敗しても最低限 stderr に出す。
-    rotate_log_if_needed(log_path);
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        Ok(file) => {
-            let _ = tracing_subscriber::fmt()
-                .with_writer(Mutex::new(file))
-                .with_ansi(false)
-                .with_env_filter(
-                    tracing_subscriber::EnvFilter::try_from_default_env()
-                        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                )
-                .try_init();
-        }
-        Err(_) => {
-            let _ = tracing_subscriber::fmt().try_init();
-        }
-    }
+/// ログの初期化（#75）。
+///
+/// TSF と同じく、起動インスタンスごとの `rakukan-engine-host-<PID>-<起動識別子>.log` + `.lock`
+/// に書く。書き込みは専用のスレッドで行う（#76）。`.lock` を取れない・スレッドを起動できない
+/// ときはログなしで続ける。engine DLL のログも callback でここへ流れる。
+fn init_tracing(build: &rakukan_engine_abi::HostBuildId) -> Option<rakukan_log::AsyncLog> {
+    let dir = log_dir();
+    let instance = rakukan_log::file::acquire_instance(
+        rakukan_log::file::HOST_PREFIX,
+        &dir,
+        std::process::id(),
+    )?;
+    let header = rakukan_log::header::header_line(
+        "host",
+        &instance.stem,
+        &format!("{}@{}", build.pkg_version, build.git_sha),
+    );
+    let file = rakukan_log::file::RotatingLog::open(instance.log_path, Some(header));
+    // ロックは書き込み用のスレッドが持ち、プロセスが終わるまで離さない
+    let log = rakukan_log::AsyncLog::spawn("rakukan-log-writer", file, instance.lock).ok()?;
+    let _ = LOG_FLUSHER.set(log.flusher());
+    let _ = tracing_subscriber::fmt()
+        .with_writer(log.clone())
+        .with_ansi(false)
+        .with_thread_ids(true)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
+        .try_init();
+    Some(log)
 }
 
-/// Win32 STDERR を log ファイルに向ける。サイレント死の原因（llama.cpp の
-/// `fprintf(stderr, ...)` や Rust eprintln）を log と同じファイルに残すため。
+/// Win32 STDERR をパイプで受け、ログと同じ書き込み用のスレッドへ流す（#75）。
+///
+/// サイレント死の原因（llama.cpp の `fprintf(stderr, ...)` や Rust eprintln、既定の panic
+/// の出力）をログに残すため。以前は同じファイルを別ハンドルで開いていたが、ローテーションと
+/// 書き手を 1 つにすること（#73）に合わないので、パイプを読むスレッドが 1 行ずつキューに入れる。
 ///
 /// `windows_subsystem = "windows"` だと CRT stderr は最初からどこにも繋がって
 /// いないので、リダイレクトしないと診断情報が消える。
 #[cfg(windows)]
-fn redirect_stderr_to_log(log_path: &std::path::Path) {
-    use std::os::windows::io::AsRawHandle;
+fn redirect_stderr_to_log(log: rakukan_log::AsyncLog) {
+    use std::io::BufRead;
+    use std::os::windows::io::FromRawHandle;
     use windows::Win32::Foundation::HANDLE;
     use windows::Win32::System::Console::{STD_ERROR_HANDLE, SetStdHandle};
+    use windows::Win32::System::Pipes::CreatePipe;
 
-    let file = match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path)
-    {
-        Ok(f) => f,
-        Err(e) => {
-            tracing::warn!("redirect_stderr_to_log: open failed: {e}");
-            return;
-        }
-    };
-    let handle = HANDLE(file.as_raw_handle());
-    if let Err(e) = unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) } {
+    let mut read = HANDLE::default();
+    let mut write = HANDLE::default();
+    if let Err(e) = unsafe { CreatePipe(&mut read, &mut write, None, 0) } {
+        tracing::warn!("redirect_stderr_to_log: CreatePipe failed: {e:?}");
+        return;
+    }
+    // 書き込み側はプロセスが終わるまで stderr として開いておく（閉じない）
+    if let Err(e) = unsafe { SetStdHandle(STD_ERROR_HANDLE, write) } {
         tracing::warn!("redirect_stderr_to_log: SetStdHandle failed: {e:?}");
         return;
     }
-    // OS ハンドルはプロセス終了まで開いていてほしい。File を drop すると
-    // CloseHandle されるので forget でリーク（プロセス終了時に OS が回収）。
-    std::mem::forget(file);
-    tracing::info!("stderr redirected to log file");
+    let reader = unsafe { std::fs::File::from_raw_handle(read.0) };
+    let spawned = std::thread::Builder::new()
+        .name("rakukan-stderr".to_string())
+        .spawn(move || {
+            let mut lines = std::io::BufReader::new(reader);
+            let mut buf = Vec::new();
+            loop {
+                buf.clear();
+                match lines.read_until(b'\n', &mut buf) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        let text = String::from_utf8_lossy(&buf);
+                        let text = text.trim_end_matches(['\r', '\n']);
+                        log.send(format!("{} STDERR {text}\n", utc_now()).into_bytes());
+                    }
+                }
+            }
+        });
+    match spawned {
+        Ok(_) => tracing::info!("stderr redirected to the log"),
+        Err(e) => tracing::warn!("redirect_stderr_to_log: reader thread failed: {e}"),
+    }
 }
 
 #[cfg(not(windows))]
-fn redirect_stderr_to_log(_log_path: &std::path::Path) {}
+fn redirect_stderr_to_log(_log: rakukan_log::AsyncLog) {}
+
+/// 今の時刻（UTC、`2026-10-23T01:02:03.456Z`）。stderr の行に付ける。
+fn utc_now() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = now.as_secs();
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    // 1970-01-01 からの日数を年月日へ（Howard Hinnant の civil_from_days）
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.{:03}Z",
+        rem / 3_600,
+        rem % 3_600 / 60,
+        rem % 60,
+        now.subsec_millis()
+    )
+}
 
 /// named mutex による多重起動防止。
 ///
@@ -215,25 +241,27 @@ fn install_panic_hook() {
             std::thread::current().name().unwrap_or("<unnamed>"),
             std::process::id()
         );
-        // 既存 hook（既定の stderr 出力）も呼ぶ。stderr は↑でログへリダイレクト
-        // 済みなので、Rust デフォルトのバックトレースもログに入る。
+        // 既存 hook（既定の stderr 出力）も呼ぶ。stderr はパイプでログへ流しているので、
+        // Rust デフォルトのバックトレースもログに入る。abort の前にキューを書き出す
         prev(info);
+        flush_log();
     }));
 }
 
 fn main() -> Result<()> {
-    let log_path = log_path();
-    init_tracing(&log_path);
-    install_panic_hook();
-    redirect_stderr_to_log(&log_path);
+    // ログの初期化は多重起動の判定より後にする（#75）。終わるだけのホストにログを作らない
+    exit_if_already_running();
     let build = rakukan_engine_abi::host_build_id();
+    if let Some(log) = init_tracing(&build) {
+        redirect_stderr_to_log(log);
+    }
+    install_panic_hook();
     tracing::info!(
         "rakukan-engine-host starting (pid={}) version={} git={}",
         std::process::id(),
         build.pkg_version,
         build.git_sha
     );
-    exit_if_already_running();
 
     // エンジンはまだ作らない。最初のクライアント Create リクエストで
     // DynEngine::load_auto が呼ばれる。これにより「ホストを起動しても
@@ -242,9 +270,10 @@ fn main() -> Result<()> {
     let engine: SharedEngine = Arc::new(HostShared::new());
 
     // serve() はブロッキングで Named Pipe を待ち受け続ける。
-    if let Err(e) = serve(engine) {
+    let served = serve(engine);
+    if let Err(e) = &served {
         tracing::error!("serve terminated with error: {e}");
-        return Err(e);
     }
-    Ok(())
+    flush_log();
+    served
 }

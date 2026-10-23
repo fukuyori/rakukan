@@ -967,10 +967,14 @@ cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名な�
 | ファイル（`%LOCALAPPDATA%\rakukan\`） | 出所 | 主な内容 |
 |------|------|------|
 | `rakukan-tsf-<PID>-<起動識別子>.log` | TSF DLL（アプリごとのプロセス） | キー処理、変換経路、`dict not ready after 30s: dict_status=...`（辞書が ready にならない場合） |
-| `rakukan-engine-host.log` | `rakukan-engine-host.exe` | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延 |
-| `rakukan-engine-dll.log` | engine DLL 内の tracing（cdylib は host と subscriber を共有しない） | `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
+| `rakukan-engine-host-<PID>-<起動識別子>.log` | `rakukan-engine-host.exe` と、その中の engine DLL | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延、stderr（`STDERR` の行）。engine DLL の行は target `rakukan_engine_dll`: `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
+| `rakukan-engine-dll.log` | engine DLL（callback を登録しない古いホストで動かした場合だけ） | 上の `rakukan_engine_dll` の行と同じ内容 |
 
-TSF ログは書き込み時に 16 MiB を基準として退避し、5 世代を保持する。
+どのログも `.lock` を排他で取れたプロセスだけが書く（取れなければ起動識別子を変えて 4 回まで試し、それでも取れなければログなしで続ける）。各ファイルの 1 行目はヘッダー `rakukan log header: component=... exe=... package=... pid=... instance=... build=...` で、ローテーションで新しい本体を開くたびに書く。各行には時刻（UTC）・レベル・スレッド ID・target が付く。書き込みは専用のスレッドで行い、呼び出し元は上限つきのキューに入れるだけにする。キューが満杯のときは捨て、次に書けたときに `rakukan-log: N lines dropped (queue full)` を 1 行書く。プロセスの終了時・異常終了時にキューに残った行は失われうる（ホストは終了時と panic 時に 0.5 秒まで書き出しを待つ）。
+
+ログレベル: TSF は `RAKUKAN_LOG` → `config.toml` の `log_level` → `debug`（最初の Activate のときに決まる）。ホストは `RUST_LOG` → `info`、engine DLL は `RAKUKAN_LOG` → `info`（どちらもホストの起動時に決まる）。
+
+ログは退避して 5 世代を保持する（各ファイルの本体が 16 MiB を超える書き込みの前に退避）。
 本体を `.log.tmp` に移してから世代を送る。途中で削除・移動に失敗した場合は
 `.tmp` と次の操作を `RotatingLog` に保持し、成功済みの操作を繰り返さずに再開する。
 失敗後は、開き直した本体がさらに 1 MiB 増えるまで再試行を控えるため、
@@ -979,8 +983,7 @@ TSF ログは書き込み時に 16 MiB を基準として退避し、5 世代を
 
 ```powershell
 .\scripts\merge-logs.ps1 -OutFile merged.log; Get-Content merged.log -Tail 30
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-host.log" -Tail 30
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
+Get-ChildItem "$env:LOCALAPPDATA\rakukan\rakukan-engine-host-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Tail 30
 ```
 
 ### ビルドパス

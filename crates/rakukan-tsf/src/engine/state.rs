@@ -104,7 +104,7 @@ fn note_dict_not_ready(eng: &DynEngine) {
         && !DICT_WAIT_WARNED.swap(true, AO::AcqRel)
     {
         tracing::warn!(
-            "dict not ready after {}s: dict_status={:?} (DLL-side detail is in rakukan-engine-dll.log; host/DLL build check is in rakukan-engine-host.log)",
+            "dict not ready after {}s: dict_status={:?} (DLL-side detail and the host/DLL build check are in the host log rakukan-engine-host-*.log)",
             now.saturating_sub(start) / 1000,
             eng.dict_status()
         );

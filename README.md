@@ -144,8 +144,9 @@ cargo make quick-install
 ログ:
 
 - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（アプリごとのプロセス単位。統合は `scripts/merge-logs.ps1`）
-- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）
-- エンジン DLL 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log`（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告はこちらに出る）
+- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host-<PID>-<起動識別子>.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）。エンジン DLL のログ（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告。target `rakukan_engine_dll`）もここに入る
+
+各ファイルの 1 行目は発生元を示すヘッダー（実行ファイル・PID・ビルドなど）。書き込み時に 16 MiB で退避し、5 世代を残す。
 
 > 各ステップはそれぞれ独立に実行できます。ビルド (`build-engine` / `build-tsf`) は管理者不要、`install` のみ管理者権限が必要です。
 
@@ -158,7 +159,7 @@ cargo make quick-install
 - `jinen-v2-xsmall-q5` / `jinen-v2-small-q5` は v2 世代（Qwen3 ベース）。プロンプト形式は v1 と共通で、`model_variant` を書き換えるだけで切り替えられる
 - `n_gpu_layers = 0` は CPU のみ
 - 未指定は全レイヤー GPU オフロード
-- `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果は `rakukan-engine-host.log` に出る）
+- `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果はエンジンホストのログに出る）
 
 `n_gpu_layers` と `model_variant` は config.toml を編集して保存すると自動で反映されます。変更は保存通知・フォルダの変更通知・30 秒ごとの定期確認で検出され、`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます。すぐに反映したい場合は言語バーの「エンジン再起動」を使います。
 

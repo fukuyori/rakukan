@@ -1682,6 +1682,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -1727,6 +1728,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -1747,6 +1749,7 @@ dependencies = [
  "anyhow",
  "rakukan-engine-abi",
  "rakukan-engine-rpc",
+ "rakukan-log",
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -1760,6 +1763,15 @@ dependencies = [
  "postcard",
  "rakukan-engine-abi",
  "serde",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+]
+
+[[package]]
+name = "rakukan-log"
+version = "0.13.0"
+dependencies = [
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -1780,6 +1792,7 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "rakukan-engine-rpc",
+ "rakukan-log",
  "serde",
  "sha2",
  "toml",

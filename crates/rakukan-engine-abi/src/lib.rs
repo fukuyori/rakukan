@@ -279,6 +279,38 @@ struct EngineVTable {
 
     // 診断（任意シンボル。無い DLL は古いビルド）
     build_info: Option<unsafe extern "C" fn() -> *mut c_char>,
+    // DLL のログをホストへ渡す callback の登録（任意シンボル、#75。ABI 12 のまま）。
+    // 無い DLL は今までどおり `rakukan-engine-dll.log` に書く
+    set_log_callback: Option<SetLogCallbackFn>,
+}
+
+/// engine DLL がログの 1 件ごとに呼ぶ callback（#75）。
+///
+/// `level`: 1=ERROR 2=WARN 3=INFO 4=DEBUG 5=TRACE。`target`・`msg` は NUL 終端の UTF-8 で、
+/// 呼び出しの間だけ有効（所有権は DLL）。DLL のどのスレッドからも呼ばれる。
+type DllLogCallback = extern "C" fn(level: u32, target: *const c_char, msg: *const c_char);
+type SetLogCallbackFn = unsafe extern "C" fn(Option<DllLogCallback>);
+
+/// engine DLL のログを、ホストの subscriber へ流す（#75）。
+///
+/// 文字列は呼び出しの間だけ有効なので、ここで写す。DLL へは呼び返さない（再入しない）。
+/// 書き込みはホストの書き込み用のスレッドが行うので、DLL のスレッドはファイル I/O を待たない。
+extern "C" fn dll_log_callback(level: u32, target: *const c_char, msg: *const c_char) {
+    let text = |p: *const c_char| {
+        if p.is_null() {
+            std::borrow::Cow::Borrowed("")
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy()
+        }
+    };
+    let (target, msg) = (text(target), text(msg));
+    match level {
+        1 => tracing::error!(target: "rakukan_engine_dll", "{target}: {msg}"),
+        2 => tracing::warn!(target: "rakukan_engine_dll", "{target}: {msg}"),
+        3 => tracing::info!(target: "rakukan_engine_dll", "{target}: {msg}"),
+        4 => tracing::debug!(target: "rakukan_engine_dll", "{target}: {msg}"),
+        _ => tracing::trace!(target: "rakukan_engine_dll", "{target}: {msg}"),
+    }
 }
 
 // ─── DLL ロード ────────────────────────────────────────────────────────────────
@@ -371,6 +403,7 @@ impl EngineVTable {
             last_error: load_sym!(lib, b"engine_last_error\0"),
             dict_status: load_sym!(lib, b"engine_dict_status\0"),
             build_info: load_sym_opt!(lib, b"engine_build_info\0"),
+            set_log_callback: load_sym_opt!(lib, b"engine_set_log_callback\0"),
         })
     }
 }
@@ -398,6 +431,10 @@ impl DynEngine {
             anyhow::anyhow!("DLL load failed: {} ({e}){hint}", dll_path.display())
         })?;
         let vtable = unsafe { EngineVTable::load(&lib) }?;
+        // DLL のログの初期化は最初の engine_create で行うので、その前に登録する（#75）
+        if let Some(set_log_callback) = vtable.set_log_callback {
+            unsafe { set_log_callback(Some(dll_log_callback)) };
+        }
 
         let handle = unsafe {
             let cfg = config_json.and_then(|s| CString::new(s).ok());
@@ -407,6 +444,10 @@ impl DynEngine {
         if handle.is_null() {
             bail!("engine_create returned null");
         }
+        // engine_create の後は DLL のスレッド（変換のワーカーなど）が DLL のコードを実行しうる。
+        // backend の切り替えで古い DynEngine を捨てても DLL が外れないよう、プロセスが
+        // 終わるまで固定する（#64 の方針。1 つのホストの中では engine DLL を外さない）。
+        pin_module(vtable.create as *const (), dll_path);
 
         let engine = DynEngine {
             handle,
@@ -1193,18 +1234,99 @@ fn read_config_toml_backend() -> Option<String> {
 
 // ─── DLL ディレクトリ検出 ──────────────────────────────────────────────────────
 
-/// rakukan DLL がインストールされているディレクトリを返す。
-/// `rakukan_tsf.dll` と同じディレクトリを想定する。
-/// Windows では `GetModuleFileNameW` で取得する。
+/// rakukan がインストールされているディレクトリを返す。
+///
+/// この関数を含むモジュール（TSF DLL または host exe）のディレクトリ。
+/// `rakukan_tsf.dll`・`rakukan-engine-host.exe`・engine DLL は同じディレクトリに置くので、
+/// 配置（`%LOCALAPPDATA%\rakukan` / `%ProgramFiles%\rakukan`）に依存しない（#33）。
+/// ログ・状態ファイルの置き場所は [`local_data_dir`]。
 #[cfg(target_os = "windows")]
 pub fn install_dir() -> Option<PathBuf> {
-    let appdata = std::env::var("LOCALAPPDATA").ok()?;
-    Some(PathBuf::from(appdata).join("rakukan"))
+    module_dir_of(install_dir as *const ())
 }
 
 #[cfg(not(target_os = "windows"))]
 pub fn install_dir() -> Option<PathBuf> {
     Some(PathBuf::from("/usr/local/lib/rakukan"))
+}
+
+/// ログなど、利用者ごとに書き込むファイルの置き場所（`%LOCALAPPDATA%\rakukan`）。
+///
+/// インストール先（[`install_dir`]）は `%ProgramFiles%` のとき利用者が書けないので、分けている。
+#[cfg(target_os = "windows")]
+pub fn local_data_dir() -> Option<PathBuf> {
+    let appdata = std::env::var("LOCALAPPDATA").ok()?;
+    Some(PathBuf::from(appdata).join("rakukan"))
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn local_data_dir() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(PathBuf::from(home).join(".local/share/rakukan"))
+}
+
+/// `anchor` のアドレスを含むモジュールを、プロセスが終わるまで外れないようにする
+/// （`GetModuleHandleExW` の PIN）。失敗してもエンジンは使えるので、ログに残すだけにする。
+#[cfg(target_os = "windows")]
+fn pin_module(anchor: *const (), dll_path: &Path) {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_PIN, GetModuleHandleExW,
+    };
+    let mut module = HMODULE::default();
+    let pinned = unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
+            windows::core::PCWSTR(anchor as *const u16),
+            &mut module,
+        )
+    };
+    match pinned {
+        Ok(()) => tracing::info!(
+            "engine DLL pinned for the life of the host: {}",
+            dll_path.display()
+        ),
+        Err(e) => tracing::warn!("engine DLL pin failed: {} ({e})", dll_path.display()),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn pin_module(_anchor: *const (), _dll_path: &Path) {}
+
+/// `anchor` のアドレスを含むモジュールのファイルがあるディレクトリ。
+#[cfg(target_os = "windows")]
+fn module_dir_of(anchor: *const ()) -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::System::LibraryLoader::{
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+        GetModuleFileNameW, GetModuleHandleExW,
+    };
+    let mut module = HMODULE::default();
+    unsafe {
+        GetModuleHandleExW(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            windows::core::PCWSTR(anchor as *const u16),
+            &mut module,
+        )
+    }
+    .ok()?;
+    // 長いパスに備え、切り詰められたらバッファを広げて取り直す
+    let mut buf = vec![0u16; 1024];
+    loop {
+        let len = unsafe { GetModuleFileNameW(module, &mut buf) } as usize;
+        if len == 0 {
+            return None;
+        }
+        if len < buf.len() {
+            let path = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+            return path.parent().map(Path::to_path_buf);
+        }
+        if buf.len() >= 32 * 1024 {
+            return None;
+        }
+        buf.resize(buf.len() * 2, 0);
+    }
 }
 
 #[cfg(test)]

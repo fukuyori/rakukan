@@ -18,7 +18,7 @@ log_level = "info"
 # "vulkan" : Vulkan 対応 GPU (AMD / Intel / NVIDIA)
 # "cpu"    : CPU のみ（GPU なし、VMware 等）
 # 明示指定（cuda / vulkan / cpu）はロードに失敗しても他へ fallback しない。
-# 失敗理由は %LOCALAPPDATA%\rakukan\rakukan-engine-host.log に出る
+# 失敗理由は %LOCALAPPDATA%\rakukan\rakukan-engine-host-<PID>-<起動識別子>.log に出る
 gpu_backend = "auto"
 
 # GPU に載せるレイヤー数

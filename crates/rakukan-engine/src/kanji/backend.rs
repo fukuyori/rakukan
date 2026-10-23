@@ -532,7 +532,7 @@ impl KanaKanjiConverter {
             .model
             .generate_beam_search(&tokens, max_new_tokens, eos, beam_size)?;
         // 変換 1 件ごとの観測ログ。「止まる」「切れる」報告時に
-        // rakukan-engine-dll.log だけで所要時間と EOS 到達状況を切り分けられる。
+        // engine DLL のログ（ホストのログの target `rakukan_engine_dll`）だけで所要時間と EOS 到達状況を切り分けられる。
         tracing::info!(
             reading_chars = reading.chars().count(),
             beam_size,
