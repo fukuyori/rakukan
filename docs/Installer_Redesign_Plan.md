@@ -100,13 +100,15 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 ### 4.1 インストーラー（`rakukan_installer.iss`）
 
 - `DefaultDirName` を `{autopf}\rakukan` に変更。`PrivilegesRequired=admin` は維持。
+- `ArchitecturesAllowed=x64compatible` と `ArchitecturesInstallIn64BitMode=x64compatible` を足す（現行は 32 ビットのモードで動き、`{sys}` が SysWOW64、`{autopf}` が `Program Files (x86)` になる。7 章）。
 - `[Files]` のファイルに `ignoreversion restartreplace uninsrestartdelete` を付ける。`config.toml` の初期配置（`onlyifdoesntexist uninsneveruninstall`）は維持。
 - `AlwaysRestart=yes`、`UninstallRestartComputer=yes`。
 - 完了の案内（実際に表示されるメッセージ。`[Icons]` が無い場合は `FinishedLabelNoIcons`）を 2 章の文言にする。英語版も同様。
 - 旧ホストを止める処理は作らない。
-- `CheckDllLock`（現行は `[Tasks]` が無く呼ばれていない）、`InstallFail` のサインアウト案内、`.backup` によるロールバックを削除または見直す（7 章）。
-- 登録: 現行の `[Run]` の `regsvr32` と `ssInstall` での旧 DLL の登録解除を、`restartreplace` と組み合わせた形に改める。Inno の `regserver` フラグを使う場合は 64 ビットのインストールモードとフラグも決める（7 章）。
-- キーボードリストへの追加: 現行の `register-tip.ps1` は `postinstall` で、再起動が必要な場合は実行されない。実行するユーザー・順序を決める（7 章）。
+- 独自の戻し（`CheckDllLock`、`InstallFail` とそのサインアウト案内、`.backup`）を削除し、Inno の動作に任せる（7 章）。
+- 登録: Inno の `regserver` フラグは使わず、`[Run]` の `regsvr32` で登録する。`ssInstall` での旧 DLL の登録解除は、失敗しても更新を止めない形で残す（7 章、4.3a）。
+- キーボードリストへの追加: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も同じ扱いにする。トレイがサインインのときに一覧を確かめ、無ければ足す（7 章）。
+- `[Dirs]` で `{commonappdata}\rakukan\models` に `Permissions: users-modify` を付ける（7 章）。
 - 移行処理: `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll` が存在すれば、登録解除し、旧配置のファイルは再起動時の削除を予約する。旧ディレクトリの `dict\`（`registered.txt` も同様）も同じ。
 - `[UninstallRun]` は現行どおり（unregister-tip → regsvr32 /u）。ファイルには `uninsrestartdelete` を付ける。
 - サイレント実行ではダイアログに依存せず、失敗を終了コードとログで通知する。
@@ -155,15 +157,15 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 |---|---|---|
 | 2 | #73 | ログの書き手を 1 つに限り（`.lock` を取れたときだけ書く）、ヘッダーと各行で発生元を分かるようにする |
 | 3 | #74 | ログの掃除をトレイへ移す（トレイの起動時、90 日・30000 ファイル、容量の上限なし、旧 `rakukan.log*` も対象）。4.3a のトレイの配布・起動と合わせて行う |
-| 4 | #75 | ホストのログを書き込み時ローテーションに揃え、stderr を同じ writer へ。engine DLL のログを C ABI の callback でホストへ渡す（ABI の版を上げる） |
+| 4 | #75 | ホストのログを書き込み時ローテーションに揃え、stderr を同じ writer へ。engine DLL のログを C ABI の callback でホストへ渡す（無くても動く関数として足し、engine ABI は 12 のまま） |
 | 5 | #76 | ログの書き込みを別スレッドへ移す。ETW を調査用に併用する |
 
-5 章の作業ステップへの割り当て（2026-10-10 決定）: #73・#75・#76 は Step 1（コードの変更。#75 は engine ABI の版を上げる）、#74 は Step 2（トレイを配布・起動するのと合わせる）。
+5 章の作業ステップへの割り当て（2026-10-10 決定）: #73・#75・#76 は Step 1（コードの変更。#75 は engine ABI を変えない）、#74 は Step 2（トレイを配布・起動するのと合わせる）。
 
 ### 4.4 winget
 
-- `winget-pkgs` に manifest を登録する。InstallerType は `inno`、サイレント引数は `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART`、InstallerUrl は GitHub Releases の exe。
-- `Scope: machine`。アンインストールは ARP 登録（`AppId`）経由。再起動が必要なときの終了コードを manifest に合わせる。
+- `winget-pkgs` に manifest を登録する。InstallerType は `inno`、サイレント引数は winget の既定（`/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）、InstallerUrl は GitHub Releases の exe。
+- `Scope: machine`。アンインストールは ARP 登録（`AppId`）経由。引数に `/RESTARTEXITCODE=N` を足し、`ExpectedReturnCodes` で N を `rebootRequiredToFinish` に結び付ける（7 章）。
 - `docs/version-update-checklist.md` に「リリース後に winget manifest を更新する」を追加する。
 
 ## 5. 作業ステップ
@@ -173,8 +175,8 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 | Step | 内容 | 完了条件 |
 |---|---|---|
-| 1 | コードのパス解決を配置非依存にする（4.2 の `install_dir()`、辞書ディレクトリ、モデルディレクトリ、RPC 版不一致の扱い）。ログの見直しの #73（書き手を 1 つに・発生元）・#75（ホストと engine DLL のログ、ABI の版を上げる）・#76（書き込みを別スレッドへ・ETW）も行う（4.3b） | 現行の `%LOCALAPPDATA%` 配置のまま全テストと実機動作が変わらない。`%ProgramFiles%` に手動配置しても動く |
-| 2 | インストーラーを新方式にする（4.1）。トレイの配布・起動・Run 登録と、登録の成否の判定・旧版での登録解除の扱い（4.3a）、ログの掃除をトレイへ移す #74（4.3b）も行う | 新規 PC 相当（旧配置なし）で初回インストール → 再起動後に変換。旧ホスト・旧 TSF が動いたまま更新（事前のサインアウトなしでインストーラーが完走） → 再起動後に新版で動作。再起動までの間に、文字入力が壊れず、アプリが異常終了せず、設定・学習履歴が壊れない。削除で登録とファイルが消える。サイレント実行でも結果（再起動の要否を含む）が判別できる |
+| 1 | コードのパス解決を配置非依存にする（4.2 の `install_dir()`、辞書ディレクトリ、モデルディレクトリ、RPC 版不一致の扱い）。ログの見直しの #73（書き手を 1 つに・発生元）・#75（ホストと engine DLL のログ）・#76（書き込みを別スレッドへ・ETW）も行う（4.3b）。ホストが読み込んだ engine DLL をピン止めする（`GetModuleHandleExW` の PIN。#64 の方針、[October_Plan.md](October_Plan.md) の 4 節の開始の条件） | 現行の `%LOCALAPPDATA%` 配置のまま全テストと実機動作が変わらない。`%ProgramFiles%` に手動配置しても動く。設定が合わない `Create` で backend が替わっても、古い engine DLL が外れずホストが動き続ける |
+| 2 | インストーラーを新方式にする（4.1）。トレイの配布・起動・Run 登録と、登録の成否の判定・旧版での登録解除の扱い（4.3a）、ログの掃除をトレイへ移す #74（4.3b）も行う | 新規 PC 相当（旧配置なし）で初回インストール → 再起動後に変換。旧ホスト・旧 TSF が動いたまま更新（事前のサインアウトなしでインストーラーが完走） → 再起動後に新版で動作。再起動までの間に、アプリが異常終了せず、直接入力のときに文字・キーを失わず、設定・学習履歴が壊れない。削除で登録とファイルが消える。サイレント実行でも結果（再起動の要否を含む）が判別できる |
 | 3 | 既存利用者の移行 | `%LOCALAPPDATA%\rakukan` に旧版がある状態から新インストーラーで更新し、再起動後に旧配置の登録・ファイルが残らず、新配置で動作する |
 | 4 | 経路一本化（4.3）。`build-installer.ps1` の入力をビルド出力へ、`install.ps1` / `uninstall.ps1` の削除、`-TsfOnly` の `dev-swap-tsf.ps1` への切り出し、Makefile（`install` / `package` / `full-install` / `quick-install` / 故障試験 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook | `cargo make build-engine` → `build-tsf` → `install` → 再起動が**インストール先が空の状態から**完走し、README の手順どおりに反映できる。`install-tsf-fault-test` / `install-tsf-normal-restore` が新経路で動き、SHA256 の一致確認と再登録が従来どおり働く。`cargo make package` を実行し、成果物・セットアップ本体・アンインストーラーの 3 つに署名が付くこと（`signtool verify`）を確認する |
 | 5 | winget 登録（4.4）。リリース後に manifest を提出 | `winget install` / `upgrade` / `uninstall` が通る |
@@ -184,7 +186,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 アンインストールを含む項目（再起動前の再インストール／アンインストール、削除後の確認、トレイの解除など）の前には、[October_Plan.md](October_Plan.md) の 4 節「アンインストールを含む確認の前に、ログを退避する」の手順でログを写す。
 
-- 更新時: 旧 TSF・旧ホストの状態の組み合わせ（旧 TSF が読み込まれている／いない × ホストが動いている／止まっている）ごとに更新し、再起動までの間に、文字入力が壊れない（Rakukan が使えない場合も、未確定の文字・確定に見える文字列・キーを失わない。#69 / #70 の経路を含む）、アプリが異常終了しない、設定・学習履歴が壊れないことを確かめる。再起動後に新版に揃い、変換できる。
+- 更新時: 旧 TSF・旧ホストの状態の組み合わせ（旧 TSF が読み込まれている／いない × ホストが動いている／止まっている）ごとに更新し、再起動までの間に、アプリが異常終了しない、直接入力のときに文字・キーを失わない、設定・学習履歴が壊れないことを確かめる。protocol / engine ABI の版が違う組み合わせは直接入力だけになり、版が同じ組み合わせはそのまま動く。再起動後に新版に揃い、変換できる。
 - `PROTOCOL_VERSION` と Hello の項目が異なるビルドで更新し、旧 TSF DLL → 新 host と新 TSF DLL → 旧 host の両方向で Hello が失敗する経路を確認する。該当プロセスの TSF ログに得られた理由が残り、異なる版の要求を適用しないことを確認する。版番号を受け取れずデコード失敗・切断となる場合も含める。
 - 再起動前にホストが終わった場合（設定の変更、手動の「エンジン再起動」、自己終了）と、バックエンドの切り替え（旧ホスト＋新 engine DLL）の挙動。
 - `PendingFileRenameOperations` に置き換え・削除が登録され、再起動後に反映されている。
@@ -193,21 +195,47 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - 別ユーザーアカウントでサインインし、「キーボードの追加」で rakukan を選べ、変換できる（モデルは共有ディレクトリから読める）。
 - 削除後にレジストリの CLSID / TIP 登録と言語リストの項目が残っていない。ユーザーデータは残っている。
 - Explorer 等の異常終了がイベントビューアーに出ていない（更新・再起動の各段階）。
-- サイレント実行（`/VERYSILENT`）で対話が一切出ず、終了コードが期待どおり（再起動が必要な場合を含む）。
+- サイレント実行（`/VERYSILENT`）で対話が一切出ず、終了コードが期待どおり（winget の引数では再起動が要る成功で N、`cargo make install` では 0）。
+- TSF DLL を使用中にしたまま更新し、再起動の後に CLSID / TIP のレジストリが新版の登録の内容と合っている（7 章の登録）。
+- 昇格した端末から（winget を含む）インストールし、インストーラーを起動したユーザーのキーボードの一覧に rakukan が入る。入らなかった場合は、次のサインインでトレイが足す（7 章）。
+- 途中で失敗させた更新の後に、置き換え・削除の予約がどう残るか（7 章の失敗と戻し）。
 - 登録・解除の成否を、regsvr32 の終了コードではなくレジストリの状態で確かめる。0.12.0 以前の版からの更新で、旧 DLL の `/u` が失敗・クラッシュしても更新が完了する（4.3a）。
 - トレイが配布・起動・Run 登録され、アンインストールで解除される（4.3a）。
+- ホストの中で backend を切り替えた後（設定が合わない `Create` で別の engine DLL を読み込み、ピン止めした古い DLL も残っている状態。Step 1）に、更新・アンインストールする。どちらの DLL も使用中として扱われ、インストーラーが止まらずに完走し、再起動の後に置き換え・削除されている。
 
 ## 7. 着手前に確認すること
 
-- **登録**: Inno の `regserver` は、再起動が必要な場合（`AlwaysRestart=yes` ではファイルをその場で置き換えられた場合も）、登録を `RunOnce` に延ばす。管理者で実行した場合は HKLM の `RunOnce` で、再起動後に Administrators のメンバーがログオンしたときに実行される（標準ユーザーが別の管理者の資格情報でインストールし、再起動後は標準ユーザーだけがログオンする場合に登録が完了しない）。現行の `[Run]` の `regsvr32` を残すか置き換えるか、`ssInstall` / `CheckDllLock` の旧 DLL の登録解除の扱い、64 ビットのモードとフラグを決める。
-- **キーボードリストへの追加**: `register-tip.ps1`（`postinstall`）は再起動が必要な場合に実行されない。COM/TSF の登録・言語リストへの追加・HKCU への反映を、どのユーザーの権限で、どの順に行うか。
-- **失敗と戻し**: 途中で失敗したときに、その場で置き換わったファイル・置き換えの予約・登録の予約をどう扱うか。現行の `InstallFail` は TSF DLL だけを戻し、`FileExists` による成功判定は旧 DLL が残っていても成功とみなす。
-- **前提**: `restartreplace` / `uninsrestartdelete` は管理者の権限が要る。使用中かどうかは、置き換えの失敗（アクセス拒否・共有違反など）から Inno が判断する。予約の成功は起動時の置き換えの成功を保証しない。
-- Inno Setup がサイレント実行時に返す終了コード（再起動が必要な場合を含む）と、winget manifest の `ReturnCodes` / `ExpectedReturnCodes` の対応。winget の要件（公開 URL、ARP 登録、署名の要否）。
-- #56 で Hello の要求・応答の項目が変わるため、新旧間で版番号を交換できるかを実際の v5 / v6 のエンコードで確認する（v6 TSF → v5 host は版不一致の応答、v5 TSF → v6 host はデコード失敗・切断になる見込み）。ログと利用者向けの未接続状態をどう表すか決める。
-- `%ProgramData%\rakukan\models` の ACL 設定をインストーラーで行う方法（全ユーザー書込可）。
-- `%ProgramFiles%` 配置での `rakukan-dict-builder.exe` の扱い（配布物から外せるか）。
-- `hf_download` が書き込む先を `%ProgramData%` に変えたときの、既存の `.cache\huggingface` にあるモデルの扱い（コピーするか、読み取りフォールバックのみか）。
+2026-10-23 に決めたことと確かめた結果。資料は、Inno Setup 6.4.0 のヘルプ、Inno Setup のソース（jrsoftware/issrc の main）、winget-cli のソース（microsoft/winget-cli の master）とマニフェストのスキーマ 1.10.0、Microsoft の RunOnce の資料。
+
+- **64 ビットのモード**
+  - 確かめた結果: 現行の `.iss` には `ArchitecturesInstallIn64BitMode` が無く、32 ビットのモードで動く。`{sys}` は SysWOW64、`{autopf}` は `Program Files (x86)` を指す（ヘルプ「32-bit and 64-bit Installations」）。
+  - 決めたこと: `ArchitecturesAllowed=x64compatible` と `ArchitecturesInstallIn64BitMode=x64compatible` を足す（4.1）。
+- **登録**
+  - 確かめた結果: `regserver` を付けたファイルは、`AlwaysRestart=yes` のとき、または `restartreplace` のファイルがあるとき、次の再起動の後に登録される（ヘルプ `[Files]` の Remarks）。管理者で実行すると HKLM の RunOnce に書かれる（`Setup.Install.pas`）。HKLM の RunOnce は Administrators のメンバーがログオンしたときだけ実行され、値は実行の前に消される（Microsoft の資料）。標準ユーザーが別の管理者の資格情報でインストールし、再起動後に標準ユーザーだけがログオンすると、登録が終わらない。`postinstall` でない `[Run]` の項目は、再起動が要る場合もインストールの終わりに実行される（ヘルプ「Installation Order」）。
+  - 決めたこと: `regserver` は使わず、`[Run]` の `regsvr32` で登録する。成否は終了コードでなくレジストリの状態で決める（4.3a）。
+  - 残る点: 置き換えが再起動まで延びた場合は、古い DLL で登録される。パス・CLSID・登録の内容が新旧で同じなら結果は同じと見込む（※推測。6 章で確かめる）。登録の内容を変える版では、別の手当てが要る。
+- **キーボードリストへの追加**
+  - 確かめた結果: `postinstall` の項目は、再起動が要る場合に実行されない（ヘルプ `[Run]`）。`runasoriginaluser` は、Setup を昇格した状態で起動した場合は効かない。現行の HKCU への `reg COPY` は管理者の権限で動く。
+  - 決めたこと: `register-tip.ps1` を `postinstall` から外し、`runasoriginaluser` を付けてインストールの終わりに実行する。HKCU への `reg COPY` も同じ扱いにする。トレイがサインインのときに一覧を確かめ、無ければ足す。
+- **失敗と戻し**
+  - 確かめた結果: アンインストーラーを保存した後のエラーでは戻さない（ヘルプ「Installation Order」）。それより前の段階で何が戻るか、`restartreplace` の予約が戻るかは、ヘルプに書かれていない。現行の `InstallFail` / `.backup` / `CheckDllLock` は `%LOCALAPPDATA%\rakukan` 固定で、サインアウトを案内し、`FileExists` による成功判定は旧 DLL が残っていても成功とみなす。`CheckDllLock` はどこからも呼ばれていない。
+  - 決めたこと: 独自の戻しを外し、Inno の動作に任せる。成否は終了コードとレジストリの状態で決める。旧 DLL の `/u` は、失敗しても更新を止めない形で残す（4.3a）。予約がどう残るかは 6 章で確かめる。
+- **前提**
+  - 確かめた結果: `restartreplace` / `uninsrestartdelete` は管理者の権限が要る。置き換えを 1 秒おきに 4 回まで試し、失敗すると使用中と判断する（ヘルプ `[Files]`）。予約の成功は、起動時の置き換えの成功を保証しない。
+  - 決めたこと: `PrivilegesRequired=admin` を保つ。
+- **終了コード**
+  - 確かめた結果: `AlwaysRestart=yes` では、成功のたびに再起動が要るとされる（`Setup.MainFunc.pas`、`Setup.MainForm.pas`）。既定では 0 を返し、`/RESTARTEXITCODE=N` を付けると N を返す（ヘルプ「Setup Command Line Parameters」）。`/VERYSILENT` で `/NORESTART` が無いと、確認なしに再起動する。winget は Inno に `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` を付け（`ManifestCommon.cpp`）、0 なら再起動の案内を出さない。`ExpectedReturnCodes` で N を `rebootRequiredToFinish` に結び付けると、成功として扱い、再起動が要ると警告する。`rebootRequiredForInstall` は失敗の扱いになる（`InstallFlow.cpp`、スキーマ 1.10.0）。
+  - 決めたこと: winget の経路では `/RESTARTEXITCODE=N` を付け、N を `rebootRequiredToFinish` に結び付ける（4.4）。`cargo make install` には付けず、0 なら再起動を案内する。
+  - 残る点: 引数を足すマニフェストの項目、N の値、winget の配布版でも同じ扱いかは Step 5 で確かめる。winget の要件（公開 URL、ARP 登録、署名の要否）も同じ。
+- **`%ProgramData%\rakukan\models` の ACL**
+  - 確かめた結果: `[Dirs]` の `Permissions: users-modify` で付けられる。ヘルプは、プログラムのファイルを置くフォルダーには使わないよう、データのフォルダーなら差し支えないとしている。
+  - 決めたこと: `{commonappdata}\rakukan\models` に `users-modify` を付ける（4.1）。
+- **`rakukan-dict-builder.exe`**
+  - 確かめた結果: 現行の `.iss` の `[Files]` には無い。`{app}` へ写すのは `scripts/install.ps1` だけで、他のプログラムからは起動していない。
+  - 決めたこと: 辞書のビルドを `build-installer.ps1` の dist 準備段階へ移す（4.3）。`{app}` には置かない。
+- **既存の `.cache\huggingface` のモデル**
+  - 確かめた結果: `hf_download` は、まず `%USERPROFILE%\.cache\huggingface\hub\models--<repo>\snapshots\main\<file>` を見て、無ければ `hf_hub` の既定のキャッシュに取得する。キャッシュはユーザーのプロファイルごとにあり、他のアプリと共用される。
+  - 決めたこと: コピーせず、読むだけにする。探す順は `%ProgramData%\rakukan\models` → 既存の HF キャッシュ。新たに取得するときは `%ProgramData%` に書く。`.cache\huggingface` には書き込みも削除もしない（4.2）。
 
 ## 8. 対象外
 
@@ -218,7 +246,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 ## 9. 現行手順（本計画の実施まで）
 
-本計画の実施までは現行の手順を変えない。v6 もこの手順で配布する（リリースノートで手順を守るよう案内する。手順を守らずに一部のファイルが置き換わらなかった場合、v5 と v6 の組み合わせで日本語入力が使えなくなり、インストールし直すまで直らない見込み）。
+本計画の実施までは現行の手順を変えない。リリースノートで手順を守るよう案内する。手順を守らずに一部のファイルが置き換わらなかった場合、新旧で protocol や engine ABI の版が違うと日本語入力が使えなくなり、インストールし直すまで直らない見込み（現行のインストーラーは、置き換えられなかったファイルを再起動の後に置き換えない）。
 
 ソースから:
 

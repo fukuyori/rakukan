@@ -99,7 +99,7 @@
 - **ホスト**: `RotatingLog`（書き込み時ローテーション）にし、名前を `rakukan-engine-host-<PID>-<起動識別子>.log` + `.lock` にする。ログの初期化は多重起動の判定より後にする。stderr は、同じパスを別ハンドルで開くのをやめ、パイプで受けて同じ writer に流す（llama.cpp などの `fprintf(stderr)` を失わないため）。
 - **engine DLL**: **(b) を採る**（2026-10-10 決定。(a) は採らない）。
   - (a) DLL もインスタンスごとのファイルにする（`rakukan-engine-dll-<backend>-<ホストの PID>-<起動識別子>.log` + `.lock`）。ABI は変えない。
-  - (b) DLL のログを C ABI の callback でホストへ渡し、ホストの writer に書く。callback の登録時期（最初の `engine_create` より前）、背景スレッドからの呼び出し、再入の禁止、文字列の所有権、panic の境界、解除前に全呼び出しを終えること、失敗時は捨てること、を定める。ABI の版を上げる（2 か所で定義）。
+  - (b) DLL のログを C ABI の callback でホストへ渡し、ホストの writer に書く。callback の登録時期（最初の `engine_create` より前）、背景スレッドからの呼び出し、再入の禁止、文字列の所有権、panic の境界、失敗時は捨てること、を定める。engine DLL はホストの中で外れない（#64 の方針。[October_Plan.md](October_Plan.md) の 4 節の開始の条件、2026-10-23 決定）ので、callback の解除はプロセスの終了時だけを考える。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足し、engine ABI は 12 のままにする。既存の関数の形と意味は変えない（2026-10-22 決定）。
 - `RotatingLog`・ヘッダー・掃除の処理は、TSF・ホスト・DLL・トレイで共有する crate に移す（名前は未決）。共有 crate にしても、EXE と DLL の subscriber は別々のまま。
 
 ### 段 5: ファイルの書き込みを別スレッドへ移し、ETW を調査用に併用する — #76
@@ -118,7 +118,7 @@
 - 各コンポーネント（TSF・ホスト・engine DLL）を ETW の provider にする。セッションは、調査するときに利用者が管理者の権限で手で開始・停止する（開始・停止・テキストへの書き出しの手順と道具を用意する）。常時のセッションは作らない。
 - Rust から使う手段: Microsoft の `tracelogging`（MIT、固定スキーマ）、`tracelogging_dynamic`（実行時スキーマ、tracing の Layer 向き。ライセンスは採用する版で確認）、または `windows` crate の ETW API（MIT / Apache-2.0。今の TSF の `windows` 0.58 では feature を足す必要がある）。
 - セッション（循環 ETL）の開始・停止には、通常は管理者か Performance Log Users の権限が要る。手順には、既に動いているセッション・残ったセッションの扱いと、容量の指定を含める。
-- provider は Activate 前の照会・登録・解除では登録しない。engine DLL の provider は、`DynEngine` が DLL を外す前に解除する。
+- provider は Activate 前の照会・登録・解除では登録しない。engine DLL はホストの中で外れない（#64 の方針）ので、engine DLL の provider の解除はプロセスの終了時だけを考える。
 - 入力の内容を含むイベントの既定のレベルと、集める範囲を決める。
 - 欠落数をセッションの統計から取り、書き出し時にも残す。RPC をまたぐ因果を追えるように、要求・activity の ID を持たせる。
 

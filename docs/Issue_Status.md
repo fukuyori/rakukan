@@ -19,7 +19,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
 | [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | 2026-09-22 起票、設計案あり（`config_version` の照合とホスト再起動への統一）。方式採用・実装着手は未承認。#67 で `config_version` の項目だけ先取りする形を返信中 | 方式の承認。設計に「`config_version = None` は一致として受理しない」を明記する。#49 / #64 と合わせて設計 |
-| [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。対処方針は未決定、再現・実機検証は未実施。#66 に、古い設定の拒否とホスト内のエンジン置き換え・`Reload` の廃止を組み合わせる案を記録 | #66 と同時に方針を決める |
+| [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。方針は 2026-10-23 に決定: 1 つのホストの中では engine DLL を替えない（別の DLL が要る `Create` ではホストを起動し直す、`Reload` はなくす）。それまではフェーズ 3 の Step 1 で engine DLL をピン止めする（[October_Plan.md](October_Plan.md) の 4 節）。再現・実機検証は未実施 | 方針の実装を #66 の古い設定の照合と合わせて設計する（フェーズ 4） |
 | [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | 未着手。計画書の J-3（推奨: モデル設定の変更でホストを終了） | #66 と合わせて設計（#82 のモデル定義の移動も同時に） |
 | [#35](https://github.com/fukuyori/rakukan/issues/35) | 区読点だけの読み（。。。）が変換に乗らず、リーダー記号（… ‥）の標準的な入力手段が無い | 判断待ち。計画書の J-6（推奨: Space 変換の候補を先に、`z` キー列は後）。[Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) の 3.1.1 の A〜C が未決。PR #31 は nick が取り下げ済み | 方式と文字の割り当てを決める |
 | [#16](https://github.com/fukuyori/rakukan/issues/16) | 数字混在の読みで、かな run が辞書（ユーザー辞書・学習履歴・MOZC）候補を参照できない | 判断待ち。計画書の J-7（推奨: 段 4 で設計から）。変換ワーカーへ辞書を渡す配線は #53 と共通 | 段 4 で設計（#80 の助数詞の学習を含める） |

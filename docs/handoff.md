@@ -17,15 +17,14 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 
 ### 次の開始点: フェーズ 3（段 C、#33。#73〜#76 を含む）
 
-[October_Plan.md](October_Plan.md) の 4 節。作業は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 5 章の Step に従い、ログの見直しは [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。着手の前に、次の 3 つの開始の条件を片づける。
+[October_Plan.md](October_Plan.md) の 4 節。作業は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 5 章の Step に従い、ログの見直しは [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。着手の前に、次の 2 つの開始の条件を片づける。
 
-1. Installer_Redesign_Plan.md 7 章の確認事項（登録の方式・実行するユーザー・順序・失敗時の処置・終了コード・ACL・既存モデルの扱い）を決め、確かめた結果を同 7 章に書く。
-2. #64（設定が合わない `Create` で旧 engine DLL を外しうる）の DLL の寿命の扱いを決める。#75 の callback と #76 の ETW provider の解除にかかわる。
-3. 旧版との組み合わせの保証範囲を決める（対象とする旧版・操作・許す未接続の状態・失敗したときの処置）。
+1. Installer_Redesign_Plan.md 7 章の確認事項（登録の方式・実行するユーザー・順序・失敗時の処置・終了コード・ACL・既存モデルの扱い）を決め、確かめた結果を同 7 章に書く。→ 2026-10-23 に決め、同 7 章に書いた。
+2. #64（設定が合わない `Create` で旧 engine DLL を外しうる）の DLL の寿命の扱いを決める。#75 の callback と #76 の ETW provider の解除にかかわる。→ 2026-10-23 決定: 1 つのホストの中では engine DLL を替えない。実装はフェーズ 4、それまでは Step 1 で engine DLL をピン止めする（October_Plan.md 4 節）。
 
-フェーズ 3 に入るときに直すこと:
+#75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足し、既存の関数の形と意味は変えない（2026-10-22 決定。Log_Redesign_Plan.md 段 4 の (b)）。
 
-- Log_Redesign_Plan.md 段 4 の (b) は「ABI の版を上げる」と書いてある。2026-10-22 の話し合いで、callback を無くても動く関数（`load_sym_opt!`）として足せば engine ABI は 12 のままでよいとした。既存の関数の形と意味は変えない。
+フェーズ 3 は専用のブランチ `phase3-installer` で作業し、その間は main を更新しない。ブランチから main への pull request を開いたままにして CI を動かし、配布前の完了の後にマージコミットでマージする。リリースはフェーズ 3 の終了後に 1 回、マージした後の main で行う（October_Plan.md 4 節、2026-10-23 決定）。
 
 ### 並行して行うこと
 
