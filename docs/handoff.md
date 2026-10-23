@@ -15,16 +15,30 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 - フェーズ 2 は、計画ではフェーズ 3 と同じ版で出す予定だった。2026-10-22 に改め、単独で 0.13.0 に含めた（理由と条件は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md) 9 節の決定 1）。古いホストとの組み合わせは、今のインストールの手順（別の IME に切り替え → サインアウト → サインイン → rakukan を使わずにインストール）で避ける。
 - フェーズ 2 の試験のうち、故障を起こす口が要るもの（保留中の操作、257 キー目、`VersionMismatch`、ロック競合など）は #85（試験の自動化の基盤）に回した。
 
-### 次の開始点: フェーズ 3（段 C、#33。#73〜#76 を含む）
+### 今の作業: フェーズ 3（段 C、#33。#73〜#76 を含む）
 
-[October_Plan.md](October_Plan.md) の 4 節。作業は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 5 章の Step に従い、ログの見直しは [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。着手の前に、次の 2 つの開始の条件を片づける。
+[October_Plan.md](October_Plan.md) の 4 節。作業は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 5 章の Step に従い、ログの見直しは [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。
 
-1. Installer_Redesign_Plan.md 7 章の確認事項（登録の方式・実行するユーザー・順序・失敗時の処置・終了コード・ACL・既存モデルの扱い）を決め、確かめた結果を同 7 章に書く。→ 2026-10-23 に決め、同 7 章に書いた。
-2. #64（設定が合わない `Create` で旧 engine DLL を外しうる）の DLL の寿命の扱いを決める。#75 の callback と #76 の ETW provider の解除にかかわる。→ 2026-10-23 決定: 1 つのホストの中では engine DLL を替えない。実装はフェーズ 4、それまでは Step 1 で engine DLL をピン止めする（October_Plan.md 4 節）。
+フェーズ 3 は専用のブランチ `phase3-installer` で作業し、その間は main を更新しない。ブランチから main への pull request（#87）を開いたままにして CI を動かし、配布前の完了の後にマージコミットでマージする。リリースはフェーズ 3 の終了後に 1 回、マージした後の main で行う（October_Plan.md 4 節、2026-10-23 決定）。
 
-#75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足し、既存の関数の形と意味は変えない（2026-10-22 決定。Log_Redesign_Plan.md 段 4 の (b)）。
+Step の進み（2026-10-23。進捗は tque の #6 の下に登録している）:
 
-フェーズ 3 は専用のブランチ `phase3-installer` で作業し、その間は main を更新しない。ブランチから main への pull request を開いたままにして CI を動かし、配布前の完了の後にマージコミットでマージする。リリースはフェーズ 3 の終了後に 1 回、マージした後の main で行う（October_Plan.md 4 節、2026-10-23 決定）。
+| Step | 内容 | コミット | 実機の試験 |
+|---|---|---|---|
+| 1 | 配置に依存しないパス、ログ（#73・#75・#76、ETW）、engine DLL のピン止め、第三者のライセンス、#88・#90。レビューの指摘の修正 | `2a628b5`・`500d161`・`b93532a` | S1 合格（Test_Procedure.md の 2026-10-23 の結果） |
+| 2 | 新しいインストーラー（64 ビット、`{autopf}`、`restartreplace`、`AlwaysRestart`、登録の成否をレジストリで判定・終了コード 20、HKLM の Run のトレイ）、トレイ（多重起動の抑止・ログ・掃除・キーボードの一覧の補いを版ごとに 1 回）、ログの掃除を 90 日・30000 ファイルに（#74） | `7c6f570` | S2 合格（Step 3 とまとめて） |
+| 3 | 旧配置（`%LOCALAPPDATA%\rakukan`）からの移行（`UsePreviousAppDir=no`、旧 DLL の登録の解除、HKCU の Run の削除、旧版のファイルの削除） | `f74a9c7` | 同上 |
+| 4 | 経路の一本化（`build-installer.ps1` の入力をビルドの出力に、`install.ps1` / `uninstall.ps1` の削除、`dev-swap-tsf.ps1`、Makefile、`cargo make package`、README、CLAUDE.md） | — | 未実装 |
+
+**次の開始点: Step 4**（tque #39〜#44）。Installer_Redesign_Plan.md の 4.3 と 5 章の Step 4。着手は「実装して」の指示があってから。
+
+決まったこと・分かったこと（フェーズ 3 の中で）:
+- #75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足した。
+- #64: 1 つのホストの中では engine DLL を替えない（実装はフェーズ 4）。それまでは engine DLL をピン止めする。同じホストの中で CUDA 版から Vulkan 版に替わると、落ちないが変換が数秒かかる（#64 のコメント）。
+- モデルや `gpu_backend` を替えて保存しても、ホストを起動し直すまで反映されない（#49 のコメント。フェーズ 4）。
+- 著作権の表示は `rakukan Contributors` のまま（`LICENSE`・`NOTICE`・設定アプリの csproj。2026-10-23 に利用者が確認）。
+- 新しいインストーラーは版が同じなので `output\rakukan-0.13.0-setup.exe` の名前で作られる。0.13.0 の配布物は `output\oldversion\rakukan-0.13.0-release-setup.exe` に写してある。
+- 今の PC は、S2 の後に開発の配置（`%LOCALAPPDATA%\rakukan`、`sudo cargo make install`）に戻してある。Step 4 までは開発の導入はこの形のまま。
 
 ### 並行して行うこと
 
@@ -48,7 +62,8 @@ sudo cargo make install
 
 ### 実機の試験
 
-- 手順と、どの試験をいつ行うかは [Test_Procedure.md](Test_Procedure.md)（T1 通常の入力、T2 ホストの入れ替え、T3 設定、T4 インストール・更新・アンインストール）。
+- 手順と、どの試験をいつ行うかは [Test_Procedure.md](Test_Procedure.md)（T1 通常の入力、T2 ホストの入れ替え、T3 設定、T4 インストール・更新・アンインストール、S1・S2 フェーズ 3 の Step 1〜3）。
+- 手順は「1. 操作（コマンド）」と「見る点:」の番号付きの一覧で示す。管理者の PowerShell では作業フォルダがリポジトリにならないので、パスはフルパスで書く。
 - 修正はまとめてから 1 回で試験する。試験は 1 つずつ示し、操作と見る点を同じ行に書き、戻す操作まで含める。
 - 結果は Test_Procedure.md の末尾に、日付・版・ビルドを書いた節として足す。
 
@@ -70,11 +85,14 @@ sudo cargo make install
 
 | 用途 | 場所 |
 |---|---|
-| インストール先 | `%LOCALAPPDATA%\rakukan\`（`%ProgramFiles%` への移行はフェーズ 3） |
+| インストール先 | 開発の導入（`sudo cargo make install`）は `%LOCALAPPDATA%\rakukan\`。新しいインストーラーは `%ProgramFiles%\rakukan\`（Step 4 で開発の導入もこちらにする） |
+| モデル | `%ProgramData%\rakukan\models`（無ければ既存の `%USERPROFILE%\.cache\huggingface\hub` を読む） |
 | 設定 | `%APPDATA%\rakukan\config.toml` / `keymap.toml` / `user_dict.toml` |
 | 学習履歴 | `%APPDATA%\rakukan\learn_history.bin` |
-| 辞書 | `%LOCALAPPDATA%\rakukan\dict\rakukan.dict`（隣に `rakukan.dict.build.json`） |
-| ログ | `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（TSF。アプリのプロセスごと。時刻順の統合は `scripts/merge-logs.ps1`）/ `rakukan-engine-host.log` / `rakukan-engine-dll.log` |
+| 辞書 | インストール先の `dict\rakukan.dict`（隣に `rakukan.dict.build.json`） |
+| ログ | `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（TSF。アプリのプロセスごと。時刻順の統合は `scripts/merge-logs.ps1`）/ `rakukan-engine-host-<PID>-<起動識別子>.log`（engine DLL の行を含む）/ `rakukan-tray-<PID>-<起動識別子>.log`。各ファイルの 1 行目がヘッダー。トレイが起動時に 90 日・30000 ファイルを超えた分を消す |
+| 登録の記録 | `%LOCALAPPDATA%\rakukan\register_debug.log`（regsvr32 の登録・解除のたびに時刻・`dll_path`・各段階の結果） |
+| 調査用の ETW | `scripts/etw-trace.ps1 start / stop / export`（管理者）。provider は `Rakukan.Tsf`・`Rakukan.Host` |
 | 復帰マーカー | `%LOCALAPPDATA%\rakukan\engine-recovery.txt`（#43 / #57） |
 
 ## 3. 文書の地図
@@ -99,7 +117,8 @@ sudo cargo make install
 - **#85（試験の自動化の基盤）**: フェーズ 2 の対象外にした試験（Input_Pipeline_Plan.md 6 節の表で「対象外」の行）は、故障を起こす口（`DocOps` / FakeHost / 時計の外出し）が要る。今後の開発の基盤として計画する。
 - **#86**: 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される。重要度は低。起きるアプリは見つかっていない。ログのアプリ名（`app=`）で探す。
 - **観察（調べていない）**: ホストを起動できない状態で、最初のキーの待ちが 3.6 s になったことがある（`Transport` → `HostMissing` → `Suppressed`。2026-10-22）。
-- **インストーラー**: 今のインストーラーは動いているホストを止めない。失敗したときに戻すのは TSF の DLL だけ。どちらもフェーズ 3 で扱う。
+- **フェーズ 3 の残り**: `check-bundled-licenses.ps1` の残りの指摘（自前のファイルを名前だけで判定・`.msix` の中のパスと同名のファイル・辞書の出所の確認。tque #70）。別のユーザーでの確認（Test_Procedure.md の S2-6）は行っていない。
+- **観察（調べていない）**: 2026-10-23 のサインインの後、ChatGPT.exe の TSF のログが作られなかった。ChatGPT で「100%」が「10%」になることがあるという報告があったが、ログが無く確かめられていない。
 - **運用で確かめる**: #57（詰まりの検出）・#50（DM の識別）は、ログの再計測のときに確認してクローズを判断する。
 
 ## 5. 調査の知見

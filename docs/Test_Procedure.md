@@ -284,7 +284,7 @@
      "Run HKLM:   " + (Get-ItemProperty 'HKLM:\Software\Microsoft\Windows\CurrentVersion\Run' -Name rakukan-tray -ErrorAction SilentlyContinue).'rakukan-tray'
      "Run HKCU:   " + (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name rakukan-tray -ErrorAction SilentlyContinue).'rakukan-tray'
      "TipListed:  " + (Get-ItemProperty 'HKCU:\Software\rakukan' -Name TipListedVersion -ErrorAction SilentlyContinue).TipListedVersion
-     "Keyboard:   " + ((Get-WinUserLanguageList | Where-Object LanguageTag -like 'ja*').InputMethodTips -join ', ')
+     "Keyboard:   " + ((@(Get-WinUserLanguageList) | ForEach-Object { $_ } | Where-Object { $_.LanguageTag -like 'ja*' }).InputMethodTips -join ', ')
      "--- processes"; Get-Process rakukan-engine-host, rakukan-tray, rakukan-settings -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, Path, StartTime
      "--- pending (rakukan)"; (Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager' -Name PendingFileRenameOperations -ErrorAction SilentlyContinue).PendingFileRenameOperations | Select-String rakukan
      "--- $env:ProgramFiles\rakukan"; Get-ChildItem "$env:ProgramFiles\rakukan" -ErrorAction SilentlyContinue | Format-Table Name, Length
@@ -348,14 +348,15 @@
 戻す操作: なし（S2-3 へ続ける）。
 
 ### S2-3 サイレント実行（winget と同じ引数）
-1. 管理者の PowerShell で:
+1. 管理者の PowerShell で（作業フォルダがリポジトリにならないので、フルパスで指定する）:
    ```powershell
-   $p = Start-Process .\output\rakukan-0.13.0-setup.exe -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010' -Wait -PassThru
+   $setup = "D:\home\source\rust\rakukan\output\rakukan-0.13.0-setup.exe"
+   $p = Start-Process $setup -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /RESTARTEXITCODE=3010' -Wait -PassThru
    "exit code: $($p.ExitCode)"
    ```
 2. 同じく `/RESTARTEXITCODE` を付けずに実行し、終了コードを見る:
    ```powershell
-   $p = Start-Process .\output\rakukan-0.13.0-setup.exe -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+   $p = Start-Process $setup -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
    "exit code: $($p.ExitCode)"
    ```
 3. PowerShell で `Show-RakukanState` とセットアップのログ。
@@ -520,3 +521,21 @@ Step 4（経路の一本化）までは、開発の導入は今までの `sudo c
 - S1-5: 合格。設定アプリ・ホスト・engine DLL・辞書が `C:\Program Files\rakukan` から動き、ログは `%LOCALAPPDATA%\rakukan` に書かれた。設定アプリの左の欄の下とファイルのプロパティに「Copyright (c) 2024-2026 rakukan Contributors」がある（#88）。
   - 1 回目の戻す操作は管理者でない PowerShell で行い、登録が付け替わらないまま `%ProgramFiles%\rakukan` を消したため、IME が選べなくなった（`register_debug.log` に `create CLSID key: アクセスが拒否されました。 (0x80070005)`）。2 回目は、戻す操作の `regsvr32` が `register_debug.log` に記録を残さず（登録・解除の処理まで届いていない）、同じく選べなくなった。2 回目の原因は未確認。どちらも管理者の PowerShell で `regsvr32 "$env:LOCALAPPDATA\rakukan\rakukan_tsf.dll"` をやり直して戻った。手順を、`/s` を外し、登録先のレジストリと `register_debug.log` を確かめてから消す形に改めた。
 - 後始末: `config.toml`・`keymap.toml`・`user_dict.toml` は試験の前のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログのレベルは `trace` のまま。
+
+## 2026-10-23 の結果（S2: フェーズ 3 の Step 2・3。開発ビルド `f74a9c7`、そこから `-Sign` 付きで作ったインストーラー）
+
+S2-0 の 4 で `sudo cargo make install` した開発の配置（`%LOCALAPPDATA%\rakukan`）を旧配置とした。アプリはメモ帳の代わりに EmEditor を使った。
+
+- S2-0: 0.13.0 の配布物を `output\oldversion\rakukan-0.13.0-release-setup.exe` に写した（ハッシュ一致）。インストーラーの署名は有効（タイムスタンプ付き）。`Show-RakukanState` の `Keyboard` が空と出たのは関数の書き方の誤り（`Get-WinUserLanguageList` は一覧を 1 つの値で返す）で、直した。`register-tip.ps1` は一覧を変数に入れてから絞るので影響しない。
+- S2-1: 合格。
+  - 使用許諾の画面に、日本語と英語の見出しの文と [1]〜[4] が崩れずに出て、最後（NVIDIA の EULA の Attachment B の終わり）まで読めた。「同意しない」では先へ進めなかった。サインアウトを求められずに完走した。
+  - セットアップのログに、旧 DLL の登録の解除（`exit code 0`）、HKCU の Run の `rakukan-tray` の削除、旧版のファイル・`settings-ui`・`dict` の削除があり、使用中の 4 つ（TSF DLL・CUDA 版の engine DLL・ホスト・トレイ）は再起動のときの削除の予約に入った。`TSF registration check failed` は無い。`etw`・`config.toml`・`rakukan.toml`・`*.bak`・ログは残った。
+  - 再起動の前も EmEditor で変換・確定でき（旧ホストのまま）、文字は失われなかった。Program Files のトレイは起動しなかった（旧配置で動いていた新しいビルドのトレイが mutex を持っていたためと見られる。※推測）。
+  - 再起動の後: ホスト・トレイ・engine DLL・辞書が `C:\Program Files\rakukan` から動き、変換できた。モデルは既存の HF のキャッシュから読まれた。予約は空、旧配置の旧版のファイルは消えた。トレイのログの 1 行目と掃除の行があった（一覧の補いは旧配置のトレイが 0.13.0 の分を済ませていたので行わない）。キーボードの一覧に rakukan があった。`models` は `BUILTIN\Users:(OI)(CI)(M)`。イベントログのアプリの異常終了に rakukan・explorer・EmEditor のものは無かった。設定のハッシュは試験の前と同じ。設定アプリに版と著作権の表示が出た。
+  - `TIP WOW64`（`HKLM\SOFTWARE\WOW6432Node\Microsoft\CTF\TIP\{CLSID}`）は、旧配置・移行の後・再起動の後とも `True` で、S2-4 のアンインストールで `False` になった。
+- S2-2: 合格。完了の画面に「インストールを完了するには、PC を再起動してください。再起動するまでは、Rakukan による日本語入力ができないことがあります。」と「今すぐ再起動しますか?」が出た。使用中の 4 つは置き換えの予約（`is-*.tmp`）になり、更新の後も EmEditor で確定できた。再起動の後に予約と `is-*.tmp` は無くなり、登録は変わらなかった。
+- S2-3: 合格。`/RESTARTEXITCODE=3010` 付きで終了コード `3010`、付けずに `0`。セットアップのログに `Need to restart Windows? Yes` と `Will not restart Windows automatically.`。再起動の後に予約は無くなり、変換できた。画面に何も出なかったかは未確認。管理者の PowerShell では作業フォルダがリポジトリにならないので、手順をフルパスに改めた。
+- S2-4: 合格。アンインストールの最後に再起動を求める表示が出た。再起動の前に、CLSID・TIP（HKLM・HKCU）・HKLM の Run・`TipListedVersion`・キーボードの一覧の項目・「アプリと機能」の登録が消え、使用中の 4 つと `C:\Program Files\rakukan` が削除の予約に入った（同じファイルが 4 回ずつ登録されていた）。再起動の後に `%ProgramFiles%\rakukan` と予約が無くなった。`%ProgramData%\rakukan\models`・`%APPDATA%\rakukan`（設定のハッシュは試験の前と同じ）・ログは残った。
+- S2-5: 合格。`sudo cargo make install` と `register-tip.ps1` で、登録が `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll`、HKCU の Run がトレイ、キーボードの一覧に rakukan、ホストが `%LOCALAPPDATA%\rakukan` から動き、変換できた。
+- S2-6: 行っていない。
+- 後始末: ログは S2-0 と S2-4 の前に `%APPDATA%\rakukan\log-backup-*` へ写した。ログのレベルは `trace` のまま。
