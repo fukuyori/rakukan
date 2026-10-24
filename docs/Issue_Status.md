@@ -10,8 +10,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ |
-| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる | 運用ログで `unknown dm` / `skipped save for dead dm` の有無と回帰を見てクローズ |
+| [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ（[2026-11_Plan.md](2026-11_Plan.md) の 2 節） |
+| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント） | [October_Plan.md](October_Plan.md) の 7 節: 段 1（原因を確かめるログの追加） |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
 
 ## 2. 判断待ち（利用者の決定が要る）
@@ -42,9 +42,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。10 月の計画のフェーズ 3。Step 1〜5（`2a628b5`・`500d161`・`b93532a`・`7c6f570`・`f74a9c7`・`cc189b3`）を PR #87（マージコミット `7a04bef`）で main に入れ、0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験 S1〜S3 と、配布物での T1〜T4・試験 30 に合格（[Test_Procedure.md](Test_Procedure.md)、2026-10-23・24） | 公開後の完了の Step 7（PR #30 への結論のコメント）は 2026-10-24 に投稿した。確かめてから手でクローズする（[October_Plan.md](October_Plan.md) の 4 節） |
-| #73〜#76 | ログ見直し 段 2〜5（書き手を 1 つに・発生元、掃除をトレイへ、ホストと engine DLL のログを揃える、書き込みを別スレッドへ・ETW） | 設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。#73・#75・#76 は Step 1（`2a628b5`・`500d161`）、#74 は Step 2（`7c6f570`）で実装し、S1・S2 で確かめた。0.13.1 に含まれ、配布物の試験（T1〜T4）でもホスト・トレイのログ（ヘッダー・engine DLL の行・掃除）を確かめた | 確かめてから手でクローズする（October_Plan.md の 4 節のリリース作業の 7） |
-| [#46](https://github.com/fukuyori/rakukan/issues/46) | 学習履歴を個別に削除する手段が無い | #33 と合わせる予定 | #33 と同時 |
+| [#46](https://github.com/fukuyori/rakukan/issues/46) | 学習履歴を個別に削除する手段が無い | #33 と合わせる予定だったが、#33 では扱わなかった（#33 は 2026-10-24 にクローズ） | 時期を決める |
 | [#32](https://github.com/fukuyori/rakukan/issues/32) | 文節変換: 区読点を含まない文で変換対象を文節単位に分けて選び直せない | [Segment_Edit_Plan.md](Segment_Edit_Plan.md)。9〜10 月は対応しない | 計画とインストーラー改修の後 |
 | [#63](https://github.com/fukuyori/rakukan/issues/63) | 文節変換: 読みと変換結果を文節単位で対応付ける方式の検討 | 方式 1（かなアンカー）は不採用、2（辞書ラティス）/ 3（形態素解析）/ 4（jinen スコアリング）を比較して記録。実装予定なし | 進める前に文節の定義・発火タイミング・実験の順番を決める |
 | [#18](https://github.com/fukuyori/rakukan/issues/18) | ローカル統合ブランチの未上流化の修正・機能の棚卸し | 各項目は個別 Issue へ分割済み。記録として残している | なし |
@@ -57,6 +55,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 内容 | クローズ日 |
 |---|---|---|
+| #33 / #73〜#76 | インストーラー再設計（`%ProgramFiles%` への配置、実行の後の再起動で完了、旧配置からの移行、`cargo make install` の一本化）/ ログ見直し 段 2〜5（10 月の計画のフェーズ 3。0.13.1 に含まれる。winget への登録は #91 に移した） | 2026-10-24（0.13.1） |
 | #88 / #89 / #90 | 配布物の第三者の部品の条件: 設定アプリの著作権の表示と使用許諾の画面（Microsoft の部品）/ MPL-2.0 の `option-ext` は Windows のビルドに入らないことの表示 / CUDA の読み込み用のライブラリを `cudart_static.lib` から取る（`500d161`・`b93532a`。0.13.1 に含まれる） | 2026-10-23 |
 | #69 / #70 / #71 | ホストとの通信失敗・エンジンの準備中に打鍵や確定する文字列が失われる・アプリへ素通りする / フォーカス移動で ResetAll が送られない（10 月の計画のフェーズ 1・2） | 2026-10-22（0.13.0） |
 | #56 / #65 / #72 | ホスト交換中の未確定文字の復元（PR #67 / #68、nick）/ 再接続時に config.toml の設定で Create / DllMain を空にし Activate で初期化（regsvr32 の失敗） | 2026-10-10（0.12.0） |
