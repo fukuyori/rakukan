@@ -33,17 +33,25 @@ Step の進み（2026-10-24。進捗は tque の #6 の下に登録している�
 | 5 | 配布前の文書（CHANGELOG の `[Next Release]` の節、DESIGN.md・handoff.md の配置と導入の手順、version-update-checklist.md の CHANGELOG の見出し） | `cc189b3`（Step 4 と同じ） | 文書だけ |
 | 6 | リリース作業: PR #87 をマージコミット `7a04bef` でマージ、版を 0.13.1 に上げ・ビルドの識別子から `-dirty` を外す（`84ff900`）、タグ `0.13.1`、配布物で T1〜T4・試験 30 | `7a04bef`・`84ff900` | 合格（Test_Procedure.md の 0.13.1 の結果） |
 
-**次の開始点**: 公開後の完了の Step 7（PR #30 への結論のコメント）は 2026-10-24 に投稿した（tque #54）。winget への登録は #91 で扱う（時期は未定）。#33・#73〜#76 は 2026-10-24 にクローズした。フェーズ 3 は完了。次の作業は [2026-11_Plan.md](2026-11_Plan.md) の候補から選ぶ。
+**次の開始点**: 公開後の完了の Step 7（PR #30 への結論のコメント）は 2026-10-24 に投稿した（tque #54）。winget への登録は #91 で扱う（時期は未定）。#33・#73〜#76 は 2026-10-24 にクローズした。フェーズ 3 は完了。フェーズ 4 も 2026-10-24 に完了した（下の「フェーズ 4」）。10 月の計画で残っているのはフェーズ 5（#83・IPC の名前）と、計画の終わりの `phase3-installer` のブランチの削除。
 
 決まったこと・分かったこと（フェーズ 3 の中で）:
 - #75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足した。
-- #64: 1 つのホストの中では engine DLL を替えない（実装はフェーズ 4）。それまでは engine DLL をピン止めする。同じホストの中で CUDA 版から Vulkan 版に替わると、落ちないが変換が数秒かかる（#64 のコメント）。
-- モデルや `gpu_backend` を替えて保存しても、ホストを起動し直すまで反映されない（#49 のコメント。フェーズ 4）。
+- #64: 1 つのホストの中では engine DLL を替えない。フェーズ 4（下）で実装した。engine DLL のピン止めはそのまま残す。
+- モデルや `gpu_backend` を替えて保存しても、ホストを起動し直すまで反映されなかった（#49 のコメント）。フェーズ 4 で直した。
 - 著作権の表示は `rakukan Contributors` のまま（`LICENSE`・`NOTICE`・設定アプリの csproj。2026-10-23 に利用者が確認）。
 - 0.13.0 の配布物は `output\oldversion\rakukan-0.13.0-release-setup.exe` に写してある。
 - 今の PC には 0.13.1 の配布物が入っている（`%ProgramFiles%\rakukan`）。開発の導入（ビルド → `sudo cargo make install` → 再起動）で同じ場所に上書きする。`%LOCALAPPDATA%\rakukan` に残っているのはログ・`etw`・`config.toml` など。
 - `install-tsf-*`（故障試験の TSF の差し替え）は、入力方式が Rakukan だと explorer とターミナルが TSF DLL を読み込んでいてロックで止まる。サインアウト → サインインの後、入力方式を Rakukan にせずに実行する。charmap で確かめる前には入力方式を Rakukan にする（Test_Procedure.md の S3-3）。
 - 0.13.0 までのインストーラー（32 ビットのモード）が書いたアンインストール情報（`HKLM\SOFTWARE\WOW6432Node\…\Uninstall\{B7C4E2A1-…}_is1`）が、移行の後も残っていた（2026-10-24、S2 の後のこの PC で発見）。旧版のアンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。旧配置を指すものを移行で消す処理（`RemoveOldUninstallEntry`）を足し、S3-1 と、0.13.0 の配布物からの更新（T4-1）で消えることを確かめた。
+
+### フェーズ 4（#64・#66・#49・#82）
+
+- 設計書は [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)（Codex CLI のレビューを 2 回受けた）。結果は [October_Plan.md](October_Plan.md) の 5 節。2026-10-24 に実装と実機の試験を終え、完了とした。
+- コミット: `c0dcaf6`・`542d9c1`・`36cd6a9`・`23749e6`。RPC protocol v8、engine ABI 12。変更点は CHANGELOG.md の `[Next Release]`。
+- 設定が変わると、ホストは自分の中でエンジンを作り直さず起動し直す。送られた設定は config.toml の本文のハッシュと照合し、一致したものだけを採用する。config.toml を解析できない間は、`%LOCALAPPDATA%\rakukan\host-config-last.json`（ホストが最後に採用した設定）で動く。
+- #82 は、モデルの定義を config.toml へ移さず、engine に埋め込む models.toml を一覧の元にする形に改めた（設計書 2 章）。設定アプリは同じ models.toml を出力に写して読む。Issue #82 の題と本文は、まだ今の決定に合わせていない。
+- 保存した設定で起動したホスト（config.toml が壊れている間）は、`host-config-last.json` を書き直すときに `config_sha256` を `null` にする。正しく読めた config.toml から採用したのではないので、これでよいとした（2026-10-24。照合には使わない記録の値）。
 
 ### 並行して行うこと
 

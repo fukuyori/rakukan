@@ -238,6 +238,12 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 | #49 | `model_variant` の変更が、ホストが動いている間は反映されない。実装は後 | 段 B のモデル未準備の試験と、段 C のモデル共有・設定反映の試験では、設定値だけでなく実際に読み込んだモデルを確かめ、必要な状態はホストの再起動で作る |
 | #82 | モデルの定義を、エンジン埋め込みの `models.toml` から config.toml の `[models]` に移す（karukan #111 方式） | engine に渡す形が変わり engine ABI の版を上げる。モデルの置き場所（`%ProgramData%\rakukan\models`）は C で決まる |
 
+**結果**（2026-10-24）:
+
+- 実装: 設計書の 6 章の 7 段。段 1 `c0dcaf6`（RPC protocol v8）、段 2・3 `542d9c1`（ホストの版の照合・壊れている間の扱い・`CreateRestart` / `CreateKept`、クライアントと TSF）、段 4・5 `36cd6a9`（`gpu_backend` / `log_level` を設定の JSON に、converter の照合）、段 6・7 `23749e6`（models.toml の既定を xsmall、設定アプリの選択肢、`pre_tokenizer_override` の削除、DESIGN.md・CHANGELOG）。engine ABI は 12 のまま。各段の前後で fmt・clippy・`cargo test --workspace` を通した（最後は 793 件合格）。
+- 実機（2026-10-24、ビルド `23749e6`。[Test_Procedure.md](Test_Procedure.md) の同日のフェーズ 4 の結果）: モデルの変更・backend の変更・config.toml を壊している間・複数のアプリで、設計どおりに動いた。**フェーズ 4 は完了**（2026-10-24）。
+- 実機で試さなかったもの: 入力中（未確定の文字がある）に設定を保存する試験（設計書 5.2 の 6）。設定アプリに切り替えるとフォーカスの移動で確定するため、この形では試せない。ホストの入れ替えの間の復元は、0.13.1 の T2 で確かめてある。
+
 ## 6. フェーズ 5: #83（KV キャッシュの再利用）・IPC の名前とパイプの設定
 
 | Issue | 扱い | この計画との依存 |
@@ -296,3 +302,4 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 - 2026-10-24: IME オンの表示の「ー」をやめる作業（言語バーとキャレットの近くの表示）を 7 節に足した
 - 2026-10-24: IME オンの表示の「ー」をやめる作業を終えた（`3bdfd77`、実機で確認。7 節）
 - 2026-10-24: #50 の段 1（原因を確かめるログ）を終えた（`e0cbbd3`、実機で確認。7 節）
+- 2026-10-24: フェーズ 4 の設計書（Engine_Config_Apply_Plan.md）を作り、実装と実機の試験を終えた（5 節の結果）

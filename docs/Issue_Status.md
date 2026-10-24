@@ -1,6 +1,6 @@
 # 開いている Issue の状況
 
-2026-10-24 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行を更新した。
+2026-10-24 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。
 10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
@@ -11,16 +11,17 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
 | [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ（[2026-11_Plan.md](2026-11_Plan.md) の 2 節） |
-| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント） | [October_Plan.md](October_Plan.md) の 7 節: 段 1（原因を確かめるログの追加） |
+| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント）。段 1（原因を確かめるログ）は `e0cbbd3` で入れた（[October_Plan.md](October_Plan.md) の 7 節） | ログがたまってから照合し、段 2 を決める（[2026-11_Plan.md](2026-11_Plan.md) の 2 節） |
+| [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | フェーズ 4 で実装（1 つのホストの中では engine DLL・エンジンを作り直さず、設定が違えばホストが起動し直す。`Reload` を廃止。RPC protocol v8）。2026-10-24 に実機で確認（[October_Plan.md](October_Plan.md) の 5 節） | クローズの条件を確かめる |
+| [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | フェーズ 4 で実装（`config_version` をホストが config.toml の本文のハッシュと照合、`CreateKept` / `ConfigStale` / `ConfigUnusable`、壊れている間は `host-config-last.json`）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
+| [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | フェーズ 4 で実装（設定の変更でホストが起動し直す。`gpu_backend` / `log_level` も設定の JSON に。engine の converter の照合）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
+| [#82](https://github.com/fukuyori/rakukan/issues/82) | モデルの一覧を models.toml にまとめ、既定のモデルと設定アプリの選択肢をそろえる | 2026-10-24 に方針を改めた: config.toml へは移さず、models.toml を一覧の元にする（既定は xsmall、設定アプリが models.toml から選択肢を作る、`pre_tokenizer_override` の削除）。フェーズ 4 の `23749e6` で実装し、実機で確認。同日に題を改め、決定をコメントに書いた（本文は起票のときの案のまま） | クローズの条件を確かめる |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
 
 ## 2. 判断待ち（利用者の決定が要る）
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | 2026-09-22 起票、設計案あり（`config_version` の照合とホスト再起動への統一）。方式採用・実装着手は未承認。#67 で `config_version` の項目だけ先取りする形を返信中 | 方式の承認。設計に「`config_version = None` は一致として受理しない」を明記する。#49 / #64 と合わせて設計 |
-| [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | 2026-09-21 起票。方針は 2026-10-23 に決定: 1 つのホストの中では engine DLL を替えない（別の DLL が要る `Create` ではホストを起動し直す、`Reload` はなくす）。それまではフェーズ 3 の Step 1 で engine DLL をピン止めする（[October_Plan.md](October_Plan.md) の 4 節）。再現・実機検証は未実施 | 方針の実装を #66 の古い設定の照合と合わせて設計する（フェーズ 4） |
-| [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | 未着手。計画書の J-3（推奨: モデル設定の変更でホストを終了） | #66 と合わせて設計（#82 のモデル定義の移動も同時に） |
 | [#35](https://github.com/fukuyori/rakukan/issues/35) | 区読点だけの読み（。。。）が変換に乗らず、リーダー記号（… ‥）の標準的な入力手段が無い | 判断待ち。計画書の J-6（推奨: Space 変換の候補を先に、`z` キー列は後）。[Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) の 3.1.1 の A〜C が未決。PR #31 は nick が取り下げ済み | 方式と文字の割り当てを決める |
 | [#16](https://github.com/fukuyori/rakukan/issues/16) | 数字混在の読みで、かな run が辞書（ユーザー辞書・学習履歴・MOZC）候補を参照できない | 判断待ち。計画書の J-7（推奨: 段 4 で設計から）。変換ワーカーへ辞書を渡す配線は #53 と共通 | 段 4 で設計（#80 の助数詞の学習を含める） |
 | [#77](https://github.com/fukuyori/rakukan/issues/77) | 数字・英字の全角/半角をユーザーの選択から学習する仕組みが無い | 2026-10-11 起票。検討段階。mozc の 2026-10 の修正 6 件を参考として記録。数字の後の `,` `.` が全角数字と混在するかは未確認 | 学習の単位・対象・使い道・設定との優先・保存先（#46 と関係）を決める |
@@ -28,7 +29,6 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#79](https://github.com/fukuyori/rakukan/issues/79) | ヒエログリフや珍しい仮名（濁点付き仮名・鼻濁音・アイヌ語カナ）が一般的な読みの変換で上位に出る | 2026-10-11 起票。実測で 4 番目前後に出ることを確認。mozc は `d901f2c2f` / `028c3b36c` で降格（削除ではない）。重要度は中〜低（先頭 3 件は変わらず、誤確定にもつながらない）として、10 月の計画には入れない | 降格の方式を決める。推奨はエンジン側で文字のコードで判定する方式（辞書の作り直し不要。固定版の `symbol.tsv` で対象 120 件に一致、誤検出 0）。辞書側で印を付ける方式にするかは #78 のときに改めて決める |
 | [#80](https://github.com/fukuyori/rakukan/issues/80) | 数字の後の助数詞の学習が、数字が変わると効かない（読み全体で学習しているため） | 2026-10-11 起票。mozc `662147864`（数字の直後という条件付きの学習）を参考に記録 | #16 の設計に含めて検討する |
 | [#81](https://github.com/fukuyori/rakukan/issues/81) | 候補ウィンドウがダークテーマに対応していない | 2026-10-11 起票。色はライト用のみで固定。入力モード表示は `SystemUsesLightTheme` で判定している | 判定に使う値・判定の時期・配色・config での選択・高コントラストの扱いを決める |
-| [#82](https://github.com/fukuyori/rakukan/issues/82) | モデルの定義をエンジン埋め込みの `models.toml` から config.toml の `[models]` に移す（karukan #111 方式） | 2026-10-11 起票。今はモデルの追加に再ビルドが要り、一覧が `install.ps1`・設定アプリ・config のコメントに重複 | 既定の定義の置き場所、engine へ渡す形（ABI 変更）、`model_variant` との互換を決める。#49 と合わせて設計 |
 | [#83](https://github.com/fukuyori/rakukan/issues/83) | Space 変換のビームサーチで、ステップごとに全系列を計算し直している（KV キャッシュの再利用） | 2026-10-11 起票。karukan `8d132a9`（#95）を参考に記録。効果は未計測 | まず所要時間を計測。次に上位 k 件の部分選択、その後に KV 再利用（旧方式へ戻せる設定、新旧比較の試験、3 variant での確認） |
 | [#84](https://github.com/fukuyori/rakukan/issues/84) | 単漢字（mozc `single_kanji.tsv`）を候補に加え、表示順（または種類の切り替え）を決める | 2026-10-21 起票 | 10 月の計画には入っていない。扱いを決める |
 | [#85](https://github.com/fukuyori/rakukan/issues/85) | 試験の自動化の基盤（試験用のアプリ・台本の実行器・ホストの故障の口） | 2026-10-22 起票。今後の改修・開発の基盤として計画する。フェーズ 2 には入れない（利用者の判断） | 10 月の計画には入っていない。着手の時期を決める |

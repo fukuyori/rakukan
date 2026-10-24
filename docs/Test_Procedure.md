@@ -692,3 +692,19 @@ S3-0 の時点の旧配置は、S2-5 で `install.ps1` により入れた `%LOCA
 - T4-2: 合格。ログを退避（`log-backup-20261024-113955`）してから「アプリ」でアンインストールし、再起動の後に登録・TIP（HKLM・HKCU）・HKLM の Run・`TipListed`・キーボードの一覧の項目・アンインストール情報（64・32 ビットとも）・`%ProgramFiles%\rakukan`・予約が無くなり、`%APPDATA%\rakukan` と `%ProgramData%\rakukan\models` は残った。0.13.1 の配布物を入れ直して再起動の後に変換でき、登録・キーボードの一覧・`TipListed`（`0.13.1`）・ホストとトレイの場所（`C:\Program Files\rakukan`）が戻った。
 - 試験 30（配布物での統合試験）: 上の T1・T2 を 0.13.1 の配布物で行った。
 - 後始末: 設定は `config.toml`・`keymap.toml`・`user_dict.toml` が準備のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログのレベルは `trace` のまま。今の PC は 0.13.1 の配布物が入った状態。
+
+## 2026-10-24 の結果（フェーズ 4: 設定の反映とホストの起動し直し。開発ビルド `23749e6`、`sudo cargo make install`）
+
+設計書は [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md) の 5.2 節。最初の試験は、`cargo make build-tsf` と `sudo cargo make install` が前のビルド（16:34、ホストのログの 1 行目が `build=0.13.1@3bdfd7729091`）のまま行われていたので、数えない。入れ直した後（19:15〜19:17 のビルド、ホストのログが `build=0.13.1@23749e628031`）にやり直した。
+
+- 準備: `config.toml` を `config.toml.phase4-backup` に写した。
+- 通常の入力: 合格。新しいホストが `Selected backend (explicit): cuda`（設定の JSON の `gpu_backend` で選んだ）、`model ready name=jinen-v2-small-q5`。
+- 設定アプリのモデルの選択肢: 合格（models.toml の 8 種類）。
+- モデルの変更（`jinen-v2-xsmall-f16` → `jinen-v2-small-q5` に戻す）: 合格。古いホストが `Create with changed config; ending this host to restart` で終わり、新しいホストがそのモデルを読んだ（xsmall-f16 は `%ProgramData%\rakukan\models` へ取得、26 秒）。TSF は `host connect not completed (not counted)`。戻した後の `ShutdownIfConfigDiffers` は「同じ設定」。
+- backend の変更（`vulkan` → `cuda` に戻す）: 合格。`gpu_backend` だけの変更で `ShutdownIfConfigDiffers: config differs, will exit`、新しいホストが `Selected backend (explicit): vulkan`（最初の変換 1251ms）。古いホストに宛てた別のアプリの要求は `for another host; keeping this host`。戻した後は CUDA 版で 106ms。
+- config.toml を壊す（最後に `[general` を足す）: 合格。TSF は `TOML parse error` の WARN を出して直前の設定を使い続け、動いているホストはそのまま変換した。言語バーの「エンジン再起動」の後、新しいホストが `config.toml cannot be parsed; starting with the last adopted config (saved)` で、保存してあった設定（モデル・backend・候補数とも壊す前と同じ）で起動した。TSF の接続は `host kept its config`（`CreateKept`）。行を消した後も変換できた。
+- 複数のアプリ（メモ帳・EmEditor・Firefox）: 合格。
+- 全体: 起動の抑止（`host spawn suppressed`）と、起動の失敗として数えたもの（`recorded host startup failure`）は 0 件。ERROR の水準の行と panic は無かった。
+- 試さなかったもの: 入力中に設定を保存する試験（設計書 5.2 の 6）。設定アプリに切り替えるとフォーカスの移動で確定するため。
+- 後始末: 行を消した後の `config.toml` は、最後の改行が 1 つ多く、写しとハッシュが合わなかった（値は同じ）。写しで上書きしてハッシュの一致を確かめ、写しを消した。
+- 保存した設定で起動したホストは、`host-config-last.json` を書き直すときに `config_sha256` を `null` にする。config.toml が壊れている間の起動なので、これでよいとした（照合には使わない記録の値）。
