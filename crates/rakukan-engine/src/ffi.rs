@@ -740,11 +740,22 @@ pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
     if engine.is_kanji_ready() {
         return;
     }
-    // converter が conv_cache の Done に眠っているだけなら回収して復帰（ロード不要）
+    // converter が conv_cache の Done に眠っているだけなら回収して復帰（ロード不要）。
+    // ただし、その converter を作ったときのモデルの設定が今のエンジンと違えば使わない
+    // （#49。1 つのホストの中でエンジンを作り直さなくなったので通常は一致する。守りの層。
+    // docs/Engine_Config_Apply_Plan.md 4.6）
     if let Some(conv) = crate::conv_cache::try_reclaim_done() {
-        tracing::info!("start_load_model: converter reclaimed from conv_cache (no reload)");
-        engine.set_kanji_converter(conv);
-        return;
+        let want = model_fingerprint(engine.get_config());
+        if converter_model_matches(&want) {
+            tracing::info!("start_load_model: converter reclaimed from conv_cache (no reload)");
+            engine.set_kanji_converter(conv);
+            return;
+        }
+        tracing::info!(
+            "start_load_model: discarding the reclaimed converter (model settings changed); loading again"
+        );
+        drop(conv);
+        set_converter_model(None);
     }
     // pending / Running 中もモデルは存在する。回収は bg_start / bg_take_candidates が行う
     if crate::conv_cache::has_converter() {
@@ -789,8 +800,8 @@ pub extern "C" fn engine_start_load_model(handle: *mut c_void) {
 }
 
 // pending converter をスレッド間で渡すための一時置き場。
-// ビルド時の config フィンガープリントを添えて保存し、Reload で config が
-// 変わった場合に古い converter を誤って注入しないようにする。
+// ビルド時の config フィンガープリントを添えて保存し、config が変わった場合に
+// 古い converter を誤って注入しないようにする。
 use crate::kanji::KanaKanjiConverter;
 use std::sync::{LazyLock, Mutex};
 static PENDING_CONVERTER: LazyLock<Mutex<Option<(String, KanaKanjiConverter)>>> =
@@ -798,6 +809,51 @@ static PENDING_CONVERTER: LazyLock<Mutex<Option<(String, KanaKanjiConverter)>>> 
 
 fn config_fingerprint(config: &EngineConfig) -> String {
     serde_json::to_string(config).unwrap_or_default()
+}
+
+/// 注入した converter を作ったときの、モデルにかかわる設定（[`model_fingerprint`]）。
+/// converter は DLL に 1 つ（エンジンか conv_cache のどちらかにある）なので、1 つだけ持つ。
+/// 分からない（この仕組みの外で作った）ときは `None`。
+static CONVERTER_MODEL: LazyLock<Mutex<Option<String>>> = LazyLock::new(|| Mutex::new(None));
+
+/// converter の中身を決める設定（`RakunEngine::build_converter` が使う項目）。
+/// 候補数・入力幅などは converter を作り直さずに変えられるので入れない。
+fn model_fingerprint(config: &EngineConfig) -> String {
+    let variant = config
+        .model_variant
+        .clone()
+        .unwrap_or_else(|| crate::kanji::model_config::registry().default_model.clone());
+    format!(
+        "model={variant} gpu_layers={} main_gpu={} threads={} beam={} margin={:?} min_top={:?} force_fail={}",
+        config.n_gpu_layers,
+        config.main_gpu,
+        config.n_threads,
+        config.convert_beam_size,
+        config.confidence_margin,
+        config.min_top_confidence,
+        config.force_inference_failure
+    )
+}
+
+fn set_converter_model(fingerprint: Option<String>) {
+    match CONVERTER_MODEL.lock() {
+        Ok(mut g) => *g = fingerprint,
+        Err(p) => *p.into_inner() = fingerprint,
+    }
+}
+
+/// 回収した converter を、`want` の設定のエンジンで使ってよいか。
+fn converter_model_matches(want: &str) -> bool {
+    let recorded = match CONVERTER_MODEL.lock() {
+        Ok(g) => g.clone(),
+        Err(p) => p.into_inner().clone(),
+    };
+    model_matches(recorded.as_deref(), want)
+}
+
+/// 記録が無い（この仕組みの外で作った converter）ときは、今までどおり使う。
+fn model_matches(recorded: Option<&str>, want: &str) -> bool {
+    recorded.is_none_or(|r| r == want)
 }
 
 /// モデルが pending_converter に届いているか確認し、届いていたら engine に注入する。
@@ -815,10 +871,11 @@ pub extern "C" fn engine_poll_model_ready(handle: *mut c_void) -> bool {
         return true;
     }
     if let Ok(mut g) = PENDING_CONVERTER.try_lock() {
-        // config が一致する converter のみ注入する（Reload 直後の取り違え防止）
+        // config が一致する converter のみ注入する（作り直しの直後の取り違え防止）
         let fingerprint = config_fingerprint(engine.get_config());
         match g.take() {
             Some((fp, conv)) if fp == fingerprint => {
+                set_converter_model(Some(model_fingerprint(engine.get_config())));
                 engine.set_kanji_converter(conv);
                 tracing::info!("converter injected into engine");
                 return true;
@@ -1168,5 +1225,46 @@ mod log_callback_tests {
         // NUL は CString にできないので置き換えて渡す
         assert_eq!(seen[1].0, 1);
         assert_eq!(seen[1].2, "nul inside");
+    }
+}
+
+#[cfg(test)]
+mod converter_model_tests {
+    use super::*;
+
+    /// モデルにかかわる設定だけが違いになる（docs/Engine_Config_Apply_Plan.md 4.6）。
+    #[test]
+    fn model_fingerprint_covers_only_converter_settings() {
+        let base = EngineConfig::default();
+        let fp = model_fingerprint(&base);
+        // 候補数・入力幅は converter を作り直さずに変えられる
+        let mut other = base.clone();
+        other.num_candidates = 19;
+        other.live_conv_beam_size = 3;
+        assert_eq!(model_fingerprint(&other), fp);
+        // モデル・GPU・ビーム幅は違いになる
+        for change in [
+            |c: &mut EngineConfig| c.model_variant = Some("jinen-v2-small-q5".into()),
+            |c: &mut EngineConfig| c.n_gpu_layers = 1,
+            |c: &mut EngineConfig| c.main_gpu = 1,
+            |c: &mut EngineConfig| c.convert_beam_size = 7,
+            |c: &mut EngineConfig| c.force_inference_failure = true,
+        ] {
+            let mut c = base.clone();
+            change(&mut c);
+            assert_ne!(model_fingerprint(&c), fp);
+        }
+        // 未指定は既定のモデルと同じ
+        let mut named = base.clone();
+        named.model_variant = Some(crate::kanji::model_config::registry().default_model.clone());
+        assert_eq!(model_fingerprint(&named), fp);
+    }
+
+    #[test]
+    fn reclaimed_converter_is_used_only_for_the_same_model() {
+        assert!(model_matches(Some("a"), "a"));
+        assert!(!model_matches(Some("a"), "b"));
+        // 記録が無い（この仕組みの外で作った）ときは今までどおり使う
+        assert!(model_matches(None, "b"));
     }
 }

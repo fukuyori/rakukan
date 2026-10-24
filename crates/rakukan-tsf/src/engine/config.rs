@@ -1102,9 +1102,40 @@ pub fn engine_config_json(cfg: &AppConfig) -> String {
         Some(v) => format!(r#","model_variant":"{}""#, v),
         None => String::new(),
     };
+    // ホストの起動し直しが要る設定（docs/Engine_Config_Apply_Plan.md 4.1）。engine DLL は
+    // 未知のキーとして無視する。ホストは `gpu_backend` で DLL を選び、両方を設定の照合に使う
+    let gpu_backend = gpu_backend_setting(cfg.general.gpu_backend.as_deref());
+    let log_level = json_string(&cfg.general.log_level);
     format!(
-        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","alpha_width":"{alpha_width}","symbol_width":"{symbol_width}","digit_separator_auto":{digit_separator_auto},"digit_candidates_order":[{digit_candidates_order}],"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size},"force_inference_failure":{force_inference_failure}{mv_json}}}"#
+        r#"{{"num_candidates":{num_candidates},"n_gpu_layers":{n_gpu_layers},"main_gpu":{main_gpu},"n_threads":0,"digit_width":"{digit_width}","alpha_width":"{alpha_width}","symbol_width":"{symbol_width}","digit_separator_auto":{digit_separator_auto},"digit_candidates_order":[{digit_candidates_order}],"live_conv_beam_size":{live_conv_beam_size},"convert_beam_size":{convert_beam_size},"force_inference_failure":{force_inference_failure}{mv_json},"gpu_backend":"{gpu_backend}","log_level":{log_level}}}"#
     )
+}
+
+/// `gpu_backend` の値。`cuda` / `vulkan` / `cpu` のほかは `auto`（今までホストが config.toml を
+/// 読んで決めていたときと同じ解釈）。
+fn gpu_backend_setting(value: Option<&str>) -> &'static str {
+    match value.map(str::trim) {
+        Some("cuda") => "cuda",
+        Some("vulkan") => "vulkan",
+        Some("cpu") => "cpu",
+        _ => "auto",
+    }
+}
+
+/// JSON の文字列として書く（引用符と制御文字をエスケープする）。
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 fn default_config_text() -> &'static str {
@@ -1735,6 +1766,44 @@ mod config_snapshot_tests {
         assert!(mgr.has_pending_apply());
         assert_eq!(mgr.pending_apply.as_ref().unwrap().revision, 2);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `gpu_backend` と `log_level` も JSON に入るので、それだけを変えても反映待ちが立つ
+    /// （ホストが起動し直す。docs/Engine_Config_Apply_Plan.md 4.1）。
+    #[test]
+    fn backend_or_log_level_change_sets_pending_apply() {
+        let base = "[general]\ngpu_backend = \"cuda\"\nlog_level = \"info\"\n";
+        let (mut mgr, path, dir) = mgr_with(base);
+        let json = mgr.snapshot().engine_json.clone();
+        assert!(json.contains(r#""gpu_backend":"cuda""#), "{json}");
+        assert!(json.contains(r#""log_level":"info""#), "{json}");
+
+        write_config(
+            &path,
+            "[general]\ngpu_backend = \"vulkan\"\nlog_level = \"info\"\n",
+        );
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert!(mgr.has_pending_apply(), "backend だけの変更");
+
+        let (mut mgr, path, dir2) = mgr_with(base);
+        write_config(
+            &path,
+            "[general]\ngpu_backend = \"cuda\"\nlog_level = \"debug\"\n",
+        );
+        assert_eq!(mgr.reinit(), LoadOutcome::Updated);
+        assert!(mgr.has_pending_apply(), "log_level だけの変更");
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&dir2);
+    }
+
+    #[test]
+    fn engine_json_normalizes_backend_and_escapes_strings() {
+        assert_eq!(super::gpu_backend_setting(None), "auto");
+        assert_eq!(super::gpu_backend_setting(Some("auto")), "auto");
+        assert_eq!(super::gpu_backend_setting(Some("weird")), "auto");
+        assert_eq!(super::gpu_backend_setting(Some("cpu")), "cpu");
+        assert_eq!(super::json_string(r#"a"b\c"#), r#""a\"b\\c""#);
+        assert_eq!(super::json_string("x\ny"), r#""x\u000ay""#);
     }
 
     #[test]

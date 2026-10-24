@@ -1758,6 +1758,12 @@ fn disk_label(disk: DiskConfig) -> &'static str {
     }
 }
 
+/// 設定の JSON の `gpu_backend`。JSON が無い・読めない・キーが無いときは `None`（auto）。
+fn gpu_backend_of(config_json: Option<&str>) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(config_json?).ok()?;
+    value.get("gpu_backend")?.as_str().map(str::to_string)
+}
+
 /// 採用した `config.toml` の本文のハッシュ（保存用）。
 fn adopted_sha(disk: DiskConfig) -> Option<ConfigVersion> {
     match disk {
@@ -1783,7 +1789,14 @@ fn load_engine_into(
         Some(p) => p,
         None => return Response::Error("install_dir not found".into()),
     };
-    match DynEngine::load_auto(&install, config_json.as_deref()) {
+    // DLL は設定の JSON の `gpu_backend` で選ぶ（config.toml を読み直さない。JSON と DLL の
+    // 選択が同じ保存を指すように。設計書 4.1）
+    let gpu_backend = gpu_backend_of(config_json.as_deref());
+    match DynEngine::load_with_backend_setting(
+        &install,
+        gpu_backend.as_deref(),
+        config_json.as_deref(),
+    ) {
         Ok(mut eng) => {
             if !eng.is_dict_ready() {
                 eng.start_load_dict();
@@ -2565,6 +2578,18 @@ mod record_tests {
         // 照合が通る
         let resp = dispatch(&shared, &mut session, ask(Some(version), None));
         assert!(matches!(resp, Response::Bool(true)));
+    }
+
+    /// DLL は設定の JSON の `gpu_backend` で選ぶ（設計書 4.1）。
+    #[test]
+    fn backend_is_taken_from_the_config_json() {
+        assert_eq!(
+            gpu_backend_of(Some(r#"{"num_candidates":9,"gpu_backend":"vulkan"}"#)).as_deref(),
+            Some("vulkan")
+        );
+        assert_eq!(gpu_backend_of(Some(r#"{"num_candidates":9}"#)), None);
+        assert_eq!(gpu_backend_of(Some("not json")), None);
+        assert_eq!(gpu_backend_of(None), None);
     }
 
     /// エンジンが無いホストは、照合が通らない設定でエンジンを作らない（設計書 4.3）。

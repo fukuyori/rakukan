@@ -532,6 +532,22 @@ impl DynEngine {
         })
     }
 
+    /// 設定の値（`gpu_backend`。`None` は未指定）に従って DLL をロードする。選び方は
+    /// [`load_auto`](Self::load_auto) と同じだが、config.toml を読み直さない。ホストは、
+    /// TSF が送った設定の JSON の値を渡す（JSON と DLL の選択が同じ保存を指すように。
+    /// docs/Engine_Config_Apply_Plan.md 4.1）。
+    pub fn load_with_backend_setting(
+        install_dir: &Path,
+        gpu_backend: Option<&str>,
+        config_json: Option<&str>,
+    ) -> Result<Self> {
+        load_with_selection(
+            backend_selection(gpu_backend),
+            install_dir,
+            |_backend, dll_path| Self::load_dll_checked(dll_path, config_json),
+        )
+    }
+
     /// 指定バックエンド名の DLL をロードする。他の backend へは fallback しない。
     pub fn load_backend(
         install_dir: &Path,
@@ -1097,14 +1113,19 @@ enum BackendSelection {
 
 /// config.toml の `gpu_backend` キーを読み取り、明示指定 / auto を区別して返す。
 fn detect_backend() -> BackendSelection {
-    match read_config_toml_backend() {
-        Some(b) if matches!(b.as_str(), "cuda" | "vulkan" | "cpu") => {
-            tracing::debug!("backend::select: from config.toml={b}");
-            BackendSelection::Explicit(b)
+    backend_selection(read_config_toml_backend().as_deref())
+}
+
+/// `gpu_backend` の値を、明示指定 / auto に分ける。
+fn backend_selection(value: Option<&str>) -> BackendSelection {
+    match value {
+        Some(b) if matches!(b, "cuda" | "vulkan" | "cpu") => {
+            tracing::debug!("backend::select: gpu_backend={b}");
+            BackendSelection::Explicit(b.to_string())
         }
         Some(b) => {
             // "auto" もしくは想定外文字列 → 自動検出にフォールバック
-            tracing::debug!("backend::select: config.toml={b} -> auto");
+            tracing::debug!("backend::select: gpu_backend={b} -> auto");
             BackendSelection::Auto
         }
         None => {
@@ -1448,6 +1469,37 @@ mod backend_selection_tests {
         .unwrap();
         assert_eq!(got, "vulkan");
         assert_eq!(*attempts.borrow(), vec!["vulkan"]);
+    }
+
+    /// 設定の値（JSON の `gpu_backend`）からの選び方は、config.toml を読む場合と同じ。
+    #[test]
+    fn backend_setting_maps_to_selection() {
+        assert!(matches!(
+            backend_selection(Some("vulkan")),
+            BackendSelection::Explicit(b) if b == "vulkan"
+        ));
+        assert!(matches!(
+            backend_selection(Some("auto")),
+            BackendSelection::Auto
+        ));
+        assert!(matches!(
+            backend_selection(Some("weird")),
+            BackendSelection::Auto
+        ));
+        assert!(matches!(backend_selection(None), BackendSelection::Auto));
+    }
+
+    /// 明示の指定は、DLL が無ければ他へ切り替えずに失敗する（設定の値から読む場合も同じ）。
+    #[test]
+    fn load_with_backend_setting_does_not_fall_back_when_explicit() {
+        let missing = std::env::temp_dir().join("rakukan-abi-test-does-not-exist");
+        let err = match DynEngine::load_with_backend_setting(&missing, Some("vulkan"), None) {
+            Ok(_) => panic!("存在しない DLL のロードが成功してはいけない"),
+            Err(e) => e,
+        };
+        let msg = format!("{err:#}");
+        assert!(msg.contains("explicit, no fallback"), "{msg}");
+        assert!(msg.contains("rakukan_engine_vulkan.dll"), "{msg}");
     }
 
     #[test]
