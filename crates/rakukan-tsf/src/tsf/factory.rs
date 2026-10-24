@@ -1203,22 +1203,8 @@ impl TextServiceFactory_Impl {
         use crate::tsf::edit_session::EditSession;
         use crate::tsf::mode_indicator;
 
-        // ラッチが立っていない場合はエンジンに直接問い合わせてラッチを更新する。
-        // モード切替はキー入力前にも発生するため、初回切替時にラッチが false のまま
-        // 「ー」がカーソル位置に表示されるのを防ぐ。
-        if !crate::engine::state::is_conversion_ready()
-            && let Ok(g) = crate::engine::state::engine_try_get()
-            && let Some(eng) = g.as_ref()
-        {
-            crate::engine::state::poll_dict_ready_cached(eng);
-        }
-
-        let ready = crate::engine::state::is_conversion_ready();
-        let mode_char: &'static str = match mode {
-            // エンジン準備前は「あ」を出さない（変換できない状態を誤認させないため）
-            ImeMode::On if !ready => return,
-            m => m.label(),
-        };
+        // IME のオン/オフだけを示す（エンジンの準備の状態は見ない。言語バーの表示と同じ）
+        let mode_char: &'static str = mode.label();
 
         let ctx2 = ctx.clone();
         let session = EditSession::new(move |ec| unsafe {
@@ -1782,13 +1768,11 @@ impl ITfLangBarItemButton_Impl for TextServiceFactory_Impl {
 ///
 /// 内部状態（`ime_mode`）だけを見る。コンパートメントは参照しない
 /// （コンパートメントは内部状態から導出して書く側であり、読むと片方だけ
-/// 更新された瞬間に表示がずれる）。IME オンでエンジン準備前は「ー」。
+/// 更新された瞬間に表示がずれる）。エンジンの準備の状態は見ない（準備の印は
+/// プロセスごとに、文字を打ったときに立つので、ホストの準備ができていても
+/// 打つまでは立たない）。準備中に打ったキーは `show_engine_waiting` で知らせる。
 fn langbar_mode_char() -> &'static str {
-    match crate::engine::state::ime_mode_get_atomic() {
-        ImeMode::Off => "A",
-        ImeMode::On if !crate::engine::state::is_conversion_ready() => "ー",
-        ImeMode::On => "あ",
-    }
+    crate::engine::state::ime_mode_get_atomic().label()
 }
 
 /// Activate 前から存在する DocumentManager を台帳に登録する（Issue #50）。

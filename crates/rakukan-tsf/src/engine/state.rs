@@ -145,8 +145,6 @@ pub fn poll_dict_ready_cached(eng: &DynEngine) -> bool {
                 let elapsed = now_ms().saturating_sub(reset_at);
                 tracing::info!("dict ready: {} ms since reload reset", elapsed);
             }
-            // 辞書ロード完了 → 言語バーアイコンを "ー" から "あ" へ更新する
-            langbar_update_set();
         }
     } else {
         note_dict_not_ready(eng);
@@ -2623,14 +2621,6 @@ pub fn langbar_update_set() {
 }
 pub fn langbar_update_take() -> bool {
     LANGBAR_UPDATE_PENDING.swap(false, AtomicOrdering::AcqRel)
-}
-
-/// 辞書ロードが完了し、基本的な変換が利用可能かを返す（RPC 不要）。
-///
-/// `DICT_READY_LATCH` が立っていない間（エンジン未接続・辞書ロード中）は `false`。
-/// `false` の間は言語バーアイコンに "ー" を表示して変換停止中を示す。
-pub fn is_conversion_ready() -> bool {
-    DICT_READY_LATCH.load(AO::Acquire)
 }
 
 // ─── DocumentManager モードストア ────────────────────────────────────────────
