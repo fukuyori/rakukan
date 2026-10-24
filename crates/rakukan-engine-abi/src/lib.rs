@@ -1064,13 +1064,6 @@ mod build_id_tests {
     }
 
     #[test]
-    fn dirty_tree_counts_as_different_build() {
-        assert!(
-            build_mismatch(&host("0.10.4", "abc123"), &dll("0.10.4", "abc123-dirty")).is_some()
-        );
-    }
-
-    #[test]
     fn unknown_sha_does_not_warn() {
         assert_eq!(
             build_mismatch(&host("0.10.4", "unknown"), &dll("0.10.4", "abc123")),

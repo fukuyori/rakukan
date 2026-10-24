@@ -31,7 +31,7 @@ Step の進み（2026-10-24。進捗は tque の #6 の下に登録している�
 | 4 | 経路の一本化（`build-installer.ps1` の入力をビルドの出力に・辞書のビルドを移す、`install.ps1` / `uninstall.ps1` の削除、`dev-swap-tsf.ps1`、Makefile（`install` / `package` / `uninstall` / 故障試験の 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook）。移行で 0.13.0 の 32 ビット側のアンインストール情報を消す処理、`gen-third-party-licenses.ps1` のソートを序数比較に（Windows PowerShell 5.1 で `-Check` が通らなかった）。S3 の中で `check-bundled-licenses.ps1`・`dev-swap-tsf.ps1` の `Get-FileHash` を .NET の SHA256 に（cargo make から起動した Windows PowerShell 5.1 で見つからない） | — | S3 合格（Test_Procedure.md の 2026-10-24 の結果） |
 | 5 | 配布前の文書（CHANGELOG の `[Next Release]` の節、DESIGN.md・handoff.md の配置と導入の手順、version-update-checklist.md の CHANGELOG の見出し） | — | 文書だけ |
 
-**次の開始点: Step 6**（tque #46。リリース作業。October_Plan.md の 4 節）。次の版は 0.13.1（2026-10-24 に利用者が決定）。版を上げるとき（tque #48）に、version-update-checklist.md に従って版を変え、CHANGELOG の `[Next Release]` を `[0.13.1] - 日付` に置き換える。
+**次の開始点: Step 6**（tque #46。リリース作業。October_Plan.md の 4 節）。次の版は 0.13.1（2026-10-24 に利用者が決定）。PR #87 は 2026-10-24 にマージコミット `7a04bef` で main にマージした（tque #47）。版を 0.13.1 に上げ、CHANGELOG の見出しを `[0.13.1] - 2026-10-24` にした（tque #48。リリースの日が変わったら見出しの日付を直す）。`-dirty` を廃止した（コミットの有無でビルドの識別子を変えない。`build-support/git_info.rs`）。配布物 `rakukan-0.13.1-setup.exe`（ビルド `7a04bef972ff`）で T1〜T4・試験 30 に合格した（Test_Procedure.md の 0.13.1 の結果。tque #49・#50）。次は、版の変更のコミットとリリース（tque #51、リリースは利用者が行う）。
 
 決まったこと・分かったこと（フェーズ 3 の中で）:
 - #75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足した。

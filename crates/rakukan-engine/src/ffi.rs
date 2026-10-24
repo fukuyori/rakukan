@@ -249,7 +249,7 @@ fn init_dll_logging() {
 pub struct BuildInfo {
     /// crate version（workspace 共通）
     pub pkg_version: String,
-    /// ビルド元 git コミット（短縮）。`-dirty` 付きは作業ツリーに変更あり。git 不明なら `unknown`
+    /// ビルド元 git コミット（短縮）。git 不明なら `unknown`
     pub git_sha: String,
     /// ビルド時刻（UTC）
     pub build_time: String,

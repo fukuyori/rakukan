@@ -120,19 +120,31 @@
 戻す操作: 設定アプリで候補数を 1 の値に戻して保存 → 3〜5 と同じ操作。
 戻した後に見る点: ページ数が 1 と同じに戻っている。`Hello/Create ok` の rev が戻した後の `config published` の rev で、sha256 が変える前と同じ値。
 
-## T4. パッケージのインストール・更新・アンインストール（現在の手順）
+## T4. パッケージのインストール・更新・アンインストール
 
-**版数を上げた後のパッケージで行う。** 版数を上げる前のパッケージは、入っているものと同じ版数・同じ中身に置き換わるだけで、更新の試験にならない。パッケージは `-Sign` 付きで作る（`docs/Installer_Redesign_Plan.md` 4.3）。
+**版数を上げた後のパッケージで行う。** 版数を上げる前のパッケージは、入っているものと同じ版数・同じ中身に置き換わるだけで、更新の試験にならない。パッケージは `cargo make package`（`-Sign` 付き）で作る。手順はフェーズ 3 の Step 4 の後のもの（インストーラーの実行 → 再起動。事前のサインアウトは要らない）。状態は S3 の「PowerShell の準備」の関数（`Show-RakukanState`・`Show-UninstallEntry`）で見る。アンインストールの前には、ログを退避する（`docs/October_Plan.md` 4 節）。
+
+### T4-0 前の版を入れる（前の版の状態でないとき）
+1. 入っている rakukan を外す: `sudo cargo make uninstall`（または「設定」→「アプリ」）→ PC を再起動。
+2. 前の版の配布物（例: `output\oldversion\rakukan-0.13.0-release-setup.exe`）をダブルクリックで実行し、その版の手順で入れる（0.13.0 までは、終わったらサインアウト → サインイン）。
+   見る点: `Show-RakukanState` の `CLSID` が前の版のインストール先（0.13.0 までは `…\AppData\Local\rakukan\rakukan_tsf.dll`）。
 
 ### T4-1 前の版からの更新
-1. 前の版（または試験前に入っている版）の状態で、T1 の 1 で動作を確かめる。
-2. 新しい版のパッケージで更新する（現在の手順: 別の IME に切り替え → サインアウト → サインイン → インストーラー実行 → サインアウト → サインイン）。
-3. 見る点: インストーラーがエラーなく完了する。`rakukan-engine-host.log` の起動時の版数が新しい版で、ビルドの一致の検査が通る。T1 の 1 と T2-1 が通る。`%APPDATA%\rakukan` の設定・ユーザー辞書・学習履歴が残っている（0 の 1 のハッシュと比べ、学習履歴は試験で変わりうる）。
+1. 前の版の状態で、T1 の 1 で動作を確かめる。メモ帳は閉じない（前の版の TSF とホストが動いている状態にする）。
+2. 新しい版のパッケージをダブルクリックで実行する（UAC を承認）。サインアウトはしない。
+   見る点: 使用許諾の画面が出て、「同意する」で進める。完了の画面に再起動を求める文が出る。「後で再起動する」を選んで完了する。
+3. メモ帳で `kanji` → Space → Enter。
+   見る点: メモ帳が落ちない。打った文字は失われない（変換できなくてもよい）。
+4. PC を再起動し、サインインする。
+5. メモ帳で T1 の 1。PowerShell で「PowerShell の準備」を行い、`Show-RakukanState`、`Show-UninstallEntry`、ホストのログの 1 行目と `engine DLL loaded` の行（S3-1 の 8 のコマンド）。
+   見る点: 変換できる。`CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`。ホストのログの `build=` と `dll_version=` が新しい版で、`dll_git` と `host_git` が同じ（`-dirty` が付かない）。前の版が 0.13.0 までなら、`64-bit: True`・`32-bit: False`、「アプリ」の一覧の Rakukan IME が 1 つ、`%LOCALAPPDATA%\rakukan` に旧版のファイルが無い。`%APPDATA%\rakukan` の設定・ユーザー辞書・学習履歴が残っている（0 の 1 のハッシュと比べ、学習履歴は試験で変わりうる）。
 
 ### T4-2 アンインストールと再インストール
-1. 「アプリと機能」から Rakukan を削除 → サインアウト → サインイン。
-2. 見る点: キーボードの一覧に Rakukan が無い。`%APPDATA%\rakukan` が残っている。
-3. 戻す操作: 新しい版のパッケージを再インストール（現在の手順）。
+1. ログを退避する。「設定」→「アプリ」から Rakukan IME をアンインストールする。
+   見る点: 完了の後に再起動を求める表示が出る。
+2. PC を再起動し、サインインする。`Show-RakukanState`、`Show-UninstallEntry`。
+   見る点: キーボードの一覧に Rakukan が無い。`CLSID` が空。`%ProgramFiles%\rakukan` が無い。`64-bit: False`・`32-bit: False`。`%APPDATA%\rakukan` と `%ProgramData%\rakukan\models` が残っている。
+3. 戻す操作: 新しい版のパッケージをダブルクリックで実行 → PC を再起動。
 4. 戻した後に見る点: T1 の 1 が通る。設定が残っている。
 
 ## S1. フェーズ 3 の Step 1（配置に依存しない形・ログ・ETW）
@@ -666,3 +678,17 @@ S3-0 の時点の旧配置は、S2-5 で `install.ps1` により入れた `%LOCA
   - `sudo cargo make uninstall` は `exit code: 0` で、画面は出なかった。再起動の前に登録・TIP（HKLM・HKCU）・HKLM の Run・`TipListed`・キーボードの一覧の項目・アンインストール情報（64・32 ビットとも）が消え、使用中の 4 つと `C:\Program Files\rakukan` が削除の予約に入った。再起動の後の `sudo cargo make install` では、既存のファイルが無い状態で入った。
   - 戻した後: 再起動の後に変換でき、登録・キーボードの一覧・`TipListed`（`0.13.0`）・ホストとトレイの場所が戻った。
 - 後始末: 設定は `config.toml`・`keymap.toml`・`user_dict.toml` が S3-0 のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログは S3-0 と S3-4 の前に退避した。ログのレベルは `trace` のまま。`output\rakukan-0.13.0-setup.exe` は開発用のインストーラーに置き換わった（S3-4 の署名付きのものも、その後の install で置き換わった）。
+
+## 0.13.1 の結果（2026-10-24。T1〜T4・試験 30: `rakukan-0.13.1-setup.exe`、`cargo make package` で作成、ビルド `7a04bef972ff`）
+
+配布物は main（`7a04bef` = PR #87 のマージ）に版の変更（0.13.1）と `-dirty` の廃止を加えた作業ツリーから作った。署名はセットアップ本体（タイムスタンプ付き）と `dist\` の成果物 8 つがすべて有効。前の版は 0.13.0 の配布物（`output\oldversion\rakukan-0.13.0-release-setup.exe`）。試験のアプリはメモ帳の代わりに主に EmEditor を使った。
+
+- 準備: 設定を `backup-test-20261024-102657`、ログを `log-backup-20261024-102658` に写した。
+- T4-0: 開発版を `sudo cargo make uninstall` で外して再起動した後、0.13.0 の配布物を入れた。登録は `…\AppData\Local\rakukan\rakukan_tsf.dll`、アンインストール情報は 32 ビット側だけ。
+- T4-1: 合格。0.13.0 で変換できる状態から、サインアウトせずに 0.13.1 の配布物を実行した（使用許諾の画面・完了の画面の再起動の文を確認）。再起動の前も入力できた。セットアップのログに旧 DLL の登録の解除と `migration: removed old uninstall entry … (App Path=C:\Users\n_fuk\AppData\Local\rakukan)` があり、使用中の 0.13.0 の 3 つ（TSF DLL・CUDA 版の engine DLL・ホスト）は削除の予約に入った。再起動の後: ホストのログの 1 行目が `build=0.13.1@7a04bef972ff`、`engine DLL loaded` が `dll_version=0.13.1 dll_git=7a04bef972ff … host_git=7a04bef972ff`（ビルドの一致の WARN なし、`-dirty` なし）。ホスト・トレイ・engine DLL・辞書が `C:\Program Files\rakukan` から動いた。アンインストール情報は 64 ビット側だけ（`DisplayVersion` 0.13.1）。予約は空、`%LOCALAPPDATA%\rakukan` の旧版のファイルは消えた。`TipListed` が `0.13.1`。設定（`config.toml`・`keymap.toml`・`user_dict.toml`）は準備のバックアップと一致。イベントログのアプリの異常終了は無かった。
+- T1: 合格（1〜5）。
+- T2: 合格。T2-1・T2-1b・T2-2・T2-3 で、ホストを止めた後に `Disconnected(Transport)` → `Hello/Create ok … spawn=ok` → `composition read failed: Rejected(GenMismatch)`（復元のきっかけ）の順の行があった。T2-3 は Enter で選んでいた候補（「感じ」）が確定した（2026-10-10 はひらがなが確定していた）。T2-1 の前に 1 回 `Rejected(OwnerMismatch)` があった（ホストを止める前。アプリの間で入力先が移ったときのものと見られる。※推測）。T2-4 は `trigger=ManualRestart force=true` と `rpc: Shutdown acknowledged by host`、ホストのログに `Shutdown requested, exiting host process` の後の起動。
+- T3: 合格。ページ数は 5 → 4（候補数 9）→ 5（28 に戻した後）。繋ぎ直しは `Hello/Create ok config=(rev=2 sha256=e2fb5d0f66cf)`（変えた後の `config published` と同じ）と、戻した後の `rev=3 sha256=f7be1901bd38`（変える前と同じ sha256）。
+- T4-2: 合格。ログを退避（`log-backup-20261024-113955`）してから「アプリ」でアンインストールし、再起動の後に登録・TIP（HKLM・HKCU）・HKLM の Run・`TipListed`・キーボードの一覧の項目・アンインストール情報（64・32 ビットとも）・`%ProgramFiles%\rakukan`・予約が無くなり、`%APPDATA%\rakukan` と `%ProgramData%\rakukan\models` は残った。0.13.1 の配布物を入れ直して再起動の後に変換でき、登録・キーボードの一覧・`TipListed`（`0.13.1`）・ホストとトレイの場所（`C:\Program Files\rakukan`）が戻った。
+- 試験 30（配布物での統合試験）: 上の T1・T2 を 0.13.1 の配布物で行った。
+- 後始末: 設定は `config.toml`・`keymap.toml`・`user_dict.toml` が準備のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログのレベルは `trace` のまま。今の PC は 0.13.1 の配布物が入った状態。
