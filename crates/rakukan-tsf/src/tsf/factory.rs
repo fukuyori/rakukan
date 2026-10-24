@@ -112,6 +112,15 @@ const ID_MENU_ENGINE_RELOAD: u32 = 11;
 /// 経過時間は `ready_reset_elapsed_ms()` を参照。`None`（= 初期状態 or 既に
 /// ready）なら単純な砂時計を返す。
 pub(super) fn loading_indicator_symbol() -> (&'static str, &'static str) {
+    // ホストは生きているが、設定を採用できずエンジンを作らなかった（#66。設計書 4.3）
+    if matches!(
+        rakukan_engine_rpc::host_link().state,
+        rakukan_engine_rpc::LinkState::Disconnected(
+            rakukan_engine_rpc::DisconnectKind::ConfigUnusable
+        )
+    ) {
+        return ("⚙", "設定を読めません");
+    }
     match crate::engine::state::ready_reset_elapsed_ms() {
         None => ("⏳", "エンジン読込中"),
         Some(ms) if ms < 10_000 => ("⏳", "エンジン読込中"),

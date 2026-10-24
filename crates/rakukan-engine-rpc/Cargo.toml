@@ -13,8 +13,12 @@ anyhow   = { workspace = true }
 tracing  = { workspace = true }
 serde    = { workspace = true }
 postcard = { version = "1", features = ["use-std"] }
+# 設定の版の照合（config.toml の本文のハッシュ）と、最後に採用した設定の保存（#66）
+sha2       = "0.10"
+serde_json = { workspace = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 # spawn_log_env が作る RAKUKAN_LOG を、engine DLL と同じ EnvFilter で解釈して確かめる
 tracing-subscriber = { workspace = true }
 

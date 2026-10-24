@@ -481,6 +481,9 @@ pub enum ApplyOutcome {
     HostReplaced,
     /// 通信失敗・異常応答（`Ok(())` に潰した通信失敗を含む）。反映待ちは保持する
     CommFailure,
+    /// 送った組はディスクの本文と照合が通らなかった（`Rejected(ConfigStale)`、#66）。
+    /// ホストは今の設定のまま続けている。反映待ちは保持する
+    ConfigStale,
 }
 
 /// 送信中の組と契機。
@@ -510,6 +513,33 @@ pub struct ConfigManager {
     /// 直近の読込失敗（エラー文）。同じ失敗が続く間は WARN を繰り返さず、
     /// 失敗の内容が変わったときと、読めるようになったときに記録する。再確認自体は続ける
     last_load_failure: Option<String>,
+    /// 直近の読み込みで本文を読めたが設定として解析できなかったとき、その回に読めた本文の
+    /// SHA-256（docs/Engine_Config_Apply_Plan.md 4.3a。ホストへ `broken_version` として送る）。
+    /// 読み込みのたびに更新し、読めなかった・正常に読めたときは `None`。
+    broken_version: Option<[u8; 32]>,
+}
+
+/// 読み込みの失敗。解析の失敗のときは、その回に読めた本文のハッシュを持つ。
+#[derive(Debug)]
+struct LoadFailure {
+    error: anyhow::Error,
+    /// 本文を読めたが解析できなかったとき、その本文の SHA-256。読めなかったときは `None`。
+    broken_version: Option<[u8; 32]>,
+}
+
+impl LoadFailure {
+    fn unreadable(error: impl Into<anyhow::Error>) -> Self {
+        Self {
+            error: error.into(),
+            broken_version: None,
+        }
+    }
+}
+
+impl std::fmt::Display for LoadFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(f)
+    }
 }
 
 /// 読込失敗の記録。戻り値は「新しい失敗として WARN すべきか」。
@@ -562,8 +592,8 @@ fn read_and_build(
     path: &Path,
     prev: &ConfigSnapshot,
     revision: u64,
-) -> Result<Option<ConfigSnapshot>> {
-    let bytes = std::fs::read(path)?;
+) -> std::result::Result<Option<ConfigSnapshot>, LoadFailure> {
+    let bytes = std::fs::read(path).map_err(LoadFailure::unreadable)?;
     if let ConfigSource::File {
         bytes: prev_bytes, ..
     } = &prev.source
@@ -571,7 +601,16 @@ fn read_and_build(
     {
         return Ok(None);
     }
-    Ok(Some(build_snapshot_from_bytes(bytes, revision)?))
+    build_parsed(bytes, revision).map(Some)
+}
+
+/// 読めた本文から組を作る。解析できなければ、その本文のハッシュを付けた失敗にする。
+fn build_parsed(bytes: Vec<u8>, revision: u64) -> std::result::Result<ConfigSnapshot, LoadFailure> {
+    let sha256 = sha256_of(&bytes);
+    build_snapshot_from_bytes(bytes, revision).map_err(|error| LoadFailure {
+        error,
+        broken_version: Some(sha256),
+    })
 }
 
 fn log_engine_config(snapshot: &ConfigSnapshot) {
@@ -593,9 +632,10 @@ impl ConfigManager {
     /// 残す**。無言で既定値へ戻すと、利用者からは「設定が勝手に初期化された」と
     /// しか見えない。既定値由来の組は `ConfigSource::Defaults` で、本文のハッシュを持たない。
     pub(crate) fn from_path(path: PathBuf) -> Self {
+        let mut broken_version = None;
         let snapshot = match std::fs::read(&path)
-            .map_err(anyhow::Error::from)
-            .and_then(|bytes| build_snapshot_from_bytes(bytes, 1))
+            .map_err(LoadFailure::unreadable)
+            .and_then(|bytes| build_parsed(bytes, 1))
         {
             Ok(s) => s,
             Err(e) => {
@@ -603,6 +643,7 @@ impl ConfigManager {
                     "config.toml load failed; starting with defaults: path={} error={e}",
                     path.display()
                 );
+                broken_version = e.broken_version;
                 defaults_snapshot(1)
             }
         };
@@ -615,7 +656,13 @@ impl ConfigManager {
             pending_apply: None,
             in_flight: None,
             last_load_failure: None,
+            broken_version,
         }
+    }
+
+    /// 直近の読み込みで解析できなかった本文のハッシュ（設計書 4.3a）。
+    pub(crate) fn broken_version(&self) -> Option<[u8; 32]> {
+        self.broken_version
     }
 
     #[cfg(test)]
@@ -655,7 +702,9 @@ impl ConfigManager {
     }
 
     /// 読込失敗を記録する。同じ失敗の間は WARN を繰り返さない（#65: 「WARN を 1 回」）。
-    fn note_failure(&mut self, e: &anyhow::Error, reason: &str) {
+    fn note_failure(&mut self, e: &LoadFailure, reason: &str) {
+        // 壊れた本文が別の壊れた本文に替わったときもハッシュが替わるように、毎回更新する
+        self.broken_version = e.broken_version;
         let text = e.to_string();
         if note_load_failure(&mut self.last_load_failure, &text) {
             tracing::warn!(
@@ -671,6 +720,7 @@ impl ConfigManager {
     }
 
     fn note_success(&mut self) {
+        self.broken_version = None;
         if note_load_success(&mut self.last_load_failure) {
             tracing::info!("config.toml readable again: path={}", self.path.display());
         }
@@ -730,7 +780,9 @@ impl ConfigManager {
             None => None,
         };
         let cleared = match outcome {
-            ApplyOutcome::CommFailure | ApplyOutcome::HostReplaced => false,
+            ApplyOutcome::CommFailure | ApplyOutcome::HostReplaced | ApplyOutcome::ConfigStale => {
+                false
+            }
             ApplyOutcome::SameConfig
             | ApplyOutcome::RestartAccepted
             | ApplyOutcome::ShutdownAcknowledged { .. } => {
@@ -915,17 +967,26 @@ fn reload_in(
 /// `RAKUKAN_ENGINE` や RPC の接続のロックは取らない。RPC も呼ばない。そのため、
 /// 再接続の途中（それらのロックを保持した状態）から呼んでよい。
 ///
+/// 組と一緒に、直近の読み込みで解析できなかった本文のハッシュ（設計書 4.3a の
+/// `broken_version`）を、同じロックの下で返す（#66）。
+///
 /// 呼び出し元は `state::engine_config_source`（`RpcEngine` の接続試行ごとに呼ばれる）。
-pub fn snapshot_for_reconnect() -> Arc<ConfigSnapshot> {
-    snapshot_for_reconnect_in(&LOAD_LOCK, &CONFIG_MANAGER)
+pub fn snapshot_and_broken_for_reconnect() -> (Arc<ConfigSnapshot>, Option<[u8; 32]>) {
+    snapshot_and_broken_in(&LOAD_LOCK, &CONFIG_MANAGER)
 }
 
-fn snapshot_for_reconnect_in(
+fn snapshot_and_broken_in(
     load: &Mutex<()>,
     manager: &Mutex<ConfigManager>,
-) -> Arc<ConfigSnapshot> {
+) -> (Arc<ConfigSnapshot>, Option<[u8; 32]>) {
     let _ = reload_in(load, manager, "reconnect");
-    lock_or_recover(manager).current.clone()
+    let mgr = lock_or_recover(manager);
+    (mgr.current.clone(), mgr.broken_version())
+}
+
+/// 直近の読み込みで解析できなかった本文のハッシュ（設計書 4.3a）。
+pub fn broken_version() -> Option<[u8; 32]> {
+    lock_or_recover(&CONFIG_MANAGER).broken_version()
 }
 
 /// config.toml を読み直す。**読めなければ直前の設定を保つ**（Issue #61）。
@@ -1891,7 +1952,7 @@ mod config_snapshot_tests {
 mod reconnect_snapshot_tests {
     //! 再接続用の設定の組（Issue #65 の再接続組込みの準備）
     use super::config_load_failure_tests::{BROKEN, FIXED, VALID, temp_dir, write_config};
-    use super::{ConfigManager, snapshot_for_reconnect_in};
+    use super::{ConfigManager, snapshot_and_broken_in};
     use std::sync::Mutex;
     use std::time::Duration;
 
@@ -1910,7 +1971,7 @@ mod reconnect_snapshot_tests {
     fn rereads_the_file_before_returning() {
         let (load, manager, dir) = locks_with(VALID);
         write_config(&dir.join("config.toml"), FIXED);
-        let snap = snapshot_for_reconnect_in(&load, &manager);
+        let snap = snapshot_and_broken_in(&load, &manager).0;
         assert_eq!(snap.revision, 2, "接続の前に読み直して新しい組を返す");
         assert!(snap.engine_json.contains(r#""num_candidates":4"#));
         assert_eq!(
@@ -1921,11 +1982,46 @@ mod reconnect_snapshot_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// 解析できなかった本文のハッシュを `broken_version` として返す（#66。設計書 4.3a）。
+    #[test]
+    fn broken_version_tracks_the_unparsable_body() {
+        let (load, manager, dir) = locks_with(VALID);
+        let path = dir.join("config.toml");
+        let (_, broken) = snapshot_and_broken_in(&load, &manager);
+        assert_eq!(broken, None, "正常なときは付けない");
+
+        let bad1 = "[general\n";
+        std::fs::write(&path, bad1).unwrap();
+        let (snap, broken) = snapshot_and_broken_in(&load, &manager);
+        assert_eq!(broken, Some(super::sha256_of(bad1.as_bytes())));
+        assert!(
+            snap.source.sha256() != broken,
+            "組は直前の正常な本文のまま（#61）"
+        );
+
+        // 別の壊れた本文に替わればハッシュも替わる
+        let bad2 = "num_candidates = \"x\"\n[general\n";
+        std::fs::write(&path, bad2).unwrap();
+        let (_, broken) = snapshot_and_broken_in(&load, &manager);
+        assert_eq!(broken, Some(super::sha256_of(bad2.as_bytes())));
+
+        // 読めない（ファイルが無い）ときは付けない
+        std::fs::remove_file(&path).unwrap();
+        let (_, broken) = snapshot_and_broken_in(&load, &manager);
+        assert_eq!(broken, None);
+
+        // 直れば消える
+        write_config(&path, FIXED);
+        let (_, broken) = snapshot_and_broken_in(&load, &manager);
+        assert_eq!(broken, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn unchanged_file_returns_the_same_snapshot() {
         let (load, manager, dir) = locks_with(VALID);
         let before = manager.lock().unwrap().snapshot();
-        let snap = snapshot_for_reconnect_in(&load, &manager);
+        let snap = snapshot_and_broken_in(&load, &manager).0;
         assert!(
             std::sync::Arc::ptr_eq(&before, &snap),
             "本文が同じなら組を作り直さない"
@@ -1938,10 +2034,10 @@ mod reconnect_snapshot_tests {
         let (load, manager, dir) = locks_with(VALID);
         let path = dir.join("config.toml");
         write_config(&path, FIXED);
-        let good = snapshot_for_reconnect_in(&load, &manager);
+        let good = snapshot_and_broken_in(&load, &manager).0;
         // 壊れた本文
         write_config(&path, BROKEN);
-        let snap = snapshot_for_reconnect_in(&load, &manager);
+        let snap = snapshot_and_broken_in(&load, &manager).0;
         assert_eq!(snap.revision, good.revision, "壊れた本文で組を入れ替えない");
         assert_eq!(
             snap.source, good.source,
@@ -1950,7 +2046,7 @@ mod reconnect_snapshot_tests {
         assert_eq!(snap.engine_json, good.engine_json);
         // 欠落
         std::fs::remove_file(&path).expect("remove");
-        let snap = snapshot_for_reconnect_in(&load, &manager);
+        let snap = snapshot_and_broken_in(&load, &manager).0;
         assert_eq!(snap.revision, good.revision, "欠落でも直前の組を保つ");
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1968,7 +2064,7 @@ mod reconnect_snapshot_tests {
             .unwrap_or_else(|p| p.into_inner());
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let snap = snapshot_for_reconnect_in(&load, &manager);
+            let snap = snapshot_and_broken_in(&load, &manager).0;
             let _ = tx.send(snap.revision);
         });
         let got = rx.recv_timeout(Duration::from_secs(5));

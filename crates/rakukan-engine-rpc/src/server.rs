@@ -19,6 +19,7 @@ use crate::protocol::{
 };
 use rakukan_engine_abi::BgSlot;
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -27,10 +28,11 @@ use anyhow::{Context, Result};
 use rakukan_engine_abi::{BgRunState, DynEngine, StallProbe};
 
 use crate::codec::{read_frame, write_frame};
+use crate::config_check::{self, CreateDecision, DiskConfig, Verdict};
 use crate::health::{self, Action, Health, HealthTracker, RecoveryMarker, RecoveryReason};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    ChangeOutcome, ChangeRequest, EngineGen, Expect, HostId, InputCharKind, Owner,
+    ChangeOutcome, ChangeRequest, ConfigVersion, EngineGen, Expect, HostId, InputCharKind, Owner,
     PROTOCOL_VERSION, Reason, Request, RequestSeq, Response, TsfId,
 };
 
@@ -294,6 +296,10 @@ pub struct HostShared {
     /// 終了を決めた（docs/Engine_Config_Apply_Plan.md 4.2）。以後に届いた要求は処理せず
     /// `HOST_EXITING` のエラーを返す。
     exiting: AtomicBool,
+    /// 照合に読む `config.toml`（`%APPDATA%\rakukan\config.toml`。TSF と同じ場所）。
+    config_path: Option<PathBuf>,
+    /// 最後に採用した設定の保存先（`%LOCALAPPDATA%\rakukan\host-config-last.json`）。
+    last_adopted_path: Option<PathBuf>,
     /// 変換の詰まりを監視する口（Issue #57）。エンジンを作るたびに持ち替える。
     ///
     /// `state` とは別ロックにする: 監視スレッドは変換中（engine ロック保持中）でも
@@ -321,6 +327,18 @@ struct StallProbeSlot {
 
 impl HostShared {
     pub fn new() -> Self {
+        let config_path = std::env::var_os("APPDATA")
+            .map(|d| PathBuf::from(d).join("rakukan").join("config.toml"));
+        let last_adopted_path =
+            rakukan_engine_abi::local_data_dir().map(|d| d.join("host-config-last.json"));
+        Self::with_config_paths(config_path, last_adopted_path)
+    }
+
+    /// 照合に読む `config.toml` と、最後に採用した設定の保存先を指定して作る（試験用にも使う）。
+    pub fn with_config_paths(
+        config_path: Option<PathBuf>,
+        last_adopted_path: Option<PathBuf>,
+    ) -> Self {
         // 直近に自己終了しているかをマーカーから読む（Issue #43）。
         let marker = health::load_marker();
         let prior = health::prior_attempts(marker, health::now_ms());
@@ -343,7 +361,43 @@ impl HostShared {
             health: Mutex::new(HealthTracker::new(prior)),
             exit_after_response: AtomicBool::new(false),
             exiting: AtomicBool::new(false),
+            config_path,
+            last_adopted_path,
             stall_probe: Mutex::new(StallProbeSlot::default()),
+        }
+    }
+
+    /// `config.toml` を読み、要求の版と照らし合わせる（設計書 4.3）。
+    fn judge_config(
+        &self,
+        config_version: Option<ConfigVersion>,
+        broken_version: Option<ConfigVersion>,
+    ) -> (Verdict, DiskConfig) {
+        let disk = config_check::read_disk(self.config_path.as_deref());
+        (
+            config_check::judge(config_version, broken_version, disk),
+            disk,
+        )
+    }
+
+    /// 最後に採用した設定（設計書 4.3a）。無い・使えないときは `None`（既定値）。
+    fn last_adopted_config(&self) -> Option<String> {
+        self.last_adopted_path
+            .as_deref()
+            .and_then(config_check::load_last_adopted)
+            .flatten()
+    }
+
+    /// 採用した設定を保存する。書けなくても続ける。
+    fn save_last_adopted(&self, config_json: Option<&str>, config_sha256: Option<ConfigVersion>) {
+        let Some(path) = self.last_adopted_path.as_deref() else {
+            return;
+        };
+        if let Err(e) = config_check::save_last_adopted(path, config_json, config_sha256) {
+            tracing::warn!(
+                "rpc: cannot save the adopted config to {}: {e}",
+                path.display()
+            );
         }
     }
 
@@ -788,17 +842,53 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
                 record_found,
             }
         }
-        Request::Create { config_json, .. } => {
+        Request::Create {
+            config_json,
+            config_version,
+            broken_version,
+        } => {
             let mut g = lock_engine(engine);
-            if g.engine.is_some() && engine.config_snapshot() == config_json {
+            let has_engine = g.engine.is_some();
+            if has_engine && engine.config_snapshot() == config_json {
                 return Response::Unit;
             }
-            if g.engine.is_some() {
-                tracing::info!(
-                    "rpc: Create requested with changed config, reloading current engine"
-                );
+            // 1 つのホストの中では engine を作り直さない（#64）。設定が違えば、照合が
+            // 通ったときだけホストが終わる（設計書 4.2・4.3・4.3a）
+            let (verdict, disk) = engine.judge_config(config_version, broken_version);
+            match config_check::decide_create(has_engine, verdict) {
+                CreateDecision::Restart => {
+                    tracing::info!("rpc: Create with changed config; ending this host to restart");
+                    Response::CreateRestart
+                }
+                CreateDecision::Keep => {
+                    tracing::info!(
+                        "rpc: Create with a config not adopted ({verdict:?}, disk={}); keeping the current config",
+                        disk_label(disk)
+                    );
+                    Response::CreateKept
+                }
+                CreateDecision::LoadRequested => {
+                    load_engine_into(engine, &mut g, config_json, adopted_sha(disk))
+                }
+                CreateDecision::LoadLastAdopted => {
+                    let last = engine.last_adopted_config();
+                    tracing::info!(
+                        "rpc: config.toml cannot be parsed; starting with the last adopted config ({})",
+                        if last.is_some() { "saved" } else { "defaults" }
+                    );
+                    match load_engine_into(engine, &mut g, last, None) {
+                        Response::Unit => Response::CreateKept,
+                        other => other,
+                    }
+                }
+                CreateDecision::Unusable => {
+                    tracing::info!(
+                        "rpc: Create with a config not adopted (disk={}); no engine yet",
+                        disk_label(disk)
+                    );
+                    Response::Rejected(Reason::ConfigUnusable)
+                }
             }
-            load_engine_into(engine, &mut g, config_json)
         }
         // v8 で廃止（1 つのホストの中では engine を作り直さない。#64）
         Request::_ReservedReload { .. } => Response::Error("Reload has been removed".into()),
@@ -852,7 +942,8 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
         Request::ShutdownIfConfigDiffers {
             config_json,
             expected_host_id,
-            ..
+            config_version,
+            broken_version,
         } => {
             // 宛先のホストは既に入れ替わっている。新しいホストの設定と比べると、
             // 「同じ設定」と「別のホストだった」を区別できなくなるので比較しない。
@@ -868,10 +959,21 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
             let current = engine.config_snapshot();
             if current == config_json {
                 tracing::info!("rpc: ShutdownIfConfigDiffers: config unchanged, keeping host");
-                Response::Bool(false)
-            } else {
-                tracing::info!("rpc: ShutdownIfConfigDiffers: config differs, will exit");
-                Response::Bool(true)
+                return Response::Bool(false);
+            }
+            // 照合が通ったときだけ終わる。古い設定・壊れている間は終わらない（設計書 4.3）
+            match engine.judge_config(config_version, broken_version) {
+                (Verdict::Adopt, _) => {
+                    tracing::info!("rpc: ShutdownIfConfigDiffers: config differs, will exit");
+                    Response::Bool(true)
+                }
+                (verdict, disk) => {
+                    tracing::info!(
+                        "rpc: ShutdownIfConfigDiffers: config not adopted ({verdict:?}, disk={}); keeping host",
+                        disk_label(disk)
+                    );
+                    Response::Rejected(Reason::ConfigStale)
+                }
             }
         }
         other => {
@@ -1647,13 +1749,36 @@ fn lock_engine(engine: &SharedEngine) -> std::sync::MutexGuard<'_, SharedEngineS
     }
 }
 
-/// 指定 config_json で DynEngine::load_auto し、既存 slot に入れる。
-/// 辞書・モデルの bg ロードも起動する。
+/// 照合のログに出す、ディスクの読み取りの結果。
+fn disk_label(disk: DiskConfig) -> &'static str {
+    match disk {
+        DiskConfig::Read(_) => "read",
+        DiskConfig::Missing => "missing",
+        DiskConfig::Unreadable => "unreadable",
+    }
+}
+
+/// 採用した `config.toml` の本文のハッシュ（保存用）。
+fn adopted_sha(disk: DiskConfig) -> Option<ConfigVersion> {
+    match disk {
+        DiskConfig::Read(h) => Some(h),
+        DiskConfig::Missing | DiskConfig::Unreadable => None,
+    }
+}
+
+/// 指定 config_json で DynEngine::load_auto し、空の slot に入れる（1 つのホストの中では
+/// 作り直さないので、呼ぶのはエンジンが無いときだけ。#64）。
+/// 辞書・モデルの bg ロードも起動する。成功したら、採用した設定を保存する（設計書 4.3a）。
 fn load_engine_into(
     host: &HostShared,
     slot: &mut SharedEngineState,
     config_json: Option<String>,
+    adopted_sha256: Option<ConfigVersion>,
 ) -> Response {
+    debug_assert!(
+        slot.engine.is_none(),
+        "engine must not be replaced in a host"
+    );
     let install = match rakukan_engine_abi::install_dir() {
         Some(p) => p,
         None => return Response::Error("install_dir not found".into()),
@@ -1669,6 +1794,7 @@ fn load_engine_into(
             host.set_stall_probe(eng.stall_probe());
             slot.engine = Some(eng);
             host.replace_engine_gen(slot, true);
+            host.save_last_adopted(config_json.as_deref(), adopted_sha256);
             host.set_config(config_json);
             Response::Unit
         }
@@ -2355,9 +2481,21 @@ mod record_tests {
         assert!(matches!(resp, Response::Error(_)));
     }
 
+    /// 試験用の config.toml を置いたホスト。戻り値の一時フォルダは試験の間保持すること。
+    fn host_with_config(body: &[u8]) -> (SharedEngine, ConfigVersion, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(&config, body).unwrap();
+        let shared = Arc::new(HostShared::with_config_paths(
+            Some(config),
+            Some(dir.path().join("host-config-last.json")),
+        ));
+        (shared, config_check::sha256(body), dir)
+    }
+
     #[test]
     fn shutdown_checks_host_id_without_the_engine_lock() {
-        let shared: SharedEngine = Arc::new(HostShared::new());
+        let (shared, version, _dir) = host_with_config(b"[general]\n");
         let mut session = Session::default();
         // 変換中を模してエンジンのロックを保持したままでも答えられる
         let _held = shared.state.lock().unwrap();
@@ -2397,11 +2535,55 @@ mod record_tests {
             Request::ShutdownIfConfigDiffers {
                 config_json: Some("{}".into()),
                 expected_host_id: shared.host_id,
-                config_version: None,
+                config_version: Some(version),
                 broken_version: None,
             },
         );
         assert!(matches!(resp, Response::Bool(true)));
+    }
+
+    /// 設定が違っても、ディスクの本文と照合が通らなければ終わらない（設計書 4.3）。
+    #[test]
+    fn conditional_shutdown_needs_the_config_on_disk() {
+        let (shared, version, _dir) = host_with_config(b"[general]\n");
+        let mut session = Session::default();
+        let ask = |config_version, broken_version| Request::ShutdownIfConfigDiffers {
+            config_json: Some("{}".into()),
+            expected_host_id: shared.host_id,
+            config_version,
+            broken_version,
+        };
+        // 古い設定（別の本文から作った）
+        let resp = dispatch(&shared, &mut session, ask(Some([9; 32]), None));
+        assert!(matches!(resp, Response::Rejected(Reason::ConfigStale)));
+        // 既定値で作った設定（ファイルはある）
+        let resp = dispatch(&shared, &mut session, ask(None, None));
+        assert!(matches!(resp, Response::Rejected(Reason::ConfigStale)));
+        // 壊れている間は終わらない
+        let resp = dispatch(&shared, &mut session, ask(Some([9; 32]), Some(version)));
+        assert!(matches!(resp, Response::Rejected(Reason::ConfigStale)));
+        // 照合が通る
+        let resp = dispatch(&shared, &mut session, ask(Some(version), None));
+        assert!(matches!(resp, Response::Bool(true)));
+    }
+
+    /// エンジンが無いホストは、照合が通らない設定でエンジンを作らない（設計書 4.3）。
+    #[test]
+    fn create_without_an_engine_rejects_a_stale_config() {
+        let (shared, _version, _dir) = host_with_config(b"[general]\n");
+        let mut session = Session::default();
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::Create {
+                config_json: Some("{}".into()),
+                config_version: Some([9; 32]),
+                broken_version: None,
+            },
+        );
+        assert!(matches!(resp, Response::Rejected(Reason::ConfigUnusable)));
+        assert!(shared.state.lock().unwrap().engine.is_none());
+        assert_eq!(shared.config_snapshot(), None, "設定を変えない");
     }
 
     #[test]

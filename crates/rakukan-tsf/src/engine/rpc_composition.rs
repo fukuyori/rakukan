@@ -715,8 +715,9 @@ impl DynEngine {
     pub fn shutdown_if_config_differs(
         &self,
         config: Option<String>,
+        versions: rakukan_engine_rpc::ConfigVersions,
     ) -> anyhow::Result<rakukan_engine_rpc::ConditionalShutdown> {
-        self.0.shutdown_if_config_differs(config)
+        self.0.shutdown_if_config_differs(config, versions)
     }
     pub fn convert_sync(&self) -> Result<Vec<String>, ReadError> {
         match self.read_local(ReadRequest::ConvertSync)? {

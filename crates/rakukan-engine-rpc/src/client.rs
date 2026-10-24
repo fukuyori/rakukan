@@ -22,10 +22,11 @@ use anyhow::{Context, Result, anyhow, bail};
 use crate::codec::{read_frame, write_frame};
 use crate::pipe::{PipeStream, pipe_name_for_current_user};
 use crate::protocol::{
-    BgView, ChangeOutcome, ChangeRequest, Checkpoint, EditState, EffectResult, EngineGen, Expect,
-    HostId, Owner, PIPE_BASE_NAME, PROTOCOL_VERSION, ReadRequest, Reason, Replay, Request,
-    RequestSeq, Response, SideEffect, TsfId, Unresolved,
+    BgView, ChangeOutcome, ChangeRequest, Checkpoint, ConfigVersion, EditState, EffectResult,
+    EngineGen, Expect, HostId, Owner, PIPE_BASE_NAME, PROTOCOL_VERSION, ReadRequest, Reason,
+    Replay, Request, RequestSeq, Response, SideEffect, TsfId, Unresolved,
 };
+use crate::server::HOST_EXITING;
 /// ホスト実行ファイル名。インストールディレクトリ直下に配置されている前提。
 pub const HOST_EXE_NAME: &str = "rakukan-engine-host.exe";
 
@@ -200,6 +201,42 @@ pub enum DisconnectKind {
     HostMissing,
     /// `Create` の応答がエラー・想定外だった。
     CreateError,
+    /// ホストは生きているが、送った設定を採用できずエンジンを作らなかった
+    /// （`Rejected(ConfigUnusable)`、docs/Engine_Config_Apply_Plan.md 4.3）。
+    /// 設定が直る・読み直せると回復する。
+    ConfigUnusable,
+}
+
+/// 接続の試行で、ホストが起動し直しの途中だった（`CreateRestart` を受けた、または終了中の
+/// ホストに繋がった）。古いホストが終わるのを待ってから試し直す（設計書 4.5）。
+#[derive(Debug)]
+struct HostRestarting;
+
+impl std::fmt::Display for HostRestarting {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("host is restarting")
+    }
+}
+
+impl std::error::Error for HostRestarting {}
+
+fn is_host_restarting(e: &anyhow::Error) -> bool {
+    // 文脈（`.context(HostRestarting)`）として付けた場合は `downcast_ref` で、元の
+    // エラーとして作った場合は `chain` で見つかる
+    e.downcast_ref::<HostRestarting>().is_some() || e.chain().any(|c| c.is::<HostRestarting>())
+}
+
+/// `Create` の応答の分類。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreateReply {
+    /// `Unit`: 送った設定で動いている。
+    Created,
+    /// `CreateKept`: 送った設定は採用されなかったが、ホストは今の設定のまま使える。
+    Kept,
+    /// `CreateRestart`: ホストは作り直さずに終わる。
+    Restart,
+    /// `Rejected(ConfigUnusable)`: エンジンが無く、設定を採用できない。
+    Unusable,
 }
 
 /// 接続の試行の失敗（設計書 4.9）。`finish_attempt` が失敗の段階から分類して、エラーに
@@ -235,7 +272,8 @@ fn rejection_may_have_applied(reason: Reason) -> bool {
         Reason::GenMismatch | Reason::OwnerMismatch => false,
         // 適用されたかをホストも判断できない
         Reason::ResultUnavailable => true,
-        // #66 用に予約（v7 のホストは返さない）。結果不明（通信失敗と同じ）として扱う
+        // 設定の照合の拒否（#66）。ホストは `Create` / `ShutdownIfConfigDiffers` にだけ返し、
+        // 変更要求には返さない。返された場合は結果不明（通信失敗と同じ）として扱う
         Reason::ConfigStale | Reason::ConfigUnusable => true,
     }
 }
@@ -348,6 +386,18 @@ pub enum ConditionalShutdown {
     /// 比べていないので、「同じ設定」とは区別する。`Err` にすると呼び出し元が無条件の
     /// `shutdown()` へ切り替え、新しいホストを終了させてしまう。
     Skipped,
+    /// 送った設定はディスクの本文と照合が通らなかった（古い・壊れている間、
+    /// `Rejected(ConfigStale)`）。ホストは終わらない。無条件の `shutdown()` へ回さない。
+    Stale,
+}
+
+/// 送る設定の版（docs/Engine_Config_Apply_Plan.md 4.3 / 4.3a）。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ConfigVersions {
+    /// 設定の JSON を作った読み取りの `config.toml` 本文の SHA-256。既定値由来は `None`。
+    pub config_version: Option<ConfigVersion>,
+    /// 直近の読み込みで解析できなかった本文の SHA-256。正常なときは `None`。
+    pub broken_version: Option<ConfigVersion>,
 }
 
 /// `Change` の応答（Issue #56）。
@@ -591,6 +641,8 @@ pub struct CreateConfig {
     /// ログに残す、この設定の組の識別子（TSF では `rev=… sha256=…`）。
     /// `Create` が成功したときの記録に使う。
     pub label: String,
+    /// `json` を作った読み取りの版（ホストがディスクの本文と照合する。#66）。
+    pub versions: ConfigVersions,
 }
 
 /// 接続試行のたびに `Create` で送る設定を返す関数（Issue #65）。
@@ -716,6 +768,15 @@ struct AttemptContext {
     spawn_to_connect_ms: Option<u64>,
     /// この試行の `Create` に使う設定の組の識別子（`config_source` があるときだけ）。
     config_label: Option<String>,
+    /// ホストが送った設定を採用せず、今の設定のまま繋いだ（`CreateKept`）。
+    kept: bool,
+}
+
+/// 接続試行 1 回の `Create` に使う設定。
+struct AttemptConfig {
+    json: Option<String>,
+    label: Option<String>,
+    versions: ConfigVersions,
 }
 
 /// 接続試行が失敗した段階。
@@ -743,7 +804,40 @@ impl AttemptStage {
 struct AttemptFailure {
     stage: AttemptStage,
     error: anyhow::Error,
+    /// `HostSpawnGuard` の失敗に数えるか。ホストが生きている（設定を採用しなかった）・
+    /// 起動し直しの途中のときは数えない（設計書 4.3・4.5）。
+    counted: bool,
+    /// `HostLink` の分類を段階から決めず、これにする。
+    kind: Option<DisconnectKind>,
 }
+
+impl AttemptFailure {
+    fn new(stage: AttemptStage, error: anyhow::Error) -> Self {
+        // 終了中のホストに繋がった（起動し直しの途中）: 数えずに、終わるのを待って試し直す
+        let restarting = error.chain().any(|c| c.to_string().contains(HOST_EXITING));
+        if restarting {
+            return Self {
+                stage,
+                error: error.context(HostRestarting),
+                counted: false,
+                kind: None,
+            };
+        }
+        Self {
+            stage,
+            error,
+            counted: true,
+            kind: None,
+        }
+    }
+}
+
+/// `CreateRestart` の後や終了中のホストに繋がった後、古いホストが終わるのを待つ上限と間隔、
+/// 続けて待ち直す回数の上限（設計書 7 章）。
+const RESTART_WAIT_MAX_MS: u64 = 3_000;
+const RESTART_WAIT_STEP_MS: u64 = 100;
+const RESTART_PROBE_CONNECT_MS: u64 = 50;
+const MAX_RESTART_WAITS: u32 = 3;
 
 impl RpcEngine {
     /// 接続だけ試行して生成する。config_json は Create リクエストで送られる。
@@ -806,6 +900,7 @@ impl RpcEngine {
     ///   次回 API 呼び出しで新 config の Create 付きで再 spawn される。
     /// - `Ok(SameConfig)` = ホストは既に同一 config で動作中。接続・エンジンとも継続。
     /// - `Ok(Skipped)` = 宛先のホストは既に入れ替わっていた。比べていない。
+    /// - `Ok(Stale)` = 送った設定はディスクの本文と照合が通らなかった。ホストは継続。
     /// - `Err(_)`    = 比較不能（旧プロトコルのホストが variant をデコードできず
     ///   切断した、ホストが応答しない等）。呼び出し元は無条件 `shutdown()` に
     ///   フォールバックすること。
@@ -816,12 +911,13 @@ impl RpcEngine {
     pub fn shutdown_if_config_differs(
         &self,
         config_json: Option<String>,
+        versions: ConfigVersions,
     ) -> Result<ConditionalShutdown> {
         let mut guard = self
             .inner
             .lock()
             .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
-        guard.shutdown_if_config_differs(config_json)
+        guard.shutdown_if_config_differs(config_json, versions)
     }
 
     /// 採番した変更要求を送る（Issue #56）。
@@ -1171,6 +1267,7 @@ impl<T: HostTransport> Connection<T> {
     fn shutdown_if_config_differs(
         &mut self,
         config_json: Option<String>,
+        versions: ConfigVersions,
     ) -> Result<ConditionalShutdown> {
         if let Some(cfg) = config_json.clone() {
             self.config_json = Some(cfg);
@@ -1179,8 +1276,8 @@ impl<T: HostTransport> Connection<T> {
             self.call_with_retry(Request::ShutdownIfConfigDiffers {
                 config_json,
                 expected_host_id,
-                config_version: None,
-                broken_version: None,
+                config_version: versions.config_version,
+                broken_version: versions.broken_version,
             })
         });
         match result {
@@ -1196,6 +1293,12 @@ impl<T: HostTransport> Connection<T> {
                     "rpc: ShutdownIfConfigDiffers skipped (target host already replaced)"
                 );
                 Ok(ConditionalShutdown::Skipped)
+            }
+            Ok(Response::Rejected(Reason::ConfigStale)) => {
+                tracing::info!(
+                    "rpc: ShutdownIfConfigDiffers: config not adopted by the host (stale or config.toml broken); host keeps running"
+                );
+                Ok(ConditionalShutdown::Stale)
             }
             Ok(Response::Error(e)) => bail!("shutdown_if_config_differs error: {e}"),
             Ok(other) => bail!(
@@ -1480,18 +1583,74 @@ impl<T: HostTransport> Connection<T> {
         result
     }
 
+    /// 接続を試す。通常の失敗は 1 回だけ試し直す。ホストが起動し直しの途中だったときは
+    /// （`CreateRestart` を受けた・終了中のホストに繋がった）、古いホストが終わるのを
+    /// 待ってから試し直す。これは続けて `MAX_RESTART_WAITS` 回まで（設計書 4.5）。
     fn connect_with_one_retry(&mut self) -> Result<()> {
-        if let Err(first_err) = self.try_connect_once() {
-            tracing::warn!(
-                "ensure_connected: handshake failed ({first_err}); retrying after {RECONNECT_RETRY_DELAY_MS}ms"
-            );
-            self.transport
-                .sleep(Duration::from_millis(RECONNECT_RETRY_DELAY_MS));
-            return self
-                .try_connect_once()
-                .with_context(|| format!("retry after first failure: {first_err}"));
+        let mut restart_waits = 0u32;
+        let mut first_err: Option<anyhow::Error> = None;
+        loop {
+            let err = match self.try_connect_once() {
+                Ok(()) => return Ok(()),
+                Err(e) => e,
+            };
+            if is_host_restarting(&err) {
+                if restart_waits < MAX_RESTART_WAITS {
+                    restart_waits += 1;
+                    tracing::info!(
+                        "ensure_connected: host is restarting; waiting for the old host to exit ({restart_waits}/{MAX_RESTART_WAITS})"
+                    );
+                    self.wait_for_old_host_exit();
+                    continue;
+                }
+                // 起動し直しが続いた: ここで初めて失敗として数える
+                let now_ms = self.transport.now_ms();
+                let newly_blocked = self.with_guard(|g| g.record_failure(now_ms));
+                tracing::warn!(
+                    "ensure_connected: host kept restarting {MAX_RESTART_WAITS} times; counted as a startup failure (newly_blocked={newly_blocked}): {err}"
+                );
+                return Err(err);
+            }
+            match first_err {
+                None => {
+                    tracing::warn!(
+                        "ensure_connected: handshake failed ({err}); retrying after {RECONNECT_RETRY_DELAY_MS}ms"
+                    );
+                    first_err = Some(err);
+                    self.transport
+                        .sleep(Duration::from_millis(RECONNECT_RETRY_DELAY_MS));
+                }
+                Some(first) => {
+                    return Err(err.context(format!("retry after first failure: {first}")));
+                }
+            }
         }
-        Ok(())
+    }
+
+    /// 古いホストのパイプに繋がらなくなるまで待つ（最長 `RESTART_WAIT_MAX_MS`）。古いホストが
+    /// 多重起動防止のミューテックスを持っている間に新しいホストを起動すると、新しいホストが
+    /// すぐ終わってしまうため（設計書 4.5）。
+    fn wait_for_old_host_exit(&mut self) {
+        let started = self.transport.now_ms();
+        loop {
+            match self
+                .transport
+                .connect(Duration::from_millis(RESTART_PROBE_CONNECT_MS))
+            {
+                // 繋がらない: 古いホストは終わった
+                Err(_) => return,
+                // まだ動いている（終了中）。すぐ閉じて待つ
+                Ok(stream) => drop(stream),
+            }
+            if self.transport.now_ms().saturating_sub(started) >= RESTART_WAIT_MAX_MS {
+                tracing::warn!(
+                    "ensure_connected: old host still answering after {RESTART_WAIT_MAX_MS}ms; trying anyway"
+                );
+                return;
+            }
+            self.transport
+                .sleep(Duration::from_millis(RESTART_WAIT_STEP_MS));
+        }
     }
 
     /// 接続試行 1 回（connect → spawn → Hello → Create）。
@@ -1503,27 +1662,40 @@ impl<T: HostTransport> Connection<T> {
     fn try_connect_once(&mut self) -> Result<()> {
         // この試行の `Create` に使う JSON。パイプを開く前に 1 回だけ取り、試行の間は
         // 固定する（Issue #65）。
-        let (config_json, config_label) = match &self.config_source {
-            Some(source) => {
-                let config = source();
-                (config.json, Some(config.label))
-            }
-            None => (self.config_json.clone(), None),
-        };
+        let config = self.take_create_config();
         let now_ms = self.transport.now_ms();
         let mut ctx = AttemptContext {
             blocked: self.with_guard(|g| g.is_blocked(now_ms)),
-            config_label,
+            config_label: config.label.clone(),
             ..AttemptContext::default()
         };
-        let result = self.run_attempt(&mut ctx, config_json);
+        let result = self.run_attempt(&mut ctx, config);
         self.finish_attempt(&ctx, result)
+    }
+
+    /// この試行の `Create` に使う設定。`config_source` があればそこから取る（Issue #65）。
+    fn take_create_config(&self) -> AttemptConfig {
+        match &self.config_source {
+            Some(source) => {
+                let config = source();
+                AttemptConfig {
+                    json: config.json,
+                    label: Some(config.label),
+                    versions: config.versions,
+                }
+            }
+            None => AttemptConfig {
+                json: self.config_json.clone(),
+                label: None,
+                versions: ConfigVersions::default(),
+            },
+        }
     }
 
     fn run_attempt(
         &mut self,
         ctx: &mut AttemptContext,
-        config_json: Option<String>,
+        config: AttemptConfig,
     ) -> std::result::Result<(), AttemptFailure> {
         // 1. まず接続を試行（ホストが動いていればここで繋がる）
         let mut stream = match self
@@ -1557,12 +1729,12 @@ impl<T: HostTransport> Connection<T> {
                                 s
                             }
                             Err(e) => {
-                                return Err(AttemptFailure {
-                                    stage: AttemptStage::ConnectAfterSpawn,
-                                    error: e.context(format!(
+                                return Err(AttemptFailure::new(
+                                    AttemptStage::ConnectAfterSpawn,
+                                    e.context(format!(
                                         "connect after spawn (initial error: {initial_err})"
                                     )),
-                                });
+                                ));
                             }
                         }
                     }
@@ -1577,12 +1749,12 @@ impl<T: HostTransport> Connection<T> {
                         {
                             Ok(s) => s,
                             Err(e) => {
-                                return Err(AttemptFailure {
-                                    stage: AttemptStage::ConnectWhileBlocked,
-                                    error: e.context(format!(
+                                return Err(AttemptFailure::new(
+                                    AttemptStage::ConnectWhileBlocked,
+                                    e.context(format!(
                                         "connect while spawn suppressed (initial error: {initial_err})"
                                     )),
-                                });
+                                ));
                             }
                         }
                     }
@@ -1598,19 +1770,43 @@ impl<T: HostTransport> Connection<T> {
             self.ledger.highest_sent(),
         ) {
             Ok(h) => h,
-            Err(error) => {
+            Err(error) => return Err(AttemptFailure::new(AttemptStage::Hello, error)),
+        };
+        // 4. Create（この試行で固定した設定を使う）
+        let create = |stream: &mut T::Stream, config: &AttemptConfig| {
+            Self::handshake_create(stream, config.json.clone(), config.versions)
+                .map_err(|error| AttemptFailure::new(AttemptStage::Create, error))
+        };
+        let mut reply = create(&mut stream, &config)?;
+        if reply == CreateReply::Unusable && self.config_source.is_some() {
+            // 設定を読み直して 1 回だけ送り直す（設計書 4.3）
+            let again = self.take_create_config();
+            ctx.config_label = again.label.clone();
+            reply = create(&mut stream, &again)?;
+        }
+        match reply {
+            CreateReply::Created => {}
+            CreateReply::Kept => ctx.kept = true,
+            CreateReply::Restart => {
                 return Err(AttemptFailure {
-                    stage: AttemptStage::Hello,
-                    error,
+                    stage: AttemptStage::Create,
+                    error: anyhow!(HostRestarting)
+                        .context("host is restarting with the new config"),
+                    counted: false,
+                    kind: None,
                 });
             }
-        };
-        // 4. Create（この試行で固定した JSON を使う）
-        if let Err(error) = Self::handshake_create(&mut stream, config_json) {
-            return Err(AttemptFailure {
-                stage: AttemptStage::Create,
-                error,
-            });
+            CreateReply::Unusable => {
+                // ホストは生きている。数えずに、次の契機（キー・通知・定期確認）で試し直す
+                return Err(AttemptFailure {
+                    stage: AttemptStage::Create,
+                    error: anyhow!(
+                        "host did not adopt the config (config.toml changed or unreadable)"
+                    ),
+                    counted: false,
+                    kind: Some(DisconnectKind::ConfigUnusable),
+                });
+            }
         }
         if !hello.record_found
             && let Some(u) = self.ledger.unresolved()
@@ -1663,17 +1859,24 @@ impl<T: HostTransport> Connection<T> {
         }
     }
 
-    fn handshake_create(stream: &mut T::Stream, config_json: Option<String>) -> Result<()> {
+    fn handshake_create(
+        stream: &mut T::Stream,
+        config_json: Option<String>,
+        versions: ConfigVersions,
+    ) -> Result<CreateReply> {
         write_frame(
             stream,
             &Request::Create {
                 config_json,
-                config_version: None,
-                broken_version: None,
+                config_version: versions.config_version,
+                broken_version: versions.broken_version,
             },
         )?;
         match read_frame::<_, Response>(stream)? {
-            Response::Unit => Ok(()),
+            Response::Unit => Ok(CreateReply::Created),
+            Response::CreateKept => Ok(CreateReply::Kept),
+            Response::CreateRestart => Ok(CreateReply::Restart),
+            Response::Rejected(Reason::ConfigUnusable) => Ok(CreateReply::Unusable),
             Response::Error(e) => bail!("create error: {e}"),
             other => bail!("unexpected create response: {:?}", other),
         }
@@ -1703,8 +1906,16 @@ impl<T: HostTransport> Connection<T> {
                     g.reset();
                     state
                 });
-                // 送った組で `Create` が成功したことを、反映待ちとは別に記録する（Issue #65）
-                self.created_with = ctx.config_label.clone();
+                // 送った組で `Create` が成功したことを、反映待ちとは別に記録する（Issue #65）。
+                // ホストが送った組を採用しなかった（`CreateKept`）ときは、その旨を記録する
+                self.created_with = if ctx.kept {
+                    Some(format!(
+                        "host kept its config; sent {}",
+                        ctx.config_label.as_deref().unwrap_or("stored")
+                    ))
+                } else {
+                    ctx.config_label.clone()
+                };
                 tracing::info!(
                     "host connected: Hello/Create ok config=({}) spawn={spawn_label} spawn_to_connect_ms={:?} while_blocked={}",
                     self.created_with.as_deref().unwrap_or("stored"),
@@ -1715,6 +1926,22 @@ impl<T: HostTransport> Connection<T> {
                     tracing::info!("host connection recovered; clearing startup failure guard");
                 }
                 Ok(())
+            }
+            Err(failure) if !failure.counted => {
+                // ホストは生きている（設定を採用しなかった）か、起動し直しの途中。
+                // 起動の失敗には数えない（設計書 4.3・4.5）
+                let stage = failure.stage.as_str();
+                tracing::info!(
+                    "host connect not completed (not counted): stage={stage} spawn={spawn_label}: {:#}",
+                    failure.error
+                );
+                let kind = failure.kind.unwrap_or(DisconnectKind::Transport);
+                let message = failure.error.to_string();
+                Err(failure.error.context(ConnectError {
+                    stage,
+                    kind,
+                    message,
+                }))
             }
             Err(failure) => {
                 let stage = failure.stage.as_str();
@@ -2185,6 +2412,7 @@ mod tests {
             CreateConfig {
                 json: Some(format!("cfg{n}")),
                 label: format!("rev={n}"),
+                versions: ConfigVersions::default(),
             }
         });
         (source, calls)
@@ -2218,6 +2446,7 @@ mod tests {
         conn.config_source = Some(Arc::new(|| CreateConfig {
             json: None,
             label: "defaults".into(),
+            versions: ConfigVersions::default(),
         }));
         conn.try_connect_once().expect("connect");
         assert_eq!(sent_create_json(&outgoing), None);
@@ -3165,7 +3394,10 @@ mod tests {
         assert_eq!(conn.link.get().state, mismatch, "shutdown");
 
         let mut conn = connection(old_host());
-        assert!(conn.shutdown_if_config_differs(None).is_err());
+        assert!(
+            conn.shutdown_if_config_differs(None, ConfigVersions::default())
+                .is_err()
+        );
         assert_eq!(
             conn.link.get().state,
             mismatch,
@@ -3241,7 +3473,9 @@ mod tests {
                 connects: VecDeque::from([Ok(s)]),
                 ..Default::default()
             });
-            let out = conn.shutdown_if_config_differs(Some("{}".into())).unwrap();
+            let out = conn
+                .shutdown_if_config_differs(Some("{}".into()), ConfigVersions::default())
+                .unwrap();
             assert!(matches!(
                 sent(&log)[2],
                 Request::ShutdownIfConfigDiffers {
@@ -3264,5 +3498,181 @@ mod tests {
             run(Response::ShutdownSkipped),
             (ConditionalShutdown::Skipped, true)
         );
+        // 照合が通らない: ホストは続ける。接続も残す（無条件の Shutdown に回さない）
+        assert_eq!(
+            run(Response::Rejected(Reason::ConfigStale)),
+            (ConditionalShutdown::Stale, true)
+        );
+    }
+
+    /// 送る設定の版が `Create` と `ShutdownIfConfigDiffers` に載る（#66）。
+    #[test]
+    fn config_versions_are_sent() {
+        let versions = ConfigVersions {
+            config_version: Some([1; 32]),
+            broken_version: Some([2; 32]),
+        };
+        let (s, log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Unit,
+            Response::Bool(false),
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        conn.config_source = Some(Arc::new(move || CreateConfig {
+            json: Some("{}".into()),
+            label: "rev=1".into(),
+            versions,
+        }));
+        conn.shutdown_if_config_differs(Some("{}".into()), versions)
+            .unwrap();
+        let sent = sent(&log);
+        assert!(matches!(
+            sent[1],
+            Request::Create {
+                config_version: Some([1, ..]),
+                broken_version: Some([2, ..]),
+                ..
+            }
+        ));
+        assert!(matches!(
+            sent[2],
+            Request::ShutdownIfConfigDiffers {
+                config_version: Some([1, ..]),
+                broken_version: Some([2, ..]),
+                ..
+            }
+        ));
+    }
+
+    /// `CreateKept` は接続の成功。失敗に数えず、ホストが設定を採用しなかったことを記録する。
+    #[test]
+    fn create_kept_connects_without_counting() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[
+                hello_from(HOST_A, false),
+                Response::CreateKept,
+            ]))]),
+            ..Default::default()
+        });
+        conn.config_source = Some(Arc::new(|| CreateConfig {
+            json: Some("{}".into()),
+            label: "rev=7".into(),
+            versions: ConfigVersions::default(),
+        }));
+        conn.try_connect_once().expect("kept is a success");
+        assert!(conn.stream.is_some());
+        assert_eq!(conn.with_guard(|g| g.failure_count), 0);
+        assert!(
+            conn.created_with
+                .as_deref()
+                .is_some_and(|l| l.contains("host kept") && l.contains("rev=7"))
+        );
+    }
+
+    /// `ConfigUnusable` は設定を読み直して 1 回だけ送り直す。それでも拒否なら、数えずに失敗し、
+    /// 接続の状態は `ConfigUnusable` になる。
+    #[test]
+    fn config_unusable_resends_once_and_is_not_counted() {
+        let (source, calls) = counting_source();
+        let (s, log) = logged_stream(&[
+            hello_from(HOST_A, false),
+            Response::Rejected(Reason::ConfigUnusable),
+            Response::Rejected(Reason::ConfigUnusable),
+        ]);
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(s)]),
+            ..Default::default()
+        });
+        conn.config_source = Some(source);
+        let err = conn.try_connect_once().expect_err("not adopted");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "read again once"
+        );
+        assert_eq!(sent(&log).len(), 3, "Hello + Create + Create");
+        assert_eq!(conn.with_guard(|g| g.failure_count), 0, "not counted");
+        assert_eq!(disconnect_kind(&err), DisconnectKind::ConfigUnusable);
+
+        // 送り直しで採用されれば繋がる
+        let (source, _) = counting_source();
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([Ok(stream_with(&[
+                hello_from(HOST_A, false),
+                Response::Rejected(Reason::ConfigUnusable),
+                Response::Unit,
+            ]))]),
+            ..Default::default()
+        });
+        conn.config_source = Some(source);
+        conn.try_connect_once()
+            .expect("adopted after reading again");
+        assert_eq!(conn.created_with.as_deref(), Some("rev=2"));
+    }
+
+    /// `CreateRestart` の後は、古いホストが終わるのを待ってから繋ぎ直す。失敗に数えない。
+    #[test]
+    fn create_restart_waits_for_the_old_host_and_reconnects() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                // 1 回目の試行: 古いホストが CreateRestart を返す
+                Ok(stream_with(&[
+                    hello_from(HOST_A, false),
+                    Response::CreateRestart,
+                ])),
+                // 待ち: まだ古いホストに繋がる → 次は繋がらない（終わった）
+                Ok(stream_with(&[])),
+                Err("pipe gone"),
+                // 2 回目の試行: 繋がらない → spawn → 新しいホスト
+                Err("pipe gone"),
+                Ok(stream_with(&[hello_from(HOST_B, false), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        conn.connect_with_one_retry()
+            .expect("reconnected to the new host");
+        assert_eq!(conn.host_id, Some(HOST_B));
+        assert_eq!(conn.with_guard(|g| g.failure_count), 0);
+    }
+
+    /// 起動し直しが続いたら、上限で失敗として数える。
+    #[test]
+    fn repeated_restarts_are_counted_after_the_limit() {
+        let mut connects = VecDeque::new();
+        for _ in 0..=MAX_RESTART_WAITS {
+            connects.push_back(Ok(stream_with(&[
+                hello_from(HOST_A, false),
+                Response::CreateRestart,
+            ])));
+            // 待ち: すぐ繋がらなくなる
+            connects.push_back(Err("pipe gone"));
+        }
+        let mut conn = connection(FakeTransport {
+            connects,
+            ..Default::default()
+        });
+        let err = conn.connect_with_one_retry().expect_err("kept restarting");
+        assert!(is_host_restarting(&err));
+        assert_eq!(conn.with_guard(|g| g.failure_count), 1);
+    }
+
+    /// 終了中のホスト（`host exiting`）に繋がったときも、起動し直しの途中として扱う。
+    #[test]
+    fn host_exiting_is_treated_as_a_restart() {
+        let mut conn = connection(FakeTransport {
+            connects: VecDeque::from([
+                Ok(stream_with(&[Response::Error(HOST_EXITING.into())])),
+                Err("pipe gone"),
+                Err("pipe gone"),
+                Ok(stream_with(&[hello_from(HOST_B, false), Response::Unit])),
+            ]),
+            ..Default::default()
+        });
+        conn.connect_with_one_retry().expect("reconnected");
+        assert_eq!(conn.host_id, Some(HOST_B));
+        assert_eq!(conn.with_guard(|g| g.failure_count), 0);
     }
 }

@@ -440,6 +440,7 @@ trait ConfigShutdown {
     fn conditional_shutdown(
         &self,
         config_json: Option<String>,
+        versions: rakukan_engine_rpc::ConfigVersions,
     ) -> anyhow::Result<rakukan_engine_rpc::ConditionalShutdown>;
     fn shutdown(
         &self,
@@ -451,8 +452,9 @@ impl ConfigShutdown for DynEngine {
     fn conditional_shutdown(
         &self,
         config_json: Option<String>,
+        versions: rakukan_engine_rpc::ConfigVersions,
     ) -> anyhow::Result<rakukan_engine_rpc::ConditionalShutdown> {
-        self.shutdown_if_config_differs(config_json)
+        self.shutdown_if_config_differs(config_json, versions)
     }
 
     fn shutdown(
@@ -463,22 +465,35 @@ impl ConfigShutdown for DynEngine {
     }
 }
 
+/// 送る組の版（#66）。`config_version` は送る組の本文のハッシュ、`broken_version` は
+/// 直近の読み込みで解析できなかった本文のハッシュ（設計書 4.3 / 4.3a）。
+fn apply_versions(sent: &super::config::ApplyId) -> rakukan_engine_rpc::ConfigVersions {
+    rakukan_engine_rpc::ConfigVersions {
+        config_version: sent.sha256,
+        broken_version: super::config::broken_version(),
+    }
+}
+
 /// 送信と応答の境界。通信失敗を成功として扱わず、比較失敗時だけ Shutdown に落とす。
 fn request_config_apply(
     engine: &impl ConfigShutdown,
     config_json: String,
+    versions: rakukan_engine_rpc::ConfigVersions,
     force: bool,
 ) -> super::config::ApplyOutcome {
     use super::config::ApplyOutcome;
     use rakukan_engine_rpc::{ConditionalShutdown, ShutdownOutcome};
 
     if !force {
-        match engine.conditional_shutdown(Some(config_json.clone())) {
+        match engine.conditional_shutdown(Some(config_json.clone()), versions) {
             Ok(ConditionalShutdown::SameConfig) => return ApplyOutcome::SameConfig,
             Ok(ConditionalShutdown::Restarting) => return ApplyOutcome::RestartAccepted,
             // 宛先のホストは既に入れ替わっていた。無条件の Shutdown へ回ると新しい
             // ホストを終了させるので回らない。反映待ちは残す（Issue #56 / #65）
             Ok(ConditionalShutdown::Skipped) => return ApplyOutcome::HostReplaced,
+            // 送った設定はディスクの本文と照合が通らなかった（古い・壊れている間）。
+            // ホストは続けている。無条件の Shutdown へ回らず、反映待ちを残す（#66）
+            Ok(ConditionalShutdown::Stale) => return ApplyOutcome::ConfigStale,
             Err(e) => {
                 tracing::warn!(
                     "engine_reload: conditional shutdown failed ({e}); falling back to unconditional shutdown"
@@ -537,7 +552,11 @@ mod config_apply_tests {
     }
 
     impl ConfigShutdown for MockShutdown {
-        fn conditional_shutdown(&self, _: Option<String>) -> anyhow::Result<ConditionalShutdown> {
+        fn conditional_shutdown(
+            &self,
+            _: Option<String>,
+            _: rakukan_engine_rpc::ConfigVersions,
+        ) -> anyhow::Result<ConditionalShutdown> {
             self.calls.lock().expect("calls").push("conditional");
             if let Some(resume) = self.resume.lock().expect("gate").take() {
                 self.entered
@@ -558,6 +577,20 @@ mod config_apply_tests {
         }
     }
 
+    /// 照合が通らない（`Stale`）は、無条件の Shutdown へ回らず、反映待ちを残す（#66）。
+    #[test]
+    fn stale_config_does_not_fall_back_to_shutdown() {
+        let stale = MockShutdown::new(
+            Ok(ConditionalShutdown::Stale),
+            Err("must not call shutdown"),
+        );
+        assert_eq!(
+            request_config_apply(&stale, "A".into(), Default::default(), false),
+            ApplyOutcome::ConfigStale
+        );
+        assert_eq!(*stale.calls.lock().unwrap(), ["conditional"]);
+    }
+
     #[test]
     fn transport_outcomes_require_a_real_success_response() {
         let same = MockShutdown::new(
@@ -565,14 +598,14 @@ mod config_apply_tests {
             Err("must not call shutdown"),
         );
         assert_eq!(
-            request_config_apply(&same, "A".into(), false),
+            request_config_apply(&same, "A".into(), Default::default(), false),
             ApplyOutcome::SameConfig
         );
         assert_eq!(*same.calls.lock().unwrap(), ["conditional"]);
 
         let no_response = MockShutdown::new(Err("compare failed"), Ok(ShutdownOutcome::NoResponse));
         assert_eq!(
-            request_config_apply(&no_response, "A".into(), false),
+            request_config_apply(&no_response, "A".into(), Default::default(), false),
             ApplyOutcome::CommFailure
         );
         assert_eq!(
@@ -583,13 +616,13 @@ mod config_apply_tests {
         let acknowledged =
             MockShutdown::new(Err("compare failed"), Ok(ShutdownOutcome::Acknowledged));
         assert_eq!(
-            request_config_apply(&acknowledged, "A".into(), false),
+            request_config_apply(&acknowledged, "A".into(), Default::default(), false),
             ApplyOutcome::ShutdownAcknowledged { fallback: true }
         );
 
         let forced = MockShutdown::new(Err("must not compare"), Err("write failed"));
         assert_eq!(
-            request_config_apply(&forced, "A".into(), true),
+            request_config_apply(&forced, "A".into(), Default::default(), true),
             ApplyOutcome::CommFailure
         );
         assert_eq!(*forced.calls.lock().unwrap(), ["shutdown"]);
@@ -600,7 +633,7 @@ mod config_apply_tests {
             Err("must not call shutdown"),
         );
         assert_eq!(
-            request_config_apply(&skipped, "A".into(), false),
+            request_config_apply(&skipped, "A".into(), Default::default(), false),
             ApplyOutcome::HostReplaced
         );
         assert_eq!(*skipped.calls.lock().unwrap(), ["conditional"]);
@@ -608,7 +641,7 @@ mod config_apply_tests {
         let forced_skipped =
             MockShutdown::new(Err("must not compare"), Ok(ShutdownOutcome::Skipped));
         assert_eq!(
-            request_config_apply(&forced_skipped, "A".into(), true),
+            request_config_apply(&forced_skipped, "A".into(), Default::default(), true),
             ApplyOutcome::HostReplaced
         );
     }
@@ -641,7 +674,9 @@ mod config_apply_tests {
             resume: Mutex::new(Some(resume_rx)),
         });
         let in_flight = sender.clone();
-        let send = std::thread::spawn(move || request_config_apply(&*in_flight, json_a, false));
+        let send = std::thread::spawn(move || {
+            request_config_apply(&*in_flight, json_a, Default::default(), false)
+        });
         entered_rx
             .recv_timeout(Duration::from_secs(3))
             .expect("A reached transport");
@@ -656,7 +691,7 @@ mod config_apply_tests {
             .begin_apply(ApplyTrigger::SaveEvent, false)
             .expect("B pending");
         assert_ne!(a, b);
-        let b_outcome = request_config_apply(&*sender, json_b, false);
+        let b_outcome = request_config_apply(&*sender, json_b, Default::default(), false);
         assert!(manager.finish_apply(&b, b_outcome));
         assert!(!manager.has_pending_apply());
         std::fs::remove_dir_all(dir).expect("remove test dir");
@@ -684,7 +719,7 @@ mod config_apply_tests {
             Err("comparison unavailable"),
             Ok(ShutdownOutcome::NoResponse),
         );
-        let outcome = request_config_apply(&sender, json, false);
+        let outcome = request_config_apply(&sender, json, Default::default(), false);
         assert_eq!(outcome, ApplyOutcome::CommFailure);
         assert!(!manager.finish_apply(&id, outcome));
         assert!(manager.has_pending_apply());
@@ -733,8 +768,25 @@ fn engine_reload_impl(
 
         match guard.0.as_mut() {
             Some(eng) => {
-                let outcome = request_config_apply(eng, cfg, force);
+                let mut outcome = request_config_apply(eng, cfg, apply_versions(&sent), force);
                 finish_apply(&sent, outcome);
+                if outcome == ApplyOutcome::ConfigStale {
+                    // 照合が通らなかった: 読み直して 1 回だけ送り直す（#66。設計書 4.3）
+                    let _ = super::config::reload_config("config_stale");
+                    if let Some((sent, cfg)) = begin_apply(trigger, false) {
+                        outcome = request_config_apply(eng, cfg, apply_versions(&sent), false);
+                        finish_apply(&sent, outcome);
+                    }
+                }
+                if outcome == ApplyOutcome::ConfigStale {
+                    // ホストは今の設定のまま続けている。反映待ちを残し、次の契機
+                    // （通知・定期の確認・モード切替）でまた 1 回送る
+                    tracing::warn!(
+                        "engine_reload: host did not adopt the config (stale or config.toml broken); keeping host, pending kept ({:?})",
+                        t_start.elapsed()
+                    );
+                    return;
+                }
                 if outcome == ApplyOutcome::SameConfig {
                     tracing::info!(
                         "engine_reload: host already running with same config, skipping restart ({:?})",
@@ -798,12 +850,12 @@ fn create_engine() -> anyhow::Result<DynEngine> {
 /// ホストへの接続試行のたびに `Create` で送る EngineConfig JSON（Issue #65）。
 ///
 /// 初回の接続・ハンドルの作り直し・自動の再接続のどれでも、送る直前に `config.toml` を
-/// 読み直した組（`config::snapshot_for_reconnect`）から取る。保存済みの文字列で
+/// 読み直した組（`config::snapshot_and_broken_for_reconnect`）から取る。保存済みの文字列で
 /// `Create` すると、ホストが入れ替わったときに古い設定へ戻るため。
 ///
 /// 自動の再接続では `RpcEngine` の内部のロックと、呼び出し元によっては
 /// `RAKUKAN_ENGINE` を保持したまま呼ばれる（初回の生成では `RpcEngine` はまだ無い）。
-/// `snapshot_for_reconnect` が取るのは、読込専用ロックと設定状態のロックのほかは、
+/// `snapshot_and_broken_for_reconnect` が取るのは、読込専用ロックと設定状態のロックのほかは、
 /// 公開時のログのレベル（`set_host_log_level`）やログの出力の Mutex だけで、どれも
 /// エンジンのロックや RPC へは戻らない。逆向き（設定のロックを持ったままエンジンの
 /// ロックや RPC）を取る箇所も無い（`config::begin_apply` / `finish_apply` は設定の
@@ -814,12 +866,20 @@ fn create_engine() -> anyhow::Result<DynEngine> {
 /// `label` として RPC クライアントの接続ログ（`Hello/Create ok config=(…)`）に残る。
 fn engine_config_source() -> rakukan_engine_rpc::ConfigSource {
     std::sync::Arc::new(|| {
-        let snapshot = super::config::snapshot_for_reconnect();
+        let (snapshot, broken_version) = super::config::snapshot_and_broken_for_reconnect();
         let label = snapshot.apply_id().to_string();
-        tracing::debug!("engine config for Create: {label}");
+        tracing::debug!(
+            "engine config for Create: {label} broken={}",
+            broken_version.is_some()
+        );
         rakukan_engine_rpc::CreateConfig {
             json: Some(snapshot.engine_json.clone()),
             label,
+            // ホストがディスクの本文と照合する（#66。設計書 4.3 / 4.3a）
+            versions: rakukan_engine_rpc::ConfigVersions {
+                config_version: snapshot.source.sha256(),
+                broken_version,
+            },
         }
     })
 }
