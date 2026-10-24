@@ -44,10 +44,66 @@ impl std::fmt::LowerHex for DmRef {
     }
 }
 
+/// slot が死んだ理由（診断用。生死の判定には使わない）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeadReason {
+    /// 生存中の slot への `OnUninitDocumentMgr`。
+    Uninit,
+    /// 台帳に無い ptr への `OnUninitDocumentMgr`（死んだ slot として記録した）。
+    UninitUnknown,
+    /// Deactivate で一括して失効させた。
+    Deactivate,
+}
+
+impl std::fmt::Display for DeadReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DeadReason::Uninit => "uninit",
+            DeadReason::UninitUnknown => "uninit-unknown",
+            DeadReason::Deactivate => "deactivate",
+        })
+    }
+}
+
+/// [`DmRef`] が今どういう状態か（診断用。[`DmRegistry::status`] が返す）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DmStatus {
+    Live,
+    /// 同じ世代の死んだ slot が残っている。
+    Dead(DeadReason),
+    /// 同じアドレスに別の世代の slot がある（古い世代が死んだ理由は残らない）。
+    Superseded {
+        current: u64,
+        current_alive: bool,
+    },
+    /// 台帳に無い（追い出し済み、または一度も登録していない）。
+    NotInRegistry,
+}
+
+impl std::fmt::Display for DmStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DmStatus::Live => f.write_str("live"),
+            DmStatus::Dead(reason) => write!(f, "dead({reason})"),
+            DmStatus::Superseded {
+                current,
+                current_alive,
+            } => write!(
+                f,
+                "superseded(now g{current} {})",
+                if *current_alive { "live" } else { "dead" }
+            ),
+            DmStatus::NotInRegistry => f.write_str("not-in-registry"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 struct DmSlot {
     generation: u64,
     alive: bool,
+    /// 死んだ理由。生存中は `None`。
+    dead_reason: Option<DeadReason>,
 }
 
 /// 台帳本体。純粋なデータ構造で、単体テストはこれに対して行う。
@@ -89,6 +145,7 @@ impl DmRegistry {
             DmSlot {
                 generation,
                 alive: true,
+                dead_reason: None,
             },
         );
         DmRef { ptr, generation }
@@ -134,6 +191,7 @@ impl DmRegistry {
         match self.slots.get_mut(&ptr) {
             Some(slot) if slot.alive => {
                 slot.alive = false;
+                slot.dead_reason = Some(DeadReason::Uninit);
                 let dm = DmRef {
                     ptr,
                     generation: slot.generation,
@@ -156,6 +214,7 @@ impl DmRegistry {
                     DmSlot {
                         generation,
                         alive: false,
+                        dead_reason: Some(DeadReason::UninitUnknown),
                     },
                 );
                 (DmRef { ptr, generation }, false)
@@ -169,6 +228,7 @@ impl DmRegistry {
         for (&ptr, slot) in self.slots.iter_mut() {
             if slot.alive {
                 slot.alive = false;
+                slot.dead_reason = Some(DeadReason::Deactivate);
                 expired.push(DmRef {
                     ptr,
                     generation: slot.generation,
@@ -187,14 +247,26 @@ impl DmRegistry {
             .is_some_and(|s| s.alive && s.generation == dm.generation)
     }
 
-    /// 死んだ slot の数（テスト用）。
-    #[cfg(test)]
+    /// `dm` の状態（診断用の読み取りだけ。[`is_live`](Self::is_live) の判定は変えない）。
+    pub fn status(&self, dm: DmRef) -> DmStatus {
+        match self.slots.get(&dm.ptr) {
+            None => DmStatus::NotInRegistry,
+            Some(s) if s.generation != dm.generation => DmStatus::Superseded {
+                current: s.generation,
+                current_alive: s.alive,
+            },
+            Some(s) if s.alive => DmStatus::Live,
+            // 死んだ slot には必ず理由がある。万一無ければ Uninit として出す
+            Some(s) => DmStatus::Dead(s.dead_reason.unwrap_or(DeadReason::Uninit)),
+        }
+    }
+
+    /// 死んだ slot の数。
     pub fn dead_count(&self) -> usize {
         self.dead
     }
 
-    /// 生存中の slot の数（テスト用）。
-    #[cfg(test)]
+    /// 生存中の slot の数。
     pub fn live_count(&self) -> usize {
         self.slots.len() - self.dead
     }
@@ -209,7 +281,15 @@ impl DmRegistry {
                 .map(|(&ptr, _)| ptr);
             match oldest {
                 Some(ptr) => {
-                    self.slots.remove(&ptr);
+                    if let Some(s) = self.slots.remove(&ptr) {
+                        tracing::trace!(
+                            "dm_registry: evicted dead dm={:x} over cap",
+                            DmRef {
+                                ptr,
+                                generation: s.generation
+                            }
+                        );
+                    }
                     self.dead -= 1;
                 }
                 None => break,
@@ -227,6 +307,17 @@ pub enum DmSeen {
     Unknown(usize),
     /// 台帳にある ptr（生死は [`is_live`] で判定する）。
     Known(DmRef),
+}
+
+/// ログの表記: `none` / `ptr=0x… state=unknown` / `0x…/gN`。
+impl std::fmt::Display for DmSeen {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DmSeen::Absent => f.write_str("none"),
+            DmSeen::Unknown(ptr) => write!(f, "ptr={ptr:#x} state=unknown"),
+            DmSeen::Known(dm) => write!(f, "{dm:x}"),
+        }
+    }
 }
 
 impl DmSeen {
@@ -289,6 +380,34 @@ pub fn is_live(dm: DmRef) -> bool {
     TL_DM_REGISTRY
         .try_with(|r| r.borrow().is_live(dm))
         .unwrap_or(false)
+}
+
+/// 診断のログ用。`dm` の状態。台帳を引けない（thread-local の破棄後など）ときは `None`。
+/// TSF スレッド以外では台帳が空なので [`DmStatus::NotInRegistry`] になる。
+pub fn status(dm: DmRef) -> Option<DmStatus> {
+    TL_DM_REGISTRY.try_with(|r| r.borrow().status(dm)).ok()
+}
+
+/// 診断のログ用。`(生存中の数, 死んだ数)`。台帳を引けないときは `None`。
+pub fn counts() -> Option<(usize, usize)> {
+    TL_DM_REGISTRY
+        .try_with(|r| {
+            let r = r.borrow();
+            (r.live_count(), r.dead_count())
+        })
+        .ok()
+}
+
+/// 診断のログ用。`Option<DmRef>` を `none` / `0x…/gN` で出す。
+pub struct OptDm(pub Option<DmRef>);
+
+impl std::fmt::Display for OptDm {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(dm) => write!(f, "{dm:x}"),
+            None => f.write_str("none"),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -464,5 +583,71 @@ mod tests {
         }
         assert!(reg.is_live(live));
         assert_eq!(reg.dead_count(), DmRegistry::DEAD_SLOT_CAP);
+    }
+
+    /// 診断の状態は、失効の経路ごとの理由・世代違い・台帳に無いを区別する。
+    #[test]
+    fn status_reports_reason_and_supersession() {
+        let mut reg = DmRegistry::default();
+        let a = reg.register(0x10);
+        assert_eq!(reg.status(a), DmStatus::Live);
+        reg.expire(0x10);
+        assert_eq!(reg.status(a), DmStatus::Dead(DeadReason::Uninit));
+
+        let (u, _) = reg.expire(0x20);
+        assert_eq!(reg.status(u), DmStatus::Dead(DeadReason::UninitUnknown));
+
+        let b = reg.register(0x30);
+        reg.expire_all();
+        assert_eq!(reg.status(b), DmStatus::Dead(DeadReason::Deactivate));
+
+        // 同じアドレスの新しい世代: 古い世代は世代違いになる
+        let a2 = reg.register(0x10);
+        assert_eq!(
+            reg.status(a),
+            DmStatus::Superseded {
+                current: a2.generation,
+                current_alive: true
+            }
+        );
+        assert_eq!(
+            reg.status(DmRef {
+                ptr: 0x40,
+                generation: 1
+            }),
+            DmStatus::NotInRegistry
+        );
+    }
+
+    /// 理由を持たせても、生死の判定と件数は変わらない。
+    #[test]
+    fn status_does_not_change_liveness_or_counts() {
+        let mut reg = DmRegistry::default();
+        let a = reg.register(0x10);
+        reg.expire(0x10);
+        let _ = reg.status(a);
+        assert!(!reg.is_live(a));
+        assert_eq!((reg.live_count(), reg.dead_count()), (0, 1));
+        // 死んだ slot の再登録で理由は消える
+        let (a2, fresh) = reg.ensure_live(0x10);
+        assert!(fresh);
+        assert_eq!(reg.status(a2), DmStatus::Live);
+        assert_eq!((reg.live_count(), reg.dead_count()), (1, 0));
+    }
+
+    #[test]
+    fn dm_seen_display_uses_hex_notation() {
+        let dm = DmRef {
+            ptr: 0x1c9b990d920,
+            generation: 4,
+        };
+        assert_eq!(DmSeen::Known(dm).to_string(), "0x1c9b990d920/g4");
+        assert_eq!(
+            DmSeen::Unknown(0xabc).to_string(),
+            "ptr=0xabc state=unknown"
+        );
+        assert_eq!(DmSeen::Absent.to_string(), "none");
+        assert_eq!(OptDm(None).to_string(), "none");
+        assert_eq!(OptDm(Some(dm)).to_string(), "0x1c9b990d920/g4");
     }
 }

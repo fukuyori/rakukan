@@ -604,6 +604,8 @@ impl ITfTextInputProcessor_Impl for TextServiceFactory_Impl {
                 let (dm, fresh) = dm_registry::ensure_live(focused.as_raw() as usize);
                 if fresh {
                     tracing::debug!("Activate: focused dm={dm:x} was not enumerated, registered");
+                } else {
+                    tracing::debug!("Activate: focused dm={dm:x} already registered");
                 }
                 if let Some(mode) = doc_mode_on_focus_change(None, Some(dm), hwnd_val) {
                     tracing::info!("Activate: initial mode={mode:?} (config.input.default_mode)");
@@ -1796,6 +1798,7 @@ fn register_existing_document_mgrs(tm: &ITfThreadMgr) {
     // 参照を保持したまま集める。登録前に解放すると、そのアドレスが別の DM に再利用
     // されうる。
     let mut dms: Vec<ITfDocumentMgr> = Vec::new();
+    let mut complete = true;
     loop {
         let mut buf: [Option<ITfDocumentMgr>; 8] = Default::default();
         let mut fetched = 0u32;
@@ -1804,6 +1807,7 @@ fn register_existing_document_mgrs(tm: &ITfThreadMgr) {
                 "Activate: EnumDocumentMgrs Next failed after {} dm(s): {err}; enumeration may be incomplete",
                 dms.len()
             );
+            complete = false;
             break;
         }
         if fetched == 0 {
@@ -1812,14 +1816,20 @@ fn register_existing_document_mgrs(tm: &ITfThreadMgr) {
         dms.extend(buf.into_iter().take(fetched as usize).flatten());
     }
     let mut fresh = 0usize;
+    // 列挙した DM の一覧（Issue #50 の段 1。未登録の DM が列挙に出ていたかを照合する）
+    let mut listed = Vec::with_capacity(dms.len());
     for dm in &dms {
-        if dm_registry::ensure_live(dm.as_raw() as usize).1 {
+        let (dm, is_new) = dm_registry::ensure_live(dm.as_raw() as usize);
+        if is_new {
             fresh += 1;
         }
+        listed.push(format!("{dm:x}({})", if is_new { "new" } else { "known" }));
     }
     tracing::debug!(
-        "Activate: enumerated {} dm(s), registered {fresh} new",
-        dms.len()
+        "Activate: enumerated {} dm(s), registered {fresh} new, {}: [{}]",
+        dms.len(),
+        if complete { "complete" } else { "incomplete" },
+        listed.join(", ")
     );
     drop(dms);
 }
@@ -1839,8 +1849,13 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
                 use windows::core::Interface;
                 dm.as_raw() as usize
             };
+            // 上書きする前の状態（生存中の slot の上書きは、Uninit を見ずに同じアドレスが
+            // 再利用されたことを示す）
+            let before = dm_registry::lookup(ptr)
+                .and_then(dm_registry::status)
+                .map_or_else(|| "none".to_string(), |s| s.to_string());
             let dm = dm_registry::register(ptr);
-            tracing::trace!("OnInitDocumentMgr: registered dm={dm:x}");
+            tracing::debug!("OnInitDocumentMgr: registered dm={dm:x} (slot before: {before})");
         }
         Ok(())
     }
@@ -1852,8 +1867,8 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
                 dm.as_raw() as usize
             };
             // 台帳の失効（slot は残す）→ モード退避 → context / composition の無効化
+            // 台帳の変化は dispose_dm_resources が DEBUG で出す
             crate::engine::state::dispose_dm_resources(ptr);
-            tracing::trace!("OnUninitDocumentMgr: removed dm={ptr:#x}");
         }
         Ok(())
     }
@@ -1888,11 +1903,19 @@ impl ITfThreadMgrEventSink_Impl for TextServiceFactory_Impl {
         // なので COM 再入もロックも無い。台帳に無い ptr は登録しない（死んだ扱い）。
         let next = dm_registry::seen(next_ptr);
         let prev = dm_registry::seen(prev_ptr);
-        if let DmSeen::Unknown(ptr) = next {
-            tracing::debug!("OnSetFocus: unknown dm={ptr:#x} as next (not registered)");
-        }
-        if let DmSeen::Unknown(ptr) = prev {
-            tracing::debug!("OnSetFocus: unknown dm={ptr:#x} as prev (not saved)");
+        if matches!(next, DmSeen::Unknown(_)) || matches!(prev, DmSeen::Unknown(_)) {
+            // 台帳の件数（Issue #50 の段 1）。台帳の借用だけで COM には触れない
+            let (live, dead) = dm_registry::counts().unwrap_or((0, 0));
+            if let DmSeen::Unknown(ptr) = next {
+                tracing::debug!(
+                    "OnSetFocus: unknown dm={ptr:#x} as next (not registered; registry live={live} dead={dead})"
+                );
+            }
+            if let DmSeen::Unknown(ptr) = prev {
+                tracing::debug!(
+                    "OnSetFocus: unknown dm={ptr:#x} as prev (not saved; registry live={live} dead={dead})"
+                );
+            }
         }
 
         let hwnd_val = foreground_root_hwnd();

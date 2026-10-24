@@ -1089,10 +1089,18 @@ fn handle_pending_focus_changes() {
 /// msctf._NotifyCallbacks コールバックの外で実行されるため、
 /// COM 再入 (set_open_close) や ITfContext の Drop (stop_live_timer) が安全。
 fn process_focus_change(fc: FocusChange) {
+    // 照合の結果もこの行に出す（Issue #50 の段 1。続く skipped save / dead の行の理由）。
+    // 台帳を読むだけで、判定は下の is_live のまま
+    let state = |dm: Option<DmRef>| {
+        dm.and_then(dm_registry::status)
+            .map_or_else(String::new, |s| format!(" [{s}]"))
+    };
     tracing::debug!(
-        "OnSetFocus(deferred): prev_dm={:?} next_dm={:?} hwnd={:#x}",
-        fc.prev,
+        "OnSetFocus(deferred): prev_dm={}{} next_dm={}{} hwnd={:#x}",
+        dm_registry::OptDm(fc.prev),
+        state(fc.prev),
         fc.next,
+        state(fc.next.known()),
         fc.hwnd_val
     );
 

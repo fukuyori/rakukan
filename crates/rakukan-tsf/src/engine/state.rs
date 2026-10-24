@@ -2746,7 +2746,10 @@ impl ModeStore {
         if hwnd != 0 {
             self.hwnd_modes.insert(hwnd, mode);
         }
-        tracing::trace!("doc_mode: remembered mode={mode:?} for dm={dm:?} hwnd={hwnd:#x}");
+        tracing::trace!(
+            "doc_mode: remembered mode={mode:?} for dm={} hwnd={hwnd:#x}",
+            dm_registry::OptDm(dm)
+        );
     }
 
     /// DM 破棄時: モードを HWND へ退避してから `dm_modes` / `dm_to_hwnd` を削除する。
@@ -2913,6 +2916,15 @@ pub fn doc_mode_remember_current(mode: ImeMode) {
         return;
     }
     let dm_live = dm.is_some_and(dm_registry::is_live);
+    if let Some(dm) = dm.filter(|_| !dm_live) {
+        // 生きていない理由（Issue #50 の段 1）。台帳を引けないときは理由を判定しない
+        match dm_registry::status(dm) {
+            Some(status) => tracing::debug!("doc_mode: current dm={dm:x} is {status}"),
+            None => tracing::debug!(
+                "doc_mode: current dm={dm:x} not live; registry unavailable, reason unknown"
+            ),
+        }
+    }
     if let Ok(mut store) = DOC_MODE_STORE.try_lock() {
         store.remember_current(dm, dm_live, hwnd, mode);
     }
@@ -2940,7 +2952,15 @@ pub fn doc_mode_deactivate() {
     if expired.is_empty() {
         return;
     }
-    tracing::debug!("doc_mode: deactivate expired {} live dm(s)", expired.len());
+    tracing::debug!(
+        "doc_mode: deactivate expired {} live dm(s): [{}]",
+        expired.len(),
+        expired
+            .iter()
+            .map(|dm| format!("{dm:x}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
     // このスレッドの DM の RPC の編集状態も外す（入力処理の見直しの段 3）。DM はスレッドごと
     // なので、所有スレッドでない Deactivate でも、ほかのスレッドの状態には触れない
     for dm in &expired {
@@ -2964,11 +2984,16 @@ pub fn doc_mode_deactivate() {
 /// 通知は死んだ世代に解決される）。
 pub fn dispose_dm_resources(dm_ptr: usize) {
     super::rpc_composition::dispose(dm_ptr);
+    // 失効の前の状態で 3 つの場合を書き分ける（Issue #50 の段 1）
+    let known_before = dm_registry::lookup(dm_ptr).is_some();
     let (dm, expired) = dm_registry::expire(dm_ptr);
     if expired {
+        tracing::debug!("OnUninitDocumentMgr: expired live dm={dm:x}");
         doc_mode_remove(dm);
+    } else if known_before {
+        tracing::debug!("OnUninitDocumentMgr: dm={dm:x} was already dead");
     } else {
-        tracing::debug!("doc_mode: uninit for unknown or dead dm={dm:x} (recorded as dead)");
+        tracing::debug!("OnUninitDocumentMgr: unknown ptr={dm_ptr:#x}, recorded as dead dm={dm:x}");
     }
     crate::tsf::candidate_window::invalidate_live_context_for_dm(dm_ptr);
     invalidate_composition_for_dm(dm_ptr);
