@@ -160,19 +160,19 @@ TSF の `.log.tmp` はローテーション途中のログを保持している�
 ### 4.1 ビルド + インストール
 
 ```sh
-cargo make build-tsf             # TSF のみ（engine 変更なしなら高速）
-cargo make build-engine          # engine 本体。初回 / engine crate 変更後
-sudo cargo make install
+cargo make build-engine          # engine 本体。初回 / engine crate 変更後（変更なしなら省略できる）
+cargo make build-tsf             # TSF
+sudo cargo make install          # インストーラーを署名なしで作り、サイレント実行（%ProgramFiles%\rakukan）
 ```
 
-**サインアウト → 再ログオン**。TSF DLL は新 PID でないと再読み込みされない。
+**PC を再起動**してインストールを完了する（使用中のファイルは再起動のときに置き換わる。事前のサインアウトは要らない）。
 
 ### 4.2 症状カテゴリ別チェックリスト
 
 #### `0xc0000005` crash 系
 
 1. WerFault フルダンプ設定（§2.1）を確認
-2. `cargo make sign && cargo make install` → サインアウト → 再ログオン
+2. §4.1 の手順でビルドしてインストールし、PC を再起動する
 3. 再現操作を 30 分以上継続（Explorer 主体ならアドレスバー / リネーム / フォルダ移動 / Alt+Tab）
 4. `%LOCALAPPDATA%\CrashDumps\` に dump が出るか確認
 5. 出たら §2.2 で解析
