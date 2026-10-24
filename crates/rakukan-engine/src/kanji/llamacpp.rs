@@ -149,53 +149,6 @@ impl LlamaCppModel {
         })
     }
 
-    /// Load a GGUF model with a pre-tokenizer type override.
-    ///
-    /// Some models use custom pre-tokenizer types (e.g., `gpt2-small-japanese-char`)
-    /// that llama.cpp doesn't recognize. This method overrides the `tokenizer.ggml.pre`
-    /// metadata key to a compatible type before loading.
-    pub fn from_file_with_pre_tokenizer_override<P: AsRef<Path>, T: AsRef<Path>>(
-        path: P,
-        tokenizer_json: T,
-        pre_tokenizer: &str,
-    ) -> Result<Self> {
-        use llama_cpp_2::model::params::kv_overrides::ParamOverrideValue;
-        use std::ffi::CString;
-        use std::pin::pin;
-
-        let backend = get_backend()?;
-
-        let mut params = pin!(LlamaModelParams::default().with_n_gpu_layers(0));
-
-        let key =
-            CString::new("tokenizer.ggml.pre").map_err(|e| KanjiError::ModelLoad(e.into()))?;
-        let mut str_value: [std::os::raw::c_char; 128] = [0; 128];
-        for (i, &byte) in pre_tokenizer.as_bytes().iter().enumerate() {
-            if i >= 127 {
-                break;
-            }
-            str_value[i] = byte as std::os::raw::c_char;
-        }
-        params
-            .as_mut()
-            .append_kv_override(&key, ParamOverrideValue::Str(str_value));
-
-        let model = LlamaModel::load_from_file(backend, path.as_ref(), &params)
-            .map_err(|e| KanjiError::ModelLoad(e.into()))?;
-        let external_tokenizer = load_tokenizer(tokenizer_json)?;
-        let special_token_ids = non_byte_special_token_ids(&external_tokenizer);
-
-        Ok(Self {
-            model,
-            n_ctx: 128,
-            external_tokenizer,
-            special_token_ids,
-            n_threads: 0,
-            n_gpu_layers: 0,
-            main_gpu: 0,
-        })
-    }
-
     /// Load a GGUF model with explicit context window size
     pub fn from_file_with_n_ctx<P: AsRef<Path>, T: AsRef<Path>>(
         path: P,

@@ -21,8 +21,6 @@ pub struct ModelRegistry {
 pub struct ModelFamily {
     pub repo_id: String,
     pub display_name: String,
-    #[serde(default)]
-    pub pre_tokenizer_override: Option<String>,
     /// Quantisation variants keyed by short name (e.g. "q5", "f16")
     pub variants: HashMap<String, VariantConfig>,
 }
@@ -94,7 +92,8 @@ mod tests {
     #[test]
     fn test_parse_registry() {
         let reg = registry();
-        assert_eq!(reg.default_model, "jinen-v1-small-q5");
+        // 既定のモデルは xsmall（配布する config.toml・設定アプリと同じ）
+        assert_eq!(reg.default_model, "jinen-v1-xsmall-q5");
         assert_eq!(reg.models.len(), 4, "Expected exactly 4 model families");
     }
 
@@ -122,8 +121,8 @@ mod tests {
     fn test_default_variant() {
         let reg = registry();
         let (family, variant) = reg.default_variant().expect("default not found");
-        assert_eq!(variant.id, "jinen-v1-small-q5");
-        assert_eq!(family.repo_id, "togatogah/jinen-v1-small.gguf");
+        assert_eq!(variant.id, "jinen-v1-xsmall-q5");
+        assert_eq!(family.repo_id, "togatogah/jinen-v1-xsmall.gguf");
     }
 
     #[test]

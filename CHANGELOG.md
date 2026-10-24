@@ -3,6 +3,29 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [Next Release]
+
+設定アプリで変えた設定（モデル・GPU の backend・ログの水準を含む）が、エンジンのホストが動いている間も次の変換から反映されるようになった。設定が変わると、ホストは自分の中でエンジンを作り直さず、起動し直す（ほかのアプリの接続もいったん切れ、入力中の文字は戻される）。ホストとの通信の版（RPC プロトコル）が 8 に上がったので、更新した後は PC を再起動するまで日本語入力が使えないことがある。
+
+### Fixed
+
+- **モデルを変えても、ホストが動いている間は前のモデルのまま変換していた**（[Issue #49](https://github.com/fukuyori/rakukan/issues/49)）: 設定が違えばホストが起動し直して、新しいモデルを読み込む。エンジンは、残っている変換の部品を、作ったときのモデルの設定が同じときだけ使う。
+- **`gpu_backend` だけを変えても反映されなかった**（[Issue #49](https://github.com/fukuyori/rakukan/issues/49)）: `gpu_backend` と `log_level` も、ホストへ送る設定に入れた。ホストは送られた設定の `gpu_backend` で engine DLL を選び、config.toml を読み直さない。
+- **設定が違う接続で、ホストが同じプロセスの中でエンジンと DLL を作り直していた**（[Issue #64](https://github.com/fukuyori/rakukan/issues/64)）: 作り直さずに、ホストが起動し直す。ホストの中で backend を替えたときの、変換が極端に遅くなる状態が起きなくなる。終わると決めたホストは、ほかのアプリの処理中の要求が終わるのを待ってから終わる。
+- **古い設定を持ったアプリの接続で、ホストの設定が戻ることがあった**（[Issue #66](https://github.com/fukuyori/rakukan/issues/66)）: ホストは、送られた設定が config.toml の今の本文から作られているか（本文のハッシュ）を確かめ、一致するときだけ採用する。config.toml を解析できない間は、ホストが最後に採用した設定（`%LOCALAPPDATA%\rakukan\host-config-last.json`）で動く。
+- **IME をオンにした直後、言語バーとキャレットの近くの表示が「あ」ではなく「ー」になっていた**: 文字を打つまで辞書の準備の印が立たないためだった。IME のオン/オフだけを表示する。
+
+### Changed
+
+- **既定のモデルを `jinen-v1-xsmall-q5` にそろえた**（[Issue #82](https://github.com/fukuyori/rakukan/issues/82)）: engine の models.toml だけが `jinen-v1-small-q5` になっていた（config.toml に `model_variant` が無いときに効いていた）。
+- **設定アプリのモデルの選択肢を、models.toml から作るようにした**（[Issue #82](https://github.com/fukuyori/rakukan/issues/82)）: 使えるモデルの一覧は models.toml だけに書く。選択肢の表示から容量の目安が無くなり、models.toml の表示名を出す。config.toml のコメントにあったモデルの一覧も消した。
+- RPC プロトコルの版を 8 にした。使われていなかった `Reload` と `AvailableModelsJson` を廃止した（位置は残してある）。
+- 使っていなかった `pre_tokenizer_override` を消した。
+
+### Added
+
+- **DocumentManager の台帳の調査のためのログ**（[Issue #50](https://github.com/fukuyori/rakukan/issues/50)）: 台帳の登録・失効・列挙と、`skipped save` / `unknown dm` の理由を DEBUG で出す。動作は変えない。
+
 ## [0.13.1] - 2026-10-24
 
 インストール先が `%LOCALAPPDATA%\rakukan` から `%ProgramFiles%\rakukan` に変わり、インストール・更新・アンインストールは、インストーラーを実行した後の **PC の再起動** で完了する。事前の準備（別の IME への切り替え、サインアウト・サインイン）は要らない。使用中のファイルは再起動のときに置き換わるので、再起動するまでは Rakukan による日本語入力ができないことがある。0.13.0 までの配置から更新すると、インストーラーが旧配置の登録を解除し、旧版のファイルを消す（使用中のものは再起動のときに消える）。設定・ユーザー辞書・学習履歴・ログはそのまま残る。

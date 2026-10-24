@@ -31,5 +31,9 @@
     <Content Include="..\..\crates\rakukan-tsf\rakukan.ico" Link="rakukan.ico">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
+    <!-- モデルの選択肢の元（engine に埋め込むものと同じ一覧。docs/Engine_Config_Apply_Plan.md 4.7） -->
+    <Content Include="..\..\crates\rakukan-engine\models.toml" Link="models.toml">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
   </ItemGroup>
 </Project>

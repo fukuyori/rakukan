@@ -467,6 +467,11 @@ load_auto(dir, config_json)
          全て失敗したら各 backend の理由をまとめたエラー
 ```
 
+ホストは `load_auto` ではなく `load_with_backend_setting(dir, gpu_backend, config_json)` を使い、
+TSF が送った設定の JSON の `gpu_backend` で選ぶ（選び方は同じ。config.toml を読み直さないので、
+JSON と DLL の選択が同じ保存を指す。[Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md) 4.1）。
+`load_auto`（config.toml を読む）は CLI などホスト以外の経路に残っている。
+
 v0.11.0 まではファイルの有無だけで backend を決めていたため、CUDA ランタイム未導入の環境で
 `rakukan_engine_cuda.dll` が存在するとロード失敗のまま先へ進めず IME が無反応になった（Issue #2）。
 `LoadLibrary` が `ERROR_MOD_NOT_FOUND`（126）で失敗した場合は依存 DLL 不足のヒントを付ける。
@@ -499,7 +504,7 @@ RpcEngine (client)                          serve() (server)
 
 ### プロトコル
 
-現在の `PROTOCOL_VERSION` は **7**（0.13.0）。
+現在の `PROTOCOL_VERSION` は **8**（設定の反映とホストの起動し直し。[Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)）。
 `Hello` で一致しないと接続できない。インストーラーは古いホストを止めず、使用中のファイルは
 次の Windows の起動時に置き換えるので、版を上げたリリースでは、再起動するまで日本語入力が
 使えないことがある（TSF は「エンジン未準備」と同じ扱いで直接入力になる。[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 2 章）。
@@ -510,19 +515,20 @@ RpcEngine (client)                          serve() (server)
 | Request | 役割 |
 | --- | --- |
 | `Hello { protocol_version }` | 接続直後のバージョン交換 |
-| `Create { config_json }` | DynEngine を初回生成（既存なら no-op） |
-| `Reload { config_json }` | 既存 DynEngine を drop して新 config で再生成 |
+| `Create { config_json, config_version, broken_version }` | DynEngine を初回生成（同じ config なら no-op）。config が違えばホストは作り直さず、照合が通れば `CreateRestart` で終わり、通らなければ `CreateKept` で今の config のまま続ける（下の「config.toml の変更検出と反映」） |
+| `_ReservedReload` | 旧 `Reload`（v8 で廃止。1 つのホストの中ではエンジンを作り直さない。#64）。host は Error を返す |
 | `PushChar(u32) / Backspace / ResetAll / ...` | 入力操作 |
 | `BgStart / BgWaitMs / BgTakeCandidates / ...` | BG 変換 |
 | `MergeCandidatesForReading` | 候補マージ。TSF 側が reading を明示する（旧 `MergeCandidates` は `_ReservedMergeCandidates` としてスロットのみ残し、host は Error を返す） |
 | `ConvertSync / SegmentSurface / ...` | 同期変換 |
 | `Shutdown` | ホストに自己終了を依頼する（応答後に `process::exit(0)`） |
-| `ShutdownIfConfigDiffers { config_json }` | ホストの config と異なるときだけ自己終了する（`Bool(true)` = 終了する） |
+| `ShutdownIfConfigDiffers { config_json, expected_host_id, config_version, broken_version }` | ホストの config と異なり、照合が通ったときだけ自己終了する（`Bool(true)` = 終了する。照合が通らなければ `Rejected(ConfigStale)` で続ける） |
 | `EngineHealth` | ホストの健全性 `ok` / `recovering` / `unrecoverable` を返す（Issue #43）。エンジンのロックを取らずに即答する |
 | `Bye` | クライアント切断宣言 |
 
-`Response` は `Hello / Unit / Bool / U32 / I32 / String / Strings / SegmentsModel / Error / InputCharResult` のいずれか
-（`_ReservedSegments` / `_ReservedSegmentBlocks` は ABI v7 で廃止したスロット）。
+`Response` は `Hello / Unit / Bool / U32 / I32 / String / Strings / SegmentsModel / Error / InputCharResult` などのほか、
+v8 で `CreateRestart` / `CreateKept` を末尾に加えた（`_ReservedSegments` / `_ReservedSegmentBlocks` は ABI v7 で廃止したスロット）。
+使う所の無かった `AvailableModelsJson` は v8 で `_ReservedAvailableModelsJson` にした（モデルの一覧は models.toml。設定アプリが直接読む）。
 enum の discriminant は宣言順なので、`Request` / `Response` の variant は**末尾にだけ追加する**。
 ホスト側で panic したり DynEngine が未生成のまま他リクエストが来た場合は
 `Response::Error(String)` を返し、クライアント側は空値を返すかそのまま無視する。
@@ -542,9 +548,16 @@ hiragana_buf 等のセッション状態は TSF 側がフォーカス変化で `
 3. `ensure_connected()` がパイプ接続を試行 → 失敗したら `CreateProcessW`
    （`DETACHED_PROCESS | CREATE_NO_WINDOW`）で `rakukan-engine-host.exe` を起動
 4. 最大 5 秒までリトライ接続、成功したら `Hello` → `Create` を送信
-   （`Create` はホストの config と同じなら no-op、異なればエンジンを作り直す）
+   （`Create` はホストの config と同じなら no-op。異なれば、ホストはエンジンを作り直さず、
+   `CreateRestart` で終わるか `CreateKept` で今の config のまま続ける）
 5. ホストがクラッシュして別 PID で再起動した場合、`call_with_retry` が
-   パイプエラーを検知して 1 回だけ再接続し、**保存済み `config_json` で `Create` を再送**
+   パイプエラーを検知して 1 回だけ再接続し、**接続試行ごとに config.toml を読み直した組**
+   （`config_source`、#65）で `Create` を再送する
+5a. `CreateRestart` を受けた、または終了中のホスト（`host exiting`）に繋がった試行は、起動の失敗に
+   数えず、古いホストのパイプに繋がらなくなるまで（100ms ごとに最長 3 秒）待ってから試し直す
+   （古いホストが多重起動防止のミューテックスを持っている間に spawn すると、新しいホストがすぐ終わるため）。
+   続けて 3 回を超えたら失敗として数える。終わると決めたホストは、以後の要求に `host exiting` を返し、
+   ほかのセッションの処理中の要求が終わるのを最長 2 秒待ってから終わる
 6. 接続試行（接続 → spawn → `Hello` → `Create`）が最終的に失敗すると、どの段階の失敗でも
    1 試行につき 1 回数え、15 秒に 3 回でその TSF プロセスからの spawn を 30 秒止める
    （`HostSpawnGuard`、Issue #55）。spawn に失敗しても別プロセスが起動したホストへ
@@ -591,8 +604,8 @@ BG 変換が同じ実行のまま 30 秒（`health::STALL_THRESHOLD`）以上 `R
   記憶は (世代, 実行番号) の組で持つ（DLL の variant が変わると実行番号が 0 から数え直しになるため、
   番号だけだと詰まりを見逃す）。確定は口のロックを保持したまま行い、そこで世代を照合するので、
   **古い DLL の観測で現在のホストを終了させることはない**
-- エンジンを外すとき（`Reload`）は口も外す。ロードに失敗したときに、停止しきっていない古い DLL の
-  ワーカーの `Running` を根拠に終了しないため
+- v8 から 1 つのホストの中ではエンジンを作り直さない・外さない（`Reload` は廃止）ので、口を外す
+  経路（`clear_stall_probe`）は本番では使わない（世代の照合の試験のために残す）
 - 詰まりを観測したら `last_status` に番兵を入れ、次の観測が早期 return で落ちないようにする
   （`observe` は同じ状態なら数えないが、詰まりは `observe` を通らないため）
 - 発動ログに実行番号・経過時間・閾値・試行回数を残す
@@ -636,10 +649,11 @@ BG 変換が同じ実行のまま 30 秒（`health::STALL_THRESHOLD`）以上 `R
    `engine_reload_for(ModeSwitch)`（本文が変わったかではなく反映待ちの有無で決める）
 3. 言語バーの「エンジン再起動」: 同期で読み直してから `engine_reload_force()`（反映待ちが無くても送る）
 
-送信は `config::begin_apply` で送信時点の組に固定し、`ShutdownIfConfigDiffers { config_json }` を送る。
+送信は `config::begin_apply` で送信時点の組に固定し、`ShutdownIfConfigDiffers { config_json, config_version, broken_version }` を送る。
 
 - `Bool(false)`（同じ config）: ホストを維持。送った組が現在の反映待ちと一致すれば解除
 - `Bool(true)`（異なる）: ホストは応答後に自己終了。再起動の受理として解除（新設定での起動確認ではない）
+- `Rejected(ConfigStale)`（照合が通らない）: ホストは続ける。読み直して 1 回だけ送り直し、それでも通らなければ反映待ちを保持（無条件の `Shutdown` には回さない）
 - エラー（比較できない）: 無条件の `Shutdown` にフォールバック。`Unit` を実際に受信したときだけ解除
 - 通信失敗・異常応答（`Ok(())` に潰していた通信失敗を含む。`ShutdownOutcome::NoResponse`）: 反映待ちを保持
 
@@ -650,13 +664,28 @@ BG 変換が同じ実行のまま 30 秒（`health::STALL_THRESHOLD`）以上 `R
 TSF DLL はアプリごとに別プロセスで動くため、同じ config で複数プロセスが送っても
 ホストの再起動は 1 回で済む（2 回目以降は `Bool(false)`）。背景の監視から送信しないのは、
 全プロセスから発火させると再起動が増え、未確定文字の復元（#56）が無いうちは入力が壊れるため。
-古い設定の再送によるホスト設定の巻き戻り防止は #66 で扱う。
+
+**ホストの照合と起動し直し**（#64 / #66 / #49、v8。[Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)）:
+
+- 設定の JSON には `gpu_backend` と `log_level` も入る（engine DLL は無視する）。どちらか一方だけの
+  変更でも反映待ちが立ち、ホストが起動し直す
+- TSF は `Create` / `ShutdownIfConfigDiffers` に、JSON を作った読み取りの本文の SHA-256（`config_version`）と、
+  直近の読み込みで解析できなかった本文の SHA-256（`broken_version`）を載せる
+- ホストは設定を採用するか決めるときだけ `%APPDATA%\rakukan\config.toml` を読み（TOML は解析しない。
+  一時的に読めなければ 50ms・3 回読み直す）、`config_version` が本文のハッシュと一致するとき（または
+  両方とも無いとき）だけ採用する。古い設定を持ったプロセスの要求でホストの設定は戻らない
+- 1 つのホストの中ではエンジンを作り直さない。config が違う `Create` は、照合が通れば `CreateRestart`
+  で終わり、通らなければ `CreateKept` で今の config のまま続ける（接続は成功として扱う）。エンジンが
+  無いホストで照合が通らなければ `Rejected(ConfigUnusable)`（TSF は読み直して 1 回だけ送り直し、それでも
+  だめなら起動の失敗に数えずに待つ。準備中の表示は ⚙）
+- config.toml を解析できない間（ディスクの本文が `broken_version` と同じ）は、動いているホストは続け、
+  新しいホストは最後に採用した設定（`%LOCALAPPDATA%\rakukan\host-config-last.json`。形式とハッシュを
+  確かめて読む。無ければ既定値）で起動する。どのプロセスから繋いでも設定は 1 つなので、行き来しない
+- engine DLL は、conv_cache から回収した converter を、作ったときのモデルにかかわる設定が今のエンジンと
+  同じときだけ使う（守りの層。通常は一致する）
 
 設定アプリは同じディレクトリの一時ファイルへ書き込みを完了してから `File.Move(overwrite)` で
 置き換える（切り詰めてから書く方式だと、IME 側が途中の本文を読みうる）。
-
-`Request::Reload`（ホスト内でエンジンを drop → 再生成）はプロトコルに残っているが、TSF からは使っていない
-（#66 で廃止の方向）。
 
 ---
 
@@ -672,8 +701,7 @@ TSF DLL はアプリごとに別プロセスで動くため、同じ config で�
 log_level = "debug"         # error/warn/info/debug/trace
 # gpu_backend = "auto"      # auto（cuda→vulkan→cpu を順に実ロード）/ cuda / vulkan / cpu（明示指定は fallback しない）
 # main_gpu = 0
-# model_variant = "jinen-v1-small-q5"
-# model_variant = "jinen-v1-xsmall-q5"
+# model_variant = "jinen-v1-xsmall-q5"   # 既定。使えるモデルの一覧は crates/rakukan-engine/models.toml（設定アプリの選択肢もここから作る）
 
 [keyboard]
 layout = "jis"              # us/jis/custom（デフォルト: jis）
@@ -801,9 +829,12 @@ mozc の TSV（取得元はコミット SHA で固定）から `rakukan-dict-bui
 
 ### モデル
 
-- モデル: jinen-v1（日本語かな漢字変換専用モデル）
-  - `jinen-v1-small-Q5_K_M.gguf`（約 88MB）
-  - `jinen-v1-xsmall-Q5_K_M.gguf`（約 30MB）
+- モデル: jinen-v1 / jinen-v2（日本語かな漢字変換専用モデル）
+  - 使えるモデルの一覧は `crates/rakukan-engine/models.toml`（engine にビルドのときに埋め込む）。
+    モデルを足すときは models.toml に書いてビルドし直す。設定アプリは、出力に写した同じ models.toml を
+    読んで選択肢を作る
+  - 既定は `jinen-v1-xsmall-q5`（`jinen-v1-xsmall-Q5_K_M.gguf`、約 30MB）。選んでいるモデルは config.toml の `model_variant`
+  - モデルを変えたら、ホストが起動し直して新しいモデルを読み込む（#49）
 - 実装: llama.cpp（`llama-cpp-2` クレート経由）
 
 ### 変換フロー（backend.rs::convert）

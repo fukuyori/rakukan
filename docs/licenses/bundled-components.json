@@ -16,6 +16,7 @@
   "ownFiles": [
     "rakukan-settings.*",
     "*.xbf",
-    "rakukan.ico"
+    "rakukan.ico",
+    "models.toml"
   ]
 }

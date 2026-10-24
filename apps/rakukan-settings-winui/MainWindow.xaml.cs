@@ -15,6 +15,9 @@ public sealed partial class MainWindow : Window
 {
     private const string ReloadEventName = @"Local\rakukan.engine.reload";
     private static readonly string AppIconPath = Path.Combine(AppContext.BaseDirectory, "rakukan.ico");
+    // 使えるモデルの一覧。engine に埋め込むものと同じ crates/rakukan-engine/models.toml を、
+    // ビルドのときに設定アプリの出力へ写す（csproj の Content。docs/Engine_Config_Apply_Plan.md 4.7）
+    private static readonly string ModelsTomlPath = Path.Combine(AppContext.BaseDirectory, "models.toml");
 
     private readonly SettingsStore _store = new();
     private readonly Dictionary<ManagedKeyAction, TextBox> _keyFields;
@@ -50,10 +53,18 @@ public sealed partial class MainWindow : Window
             [ManagedKeyAction.CancelAll] = CancelAllBox,
         };
 
+        var modelListError = LoadModelChoices();
         _settings = _store.Load();
         UserDictList.ItemsSource = _userDictEntries;
         ApplySettingsToUi(_settings);
         WireStatusBarDismissal();
+        if (modelListError is not null)
+        {
+            StatusBar.Severity = InfoBarSeverity.Warning;
+            StatusBar.Title = "モデルの一覧を読めません";
+            StatusBar.Message = $"{ModelsTomlPath}: {modelListError}。モデル ID は手で入力できます。";
+            StatusBar.IsOpen = true;
+        }
 
         if (RootNavigation.MenuItems.OfType<NavigationViewItem>().FirstOrDefault() is { } first)
         {
@@ -249,6 +260,56 @@ public sealed partial class MainWindow : Window
     private void KeymapPresetCombo_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         ApplyKeymapPresetDefaults();
+    }
+
+    // models.toml の各 variant（`[models.<ファミリー>.variants.<名前>]` の `id` と `display_name`）を、
+    // ファイルに書かれた順にモデルの選択肢にする。`default_model` は未選択のときの薄い字にする。
+    // 読めないときは選択肢を空にし（ID は手で入力できる）、理由を返す。
+    private string? LoadModelChoices()
+    {
+        ModelVariantCombo.Items.Clear();
+        Tomlyn.Model.TomlTable root;
+        try
+        {
+            root = Tomlyn.Toml.ToModel(File.ReadAllText(ModelsTomlPath));
+        }
+        catch (Exception ex)
+        {
+            return ex.Message;
+        }
+
+        if (root.TryGetValue("default_model", out var defaultModel) && defaultModel is string id0)
+        {
+            ModelVariantCombo.PlaceholderText = id0;
+        }
+        if (!root.TryGetValue("models", out var modelsObj) || modelsObj is not Tomlyn.Model.TomlTable models)
+        {
+            return "[models] がありません";
+        }
+        foreach (var family in models.Values.OfType<Tomlyn.Model.TomlTable>())
+        {
+            if (!family.TryGetValue("variants", out var variantsObj)
+                || variantsObj is not Tomlyn.Model.TomlTable variants)
+            {
+                continue;
+            }
+            foreach (var variant in variants.Values.OfType<Tomlyn.Model.TomlTable>())
+            {
+                if (!variant.TryGetValue("id", out var idObj) || idObj is not string id || id.Length == 0)
+                {
+                    continue;
+                }
+                var name = variant.TryGetValue("display_name", out var nameObj) && nameObj is string n
+                    ? n
+                    : id;
+                ModelVariantCombo.Items.Add(new ComboBoxItem
+                {
+                    Content = name == id ? id : $"{id}   ({name})",
+                    Tag = id,
+                });
+            }
+        }
+        return null;
     }
 
     // 保存された variantId (pure ID) から一致する ComboBoxItem を明示選択する。

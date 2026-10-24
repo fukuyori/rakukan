@@ -29,15 +29,8 @@ n_gpu_layers = 16
 # 使用する GPU インデックス（複数 GPU 環境で 2 枚目以降を使う場合に変更）
 main_gpu = 0
 
-# LLM モデル ID
-# jinen-v1-xsmall-q5  : 軽量・推奨（約 30 MB、低スペック PC 向け、デフォルト）
-# jinen-v1-small-q5   : 標準（約 84 MB、通常用途）
-# jinen-v1-xsmall-f16 : 高精度・大容量（約 138 MB、量子化なし FP16）
-# jinen-v1-small-f16  : 高精度・大容量（約 423 MB、量子化なし FP16）
-# jinen-v2-xsmall-q5  : v2 世代 (Qwen3) 軽量（約 28 MB）
-# jinen-v2-small-q5   : v2 世代 (Qwen3) 標準（約 81 MB）
-# jinen-v2-xsmall-f16 : v2 世代 (Qwen3) FP16（約 72 MB）
-# jinen-v2-small-f16  : v2 世代 (Qwen3) FP16（約 220 MB）
+# LLM モデル ID（既定は jinen-v1-xsmall-q5）
+# 使えるモデルは設定アプリの「モデル ID」で選べます（一覧は models.toml）
 model_variant = "jinen-v1-xsmall-q5"
 
 [keyboard]
