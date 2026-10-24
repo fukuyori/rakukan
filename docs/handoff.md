@@ -13,12 +13,12 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 - 作業計画は [October_Plan.md](October_Plan.md)（フェーズ 1〜4）。フェーズ 1〜4 はすべて完了した（各フェーズの結果は同計画の 2〜5 節）。
   - フェーズ 1（#71）・フェーズ 2（#69 / #70）: 0.13.0（タグ `0.13.0` = `7c76649`）に含まれる。RPC protocol v7、engine ABI 12。設計書は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md)。
   - フェーズ 3（#33・#73〜#76）: 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。RPC protocol v7・engine ABI 12 のまま。計画は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) と [archive/Log_Redesign_Plan.md](archive/Log_Redesign_Plan.md)。
-  - フェーズ 4（#64・#66・#49・#82）: `c0dcaf6`・`542d9c1`・`36cd6a9`・`23749e6`。RPC protocol v8、engine ABI 12。変更点は CHANGELOG.md の `[Next Release]`。設計書は [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)。
+  - フェーズ 4（#64・#66・#49・#82）: `c0dcaf6`・`542d9c1`・`36cd6a9`・`23749e6`。0.14.0（タグ `0.14.0` = `66b1554`）に含まれる。RPC protocol v8、engine ABI 12。変更点は CHANGELOG.md の `[0.14.0]`。設計書は [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)。配布物 `rakukan-0.14.0-setup.exe` のビルドの識別子は `66b155452016`（タグと同じコミット）。
 - 変更点は CHANGELOG.md の各版の節。試験の結果は [Test_Procedure.md](Test_Procedure.md) の末尾（0.13.1 より前は [archive/Test_Results_to_2026-10-24.md](archive/Test_Results_to_2026-10-24.md)）。
 
 ### 次の開始点
 
-- 10 月の計画で残っているのは、計画の終わりの `phase3-installer` のブランチの削除（手元と origin。PR #87 でマージ済み。tque #102）。
+- 10 月の計画の作業はすべて済んだ（`phase3-installer` のブランチは 2026-10-24 に手元と origin から消した）。October_Plan.md は、11 月の作業を始めるときに archive に移す。
 - その後は [2026-11_Plan.md](2026-11_Plan.md) の候補から選ぶ。#83（KV キャッシュの再利用）と IPC の名前の整理は同計画の 1.2、#57 の運用確認・#50 の照合と段 2・1 か月分のログでの再計測・#83 の計測は同 2 節。
 - winget への登録は #91（時期は未定）。
 
