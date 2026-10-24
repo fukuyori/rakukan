@@ -14,7 +14,7 @@
     <ApplicationIcon>..\..\crates\rakukan-tsf\rakukan.ico</ApplicationIcon>
     <Platforms>x64</Platforms>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
-    <Version>0.13.1</Version>
+    <Version>0.14.0</Version>
     <!-- 実行ファイルのプロパティの著作権の欄と、画面のバージョン情報に出す（Windows SDK の条項の 2.a.ii、#88） -->
     <Product>rakukan</Product>
     <Copyright>Copyright (c) 2024-2026 rakukan Contributors</Copyright>

@@ -34,7 +34,7 @@
 ; =============================================================================
 
 #define MyAppName      "Rakukan IME"
-#define MyAppVersion   "0.13.1"
+#define MyAppVersion   "0.14.0"
 #define MyAppPublisher "fukuyori"
 #define MyAppURL       "https://github.com/fukuyori/rakukan"
 #define TsfClsid       "{C0DDF8B0-1F1E-4C2D-A9E3-5F7B8D6E2A4C}"
