@@ -2,6 +2,9 @@
 name = "rakukan-tsf"
 version.workspace = true
 edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish.workspace = true
 description = "rakukan TSF (Text Services Framework) DLL"
 
 [lib]
@@ -18,6 +21,7 @@ config-watch-fault-test = []
 # rakukan-engine-abi には依存しない（= rakukan_engine_*.dll を TSF プロセスに
 # 持ち込まない）。これが Zoom / Dropbox クラッシュの恒久対策の本体。
 rakukan-engine-rpc = { path = "../rakukan-engine-rpc" }
+rakukan-log = { path = "../rakukan-log" }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"

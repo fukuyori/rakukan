@@ -17,9 +17,10 @@
 #   - LLVM (libclang; llama-cpp-sys-2 の bindgen が使う)
 #   - .NET SDK 8 (設定アプリ apps\rakukan-settings-winui)
 #   - Git
+#   - Inno Setup 6 (cargo make install / package がインストーラーを作る)
 #
 # 導入しないもの (任意。案内のみ):
-#   - CUDA Toolkit (cuda variant)、Vulkan SDK (vulkan variant)、Inno Setup 6 / signtool (配布用)
+#   - CUDA Toolkit (cuda variant)、Vulkan SDK (vulkan variant)、signtool (配布物の署名)
 #
 # 注意: ソフトウェアをインストールする。内容を確認してから実行すること。
 #       対話入力はしない (非対話環境からも実行できる)。
@@ -62,8 +63,8 @@ if (-not (Get-Command "winget" -ErrorAction SilentlyContinue)) {
     exit 1
 }
 
-# ── [1/5] Rust ───────────────────────────────────────────────────────────────
-Write-Host "[1/5] Rust" -ForegroundColor Cyan
+# ── [1/6] Rust ───────────────────────────────────────────────────────────────
+Write-Host "[1/6] Rust" -ForegroundColor Cyan
 Install-WingetPackage "Rustup" "Rustlang.Rustup" { [bool](Get-Command "rustup" -ErrorAction SilentlyContinue) }
 Refresh-Path
 if (Get-Command "rustup" -ErrorAction SilentlyContinue) {
@@ -80,10 +81,10 @@ if (Get-Command "rustup" -ErrorAction SilentlyContinue) {
 }
 Write-Host ""
 
-# ── [2/5] Visual Studio Build Tools ─────────────────────────────────────────
+# ── [2/6] Visual Studio Build Tools ─────────────────────────────────────────
 # C++ ツール (VC.Tools.x86.x64)、CMake/Ninja (VC.CMake.Project)、MSBuild を揃える。
 # Visual Studio 本体が入っていて不足コンポーネントだけがある場合も、Build Tools の追加導入で足りる。
-Write-Host "[2/5] Visual Studio 2022 Build Tools" -ForegroundColor Cyan
+Write-Host "[2/6] Visual Studio 2022 Build Tools" -ForegroundColor Cyan
 $needVs = -not ((Test-VSComponent "Microsoft.VisualStudio.Component.VC.Tools.x86.x64") -and
                 (Test-VSComponent "Microsoft.VisualStudio.Component.VC.CMake.Project") -and
                 (Test-VSComponent "Microsoft.Component.MSBuild"))
@@ -98,8 +99,8 @@ if ($needVs) {
 }
 Write-Host ""
 
-# ── [3/5] LLVM (libclang) ───────────────────────────────────────────────────
-Write-Host "[3/5] LLVM (libclang)" -ForegroundColor Cyan
+# ── [3/6] LLVM (libclang) ───────────────────────────────────────────────────
+Write-Host "[3/6] LLVM (libclang)" -ForegroundColor Cyan
 $llvmPaths = @("C:\Program Files\LLVM\bin", "C:\Program Files (x86)\LLVM\bin", "$env:LOCALAPPDATA\Programs\LLVM\bin")
 function Find-Libclang() { return ($llvmPaths | Where-Object { Test-Path -LiteralPath (Join-Path $_ "libclang.dll") } | Select-Object -First 1) }
 Install-WingetPackage "LLVM" "LLVM.LLVM" { [bool](Find-Libclang) }
@@ -117,8 +118,8 @@ if ($llvmBin) {
 }
 Write-Host ""
 
-# ── [4/5] .NET SDK ──────────────────────────────────────────────────────────
-Write-Host "[4/5] .NET SDK 8 (設定アプリ用)" -ForegroundColor Cyan
+# ── [4/6] .NET SDK ──────────────────────────────────────────────────────────
+Write-Host "[4/6] .NET SDK 8 (設定アプリ用)" -ForegroundColor Cyan
 Install-WingetPackage ".NET SDK 8" "Microsoft.DotNet.SDK.8" {
     $dotnet = Get-Command "dotnet" -ErrorAction SilentlyContinue
     if (-not $dotnet) { return $false }
@@ -126,16 +127,24 @@ Install-WingetPackage ".NET SDK 8" "Microsoft.DotNet.SDK.8" {
 }
 Write-Host ""
 
-# ── [5/5] Git ───────────────────────────────────────────────────────────────
-Write-Host "[5/5] Git" -ForegroundColor Cyan
+# ── [5/6] Git ───────────────────────────────────────────────────────────────
+Write-Host "[5/6] Git" -ForegroundColor Cyan
 Install-WingetPackage "Git" "Git.Git" { [bool](Get-Command "git" -ErrorAction SilentlyContinue) }
+Write-Host ""
+
+# ── [6/6] Inno Setup 6 ──────────────────────────────────────────────────────
+# cargo make install / package がインストーラーを作る（ISCC.exe）
+Write-Host "[6/6] Inno Setup 6" -ForegroundColor Cyan
+Install-WingetPackage "Inno Setup 6" "JRSoftware.InnoSetup" {
+    [bool](@("C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ })
+}
 Write-Host ""
 
 # ── 任意項目の案内 ──────────────────────────────────────────────────────────
 Write-Host "[任意 (自動導入しない)]" -ForegroundColor Cyan
 Write-Host "  - CUDA Toolkit : cuda variant (rakukan_engine_cuda.dll) を作る場合。nvcc が PATH か CUDA_PATH にあれば build-engine が検出する" -ForegroundColor Gray
 Write-Host "  - Vulkan SDK   : vulkan variant を作る場合。環境変数 VULKAN_SDK が設定されていれば build-engine が検出する" -ForegroundColor Gray
-Write-Host "  - Inno Setup 6 / Windows SDK signtool : 配布パッケージ作成と署名にのみ必要" -ForegroundColor Gray
+Write-Host "  - Windows SDK signtool : 配布物の署名 (cargo make package) にのみ必要" -ForegroundColor Gray
 Write-Host ""
 
 Write-Host "========================================" -ForegroundColor Green
@@ -144,5 +153,5 @@ Write-Host "========================================" -ForegroundColor Green
 Write-Host "次のステップ:" -ForegroundColor Cyan
 Write-Host "  1. シェルを開き直す (PATH / LIBCLANG_PATH を反映)"
 Write-Host "  2. cargo make check-env   で確認"
-Write-Host "  3. cargo make build-engine -> cargo make build-tsf -> サインアウト -> サインイン -> sudo cargo make install"
+Write-Host "  3. cargo make build-engine -> cargo make build-tsf -> sudo cargo make install -> PC を再起動"
 Write-Host ""

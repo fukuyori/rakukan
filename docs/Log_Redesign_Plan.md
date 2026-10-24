@@ -1,6 +1,6 @@
 # ログの作り方の見直し（2026-10-10 起案）
 
-状態: **設計済み・未実装**（8 章の決めごとは 2026-10-10 にすべて決定）。Issue: 段 1 #72（0.12.0）、段 2 #73、段 3 #74、段 4 #75、段 5 #76（段 2〜5 は #33 の対応の中で行う）。Codex CLI のレビュー（2026-10-10、4 回）を取り込み済み。
+状態: 段 2〜5 は実装済み（フェーズ 3 の Step 1 で段 2・4・5（`2a628b5`・`500d161`）、Step 2 で段 3（`7c6f570`））。実機の確認は [Test_Procedure.md](Test_Procedure.md) の S1・S2（2026-10-23）。8 章の決めごとは 2026-10-10 にすべて決定。Issue: 段 1 #72（0.12.0）、段 2 #73、段 3 #74、段 4 #75、段 5 #76（段 2〜5 は #33 の対応の中で行う）。Codex CLI のレビュー（2026-10-10、4 回）を取り込み済み。
 
 ## 1. きっかけ
 
@@ -121,6 +121,7 @@
 - provider は Activate 前の照会・登録・解除では登録しない。engine DLL はホストの中で外れない（#64 の方針）ので、engine DLL の provider の解除はプロセスの終了時だけを考える。
 - 入力の内容を含むイベントの既定のレベルと、集める範囲を決める。
 - 欠落数をセッションの統計から取り、書き出し時にも残す。RPC をまたぐ因果を追えるように、要求・activity の ID を持たせる。
+- 2026-10-23 決定: crate は `tracelogging_dynamic` 1.2.4（MIT）にし、tracing の Layer は `rakukan-log` に書く。provider は `Rakukan.Tsf` と `Rakukan.Host` の 2 つ（GUID は名前から決まる）。engine DLL のイベントはホストへの callback を通って `Rakukan.Host` に出るので、DLL には provider を持たせない。出す範囲はファイルのログと同じ（同じフィルターを通ったイベント）。activity の ID は付けず、要求の番号（`seq`）で追う（制限）。セッションの開始・停止・書き出しは `scripts/etw-trace.ps1`（`logman` / `tracerpt`、循環 ETL 既定 64 MB）。
 
 ## 5. 既存のファイルの扱い（移行）
 
@@ -151,6 +152,8 @@
 | 退避の途中でプロセスを強制終了 → 再起動 | `.tmp` と既存の世代を失わない |
 | ディスク満杯・アクセス拒否・共有違反 | 入力を止めない |
 | 普段の利用 | 入力・変換・設定の反映（#65）・ホストの再接続 |
+| ETW（管理者の PowerShell で `scripts/etw-trace.ps1 start` → 入力・変換 → `stop` → `export`） | `Rakukan.Tsf` と `Rakukan.Host`（engine DLL の target `rakukan_engine_dll` を含む）のイベントが記録される。`tracerpt` の CSV で項目（`level`・`target`・`message`）が読める（読めない場合は PerfView か WPA の手順に改める）。欠落の数が要約に出る。セッションが無い間も入力が遅くならない |
+| ログのファイル | TSF・ホストのログの 1 行目がヘッダー。ホストのログが `rakukan-engine-host-<PID>-<起動識別子>.log` で、engine DLL の行が入り、`rakukan-engine-dll.log` が伸びない。`engine DLL pinned` の行がある |
 
 ## 8. 決めること
 

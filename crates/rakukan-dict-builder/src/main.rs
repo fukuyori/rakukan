@@ -565,7 +565,7 @@ fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
     Ok(())
 }
 
-/// 辞書の隣に `<output>.build.json` を書く。`install.ps1` が `dict_schema` を期待値と
+/// 辞書の隣に `<output>.build.json` を書く。`build-installer.ps1` が `dict_schema` を期待値と
 /// 比較し、cost 帯の版が古い辞書を再生成する（Step 12-2）。
 /// `build.json` の中身（Issue #62）。
 ///

@@ -17,7 +17,7 @@
 
 1. **症状の再現条件を最優先で絞り込む**: 発生する操作シーケンス・タイミング・環境（アプリ、入力速度、モード）を書き起こしてから着手する。憶測で修正しない
 2. **WinDbg `!analyze -v` の `Failure.Bucket` を最初に見る**: call stack が一見不完全でも bucket 名だけで方向が決まることが多い（例: `<module>!Unloaded` → unload race）
-3. **tracing ログを time-correlate する**: TSF のログ（`rakukan-tsf-*.log`。アプリごとのプロセス単位で分かれるので `scripts/merge-logs.ps1` で統合する）と `rakukan-engine-host.log` を時刻で並べて race の順序を組み立てる
+3. **tracing ログを time-correlate する**: TSF のログ（`rakukan-tsf-*.log`。アプリごとのプロセス単位で分かれるので `scripts/merge-logs.ps1` で統合する）とエンジンホストのログ（`rakukan-engine-host-*.log`。同じスクリプトで統合される）を時刻で並べて race の順序を組み立てる
 4. **仮説は 1 つずつ検証する**: 同時に複数の変更を入れると root cause が分からない。再現性が低い bug ほど「1 変更 → 実機テスト」で確かめる
 5. **`0xc0000005` は unload race を最初に疑う**（0.6.6 の教訓）。TSF DLL / engine DLL / Windows API の順で当たる
 
@@ -107,7 +107,7 @@ level = "debug"
 ログ出力先:
 
 - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（統合は `scripts/merge-logs.ps1`）
-- Host 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`
+- Host 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host-<PID>-<起動識別子>.log`（engine DLL のログを含む）
 
 TSF の `.log.tmp` はローテーション途中のログを保持している場合がある。
 削除せず、本体・退避世代と一緒に調査する（`scripts/merge-logs.ps1` の対象に含まれる）。
@@ -149,7 +149,7 @@ TSF の `.log.tmp` はローテーション途中のログを保持している�
      -Pattern "2026-04-24 12:3[45]:"
    ```
 
-3. 同時刻の `rakukan-engine-host.log` も突合
+3. 同時刻のエンジンホストのログ（`rakukan-engine-host-*.log`）も突合
 4. 「reading 変化」「preview 計算」「apply」「focus 変化」の 4 軸で時刻順テーブルを作る
 5. 想定フローとズレている箇所を特定
 

@@ -179,25 +179,31 @@ RPC protocol に要求を足す場合（#69 の A の案）は、protocol の版
 **完了条件**（同 5 章の各 Step の条件に加えて）
 
 - Step 1 で #73〜#76 の試験（[Log_Redesign_Plan.md](Log_Redesign_Plan.md) の 7 章。callback の別スレッドからの呼び出し・再入・解除時の寿命、キューが満杯のときに待たず欠落を数える、書き込みの失敗、Activate 前に副作用が無い）が通る。
-- **配布前の完了**: Step 1〜4 と、Step 6 のうち CHANGELOG・配置の説明・文書の更新。
-- **公開後の完了**: Step 5（winget）の導入・更新・削除の確認と、Step 6 のうち PR #30 への結論のコメント。
+- **配布前の完了**: Step 1〜5（Step 5 は CHANGELOG・配置の説明・文書の更新）。
+- Step 6 は下の「リリース作業」。
+- **公開後の完了**: Step 7（winget）の導入・更新・削除の確認と、Step 8（PR #30 への結論のコメント）。
 
 **アンインストールを含む確認の前に、ログを退避する**
 
-アンインストールでは `rakukan-engine-host.log` が消される（`rakukan_installer.iss` の `[UninstallDelete]`）。ホストのログは、#57 の運用確認とログの再計測（7 節）の材料なので、消えると取り戻せない。Step の試験、リリース作業の T4、公開後の winget での削除の確認など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-host.log*`・`rakukan-engine-dll.log*`）を別の場所へ写す。
+ログは、#57 の運用確認とログの再計測（7 節）の材料なので、消えると取り戻せない。ログが消える場面は次のとおり。
+- 0.13.0 までのアンインストーラー: `rakukan-engine-host.log` を消す（その版の `rakukan_installer.iss` の `[UninstallDelete]`）。
+- フェーズ 3 の Step 2 からのトレイ: サインインのたびに、90 日を超えたログと、30000 ファイルを超えた分を古い順に消す（#74）。
+- Step 2 からのインストーラー・アンインストーラーは、ログを消さない。ログの置き場所は、インストール先を `%ProgramFiles%` へ移しても `%LOCALAPPDATA%\rakukan` のまま（Test_Procedure.md の S1-5 で確かめた）。
+
+Step の試験、リリース作業の T4、公開後の winget での削除の確認など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-*.log*`・`rakukan-tray-*.log*`）を別の場所へ写す。
 
 ```powershell
 $bk = "$env:APPDATA\rakukan\log-backup-$(Get-Date -Format yyyyMMdd-HHmmss)"
 New-Item -ItemType Directory $bk | Out-Null
 Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
-  Where-Object { ($_.Name -like 'rakukan-tsf-*.log*' -or $_.Name -like 'rakukan-engine-*.log*') -and $_.Name -notlike '*.lock' } |
+  Where-Object { ($_.Name -like 'rakukan-tsf-*.log*' -or $_.Name -like 'rakukan-engine-*.log*' -or $_.Name -like 'rakukan-tray-*.log*') -and $_.Name -notlike '*.lock' } |
   Copy-Item -Destination $bk
 (Get-ChildItem $bk).Count
 ```
 
-見る点: 写したファイルの数が、元のログの数（`.lock` を除く）と同じ。インストール先を `%ProgramFiles%` へ移した後（Step の途中から）は、ログの置き場所が変わるかを確かめ、上の写す元を合わせる。
+見る点: 写したファイルの数が、元のログの数（`.lock` を除く）と同じ。
 
-**リリース作業**（配布前の完了の後に行う。版の番号は、このときに決める）
+**リリース作業**（Step 6。配布前の完了の後に行う。版の番号は、このときに決める）
 
 フェーズ 3 の終了後に 1 つの版として出す（1 節）。
 
@@ -259,4 +265,4 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 - 2026-10-22: タグ `0.13.0`（`7c76649`）を作成した。配布物で T4 に合格し、試験 30 は T4 で足りるとした（Test_Procedure.md）。#69・#70・#71 をクローズ
 - 2026-10-22: フェーズ 1・2 を完了とした（2.2 節・3.1 節。F-1・F-2・T2-4 は実機で合格、257 キー目・`VersionMismatch`・ロック競合は #85 に回した）
 - 2026-10-22: フェーズ 1 の実機の確認を終えた（2.2 節）。フェーズ 2 の実機試験の結果と、そこで見つけて直した 4 件（設計書 7 節の注記）を 3.1 節に反映した
-- 2026-10-23: フェーズ 3 の終わりに行うリリース作業を 4 節に書いた。7 節の再計測の期間に 0.13.0 のビルドを足した。アンインストールを含む確認の前にログを退避する手順を 4 節に書いた。#64 の DLL の寿命の方針を決め、4 節の開始の条件と 5 節に書いた。Installer_Redesign_Plan.md 7 章の確認事項を決め、同 7 章に書いた。#75 で engine ABI を変えない（2026-10-22 決定）ことを 1 節・5 節に反映した。フェーズ 3 は終了後に 1 つの版として出し、専用のブランチで作業して最後に main へマージすると決め、1 節と 4 節（ブランチ、リリース作業）に書いた
+- 2026-10-23: フェーズ 3 の終わりに行うリリース作業を 4 節に書いた。7 節の再計測の期間に 0.13.0 のビルドを足した。アンインストールを含む確認の前にログを退避する手順を 4 節に書いた。#64 の DLL の寿命の方針を決め、4 節の開始の条件と 5 節に書いた。Installer_Redesign_Plan.md 7 章の確認事項を決め、同 7 章に書いた。#75 で engine ABI を変えない（2026-10-22 決定）ことを 1 節・5 節に反映した。フェーズ 3 は終了後に 1 つの版として出し、専用のブランチで作業して最後に main へマージすると決め、1 節と 4 節（ブランチ、リリース作業）に書いた。Installer_Redesign_Plan.md 5 章の Step を行う順に振り直し（5 配布前の文書、6 リリース作業、7 winget、8 PR #30 のコメント）、4 節の完了条件を合わせた。実機での確認を 3 回（Step 1 の後、Step 2・3 をまとめて Step 3 の後、Step 4 の後）にまとめると決め、Installer_Redesign_Plan.md 5 章に書いた

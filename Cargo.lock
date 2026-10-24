@@ -1682,6 +1682,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -1727,6 +1728,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tracing",
+ "windows",
 ]
 
 [[package]]
@@ -1747,6 +1749,7 @@ dependencies = [
  "anyhow",
  "rakukan-engine-abi",
  "rakukan-engine-rpc",
+ "rakukan-log",
  "tracing",
  "tracing-subscriber",
  "windows",
@@ -1766,10 +1769,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "rakukan-log"
+version = "0.13.0"
+dependencies = [
+ "tracelogging_dynamic",
+ "tracing",
+ "tracing-subscriber",
+ "windows",
+]
+
+[[package]]
 name = "rakukan-tray"
 version = "0.13.0"
 dependencies = [
  "anyhow",
+ "rakukan-log",
+ "tracing",
+ "tracing-subscriber",
  "windows",
 ]
 
@@ -1780,6 +1796,7 @@ dependencies = [
  "anyhow",
  "embed-resource",
  "rakukan-engine-rpc",
+ "rakukan-log",
  "serde",
  "sha2",
  "toml",
@@ -2578,6 +2595,21 @@ name = "tower-service"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8df9b6e13f2d32c91b9bd719c00d1958837bc7dec474d94952798cc8e69eeec3"
+
+[[package]]
+name = "tracelogging"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c0015caf14cad7613b7bbbb9ee44399ad9a694307be545d8af4e2711178e547e"
+
+[[package]]
+name = "tracelogging_dynamic"
+version = "1.2.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81357ee826ff21547ab41ceea8a4fcf58d60681de2055e65bc704c32e6e3614b"
+dependencies = [
+ "tracelogging",
+]
 
 [[package]]
 name = "tracing"

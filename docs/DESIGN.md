@@ -499,9 +499,10 @@ RpcEngine (client)                          serve() (server)
 
 ### プロトコル
 
-現在の `PROTOCOL_VERSION` は **5**（v0.11.7 で `EngineHealth` を追加）。
-`Hello` で一致しないと接続できないため、上げたリリースではサインアウト／サインインで
-古いホストを終わらせる必要がある。
+現在の `PROTOCOL_VERSION` は **7**（0.13.0）。
+`Hello` で一致しないと接続できない。インストーラーは古いホストを止めず、使用中のファイルは
+次の Windows の起動時に置き換えるので、版を上げたリリースでは、再起動するまで日本語入力が
+使えないことがある（TSF は「エンジン未準備」と同じ扱いで直接入力になる。[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 2 章）。
 
 `rakukan-engine-rpc/src/protocol.rs` の `Request` enum は DynEngine の全メソッドを
 1 対 1 でマップしている。代表的なバリアント:
@@ -755,14 +756,17 @@ DictStore
 
 4 ステップで辞書をロード。失敗時はステップ名付きエラーを返す。
 
-1. `step_resolve_paths` — `%LOCALAPPDATA%\rakukan\dict\` からパス解決
+1. `step_resolve_paths` — インストール先の `dict\`（`install_dir()` は自モジュールのディレクトリ。インストーラーで入れた場合は `%ProgramFiles%\rakukan\dict\`）からパス解決
 2. `step_probe_mozc` — ファイル存在・サイズ・マジックバイト確認
 3. `step_open_mozc` — MozcDict::open（mmap + ヘッダー検証）
 4. `step_load_store` — DictStore::load（ユーザー辞書込み）
 
-### インストール時の辞書差し替え（Issue #62）
+### 辞書を作り直すときの差し替え（Issue #62）
 
-`scripts/dictionary-swap.ps1` が `rakukan.dict` と `rakukan.dict.build.json` を
+辞書は `scripts/build-installer.ps1`（`cargo make install` / `cargo make package`）が、
+mozc の TSV（取得元はコミット SHA で固定）から `rakukan-dict-builder` で `C:\rb\dict\` に作り、
+インストーラーに同梱する。`rakukan.dict.build.json` の `dict_schema`・`mozc_rev` が期待値と同じなら作り直さない。
+作り直すときは、`scripts/dictionary-swap.ps1` が `rakukan.dict` と `rakukan.dict.build.json` を
 組として更新する。生成は `.new` へ行い、差し替え前に旧ファイルを `.bak` へコピーする。
 `rakukan.dict.swap.json` は一時ファイルへの書き込み・flush 後に置換し、処理段階と
 旧ファイルそれぞれの有無を記録する。
@@ -946,31 +950,48 @@ BG 初期化が完了するまで（辞書・モデルの両方が `ready`）、
 
 ## 14. ビルド・開発フロー
 
-### 4 ステップに分離された標準フロー
+### 標準フロー
+
+開発の導入も配布物も、同じインストーラー（`rakukan_installer.iss`）を通す。`scripts/build-installer.ps1` が
+ビルドの出力（`C:\rb\release` と設定アプリの出力）から `dist\` を組み立て、辞書を作り、ISCC でコンパイルする。
 
 ```powershell
 cargo make build-engine   # ① engine DLL (cpu/vulkan/cuda) ビルド
 cargo make build-tsf      # ② tsf/tray/host/dict-builder/WinUI ビルド
-cargo make sign           # ③ ビルド成果物に電子署名 (任意)
-cargo make install        # ④ コピー + TSF 登録 + tray 起動 (★管理者)
+sudo cargo make install   # ③ インストーラーを署名なしで作り、サイレント実行 (★管理者)
+# ④ PC を再起動 (インストールの完了。事前のサインアウトは要らない)
 ```
 
-### まとめ実行
+`cargo make install` のセットアップのログは、実行ごとに `output\logs\setup-<時刻>-<PID>.log` に残る。
+終了コード 20 は、登録の状態（CLSID・TIP のレジストリ）を確かめられなかったことを示す。
+
+### まとめ実行・配布物・その他
 
 ```powershell
-cargo make full-install    # ①〜④ を一括 (リリース向け)
-cargo make quick-install   # ②+④ のみ (engine 使いまわし、署名なし、開発用)
+cargo make full-install    # ①〜③ を一括 (開発用、署名なし)
+cargo make quick-install   # ②+③ のみ (engine 使いまわし、開発用、署名なし)
+cargo make package         # 配布物: sign → 署名付きインストーラー (setup・アンインストーラーにも署名)
+sudo cargo make uninstall  # アンインストーラーをサイレント実行 (完了には再起動)
+cargo make install-tsf-fault-test / install-tsf-normal-restore   # #65 の故障試験用に TSF DLL だけを差し替える (scripts/dev-swap-tsf.ps1)
 ```
+
+配布物は `-Sign` 付きで作る（`cargo make package`。証明書は環境変数 `CODESIGN_CERT`）。署名は昇格しないセッションで行う。
 
 ### ログ確認
 
 | ファイル（`%LOCALAPPDATA%\rakukan\`） | 出所 | 主な内容 |
 |------|------|------|
 | `rakukan-tsf-<PID>-<起動識別子>.log` | TSF DLL（アプリごとのプロセス） | キー処理、変換経路、`dict not ready after 30s: dict_status=...`（辞書が ready にならない場合） |
-| `rakukan-engine-host.log` | `rakukan-engine-host.exe` | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延 |
-| `rakukan-engine-dll.log` | engine DLL 内の tracing（cdylib は host と subscriber を共有しない） | `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
+| `rakukan-engine-host-<PID>-<起動識別子>.log` | `rakukan-engine-host.exe` と、その中の engine DLL | backend 選択（`backend::auto` / `Selected backend`）、`engine DLL loaded: ... dll_version=... dll_git=... host_git=...`（host と DLL が別ビルドなら WARN）、RPC の遅延、stderr（`STDERR` の行）。engine DLL の行は target `rakukan_engine_dll`: `dict load failed at [step]: reason`、LLM 変換（`beam conversion done`）、echo strip（`echo sentence dropped`） |
+| `rakukan-engine-dll.log` | engine DLL（callback を登録しない古いホストで動かした場合だけ） | 上の `rakukan_engine_dll` の行と同じ内容 |
 
-TSF ログは書き込み時に 16 MiB を基準として退避し、5 世代を保持する。
+どのログも `.lock` を排他で取れたプロセスだけが書く（取れなければ起動識別子を変えて 4 回まで試し、それでも取れなければログなしで続ける）。各ファイルの 1 行目はヘッダー `rakukan log header: component=... exe=... package=... pid=... instance=... build=...` で、ローテーションで新しい本体を開くたびに書く。各行には時刻（UTC）・レベル・スレッド ID・target が付く。書き込みは専用のスレッドで行い、呼び出し元は上限つきのキューに入れるだけにする。キューが満杯のときは捨て、次に書けたときに `rakukan-log: N lines dropped (queue full)` を 1 行書く。プロセスの終了時・異常終了時にキューに残った行は失われうる（ホストは終了時と panic 時に 0.5 秒まで書き出しを待つ）。
+
+調査用に ETW へも同じイベントを出す（provider `Rakukan.Tsf` / `Rakukan.Host`。engine DLL のイベントは `Rakukan.Host`）。セッションは管理者の PowerShell で `scripts/etw-trace.ps1 start` → 再現 → `stop` → `export` と手で行う。セッションが無い間はイベントを組み立てない。
+
+ログレベル: TSF は `RAKUKAN_LOG` → `config.toml` の `log_level` → `debug`（最初の Activate のときに決まる）。ホストは `RUST_LOG` → `info`、engine DLL は `RAKUKAN_LOG` → `info`（どちらもホストの起動時に決まる）。
+
+ログは退避して 5 世代を保持する（各ファイルの本体が 16 MiB を超える書き込みの前に退避）。
 本体を `.log.tmp` に移してから世代を送る。途中で削除・移動に失敗した場合は
 `.tmp` と次の操作を `RotatingLog` に保持し、成功済みの操作を繰り返さずに再開する。
 失敗後は、開き直した本体がさらに 1 MiB 増えるまで再試行を控えるため、
@@ -979,18 +1000,21 @@ TSF ログは書き込み時に 16 MiB を基準として退避し、5 世代を
 
 ```powershell
 .\scripts\merge-logs.ps1 -OutFile merged.log; Get-Content merged.log -Tail 30
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-host.log" -Tail 30
-Get-Content "$env:LOCALAPPDATA\rakukan\rakukan-engine-dll.log" -Tail 30
+Get-ChildItem "$env:LOCALAPPDATA\rakukan\rakukan-engine-host-*.log" | Sort-Object LastWriteTime | Select-Object -Last 1 | Get-Content -Tail 30
 ```
 
 ### ビルドパス
 
 | 種別 | パス |
 |------|------|
-| ソース | `C:\Users\n_fuk\source\rust\rakukan` |
+| ソース | `D:\home\source\rust\rakukan` |
 | ビルド成果物 | `C:\rb\release` |
-| インストール先 | `%LOCALAPPDATA%\rakukan\` |
-| 設定・辞書 | `%APPDATA%\rakukan\` |
+| 辞書（ビルド） | `C:\rb\dict\`（`build-installer.ps1` が作る） |
+| インストーラー | `output\rakukan-<version>-setup.exe` |
+| インストール先 | `%ProgramFiles%\rakukan\`（辞書は `dict\`） |
+| モデル | `%ProgramData%\rakukan\models\`（全ユーザーで共有。無ければ既存の `%USERPROFILE%\.cache\huggingface\hub` を読む） |
+| 設定・ユーザー辞書・学習履歴 | `%APPDATA%\rakukan\` |
+| ログ | `%LOCALAPPDATA%\rakukan\` |
 
 ---
 

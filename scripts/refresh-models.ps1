@@ -19,8 +19,7 @@
 #
 # 注意:
 #   - -Apply は models.toml **のみ** を更新します。
-#     variant 一覧が重複している以下 2 ファイルは手動更新が必要です:
-#       - scripts/install.ps1                           ($modelMap)
+#     variant 一覧が重複している以下のファイルは手動更新が必要です:
 #       - apps/rakukan-settings-winui/MainWindow.xaml   (ModelVariantCombo)
 
 [CmdletBinding()]
@@ -189,7 +188,6 @@ if ($anyNew) {
         Write-Host ("    " + $modelsTomlPath) -ForegroundColor Gray
         Write-Host ""
         Write-Host "Also update manually (hardcoded variant tables):" -ForegroundColor Yellow
-        Write-Host '  - scripts/install.ps1                               ($modelMap)' -ForegroundColor Gray
         Write-Host "  - apps/rakukan-settings-winui/MainWindow.xaml       (ModelVariantCombo)" -ForegroundColor Gray
         Write-Host ""
         exit 0
@@ -204,7 +202,6 @@ if ($anyNew) {
         }
         Write-Host ""
         Write-Host "Also update (hardcoded variant tables):" -ForegroundColor Yellow
-        Write-Host '  - scripts/install.ps1                               ($modelMap)' -ForegroundColor Gray
         Write-Host "  - apps/rakukan-settings-winui/MainWindow.xaml       (ModelVariantCombo)" -ForegroundColor Gray
         Write-Host ""
         exit 2   # 差分あり (apply 未適用)

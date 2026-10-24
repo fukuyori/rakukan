@@ -4,7 +4,7 @@
 //! `dict_status` に記録することで原因を絞り込める。
 //!
 //! # ステップ
-//! 1. `step_resolve_paths`  — LOCALAPPDATA から mozc/user パスを解決
+//! 1. `step_resolve_paths`  — インストール先（engine DLL の場所）から mozc/user パスを解決
 //! 2. `step_probe_mozc`     — ファイル存在・サイズ・マジック確認
 //! 3. `step_open_mozc`      — MozcDict::open（mmap + ヘッダー検証）
 //! 4. `step_load_store`     — DictStore::load（user 辞書込み）
@@ -38,7 +38,7 @@ pub fn load_dict() -> LoadResult {
     } else {
         return LoadResult::Failed {
             step: "resolve_paths",
-            reason: "find_mozc_dict() returned None (LOCALAPPDATA not set?)".to_string(),
+            reason: "find_mozc_dict() returned None (engine DLL path not found?)".to_string(),
         };
     }
 

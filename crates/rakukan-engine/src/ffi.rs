@@ -116,17 +116,106 @@ fn rotate_dll_log_if_needed(path: &std::path::Path) {
     }
 }
 
+/// ホストへログを渡す callback（#75）。`level`: 1=ERROR 2=WARN 3=INFO 4=DEBUG 5=TRACE。
+/// `target`・`msg` は NUL 終端の UTF-8 で、呼び出しの間だけ有効（所有権はこの DLL）。
+pub type LogCallback = extern "C" fn(level: u32, target: *const c_char, msg: *const c_char);
+
+static LOG_CALLBACK: OnceLock<LogCallback> = OnceLock::new();
+
+/// ログをホストへ渡す callback を登録する（#75。ABI 12 に足した、無くても動く関数）。
+///
+/// 最初の `engine_create` より前に呼ぶ。それより後の登録と、2 回目以降の登録は効かない。
+/// 解除は無い: engine DLL はホストの中で外れない（#64 の方針）ので、プロセスの終了まで使う。
+#[unsafe(no_mangle)]
+pub extern "C" fn engine_set_log_callback(callback: Option<LogCallback>) {
+    if let Some(callback) = callback {
+        let _ = LOG_CALLBACK.set(callback);
+    }
+}
+
+/// tracing のイベントを callback に渡す Layer。
+///
+/// DLL のスレッドから呼ばれる。callback はホストのキューに入れるだけで、ファイル I/O を待たない。
+struct CallbackLayer(LogCallback);
+
+impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for CallbackLayer {
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let meta = event.metadata();
+        let level = match *meta.level() {
+            tracing::Level::ERROR => 1,
+            tracing::Level::WARN => 2,
+            tracing::Level::INFO => 3,
+            tracing::Level::DEBUG => 4,
+            tracing::Level::TRACE => 5,
+        };
+        let mut text = MessageText::default();
+        event.record(&mut text);
+        // NUL を含む文字列は CString にできないので置き換える
+        let cstring = |s: &str| CString::new(s.replace('\0', " ")).unwrap_or_default();
+        let target = cstring(meta.target());
+        let msg = cstring(&text.0);
+        (self.0)(level, target.as_ptr(), msg.as_ptr());
+    }
+}
+
+/// イベントの本文（`message`）と、ほかのフィールド（` name=value`）を 1 行にする。
+#[derive(Default)]
+struct MessageText(String);
+
+impl tracing::field::Visit for MessageText {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if field.name() == "message" {
+            self.0.insert_str(0, value);
+        } else {
+            use std::fmt::Write;
+            let _ = write!(self.0, " {}={value}", field.name());
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        use std::fmt::Write;
+        if field.name() == "message" {
+            self.0.insert_str(0, &format!("{value:?}"));
+        } else {
+            let _ = write!(self.0, " {}={value:?}", field.name());
+        }
+    }
+}
+
 /// DLL 内の tracing subscriber を初期化する。
 ///
 /// cdylib は tracing の static をホストプロセスと共有しないため、これを
 /// 行わないと DLL 内の tracing ログ（生成タイムアウト・EOS 未到達の警告等）は
-/// どこにも出ない。%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log に書き出す。
+/// どこにも出ない。ホストが callback を登録していれば（#75）、ホストのログへ渡す。
+/// 登録していない古いホストでは、%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log に書き出す。
 /// ログレベルは RAKUKAN_LOG 環境変数で上書き可能（既定 info）。
 ///
 /// rlib として静的リンクされる場合（CLI 等）は呼び出し元の subscriber が
 /// 先に設定されるので try_init は no-op になる。
 fn init_dll_logging() {
     LOG_INIT.get_or_init(|| {
+        let filter = || {
+            tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+        };
+        if let Some(callback) = LOG_CALLBACK.get().copied() {
+            use tracing_subscriber::layer::SubscriberExt;
+            use tracing_subscriber::util::SubscriberInitExt;
+            let init = tracing_subscriber::registry()
+                .with(filter())
+                .with(CallbackLayer(callback))
+                .try_init();
+            let status = match init {
+                Ok(()) => "ok callback".to_string(),
+                Err(e) => format!("subscriber already set ({e})"),
+            };
+            let _ = LOG_STATUS.set(status);
+            return;
+        }
         let dir = std::env::var("LOCALAPPDATA")
             .map(|d| std::path::PathBuf::from(d).join("rakukan"))
             .unwrap_or_else(|_| std::path::PathBuf::from("."));
@@ -141,10 +230,7 @@ fn init_dll_logging() {
                 let init = tracing_subscriber::fmt()
                     .with_writer(std::sync::Mutex::new(file))
                     .with_ansi(false)
-                    .with_env_filter(
-                        tracing_subscriber::EnvFilter::try_from_env("RAKUKAN_LOG")
-                            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-                    )
+                    .with_env_filter(filter())
                     .try_init();
                 match init {
                     Ok(()) => format!("ok path={}", path.display()),
@@ -1047,5 +1133,40 @@ mod dll_log_rotation_tests {
         }
         // 最古（旧 .5）は消え、.6 は作らない
         assert!(!gen_path(DLL_LOG_ROTATE_GENERATIONS + 1).exists());
+    }
+}
+
+#[cfg(test)]
+mod log_callback_tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    static SEEN: Mutex<Vec<(u32, String, String)>> = Mutex::new(Vec::new());
+
+    extern "C" fn record(level: u32, target: *const c_char, msg: *const c_char) {
+        let text = |p| unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        SEEN.lock().unwrap().push((level, text(target), text(msg)));
+    }
+
+    #[test]
+    fn events_reach_the_callback_with_level_target_and_fields() {
+        use tracing_subscriber::layer::SubscriberExt;
+        let subscriber = tracing_subscriber::registry().with(CallbackLayer(record));
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::warn!(target: "rakukan_engine::kanji", reading_chars = 3, "slow {}", "beam");
+            tracing::error!("nul\0inside");
+        });
+        let seen = SEEN.lock().unwrap().clone();
+        assert_eq!(
+            seen[0],
+            (
+                2,
+                "rakukan_engine::kanji".to_string(),
+                "slow beam reading_chars=3".to_string()
+            )
+        );
+        // NUL は CString にできないので置き換えて渡す
+        assert_eq!(seen[1].0, 1);
+        assert_eq!(seen[1].2, "nul inside");
     }
 }

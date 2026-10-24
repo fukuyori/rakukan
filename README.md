@@ -63,29 +63,17 @@ v0.13.0 は、エンジンホストとの通信が途切れたときやエンジ
 
 ## インストール（パッケージから）
 
-[Releases](https://github.com/fukuyori/rakukan/releases) の `rakukan-<version>-setup.exe` を実行します。管理者権限（UAC）が求められます。インストール先は `%LOCALAPPDATA%\rakukan\` で、終了時に言語リストへ rakukan が追加されます。
+[Releases](https://github.com/fukuyori/rakukan/releases) の `rakukan-<version>-setup.exe` を実行します。管理者権限（UAC）が求められます。インストール先は `%ProgramFiles%\rakukan\` で、インストールの終わりに言語リストへ rakukan が追加されます。
 
-**すでに旧版が入っている場合** は、DLL を掴んでいるプロセスを無くしてから実行してください:
+インストールを完了するには、**PC を再起動** してください。旧版が入っている場合も、事前の準備（IME の切り替えやサインアウト）は要りません。使用中のファイルは再起動のときに置き換わります。再起動するまでは、Rakukan による日本語入力ができないことがあります。
 
-1. 言語バーで rakukan 以外の IME（例: Microsoft IME）に切り替える
-2. サインアウトする
-3. サインインする
-4. インストーラーを実行する
-
-インストーラーは旧 DLL が使用中かを確認し、使用中なら上の手順を案内します。上書きに失敗した場合は前のバージョンに戻したうえで同じ手順を表示します。インストール後に言語バーへ表示されない場合は、一度サインアウトして再度サインインしてください。PC の再起動は不要です。
+`%LOCALAPPDATA%\rakukan\` に入っていた旧版（0.13.0 までの配置）は、インストーラーが登録を解除し、旧版のファイルを消します（使用中のものは再起動のときに消えます）。設定・ログは残ります。
 
 ## アンインストール
 
-インストールと同じく、DLL を掴んでいるプロセスを無くしてから実行してください:
+「設定」→「アプリ」から Rakukan IME をアンインストールし、PC を再起動してください。使用中のファイルは再起動のときに消えます。
 
-1. 言語バーで rakukan 以外の IME（例: Microsoft IME）に切り替える
-2. サインアウトする
-3. サインインする
-4. 「設定」→「アプリ」から Rakukan IME をアンインストールする
-
-この手順を踏まずにアンインストールすると、「いくつかの項目が削除できませんでした。手動で削除してください。」と表示され、使用中のファイル（`rakukan_tsf.dll`、`rakukan-engine-host.exe`、`rakukan_engine_*.dll`、`rakukan-tray.exe` など）が `%LOCALAPPDATA%\rakukan\` に残ることがあります。登録の解除は済んでいるので、サインアウト → サインインの後に、残ったファイルを手で削除してください。
-
-設定・ユーザー辞書・学習履歴（`%APPDATA%\rakukan\`）と、ログ（`%LOCALAPPDATA%\rakukan\` の `*.log`）はアンインストールしても残ります。不要なら手で削除してください。
+設定・ユーザー辞書・学習履歴（`%APPDATA%\rakukan\`）、ログ（`%LOCALAPPDATA%\rakukan\` の `*.log`）、モデル（`%ProgramData%\rakukan\models\`）はアンインストールしても残ります。不要なら手で削除してください。
 
 ## ビルド前提
 
@@ -98,16 +86,17 @@ v0.13.0 は、エンジンホストとの通信が途切れたときやエンジ
 | LLVM（libclang） | `llama-cpp-sys-2` の bindgen |
 | .NET SDK 8 以上 | 設定アプリ `apps/rakukan-settings-winui`（Windows App SDK は NuGet で自動取得） |
 | Git | ソース取得 |
+| Inno Setup 6 | インストーラーの作成（`cargo make install` / `cargo make package`） |
 
 | 任意 | 用途 |
 |---|---|
 | CUDA Toolkit（nvcc） | `rakukan_engine_cuda.dll` を作る場合。無ければ cuda variant はスキップ |
 | Vulkan SDK（環境変数 `VULKAN_SDK`） | `rakukan_engine_vulkan.dll` を作る場合。無ければ vulkan variant はスキップ |
-| Inno Setup 6、Windows SDK の signtool | 配布パッケージ作成と署名（`scripts/build-installer.ps1`、`cargo make sign`） |
+| Windows SDK の signtool | 配布物の署名（`cargo make package`） |
 
 ## インストール（ソースから）
 
-ビルド → 署名 → インストールを **4 ステップ** に分離しています。**DLL を掴んでいるプロセスがあると ④ が失敗する** ため、ビルドを済ませてからサインアウト→サインインし、IME を使う前に ④ を実行します:
+ソースからのインストールも、パッケージと同じインストーラーを使います。`cargo make install` はビルドの出力からインストーラーを署名なしで作り、サイレント実行します:
 
 ```powershell
 # ① engine DLL をビルド (cpu/vulkan/cuda)
@@ -116,38 +105,38 @@ cargo make build-engine
 # ② tsf + tray + host + dict-builder + WinUI settings をビルド
 cargo make build-tsf
 
-# ③ 電子署名 (任意; 配布用)
-cargo make sign
+# ③ インストーラーを作ってサイレント実行 (★管理者権限)
+sudo cargo make install
 
-# --- ここでサインアウト → サインイン (TSF DLL を全プロセスから解放する) ---
-
-# ④ %LOCALAPPDATA%\rakukan\ にコピー + TSF 登録 + tray 起動 (★管理者権限)
-cargo make install
+# ④ PC を再起動 (インストールの完了)
 ```
 
-手順の順序は **ビルド → サインアウト → サインイン → install** です。`cargo make install` はビルドを行わないので、ビルドを飛ばすと古い成果物が再インストールされるだけになります。サインアウトせずに ④ を実行すると、DLL のコピーで「ファイルがロックされています」と表示されて中断することがあります（直前に停止したプロセスの解放待ちによる失敗は、スクリプト内で数回リトライして吸収します）。
+`cargo make install` はビルドを行わないので、ビルドを飛ばすと古い成果物が再インストールされるだけになります。事前のサインアウトは要りません。使用中のファイルは再起動のときに置き換わるので、再起動するまでは日本語入力ができないことがあります。辞書は初回に mozc の辞書を取得して作り（`C:\rb\dict\`）、取得元の版が変わるまで作り直しません。セットアップのログは実行ごとに `output\logs\` に残ります。
 
-まとめ実行:
+まとめ実行（開発用、署名なし）:
 
 ```powershell
-# ①〜④ を一括 (リリース向け)
+# ①〜③ を一括
 cargo make full-install
 
-# 開発時の高速再インストール (engine 使いまわし、署名なし)
+# engine を使いまわして ②〜③
 cargo make quick-install
 ```
 
-まとめ実行はビルドと install の間にサインアウトを挟めないため、DLL がどこにもロードされていない状態（初回インストール、またはサインイン直後に IME を使う前）でのみ通ります。通常の更新では上の分割手順を使ってください。
+配布物（署名付きのインストーラー `output\rakukan-<version>-setup.exe`）は `cargo make package` で作ります。成果物に署名してから、セットアップ本体とアンインストーラーに署名したインストーラーを作ります（環境変数 `CODESIGN_CERT` に証明書の Subject CN を設定しておく）。
 
-インストール先: `%LOCALAPPDATA%\rakukan\`  
+アンインストール: `sudo cargo make uninstall`（アンインストーラーをサイレント実行。完了には再起動）。
+
+インストール先: `%ProgramFiles%\rakukan\`  
 設定: `%APPDATA%\rakukan\config.toml`  
 ログ:
 
 - TSF 側: `%LOCALAPPDATA%\rakukan\rakukan-tsf-<PID>-<起動識別子>.log`（アプリごとのプロセス単位。統合は `scripts/merge-logs.ps1`）
-- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）
-- エンジン DLL 側: `%LOCALAPPDATA%\rakukan\rakukan-engine-dll.log`（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告はこちらに出る）
+- エンジンホスト側: `%LOCALAPPDATA%\rakukan\rakukan-engine-host-<PID>-<起動識別子>.log`（起動時に host / engine DLL の version・git sha を記録し、別ビルドの組み合わせなら WARN）。エンジン DLL のログ（辞書ロード失敗 `dict load failed at [...]` や LLM 変換の警告。target `rakukan_engine_dll`）もここに入る
 
-> 各ステップはそれぞれ独立に実行できます。ビルド (`build-engine` / `build-tsf`) は管理者不要、`install` のみ管理者権限が必要です。
+各ファイルの 1 行目は発生元を示すヘッダー（実行ファイル・PID・ビルドなど）。書き込み時に 16 MiB で退避し、5 世代を残す。
+
+> 各ステップはそれぞれ独立に実行できます。ビルド (`build-engine` / `build-tsf`) と `package` は管理者不要（署名は昇格しないセッションで行う）、`install` / `uninstall` は管理者権限が必要です。
 
 ## 設定の目安
 
@@ -158,7 +147,7 @@ cargo make quick-install
 - `jinen-v2-xsmall-q5` / `jinen-v2-small-q5` は v2 世代（Qwen3 ベース）。プロンプト形式は v1 と共通で、`model_variant` を書き換えるだけで切り替えられる
 - `n_gpu_layers = 0` は CPU のみ
 - 未指定は全レイヤー GPU オフロード
-- `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果は `rakukan-engine-host.log` に出る）
+- `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果はエンジンホストのログに出る）
 
 `n_gpu_layers` と `model_variant` は config.toml を編集して保存すると自動で反映されます。変更は保存通知・フォルダの変更通知・30 秒ごとの定期確認で検出され、`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます。すぐに反映したい場合は言語バーの「エンジン再起動」を使います。
 
@@ -217,8 +206,8 @@ rakukan の入力状態は **IME オン**（かな漢字変換）と **IME オ�
 
 ## 開発メモ
 
-- TSF 層だけの変更確認: `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
-- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `cargo make install`
+- TSF 層だけの変更確認: `cargo make build-tsf` → `sudo cargo make install` → 再起動
+- engine DLL を含む変更確認: `cargo make build-engine` → `cargo make build-tsf` → `sudo cargo make install` → 再起動
 - 生成ログ確認:
 
 ```powershell

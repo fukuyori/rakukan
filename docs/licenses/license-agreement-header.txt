@@ -1,0 +1,19 @@
+rakukan 使用許諾 / rakukan License Agreement
+
+このインストーラーは、rakukan と、第三者の部品を含みます。インストールを続けるには、以下のすべての条件に同意してください。
+
+1. rakukan 本体は MIT License で提供します（下の [1]）。
+2. 第三者の部品は、それぞれのライセンスに従います。一覧と本文は、インストール先の THIRD_PARTY_LICENSES.md にあります。
+3. 設定アプリ（settings-ui）は、Microsoft の次の部品を含みます。これらの部品には、下の Microsoft Software License Terms が適用されます。これらの部品を使うことは、その条項に同意することを意味します。
+   - Windows App SDK の実行時の部品（[2]）
+   - Windows SDK の .NET 向けの部品 Microsoft.Windows.SDK.NET.dll・WinRT.Runtime.dll（[3]）
+4. CUDA 版の変換エンジン（rakukan_engine_cuda.dll）は、NVIDIA CUDA Toolkit の CUDA ランタイムを読み込む部品を含みます（CUDA ランタイムの本体は NVIDIA のディスプレイドライバから読み込みます）。この部品には、下の NVIDIA の End User License Agreement（[4]）が適用されます。この部品を使うことは、その条項に同意することを意味します。
+
+This installer contains rakukan and third-party components. To continue the installation, you must accept all of the following terms.
+
+1. rakukan itself is provided under the MIT License ([1] below).
+2. Third-party components are governed by their own licenses. The list and the license texts are in THIRD_PARTY_LICENSES.md in the installation folder.
+3. The settings app (settings-ui) includes the following Microsoft components. They are governed by the Microsoft Software License Terms below, and using them means that you accept those terms.
+   - The Windows App SDK runtime components ([2])
+   - The Windows SDK components for .NET, Microsoft.Windows.SDK.NET.dll and WinRT.Runtime.dll ([3])
+4. The CUDA version of the conversion engine (rakukan_engine_cuda.dll) includes the CUDA Runtime loader from the NVIDIA CUDA Toolkit (the CUDA Runtime itself is loaded from the NVIDIA display driver). It is governed by the NVIDIA End User License Agreement below ([4]), and using it means that you accept those terms.

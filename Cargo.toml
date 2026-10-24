@@ -7,6 +7,7 @@ members = [
     "crates/rakukan-engine-cli",
     "crates/rakukan-engine-host",
     "crates/rakukan-engine-rpc",
+    "crates/rakukan-log",
     "crates/rakukan-tray",
     "crates/rakukan-tsf",
 ]
@@ -18,7 +19,9 @@ edition = "2024"
 rust-version = "1.85"
 authors = ["rakukan Contributors"]
 license = "MIT"
-repository = "https://github.com/yourname/rakukan"
+# rakukan の crate は crates.io に公開しない（cargo-about は公開しない crate のライセンスを集めない）
+publish = false
+repository = "https://github.com/fukuyori/rakukan"
 
 # ワークスペース全体で共有する依存バージョン
 # 各クレートは workspace = true で参照する

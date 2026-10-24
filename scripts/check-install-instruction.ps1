@@ -7,8 +7,9 @@
 #  1. "cargo make install" が応答に含まれているのに、同じ応答に
 #     "cargo make build-tsf" または "cargo make build-engine" が含まれない
 #     (CLAUDE.md の build → install 手順違反)
-#  2. "install 後にサインアウト" / "install 後にサインイン" 等の誤った順序の案内
-#     (正しい順序: sign-out → sign-in → build → install)
+#  2. 完了をサインアウト・サインインとする案内
+#     ("install 後にサインアウト" や、旧手順の "サインイン → cargo make install")
+#     (正しい手順: build → sudo cargo make install → 再起動。docs/Installer_Redesign_Plan.md の Step 4)
 #
 # 違反があれば {"decision": "block", "reason": "..."} を出力して再考させる。
 # 違反なしなら exit 0 (静かに通す)。
@@ -76,7 +77,7 @@ if ($hasInstall -and -not ($hasBuildTsf -or $hasBuildEngine)) {
     $violations += '`cargo make install` を案内したのに `cargo make build-tsf` / `cargo make build-engine` の案内が同じ応答内にない。CLAUDE.md の手順 (build → install) を必ず併記すること。'
 }
 
-# 検出 2: install の後にサインアウト/サインインを置いた誤った順序
+# 検出 2: サインアウト/サインインを install の前後に置いた案内（完了は再起動）
 $wrongOrder = @(
     'install\s*後にサインアウト',
     'install\s*後にサインイン',
@@ -85,18 +86,19 @@ $wrongOrder = @(
     'install\s*→\s*サインアウト',
     'install\s*→\s*サインイン',
     'インストール\s*→\s*サインアウト',
-    'インストール\s*→\s*サインイン'
+    'インストール\s*→\s*サインイン',
+    'サインイン\s*→\s*(sudo\s+)?cargo make install'
 )
 foreach ($pat in $wrongOrder) {
     if ($lastAssistant -match $pat) {
-        $violations += 'install の後にサインアウト/サインインを案内している。正しい順序は「サインアウト → サインイン → build (build-tsf / build-engine) → install」(memory/feedback_install_order.md 参照)。'
+        $violations += 'install の前後にサインアウト/サインインを案内している。正しい手順は「build (build-engine / build-tsf) → sudo cargo make install → PC を再起動」(.claude/CLAUDE.md 参照)。'
         break
     }
 }
 
 if ($violations.Count -eq 0) { exit 0 }
 
-$reason = "反映手順の案内が CLAUDE.md および memory/feedback_install_order.md と矛盾しています:`n- " + ($violations -join "`n- ") + "`n応答を訂正してから返答してください。"
+$reason = "反映手順の案内が .claude/CLAUDE.md と矛盾しています:`n- " + ($violations -join "`n- ") + "`n応答を訂正してから返答してください。"
 
 $out = @{
     decision = 'block'

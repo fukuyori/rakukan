@@ -22,7 +22,7 @@
 
 | ファイル | 箇所 | 備考 |
 |---|---|---|
-| `CHANGELOG.md` | `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD` | Keep a Changelog 形式。次の開発開始時に `[Unreleased]` を再作成する |
+| `CHANGELOG.md` | `## [Next Release]` → `## [X.Y.Z] - YYYY-MM-DD` | Keep a Changelog 形式。版が決まるまでは `[Next Release]` の見出しで書き、版を上げるときに置き換える |
 | `README.md` | 1 行目 `# rakukan vX.Y.Z` と「## 最新の変更」 | 最新版の要約を段落に、前版を箇条書きへ繰り下げる |
 
 ## 4. Windows 固有の version 面
@@ -37,8 +37,19 @@
 | 箇所 | 内容 |
 |---|---|
 | `cost_band::DICT_SCHEMA` | 1 上げる |
-| `scripts/install.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
-| ビルドマシンの辞書 | パッケージ作成前に `RAKUKAN_FORCE_DICT=1` を付けて `cargo make install` を実行し、`%LOCALAPPDATA%\rakukan\dict\rakukan.dict` と `rakukan.dict.build.json` を作り直す（`build-installer.ps1` はこの 2 つを同梱する） |
+| `scripts/build-installer.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
+| ビルドマシンの辞書 | `build-installer.ps1`（`cargo make install` / `cargo make package`）が、`C:\rb\dict\rakukan.dict.build.json` の `dict_schema`・`mozc_rev` が期待値と違えば作り直して同梱する。作り直せなかった場合、`package`（`-Sign`）は止まり、`install` は警告を出して古い辞書を使う。手で作り直すときは `RAKUKAN_FORCE_DICT=1` を付ける |
+
+## 4.2 第三者のライセンス（依存を変えたとき）
+
+| 対象 | 内容 |
+|---|---|
+| `docs/THIRD_PARTY_LICENSES.md` の「Rust Crates」の節 | `.\scripts\gen-third-party-licenses.ps1` で作り直す（cargo-about 0.9.2 が要る）。著作権者の名前の無い本文になる crate があると警告が出るので、上流の LICENSE を crate を作ったコミットで取り、`docs/licenses/<名前>-<版>.txt` に置く（同じ場所の README.md に出どころを書く）。手で書く節（karukan・azooKey・Mozc・llama.cpp・esaxx・Tomlyn・Windows App SDK）は、同梱する部品や版が変わったときに手で直す |
+| llama.cpp の節 | `llama-cpp-sys-2` の版を変えたら、同梱の llama.cpp のコミット（llama-cpp-rs の `llama-cpp-sys-2/llama.cpp` のサブモジュール）を確かめ、その版の `LICENSE` と、コンパイルされるコードの表示（llamafile・YaRN・nlohmann/json・base64 など）を見直す |
+| `docs/licenses/nvidia-cuda-*-eula.txt` | CUDA Toolkit の版を変えたら、その版の `EULA.txt` に差し替え、`build-installer.ps1` の使用許諾の文書の見出しと `THIRD_PARTY_LICENSES.md` の NVIDIA CUDA Runtime Loader の節を直す。CUDA のランタイムのリンクの形（hybrid の読み込み用のライブラリか、engine DLL が `cudart64_*.dll` を import しないか、`crates/rakukan-engine/build.rs` の差し替えで、llama-cpp-sys-2 が指定する `cudart.lib` が `cudart_static.lib` の写しに解決されているか。`cargo rustc ... -- --print link-args` で `cudart.lib` のパスが rakukan-engine の `OUT_DIR` になっていること）も確かめる |
+| `docs/licenses/microsoft-*.txt` | Windows App SDK・Windows SDK の参照パックの版を変えたら、その版の条項に差し替え、`build-installer.ps1` の使用許諾の文書の見出し（版の番号）を直す |
+| `docs/licenses/bundled-components.json` | 設定アプリの NuGet のパッケージ（間接の依存を含む）や、.NET・Windows SDK の版を変えたら、ライセンスを確かめてから版を直し、配布物に入るものは `THIRD_PARTY_LICENSES.md` に節を足す。`.\scripts\check-bundled-licenses.ps1` が確かめる（CI はパッケージ、`build-installer.ps1` は `-Files` で配布するファイルまで） |
+| `deny.toml` の `allow` | 新しいライセンスの crate が入ったら、配布してよいかを確かめてから足す（CI の License Check が止める） |
 
 ## 5. 変更しないもの
 
@@ -55,7 +66,10 @@ cargo check --workspace --all-targets
 git grep -n "0\.10\.4" -- ':!*.deps.json' ':!Cargo.lock' ':!docs/*' ':!CHANGELOG.md'
 # 4. リリースの状態の書き込みが無いか（版の番号・コミットで書く。docs/archive は除く）
 git grep -n "未リリース\|最新リリース" -- ':!docs/archive/*' ':!docs/version-update-checklist.md'
-# 5. 空白チェック
+# 5. 第三者のライセンスの一覧が依存と合っているか
+.\scripts\gen-third-party-licenses.ps1 -Check
+.\scripts\check-bundled-licenses.ps1
+# 6. 空白チェック
 git diff --check
 ```
 

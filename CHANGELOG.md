@@ -3,6 +3,32 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [Next Release]
+
+インストール先が `%LOCALAPPDATA%\rakukan` から `%ProgramFiles%\rakukan` に変わり、インストール・更新・アンインストールは、インストーラーを実行した後の **PC の再起動** で完了する。事前の準備（別の IME への切り替え、サインアウト・サインイン）は要らない。使用中のファイルは再起動のときに置き換わるので、再起動するまでは Rakukan による日本語入力ができないことがある。0.13.0 までの配置から更新すると、インストーラーが旧配置の登録を解除し、旧版のファイルを消す（使用中のものは再起動のときに消える）。設定・ユーザー辞書・学習履歴・ログはそのまま残る。
+
+### Changed
+
+- **インストール先を `%ProgramFiles%\rakukan`（マシン単位）にし、更新は再起動で完了するようにした**（[Issue #33](https://github.com/fukuyori/rakukan/issues/33)）: TSF の登録がマシン単位（HKLM）なのに、ファイルをユーザーごとの `%LOCALAPPDATA%` に置いていた。
+  - インストーラーは 64 ビットのモードで動き、使用中のファイルは次の Windows の起動時に置き換える。古いホストは止めない。完了の画面と無人の実行で、再起動を求める。
+  - TSF の登録の成否を、regsvr32 の終了コードではなく登録の状態（レジストリ）で確かめ、確かめられなかったときは終了コード 20 を返す。
+  - 0.13.0 までの配置からの更新では、旧配置の TSF DLL の登録を解除し、旧版が置いたファイルと、「アプリ」の一覧に残る旧版のアンインストール情報を消す。
+  - キーボードの一覧への追加は、インストーラーを起動したユーザーの権限で行う。入らなかった場合は、サインインのときにトレイが足す（版ごとに 1 回）。アンインストールで消すキーボードの登録の写し（HKCU）は、rakukan の分だけにした。
+- **モデルを全ユーザーで共有する `%ProgramData%\rakukan\models` に置くようにした**: 既存の `%USERPROFILE%\.cache\huggingface\hub` のモデルは、そのまま読む（コピー・削除はしない）。新しく取得するモデルは `%ProgramData%` に置く。インストーラーにモデルは入れない（初めての変換のときに取得する）。
+- **ログの見直し**（[Issue #73](https://github.com/fukuyori/rakukan/issues/73) / [Issue #74](https://github.com/fukuyori/rakukan/issues/74) / [Issue #75](https://github.com/fukuyori/rakukan/issues/75) / [Issue #76](https://github.com/fukuyori/rakukan/issues/76)）:
+  - ホストのログを `rakukan-engine-host-<PID>-<起動識別子>.log` にし、エンジン DLL のログもここに入るようにした（engine ABI は 12 のまま。古いホストで動かした場合だけ `rakukan-engine-dll.log`）。トレイも自分のログを書く。
+  - 1 つのログには 1 つのプロセスだけが書く。各ファイルの 1 行目に発生元（実行ファイル・PID・ビルド）を書く。書き込みは専用のスレッドで行う。
+  - ログの掃除をトレイの起動時に行い、90 日を超えたものと、30000 ファイルを超えた分を古い順に消す（容量の上限は無くした）。0.13.0 までのアンインストーラーと違い、アンインストールではログを消さない。
+  - 調査用に ETW へも同じイベントを出す（`scripts/etw-trace.ps1`）。
+- **トレイをインストーラーで配り、どのユーザーのサインインでも起動するようにした**: セッションごとに 1 つだけ動く。
+- **ホストは、読み込んだエンジン DLL を外さないようにした**（[Issue #64](https://github.com/fukuyori/rakukan/issues/64) の方針）: 設定が合わない `Create` で別のエンジン DLL を読み込んでも、前の DLL を外さない。
+- **CUDA 版のエンジン DLL が、CUDA ランタイムの読み込み用のライブラリを静的にリンクするようにした**（[Issue #90](https://github.com/fukuyori/rakukan/issues/90)）: `cudart64_*.dll` を読み込まない。
+- **ソースからのインストールも、配布物と同じインストーラーで行うようにした**: `cargo make install` はビルドの出力からインストーラーを署名なしで作り、サイレント実行する（ビルド → `sudo cargo make install` → 再起動）。`scripts/install.ps1` と `scripts/uninstall.ps1` を廃止した。配布物は `cargo make package`（成果物・セットアップ本体・アンインストーラーに署名）、アンインストールは `cargo make uninstall`。辞書はインストーラーを作るときに作る（`C:\rb\dict`）。Inno Setup 6 を開発環境の必須にした（`cargo make check-env` / `setup-env`）。
+
+### Added
+
+- **使用許諾の画面と、第三者のライセンスの文書**: インストーラーに使用許諾の画面（rakukan の MIT License、Windows App SDK、Windows SDK、NVIDIA CUDA の EULA）を出し、インストール先に `LICENSE`・`LICENSE_AGREEMENT.txt`・`NOTICE`・`THIRD_PARTY_LICENSES.md` を置く。設定アプリに著作権の表示を出し、`rakukan-settings.exe` のプロパティにも入れる（[Issue #88](https://github.com/fukuyori/rakukan/issues/88)）。
+
 ## [0.13.0] - 2026-10-22
 
 engine ABI が 11 → 12、エンジンホストとの通信のプロトコルが v6 → v7 に上がるため、インストーラーはエンジン・ホスト・TSF をすべて入れ替える。v7 の TSF は 0.12.0 のホストと繋がらないので、インストールは従来どおり、別の IME に切り替え → サインアウト → サインイン → インストーラー実行の手順で行い、サインインの後、インストールまで rakukan を使わない。古いホストが残っていた場合は、日本語入力が使えない旨の知らせが出て直接入力になる。サインアウト → サインインで直る。

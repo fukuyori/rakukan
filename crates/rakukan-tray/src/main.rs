@@ -35,6 +35,8 @@ use windows::Win32::{
 use windows::core::GUID;
 use windows::core::PCWSTR;
 
+mod upkeep;
+
 const MAP_NAME: &str = "Local\\rakukan.mode";
 const EVT_NAME: &str = "Local\\rakukan.mode.changed";
 const RELOAD_EVT_NAME: &str = "Local\\rakukan.engine.reload";
@@ -45,7 +47,7 @@ const ID_MENU_RELOAD: usize = 1002;
 const ID_MENU_EXIT: usize = 1001;
 
 /// Stable GUID for the tray icon so Windows can persist settings (e.g. promoted / always visible).
-/// (Must match the GUID referenced from install.ps1 when setting IsPromoted.)
+/// (The removed install.ps1 set IsPromoted for this GUID; changing it drops the settings Windows saved.)
 const TRAY_GUID: GUID = GUID::from_u128(0x9c8b5a79_9f7f_4d6a_bf87_2e50b5d7a2c1);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);
@@ -246,6 +248,15 @@ fn delete_notify_icon(hwnd: HWND) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if upkeep::another_instance_running() {
+        return Ok(());
+    }
+    // ログはプロセスが終わるまで持つ（書き込み用のスレッドとロック）
+    let log = upkeep::init_logging();
+    tracing::info!("tray started");
+    upkeep::spawn_startup_work(log.as_ref().map(|(_, stem)| stem.clone()));
+    let _log = log;
+
     unsafe {
         let class = to_wide_z("rakukan.tray");
         let wc = WNDCLASSW {

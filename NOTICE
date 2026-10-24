@@ -44,3 +44,15 @@ implementation of azooKey-Windows.
 Source: https://github.com/fkunn1326/azooKey-Windows
 
 Licensed under the MIT License.
+
+================================================================================
+Other third-party components
+================================================================================
+The installer also includes llama.cpp / ggml (MIT), the C++ code of esaxx and
+sais-lite (MIT), Rust crates linked into the DLLs and executables, Tomlyn
+(BSD-2-Clause) and the Windows App SDK runtime (Microsoft Software License
+Terms) used by the settings app, and the NVIDIA CUDA Runtime loader (NVIDIA
+CUDA Toolkit End User License Agreement) statically linked into the CUDA
+version of the engine DLL; the CUDA Runtime itself is loaded from the NVIDIA
+display driver and is not included. Their copyright notices and license texts are in
+THIRD_PARTY_LICENSES.md.

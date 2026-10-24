@@ -1,4 +1,4 @@
-﻿# 辞書と build.json の差し替え・中断復旧（Issue #62）。install.ps1 から読み込む。
+﻿# 辞書と build.json の差し替え・中断復旧（Issue #62）。build-installer.ps1 から読み込む。
 # journal の置換を確定点にする。バックアップは復元中にも消費しない。
 
 function Get-DictionarySwapPaths([string]$DictionaryPath) {

@@ -1,0 +1,21 @@
+{
+  "description": "設定アプリ（settings-ui）が使う NuGet のパッケージの許可の一覧。scripts/check-bundled-licenses.ps1 が使う。section は THIRD_PARTY_LICENSES.md の見出し（配布物に入らないものは null）。パッケージや版を変えたら、ライセンスを確かめてから直す。",
+  "packages": [
+    { "id": "Microsoft.WindowsAppSDK", "version": "1.6.250205002", "license": "Microsoft Software License Terms (Microsoft Windows App SDK)", "section": "### Windows App SDK Runtime" },
+    { "id": "Microsoft.Web.WebView2", "version": "1.0.2651.64", "license": "Microsoft (BSD-3-Clause style) and NOTICE.txt", "section": "### WebView2" },
+    { "id": "Tomlyn", "version": "0.17.0", "license": "BSD-2-Clause", "section": "### Tomlyn" },
+    { "id": "Microsoft.Windows.SDK.BuildTools", "version": "10.0.22621.756", "license": "Microsoft (build tools; not bundled)", "section": null }
+  ],
+  "frameworkPackages": [
+    { "id": "Microsoft.Windows.SDK.NET.Ref", "version": "10.0.19041.57", "license": "Microsoft Software License Terms (Windows SDK)", "section": "### Windows SDK Projection for .NET" },
+    { "id": "Microsoft.NETCore.App.Host.win-x64", "version": "8.0.32", "license": "MIT (.NET)", "section": "### .NET App Host" },
+    { "id": "Microsoft.NETCore.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null },
+    { "id": "Microsoft.WindowsDesktop.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null },
+    { "id": "Microsoft.AspNetCore.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null }
+  ],
+  "ownFiles": [
+    "rakukan-settings.*",
+    "*.xbf",
+    "rakukan.ico"
+  ]
+}

@@ -30,7 +30,7 @@ $ErrorActionPreference = "Stop"
 Set-Location (Split-Path $PSScriptRoot)
 
 # --- Log setup ---
-# Standalone: write own transcript. Called from install.ps1: skip (PS 5.1 no nested transcript).
+# Standalone: write own transcript. Called from a script that already started one: skip (PS 5.1 no nested transcript).
 $LogFile       = $null
 $OwnTranscript = $false
 try { $null = Get-Variable -Name TRANSCRIPT_STARTED -Scope Global -ErrorAction Stop }

@@ -29,11 +29,17 @@
             PaneDisplayMode="Left"
             SelectionChanged="OnNavigationSelectionChanged">
             <NavigationView.PaneFooter>
-                <TextBlock
-                    x:Name="VersionText"
-                    Margin="12,8,12,16"
-                    FontSize="12"
-                    Opacity="0.5" />
+                <StackPanel Margin="12,8,12,16" Spacing="2">
+                    <TextBlock
+                        x:Name="VersionText"
+                        FontSize="12"
+                        Opacity="0.5" />
+                    <TextBlock
+                        x:Name="CopyrightText"
+                        FontSize="12"
+                        Opacity="0.5"
+                        TextWrapping="Wrap" />
+                </StackPanel>
             </NavigationView.PaneFooter>
             <NavigationView.MenuItems>
                 <NavigationViewItem Tag="General" Content="基本">
@@ -477,6 +483,19 @@
                                 <StackPanel Orientation="Horizontal" Spacing="12">
                                     <Button Content="config.toml を開く" Click="OpenConfigButton_Click" />
                                     <Button Content="keymap.toml を開く" Click="OpenKeymapButton_Click" />
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Padding="20" Background="{ThemeResource CardBackgroundFillColorDefaultBrush}" BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="1" CornerRadius="16">
+                            <StackPanel Spacing="12">
+                                <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="バージョン情報" />
+                                <TextBlock x:Name="AboutVersionText" />
+                                <TextBlock x:Name="AboutCopyrightText" Opacity="0.7" TextWrapping="Wrap" />
+                                <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="rakukan は MIT License で提供しています。同梱する第三者の部品は、それぞれのライセンスに従います。" />
+                                <StackPanel Orientation="Horizontal" Spacing="12">
+                                    <Button Content="LICENSE を開く" Click="OpenLicenseButton_Click" />
+                                    <Button Content="第三者のライセンスを開く" Click="OpenThirdPartyLicensesButton_Click" />
                                 </StackPanel>
                             </StackPanel>
                         </Border>

@@ -1,11 +1,12 @@
 <#
 .SYNOPSIS
-    TSF のプロセス別ログを時刻順に統合する（Issue #60）。
+    TSF とエンジンホストのプロセス別ログを時刻順に統合する（Issue #60、#75）。
 
 .DESCRIPTION
     TSF はアプリごとに別プロセスで動くため、ログは起動インスタンスごとの
-    rakukan-tsf-<PID>-<起動識別子>.log に分かれる。ある時刻に何が起きたかを
-    追うには、複数のファイルを時刻順に並べ直す必要がある。
+    rakukan-tsf-<PID>-<起動識別子>.log に分かれる。エンジンホストのログ
+    rakukan-engine-host-<PID>-<起動識別子>.log（engine DLL のログを含む）も同じ形。
+    ある時刻に何が起きたかを追うには、複数のファイルを時刻順に並べ直す必要がある。
 
     このスクリプトは対象のログを読み、各行の先頭にある UTC タイムスタンプで
     並べ替えて 1 本にする。どの行がどのプロセスの、どのファイルから来たかが
@@ -13,7 +14,10 @@
     先頭の凡例に出す。
 
     タイムスタンプを持たない行（パニックのバックトレースなど）は、直前の行の
-    時刻を引き継いで同じ位置に残す。
+    時刻を引き継いで同じ位置に残す。各ファイルの 1 行目のヘッダー
+    （rakukan log header: ...）は行に含めず、PID の判定に使う。
+
+    同じ時刻の行の並びは、因果の順を保証しない（別プロセスの時刻の比較にすぎない）。
 
 .PARAMETER LogDir
     ログのあるディレクトリ。既定は %LOCALAPPDATA%\rakukan。
@@ -28,7 +32,8 @@
     この時刻以前の行だけを出す（UTC）。
 
 .PARAMETER ProcessId
-    この PID のログだけを対象にする。複数指定できる。
+    この PID のログだけを対象にする。複数指定できる。PID はヘッダーから取り、
+    ヘッダーの無い古いファイルはファイル名から取る。
 
 .PARAMETER IncludeLegacy
     旧方式の rakukan.log / rakukan.log.N も対象に含める。
@@ -56,7 +61,10 @@ if (-not (Test-Path -LiteralPath $LogDir)) {
 }
 
 # 対象ファイルを集める。.lock は除く。
-$patterns = @('rakukan-tsf-*.log', 'rakukan-tsf-*.log.*')
+$patterns = @(
+    'rakukan-tsf-*.log', 'rakukan-tsf-*.log.*',
+    'rakukan-engine-host-*.log', 'rakukan-engine-host-*.log.*'
+)
 if ($IncludeLegacy) { $patterns += @('rakukan.log', 'rakukan.log.*') }
 
 $files = foreach ($p in $patterns) {
@@ -64,9 +72,37 @@ $files = foreach ($p in $patterns) {
 }
 $files = $files | Sort-Object -Property Name -Unique
 
+# 各ファイルの 1 行目のヘッダー（#73）。
+$headerPattern = '^rakukan log header: '
+
+# 稼働中のプロセスが書き込み中でも読めるよう、共有を許して開く。
+function Open-LogReader([string]$path) {
+    $stream = [System.IO.FileStream]::new(
+        $path,
+        [System.IO.FileMode]::Open,
+        [System.IO.FileAccess]::Read,
+        ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
+    return [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+}
+
+# PID はヘッダーから取る。ヘッダーの無い古いファイルはファイル名から取る。
+function Get-LogPid($file) {
+    $reader = Open-LogReader $file.FullName
+    try { $first = $reader.ReadLine() } finally { $reader.Dispose() }
+    if ($first -and $first -match $headerPattern -and $first -match ' pid=(\d+) ') {
+        return $Matches[1]
+    }
+    if ($file.Name -match '^rakukan-(?:tsf|engine-host)-(\d+)-') { return $Matches[1] }
+    return '-'
+}
+
+$pids = @{}
+foreach ($f in $files) { $pids[$f.FullName] = Get-LogPid $f }
+
 if ($ProcessId) {
     $files = $files | Where-Object {
-        if ($_.Name -match '^rakukan-tsf-(\d+)-') { [int]$Matches[1] -in $ProcessId } else { $false }
+        $p = $pids[$_.FullName]
+        ($p -ne '-') -and ([int]$p -in $ProcessId)
     }
 }
 
@@ -106,7 +142,7 @@ $index = 0
 
 foreach ($f in $files) {
     $index++
-    $filePid = if ($f.Name -match '^rakukan-tsf-(\d+)-') { $Matches[1] } else { '-' }
+    $filePid = $pids[$f.FullName]
     $first = $null
     $last = $null
     $count = 0
@@ -114,16 +150,11 @@ foreach ($f in $files) {
     # 同じ時刻の中での元の並びを保つため、ファイル内の行番号を第 2 キーにする。
     $carried = '0000-00-00T00:00:00.000000'
     $lineNo = 0
-    # 稼働中のプロセスが書き込み中でも読めるよう、共有を許して開く。
-    $stream = [System.IO.FileStream]::new(
-        $f.FullName,
-        [System.IO.FileMode]::Open,
-        [System.IO.FileAccess]::Read,
-        ([System.IO.FileShare]::ReadWrite -bor [System.IO.FileShare]::Delete))
-    $reader = [System.IO.StreamReader]::new($stream, [System.Text.Encoding]::UTF8)
+    $reader = Open-LogReader $f.FullName
     try {
     while ($null -ne ($line = $reader.ReadLine())) {
         $lineNo++
+        if ($line -match $headerPattern) { continue }
         if ($line -match $stampPattern) { $carried = ConvertTo-LogKey $Matches[1] }
         if ($sinceKey -and $carried -lt $sinceKey) { continue }
         if ($untilKey -and $carried -gt $untilKey) { continue }
@@ -139,7 +170,6 @@ foreach ($f in $files) {
     }
     } finally {
         $reader.Dispose()
-        $stream.Dispose()
     }
     $legend.Add([pscustomobject]@{
         Index = "#$index"
@@ -158,6 +188,7 @@ $header += "# rakukan ログ統合  生成: $(Get-Date -Format 'yyyy-MM-ddTHH:mm
 $header += "# 元ディレクトリ: $LogDir"
 if ($sinceKey) { $header += "# Since: $sinceKey (UTC)" }
 if ($untilKey) { $header += "# Until: $untilKey (UTC)" }
+$header += "# 同じ時刻の行の並びは、因果の順を保証しない"
 $header += "#"
 $header += "# 索引  PID     行数      範囲（UTC）                              元ファイル"
 foreach ($l in ($legend | Where-Object { $_.Lines -gt 0 })) {

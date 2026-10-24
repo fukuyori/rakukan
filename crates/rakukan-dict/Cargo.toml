@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish.workspace = true
 
 description = "辞書パーサー・ユーザー辞書管理（mozc binary + user）"
 
@@ -18,3 +19,10 @@ memmap2      = { workspace = true }   # rakukan.dict の mmap 読み取り
 
 [dev-dependencies]
 tempfile  = { workspace = true }
+
+# dict_dir(): 自分を含むモジュール（engine DLL）のパスを GetModuleHandleExW / GetModuleFileNameW で取る。
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58.0", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }
