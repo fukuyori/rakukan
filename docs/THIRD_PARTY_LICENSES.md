@@ -4110,12 +4110,12 @@ The following Rust crates are linked into `rakukan_tsf.dll`, `rakukan-engine-hos
 | tracing-subscriber | 0.3.23 | MIT | https://github.com/tokio-rs/tracing |
 | try-lock | 0.2.5 | MIT | https://github.com/seanmonstar/try-lock |
 | typenum | 1.20.1 | MIT OR Apache-2.0 | https://github.com/paholg/typenum |
-| unicode_categories | 0.1.1 | MIT OR Apache-2.0 | https://github.com/swgillespie/unicode-categories |
 | unicode-ident | 1.0.24 | (MIT OR Apache-2.0) AND Unicode-3.0 | https://github.com/dtolnay/unicode-ident |
 | unicode-normalization | 0.1.25 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-normalization |
 | unicode-normalization-alignments | 0.1.12 | MIT OR Apache-2.0 | https://github.com/n1t0/unicode-normalization |
 | unicode-segmentation | 1.13.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-segmentation |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | https://github.com/unicode-rs/unicode-width |
+| unicode_categories | 0.1.1 | MIT OR Apache-2.0 | https://github.com/swgillespie/unicode-categories |
 | untrusted | 0.9.0 | ISC | https://github.com/briansmith/untrusted |
 | ureq | 2.12.1 | MIT OR Apache-2.0 | https://github.com/algesten/ureq |
 | url | 2.5.8 | MIT OR Apache-2.0 | https://github.com/servo/rust-url |
@@ -4126,8 +4126,6 @@ The following Rust crates are linked into `rakukan_tsf.dll`, `rakukan-engine-hos
 | which | 6.0.3 | MIT | https://github.com/harryfei/which-rs.git |
 | winapi | 0.3.9 | MIT OR Apache-2.0 | https://github.com/retep998/winapi-rs |
 | windows | 0.58.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
-| windows_x86_64_msvc | 0.53.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-core | 0.58.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-implement | 0.58.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-interface | 0.58.0 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
@@ -4142,6 +4140,8 @@ The following Rust crates are linked into `rakukan_tsf.dll`, `rakukan-engine-hos
 | windows-sys | 0.61.2 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-targets | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | windows-targets | 0.53.5 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows_x86_64_msvc | 0.52.6 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
+| windows_x86_64_msvc | 0.53.1 | MIT OR Apache-2.0 | https://github.com/microsoft/windows-rs |
 | winnow | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
 | winsafe | 0.0.19 | MIT | https://github.com/rodrigocfd/winsafe |
 | writeable | 0.6.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
@@ -9027,7 +9027,7 @@ Used by: winapi 0.3.9
 
 #### Apache License 2.0 (Apache-2.0)
 
-Used by: windows 0.58.0, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1, windows-core 0.58.0, windows-implement 0.58.0, windows-interface 0.58.0, windows-link 0.2.1, windows-registry 0.6.1, windows-result 0.2.0, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.5.1, windows-sys 0.59.0, windows-sys 0.60.2, windows-sys 0.61.2, windows-targets 0.52.6, windows-targets 0.53.5
+Used by: windows 0.58.0, windows-core 0.58.0, windows-implement 0.58.0, windows-interface 0.58.0, windows-link 0.2.1, windows-registry 0.6.1, windows-result 0.2.0, windows-result 0.4.1, windows-strings 0.1.0, windows-strings 0.5.1, windows-sys 0.59.0, windows-sys 0.60.2, windows-sys 0.61.2, windows-targets 0.52.6, windows-targets 0.53.5, windows_x86_64_msvc 0.52.6, windows_x86_64_msvc 0.53.1
 
 ```
                                  Apache License

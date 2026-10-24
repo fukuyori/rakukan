@@ -1,18 +1,21 @@
 # Makefile.toml - rakukan build tasks
 # cargo make <task>
 #
-# 標準のビルド & インストールフロー (4 ステップ):
+# 標準のビルド & インストールフロー:
 #   1. cargo make build-engine   engine DLL (cpu/vulkan/cuda) をビルド
 #   2. cargo make build-tsf      tsf/tray/host/dict-builder/WinUI をビルド
-#   3. cargo make sign           ビルド成果物に電子署名 (任意)
-#   4. cargo make install        %LOCALAPPDATA%\rakukan\ にコピー + 登録 + tray 起動  ★管理者必要
+#   3. sudo cargo make install   インストーラーを署名なしで作り、サイレント実行 (%ProgramFiles%\rakukan)  ★管理者必要
+#   4. PC を再起動                インストールの完了
 #
-# まとめて実行したい場合:
-#   cargo make full-install      上記 1〜4 を順に実行
-#   cargo make quick-install     build-tsf + install (engine 使いまわし、署名なし、開発時の高速再インストール用)
+# まとめて実行したい場合 (開発用、署名なし):
+#   cargo make full-install      build-engine + build-tsf + install
+#   cargo make quick-install     build-tsf + install (engine 使いまわし)
+#
+# 配布物:
+#   cargo make package           sign → 署名付きインストーラー (output\rakukan-<version>-setup.exe)
 #
 # その他:
-#   cargo make uninstall          登録解除                                          ★管理者必要
+#   cargo make uninstall          アンインストーラーをサイレント実行 (完了には再起動)  ★管理者必要
 #   cargo make build-engine-full  engine DLL フルクリーンビルド (llama CUDA キャッシュも削除、低速)
 #   cargo make check              型チェック (高速)
 #   cargo make test               エンジン単体テスト
@@ -23,7 +26,7 @@
 default_to_workspace = false
 
 # ─────────────────────────────────────────────────────────────────────────────
-# コア 4 タスク (ビルド → 署名 → インストール)
+# コアタスク (ビルド → インストール / 署名 → 配布物)
 # ─────────────────────────────────────────────────────────────────────────────
 
 [tasks.build-engine]
@@ -46,36 +49,42 @@ description = "#65 故障試験後に戻す通常版を別の出力先へビル�
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-tsf.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-normal-restore"]
 
+[tasks.install]
+description = "③ インストーラーを署名なしで作り、サイレント実行 (完了には再起動) ★管理者必要"
+command = "powershell"
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-installer.ps1", "-Profile", "release", "-Install"]
+
 [tasks.sign]
-description = "③ ビルド成果物に電子署名 (signtool, 任意)"
+description = "ビルド成果物に電子署名 (signtool。cargo make package が先に実行する)"
 command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\sign-artifacts.ps1", "-Profile", "release"]
 
-[tasks.install]
-description = "④ %LOCALAPPDATA%\\rakukan\\ にコピー + TSF 登録 + tray 起動 ★管理者必要"
+[tasks.package]
+description = "配布物: sign → 署名付きインストーラー (setup とアンインストーラーにも署名)"
+dependencies = ["sign"]
 command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release"]
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-installer.ps1", "-Profile", "release", "-Sign"]
 
 [tasks.install-tsf-fault-test]
-description = "#65 故障試験用 TSF DLL だけを導入・登録 ★管理者必要"
+description = "#65 故障試験用 TSF DLL だけを差し替え・登録 (開発専用) ★管理者必要"
 command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-fault-test", "-TsfOnly"]
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\dev-swap-tsf.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-fault-test"]
 
 [tasks.install-tsf-normal-restore]
-description = "#65 通常版 TSF DLL だけを復元・登録 ★管理者必要"
+description = "#65 通常版 TSF DLL だけを復元・登録 (開発専用) ★管理者必要"
 command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\install.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-normal-restore", "-TsfOnly"]
+args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\dev-swap-tsf.ps1", "-Profile", "release", "-BuildDir", "target\\config-watch-normal-restore"]
 
 # ─────────────────────────────────────────────────────────────────────────────
-# まとめ実行
+# まとめ実行 (開発用、署名なし)
 # ─────────────────────────────────────────────────────────────────────────────
 
 [tasks.full-install]
-description = "build-engine + build-tsf + sign + install を一括実行 (リリース向け)"
-dependencies = ["build-engine", "build-tsf", "sign", "install"]
+description = "build-engine + build-tsf + install を一括実行 (開発用、署名なし)"
+dependencies = ["build-engine", "build-tsf", "install"]
 
 [tasks.quick-install]
-description = "build-tsf + install のみ (engine 使いまわし、署名なし、開発用)"
+description = "build-tsf + install のみ (engine 使いまわし、開発用、署名なし)"
 dependencies = ["build-tsf", "install"]
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -88,9 +97,28 @@ command = "powershell"
 args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\build-engine.ps1", "-Profile", "release", "-FullClean"]
 
 [tasks.uninstall]
-description = "登録解除 ★管理者必要"
-command = "powershell"
-args = ["-ExecutionPolicy", "Bypass", "-File", "scripts\\uninstall.ps1"]
+description = "インストーラーのアンインストーラーをサイレント実行 (完了には再起動) ★管理者必要"
+# cargo-make が書き出す一時ファイルは BOM なしなので、Windows PowerShell 5.1 で読めるよう ASCII だけで書く
+script_runner = "powershell"
+script_extension = "ps1"
+script_runner_args = ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
+script = '''
+$ErrorActionPreference = "Stop"
+# AppId of rakukan_installer.iss. The installer runs in 64-bit mode, so the entry is in the native view
+# (the WOW6432Node entry belongs to the 32-bit installers of 0.13.0 and earlier in %LOCALAPPDATA%).
+$key = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{B7C4E2A1-3F8D-4C91-B5A0-D2E6F9183047}_is1"
+if (-not (Test-Path -LiteralPath $key)) { Write-Host "[uninstall] Rakukan IME is not installed."; exit 0 }
+$exe = (Get-ItemProperty -LiteralPath $key).UninstallString.Trim('"')
+if (-not (Test-Path -LiteralPath $exe)) { Write-Host "[uninstall] Uninstaller not found: $exe"; exit 1 }
+Write-Host "[uninstall] $exe"
+# The first phase of the Inno uninstaller waits for the uninstall to finish and returns its exit code.
+$proc = Start-Process -FilePath $exe -ArgumentList @("/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART") -PassThru
+$null = $proc.Handle
+$proc.WaitForExit()
+Write-Host "[uninstall] exit code: $($proc.ExitCode)"
+if ($proc.ExitCode -ne 0) { exit $proc.ExitCode }
+Write-Host "[uninstall] Done. Restart the PC to finish (files in use are removed at restart)."
+'''
 
 [tasks.check]
 description = "型チェックのみ (高速)"

@@ -12,7 +12,7 @@
 # scripts\check-env.ps1 - rakukan のビルドに必要な開発環境を確認する
 #
 # 確認する項目は scripts\build-engine.ps1 / build-tsf.ps1 / build-settings-winui.ps1 /
-# build-installer.ps1 が実際に要求しているものに合わせる。項目を増減したら README.md の
+# build-installer.ps1（cargo make install / package）が実際に要求しているものに合わせる。項目を増減したら README.md の
 # 「ビルド前提」も更新すること。
 #
 # 終了コード: 必須項目が 1 つでも欠けていれば 1、すべて揃っていれば 0
@@ -137,6 +137,12 @@ $gitVer = Get-CommandVersion "git" @("--version")
 if ($gitVer) { Write-Ok "$gitVer" } else { Write-Ng "git" }
 Write-Host ""
 
+# ── Inno Setup 6 (cargo make install / package がインストーラーを作る) ─────────
+Write-Host "[Inno Setup]" -ForegroundColor Cyan
+$iscc = @("C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
+if ($iscc) { Write-Ok "Inno Setup 6: $iscc" } else { Write-Ng "Inno Setup 6 (cargo make install / package がインストーラーを作るのに必要)" }
+Write-Host ""
+
 # ── 任意: GPU backend ────────────────────────────────────────────────────────
 Write-Host "[GPU backend (任意)]" -ForegroundColor Cyan
 $nvcc = Get-Command "nvcc" -ErrorAction SilentlyContinue
@@ -150,16 +156,14 @@ if ($env:VULKAN_SDK -and (Test-Path -LiteralPath $env:VULKAN_SDK)) { Write-Ok "V
 else { Write-Opt "VULKAN_SDK 未設定 -> vulkan variant はスキップ" }
 Write-Host ""
 
-# ── 任意: 配布パッケージ作成 ──────────────────────────────────────────────────
-Write-Host "[配布パッケージ (任意)]" -ForegroundColor Cyan
-$iscc = @("C:\Program Files (x86)\Inno Setup 6\ISCC.exe", "C:\Program Files\Inno Setup 6\ISCC.exe") | Where-Object { Test-Path -LiteralPath $_ } | Select-Object -First 1
-if ($iscc) { Write-Ok "Inno Setup 6: $iscc" } else { Write-Opt "Inno Setup 6 なし (scripts\build-installer.ps1 にのみ必要)" }
+# ── 任意: 配布物の署名 ────────────────────────────────────────────────────────
+Write-Host "[配布物の署名 (任意)]" -ForegroundColor Cyan
 $signtool = Get-Command "signtool" -ErrorAction SilentlyContinue
 if (-not $signtool) {
     $kits = Get-ChildItem "${env:ProgramFiles(x86)}\Windows Kits\10\bin\10.*\x64\signtool.exe" -ErrorAction SilentlyContinue | Select-Object -Last 1
     if ($kits) { $signtool = $kits }
 }
-if ($signtool) { Write-Ok "signtool: $(Get-CmdPath $signtool)" } else { Write-Opt "signtool なし (cargo make sign と build-installer の署名にのみ必要)" }
+if ($signtool) { Write-Ok "signtool: $(Get-CmdPath $signtool)" } else { Write-Opt "signtool なし (cargo make sign / cargo make package の署名にのみ必要)" }
 Write-Host ""
 
 # ── 結果 ─────────────────────────────────────────────────────────────────────
@@ -168,7 +172,7 @@ Write-Host " 結果" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 if ($failed.Count -eq 0) {
     Write-Host ""
-    Write-Host "  必須項目はすべて揃っています。cargo make build-engine / build-tsf に進めます。" -ForegroundColor Green
+    Write-Host "  必須項目はすべて揃っています。cargo make build-engine / build-tsf / install に進めます。" -ForegroundColor Green
 } else {
     Write-Host ""
     Write-Host "  不足している必須項目:" -ForegroundColor Red

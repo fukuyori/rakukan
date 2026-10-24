@@ -113,6 +113,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
   - 行う時期は `ssInstall`（新しい DLL を登録する `[Run]` より前）。CLSID が新旧で同じなので、後で旧 DLL の登録を解除すると、新しい登録まで消える。
   - 消すのは、旧版のインストーラーと `install.ps1` が置いた名前のファイル（TSF DLL・engine DLL・ホスト・トレイ・`rakukan-dict-builder.exe`・アイコン・TIP のスクリプト・`registered.txt`・ライセンスの文書・旧版のアンインストーラー `unins000.*` など）と、`settings-ui\`・`dict\` だけ。ログ・`etw\`・`register_debug.log`・`config.toml` など、それ以外のものは残す。消せないもの（使用中）は `RestartReplace` で次の起動時に消す。フォルダーは中身の後に予約し、空になっていれば消える。
   - `install.ps1` が HKCU の Run に書いた `rakukan-tray` は、旧配置を指していれば消す（トレイは HKLM の Run から起動する）。
+  - 0.13.0 までのインストーラーは 32 ビットのモードで、アンインストール情報を 32 ビット側（`WOW6432Node`）に書いた。64 ビットのモードの新しいインストーラーはそれを引き継がず、旧版のアンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。32 ビット側の `{AppId}_is1` の `Inno Setup: App Path` が旧配置を指していれば消す（旧配置のフォルダーが無くても行う。2026-10-24 に S2 の後の PC で残りを見つけて追加）。
   - 旧版と AppId が同じなので、`UsePreviousAppDir=no` にする（既定の yes では、前回のインストール先の `%LOCALAPPDATA%\rakukan` へ入れてしまう。ヘルプ `[Setup]: UsePreviousAppDir`）。
   - 対象は、インストーラーを実行したユーザーの `%LOCALAPPDATA%` だけ（`{localappdata}`）。別のユーザーが `install.ps1` で入れた旧配置は扱わない。
 - `[UninstallRun]` は unregister-tip → regsvr32 /u。`[UninstallRun]` では `runasoriginaluser` を使えない（Inno Setup のヘルプ `[Run]`）ので、アンインストーラーの権限で実行する。ファイルには `uninsrestartdelete` を付ける。

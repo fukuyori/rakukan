@@ -12,7 +12,7 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 
 - 作業計画は [October_Plan.md](October_Plan.md)（フェーズ 1〜5）。フェーズ 1（#71）・フェーズ 2（#69 / #70）は 2026-10-22 に完了した。どちらも 0.13.0（タグ `0.13.0` = `7c76649`）に含まれる。#69・#70・#71 は同日にクローズした。
 - 0.13.0 の変更点は CHANGELOG.md の `[0.13.0]`。RPC protocol v7、engine ABI 12。
-- フェーズ 2 は、計画ではフェーズ 3 と同じ版で出す予定だった。2026-10-22 に改め、単独で 0.13.0 に含めた（理由と条件は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md) 9 節の決定 1）。古いホストとの組み合わせは、今のインストールの手順（別の IME に切り替え → サインアウト → サインイン → rakukan を使わずにインストール）で避ける。
+- フェーズ 2 は、計画ではフェーズ 3 と同じ版で出す予定だった。2026-10-22 に改め、単独で 0.13.0 に含めた（理由と条件は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md) 9 節の決定 1）。古いホストとの組み合わせは、0.13.0 のインストールの手順（別の IME に切り替え → サインアウト → サインイン → rakukan を使わずにインストール）で避けた。
 - フェーズ 2 の試験のうち、故障を起こす口が要るもの（保留中の操作、257 キー目、`VersionMismatch`、ロック競合など）は #85（試験の自動化の基盤）に回した。
 
 ### 今の作業: フェーズ 3（段 C、#33。#73〜#76 を含む）
@@ -21,16 +21,17 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 
 フェーズ 3 は専用のブランチ `phase3-installer` で作業し、その間は main を更新しない。ブランチから main への pull request（#87）を開いたままにして CI を動かし、配布前の完了の後にマージコミットでマージする。リリースはフェーズ 3 の終了後に 1 回、マージした後の main で行う（October_Plan.md 4 節、2026-10-23 決定）。
 
-Step の進み（2026-10-23。進捗は tque の #6 の下に登録している）:
+Step の進み（2026-10-24。進捗は tque の #6 の下に登録している）:
 
 | Step | 内容 | コミット | 実機の試験 |
 |---|---|---|---|
 | 1 | 配置に依存しないパス、ログ（#73・#75・#76、ETW）、engine DLL のピン止め、第三者のライセンス、#88・#90。レビューの指摘の修正 | `2a628b5`・`500d161`・`b93532a` | S1 合格（Test_Procedure.md の 2026-10-23 の結果） |
 | 2 | 新しいインストーラー（64 ビット、`{autopf}`、`restartreplace`、`AlwaysRestart`、登録の成否をレジストリで判定・終了コード 20、HKLM の Run のトレイ）、トレイ（多重起動の抑止・ログ・掃除・キーボードの一覧の補いを版ごとに 1 回）、ログの掃除を 90 日・30000 ファイルに（#74） | `7c6f570` | S2 合格（Step 3 とまとめて） |
 | 3 | 旧配置（`%LOCALAPPDATA%\rakukan`）からの移行（`UsePreviousAppDir=no`、旧 DLL の登録の解除、HKCU の Run の削除、旧版のファイルの削除） | `f74a9c7` | 同上 |
-| 4 | 経路の一本化（`build-installer.ps1` の入力をビルドの出力に、`install.ps1` / `uninstall.ps1` の削除、`dev-swap-tsf.ps1`、Makefile、`cargo make package`、README、CLAUDE.md） | — | 未実装 |
+| 4 | 経路の一本化（`build-installer.ps1` の入力をビルドの出力に・辞書のビルドを移す、`install.ps1` / `uninstall.ps1` の削除、`dev-swap-tsf.ps1`、Makefile（`install` / `package` / `uninstall` / 故障試験の 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook）。移行で 0.13.0 の 32 ビット側のアンインストール情報を消す処理、`gen-third-party-licenses.ps1` のソートを序数比較に（Windows PowerShell 5.1 で `-Check` が通らなかった）。S3 の中で `check-bundled-licenses.ps1`・`dev-swap-tsf.ps1` の `Get-FileHash` を .NET の SHA256 に（cargo make から起動した Windows PowerShell 5.1 で見つからない） | — | S3 合格（Test_Procedure.md の 2026-10-24 の結果） |
+| 5 | 配布前の文書（CHANGELOG の `[Next Release]` の節、DESIGN.md・handoff.md の配置と導入の手順、version-update-checklist.md の CHANGELOG の見出し） | — | 文書だけ |
 
-**次の開始点: Step 4**（tque #39〜#44）。Installer_Redesign_Plan.md の 4.3 と 5 章の Step 4。着手は「実装して」の指示があってから。
+**次の開始点: Step 6**（tque #46。リリース作業。October_Plan.md の 4 節）。次の版は 0.13.1（2026-10-24 に利用者が決定）。版を上げるとき（tque #48）に、version-update-checklist.md に従って版を変え、CHANGELOG の `[Next Release]` を `[0.13.1] - 日付` に置き換える。
 
 決まったこと・分かったこと（フェーズ 3 の中で）:
 - #75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足した。
@@ -38,7 +39,9 @@ Step の進み（2026-10-23。進捗は tque の #6 の下に登録している�
 - モデルや `gpu_backend` を替えて保存しても、ホストを起動し直すまで反映されない（#49 のコメント。フェーズ 4）。
 - 著作権の表示は `rakukan Contributors` のまま（`LICENSE`・`NOTICE`・設定アプリの csproj。2026-10-23 に利用者が確認）。
 - 新しいインストーラーは版が同じなので `output\rakukan-0.13.0-setup.exe` の名前で作られる。0.13.0 の配布物は `output\oldversion\rakukan-0.13.0-release-setup.exe` に写してある。
-- 今の PC は、S2 の後に開発の配置（`%LOCALAPPDATA%\rakukan`、`sudo cargo make install`）に戻してある。Step 4 までは開発の導入はこの形のまま。
+- 今の PC は、S3 の後に新しい形の開発の配置（`%ProgramFiles%\rakukan`、ビルド → `sudo cargo make install` → 再起動）にしてある。`%LOCALAPPDATA%\rakukan` に残っているのはログ・`etw`・`config.toml` など。
+- `install-tsf-*`（故障試験の TSF の差し替え）は、入力方式が Rakukan だと explorer とターミナルが TSF DLL を読み込んでいてロックで止まる。サインアウト → サインインの後、入力方式を Rakukan にせずに実行する。charmap で確かめる前には入力方式を Rakukan にする（Test_Procedure.md の S3-3）。
+- 0.13.0 までのインストーラー（32 ビットのモード）が書いたアンインストール情報（`HKLM\SOFTWARE\WOW6432Node\…\Uninstall\{B7C4E2A1-…}_is1`）が、移行の後も残っていた（2026-10-24、S2 の後のこの PC で発見）。旧版のアンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。旧配置を指すものを移行で消す処理（`RemoveOldUninstallEntry`）を足した。**Step 4 の試験（Test_Procedure.md の S3-0 の 3・S3-1 の 6）で、消えることを確かめる**（tque #85）。
 
 ### 並行して行うこと
 
@@ -51,14 +54,15 @@ Step の進み（2026-10-23。進捗は tque の #6 の下に登録している�
 ```powershell
 cargo make build-engine   # エンジンを変えたときだけ
 cargo make build-tsf
-# サインアウト → サインイン
-sudo cargo make install
+sudo cargo make install   # インストーラーを署名なしで作り、サイレント実行（%ProgramFiles%\rakukan）
+# PC を再起動（インストールの完了。事前のサインアウトは要らない）
 ```
 
 - 手順を示すときは、この順序で示す。
+- `sudo cargo make uninstall` はアンインストーラーをサイレント実行する（完了には再起動）。`cargo make install-tsf-fault-test` / `install-tsf-normal-restore` は #65 の故障試験用に TSF DLL だけを差し替える。入力方式が Rakukan だと explorer とターミナルが DLL を読み込んでいてロックで止まるので、サインアウト → サインインの後、入力方式を Rakukan にせずに実行する。
 - `cargo test` は PowerShell から実行する（Git Bash 経由では ConPTY テストがハングする）。全体は `cargo test --workspace --lib`。バイナリの crate（`rakukan-dict-builder`）は `cargo test -p rakukan-dict-builder` を別に実行し、件数を分けて報告する。
 - CI は Format Check（`cargo fmt --all -- --check`）と Build & Test (Windows)。コミットの前に `cargo fmt --all -- --check` と clippy を通す（2026-10-22 に fmt の漏れで CI が 2 回落ちた）。
-- 配布物（インストーラー）は `-Sign` 付きで作る。配布物は `cargo make install` で入れたファイルをそのまま詰めたもの（`scripts/build-installer.ps1`）。
+- 配布物（インストーラー）は `cargo make package`（sign → `build-installer.ps1 -Sign`）で、利用者が作る。開発の導入と同じビルドの出力から、同じインストーラーを作る（`scripts/build-installer.ps1`）。cargo make が起動するのは Windows PowerShell 5.1 なので、スクリプトは 5.1 で動く書き方にする（`Get-FileHash` は PowerShell 7 から起動すると見つからない。Sort-Object の既定の比較は 5.1 と 7 で順が違う）。
 
 ### 実機の試験
 
@@ -85,7 +89,8 @@ sudo cargo make install
 
 | 用途 | 場所 |
 |---|---|
-| インストール先 | 開発の導入（`sudo cargo make install`）は `%LOCALAPPDATA%\rakukan\`。新しいインストーラーは `%ProgramFiles%\rakukan\`（Step 4 で開発の導入もこちらにする） |
+| インストール先 | `%ProgramFiles%\rakukan\`（開発の導入も配布物も同じ） |
+| ビルドの出力 | `C:\rb\release`、辞書は `C:\rb\dict\`、インストーラーは `output\rakukan-<version>-setup.exe`、セットアップのログは `output\logs\`（`cargo make install` の実行ごと） |
 | モデル | `%ProgramData%\rakukan\models`（無ければ既存の `%USERPROFILE%\.cache\huggingface\hub` を読む） |
 | 設定 | `%APPDATA%\rakukan\config.toml` / `keymap.toml` / `user_dict.toml` |
 | 学習履歴 | `%APPDATA%\rakukan\learn_history.bin` |

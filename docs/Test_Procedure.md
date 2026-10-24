@@ -16,10 +16,11 @@
 | T4 インストール・更新・アンインストール | すべてのリリースの前（前の版からの更新を含む） | 開発中 | `-Sign` 付きの配布物 |
 | S1 フェーズ 3 の Step 1（配置に依存しない形・ログ・ETW） | フェーズ 3 の Step 1 を終えたとき（`docs/Installer_Redesign_Plan.md` 5 章の実機確認の 1 回目） | それ以外 | 開発ビルド |
 | S2 フェーズ 3 の Step 2・3（新しいインストーラー・旧配置からの移行） | フェーズ 3 の Step 3 を終えたとき（同 5 章の実機確認の 2 回目） | それ以外 | 開発ビルドから `-Sign` 付きで作ったインストーラー |
+| S3 フェーズ 3 の Step 4（経路の一本化） | フェーズ 3 の Step 4 を終えたとき（同 5 章の実機確認の 3 回目） | それ以外 | 開発ビルド（`sudo cargo make install`）と `cargo make package` の配布物 |
 
 - 変更のたびではなく、まとまった変更（段・フェーズ）が終わったときに 1 回行う。
 - リリースの前: T4 は必ず行う。T1〜T3 は、前のリリースの後に当てはまる変更があり、その変更の後にまだ行っていないものだけを行う。
-- 配布物で T1〜T3 をやり直すのは、インストーラーやファイルの配置を変えたとき（10 月の計画のフェーズ 3 など）だけ。配布物は `cargo make install` で入れたファイルをそのまま詰めたもの（`scripts/build-installer.ps1`）なので、それ以外は開発ビルドでの結果を使う。
+- 配布物で T1〜T3 をやり直すのは、インストーラーやファイルの配置を変えたとき（10 月の計画のフェーズ 3 など）だけ。開発の導入（`cargo make install`）も配布物（`cargo make package`）も、同じビルドの出力から同じインストーラー（`scripts/build-installer.ps1`）で作るので、それ以外は開発ビルドでの結果を使う。
 - 故障を起こす口が要る試験（保留中の操作、257 キー目、`VersionMismatch`、ロック競合など）は、手では行わない（#85 の自動化で扱う）。
 - 結果は、日付・版・ビルドを書いた節として、この文書の末尾に足していく。
 
@@ -34,7 +35,7 @@
    ```
    見る点: 4 ファイル（無いものは除く）とハッシュが表示される。
 2. **ログのレベル**: 設定アプリ、または `config.toml` の `[general] log_level` を `"debug"` にする（元の値を控える）。反映はホストの起動し直しの後。
-3. **開発ビルドの導入**: `cargo make build-engine` → `cargo make build-tsf` → サインアウト → サインイン → `sudo cargo make install`。
+3. **開発ビルドの導入**: `cargo make build-engine` → `cargo make build-tsf` → `sudo cargo make install` → PC を再起動（フェーズ 3 の Step 4 から。それより前のビルドでは、`sudo cargo make install` の前にサインアウト → サインイン）。
    見る点: ホストのログの起動時のビルドの一致の検査が通っている（`dll_git` と `host_git` が同じ）。メモ帳で変換できる。
 4. 試験に使うアプリ: メモ帳、EmEditor（2 つ以上の別プロセス）。
 
@@ -401,6 +402,111 @@ Step 4（経路の一本化）までは、開発の導入は今までの `sudo c
 
 戻す操作: 別のアカウントからサインアウトする。
 
+## S3. フェーズ 3 の Step 4（経路の一本化）
+
+`docs/Installer_Redesign_Plan.md` 5 章の Step 4 の完了条件を確かめる。今の開発の配置（`%LOCALAPPDATA%\rakukan`、削除した `install.ps1` で入れたもの）から、新しい `sudo cargo make install` で `%ProgramFiles%\rakukan` へ移る。以後の開発の導入はこの形になるので、最後は新しい形の開発の配置で終わる。
+
+試験の範囲の外: 別のユーザーでの確認（S2-6 と同じ）、protocol / engine ABI の版が違う組み合わせ。
+
+**使う PowerShell**: 管理者でない PowerShell を 1 つ開き、S3 の操作はすべてそこで行う（`sudo` と `install-tsf-*` は、そこから昇格する。S3-4 の 2 だけは管理者の PowerShell）。下の「PowerShell の準備」は、この PowerShell を開くたびに行う。**PC を再起動した後は、開き直して、もう一度行う**（関数はその PowerShell の中にだけ残る）。
+
+**PowerShell の準備**（S3-0 の 3 で初めて行い、再起動の後のたびに行う）:
+1. 作業フォルダをリポジトリにする: `Set-Location D:\home\source\rust\rakukan`
+2. S2-0 の 6 の `function Show-RakukanState { … }` を貼る（末尾の `Show-RakukanState` の行は貼らなくてよい）。
+3. 次の 2 つの関数を貼る:
+   ```powershell
+   # セットアップのログ（output\logs\ に実行ごとに残る）の、最後のものの要点
+   function Show-SetupLog {
+     $setupLog = Get-ChildItem D:\home\source\rust\rakukan\output\logs -Filter 'setup-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+     $setupLog.Name; Select-String -LiteralPath $setupLog.FullName -Pattern 'migration:|old TSF DLL|TSF registration|Need to restart|exit code|Exception' | ForEach-Object { $_.Line }
+   }
+   # アンインストール情報（64 ビット側と、0.13.0 までの 32 ビット側）
+   function Show-UninstallEntry {
+     $u = 'Microsoft\Windows\CurrentVersion\Uninstall\{B7C4E2A1-3F8D-4C91-B5A0-D2E6F9183047}_is1'
+     "64-bit: " + (Test-Path "HKLM:\SOFTWARE\$u"); "32-bit: " + (Test-Path "HKLM:\SOFTWARE\WOW6432Node\$u")
+   }
+   ```
+   見る点: エラーが出ない。`Get-Command Show-RakukanState, Show-SetupLog, Show-UninstallEntry` で 3 つが出る。
+
+### S3-0 準備
+1. 0 の 1（設定のバックアップ）と 2（ログのレベルを `"debug"` 以上にする。`"trace"` ならそのまま）。
+2. ログを退避する（`docs/October_Plan.md` 4 節の「アンインストールを含む確認の前に、ログを退避する」の手順。S3-1 で入る新しいトレイが古いログを掃除し、S3-4 でアンインストールするため）。
+3. 「PowerShell の準備」を行い、`Show-RakukanState`、`Show-UninstallEntry`、`Test-Path C:\rb\dict\rakukan.dict`。
+   見る点: `%ProgramFiles%\rakukan` が無い（インストール先が空）。`CLSID` が `…\AppData\Local\rakukan\rakukan_tsf.dll`。`C:\rb\dict\rakukan.dict` の有無を記録する（無ければ S3-1 で辞書を初めて作る）。`32-bit` の値を記録する（S2 の後のこの PC では `True`）。
+
+### S3-1 インストール先が空の状態から install → 再起動（README の手順）
+1. メモ帳で `kanji` → Space → Enter（旧配置の TSF とホストが動いている状態にする）。メモ帳は閉じない。
+2. S3 の PowerShell で `cargo make build-engine` → `cargo make build-tsf`。
+3. 同じ PowerShell で、サインアウトせずに `sudo cargo make install`。
+   見る点: `[1/4]` で mozc の TSV の `Downloaded:` が 12 行と `-> C:\rb\dict\rakukan.dict` が出る（S3-0 の 3 で `C:\rb\dict\rakukan.dict` があった場合は `already built` が出る）。`[3/4]` の ISCC が完走する。`exit code: 0`、`log: D:\home\source\rust\rakukan\output\logs\setup-….log`、「インストールしました。完了するには PC を再起動してください。」が出る。セットアップの画面（使用許諾を含む）が出ず、PC も再起動しない。
+4. `git diff rakukan_installer.iss | Select-String MyAppVersion`。
+   見る点: 何も出ない（版が同じなので、`build-installer.ps1` が `#define MyAppVersion` を書き換えない）。
+5. メモ帳で `kanji` → Space → Enter。
+   見る点: メモ帳が落ちない。打った文字は失われない（変換できなくてもよい。起きたことを記録する）。
+6. `Show-RakukanState`、`Show-SetupLog`、`Show-UninstallEntry`。
+   見る点: `CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`、`TIP HKLM` が `True`。`Run HKLM` が `"C:\Program Files\rakukan\rakukan-tray.exe"`、`Run HKCU` が空。`%ProgramFiles%\rakukan` に `dict`・`settings-ui`・`rakukan-tray.exe` があり、`models` が無い。`pending (rakukan)` に、使用中だった `…\AppData\Local\rakukan\…` が出る。セットアップのログに `migration:` の行があり、`TSF registration check failed` が無い。アンインストール情報が `64-bit: True`・`32-bit: False`。32 ビット側が S3-0 の時点であった場合は、セットアップのログに `migration: removed old uninstall entry` がある。「設定」→「アプリ」→「インストールされているアプリ」の Rakukan IME が 1 つだけ。
+7. PC を再起動し、サインインする。メモ帳で `kanjiwohenkan` → Space → Enter。
+8. PowerShell を開き、「PowerShell の準備」を行う。`Show-RakukanState`、続けて:
+   ```powershell
+   $host_log = Get-ChildItem "$env:LOCALAPPDATA\rakukan" -Filter 'rakukan-engine-host-*.log' | Sort-Object LastWriteTime | Select-Object -Last 1
+   Get-Content $host_log.FullName -TotalCount 1
+   Select-String -LiteralPath $host_log.FullName -Pattern 'engine DLL loaded|mozc_path|dict load failed' | Select-Object -First 3 | ForEach-Object { $_.Line }
+   Get-ChildItem "$env:ProgramFiles\rakukan\dict" | Format-Table Name, Length
+   ```
+   見る点: 変換できる。ホスト・トレイの `Path` が `C:\Program Files\rakukan\…`。ホストのログの 1 行目の `exe=`、`engine DLL loaded: path=`、`mozc_path` が `C:\Program Files\rakukan\…` で、`dict load failed` が無い。`dict` に `rakukan.dict` と `rakukan.dict.build.json` がある。`pending (rakukan)` が空。`%LOCALAPPDATA%\rakukan` に旧版のファイル・`settings-ui`・`dict` が無い。`Keyboard` に `0411:{C0DDF8B0-…}{C0DDF8B1-…}` がある。
+
+戻す操作: なし（この形が以後の開発の配置。S3-2 へ続ける）。
+
+### S3-2 2 回目の install（辞書を作り直さない・ログを分ける）
+1. S3 の PowerShell で `sudo cargo make install`（ビルドはしない）。
+   見る点: `rakukan.dict already built (…), skipping.` が出て、`Downloaded:` が無い。`exit code: 0`。`Get-ChildItem D:\home\source\rust\rakukan\output\logs` に、S3-1 とは別の名前のセットアップのログが 2 つある。
+2. PC を再起動し、サインインする。**rakukan を使わずに** S3-3 へ進む（TSF DLL を読み込んだアプリがあると、S3-3 のコピーが止まる）。
+
+戻す操作: なし。
+
+### S3-3 故障試験の 2 タスク（`install-tsf-fault-test` / `install-tsf-normal-restore`）
+1. PowerShell を開き、「PowerShell の準備」を行う（S3-2 の再起動の後なので）。`cargo make build-tsf-fault-test` → `cargo make build-tsf-normal-restore`（どちらもインストールしない）。
+2. `cargo make install-tsf-fault-test`（UAC を承認）。
+   見る点: `TSF SHA256 source:` と `TSF SHA256 installed:` が同じ（結果は昇格した側の作業フォルダ `C:\Windows\System32\rakukan_install_tsf_*.log` に残る）。`Registered: C:\Program Files\rakukan\rakukan_tsf.dll` と `Installed TSF DLL only:` が出る。ファイルのロックで止まった場合（`Error while executing command, exit code: 1`）は、サインアウト → サインインの後、**入力方式を Rakukan にせずに**ターミナルを 1 つだけ開いて同じタスクをやり直す（入力方式が Rakukan だと、explorer とターミナルが TSF DLL を読み込む。`tasklist /m rakukan_tsf.dll` で見られる）。
+3. `Show-RakukanState`。
+   見る点: `CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`、`TIP HKLM`・`TIP HKCU` が `True`。トレイが止まっていない（`StartTime` が 2 の前のまま。ホストが動いていればホストも）。
+4. ターミナルをクリックしてから Win + Space で、入力方式を **Rakukan** にする（差し替えの登録し直しで MS-IME に変わっていることがあり、そのままでは charmap が TSF DLL を読み込まず、`LOG=(not found …)`・`ARMED=no` になる）。
+5. `.\scripts\issue65-start-fault-target.ps1`、表示された `Release:` のコマンドで制御のファイルを消し、文字コード表（charmap）を閉じる。
+   見る点: `BUILD_KIND=fault-test`、`ARMED=yes`。
+
+戻す操作: `cargo make install-tsf-normal-restore`（4 で入力方式を Rakukan にしたので、ロックで止まりやすい。止まった場合は 2 と同じ）。続けて入力方式を Rakukan にしてから `.\scripts\issue65-start-fault-target.ps1 -ArmedWaitSeconds 5`、`Release:` のコマンドを実行して charmap を閉じる。メモ帳で `kanji` → Space → Enter。
+
+戻した後に見る点: `TSF SHA256 source:` と `installed:` が同じで、2 の値と違う。`issue65-start-fault-target.ps1` が `BUILD_KIND=normal`・`ARMED=no`。メモ帳で変換できる。
+
+### S3-4 `cargo make package` の署名と、`cargo make uninstall`
+1. S3 の PowerShell（**昇格していない**）で `cargo make package`（利用者が行う。環境変数 `CODESIGN_CERT` を使う）。
+   見る点: `[sign] Signed: …, Skipped: …, Failed: 0`、`[sign] 成果物の署名を確認しました`、`[sign] 署名を確認しました` が出る。`output\rakukan-0.13.0-setup.exe` ができる。
+2. 管理者の PowerShell を別に開き、作った配布物をサイレント実行する（終わったら、この PowerShell は閉じてよい）:
+   ```powershell
+   $setup = "D:\home\source\rust\rakukan\output\rakukan-0.13.0-setup.exe"
+   $p = Start-Process $setup -ArgumentList '/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART' -Wait -PassThru
+   "exit code: $($p.ExitCode)"
+   ```
+   見る点: 終了コードが `0`。
+3. PC を再起動し、サインインする。メモ帳で `kanji` → Space → Enter。PowerShell を開き、「PowerShell の準備」を行ってから:
+   ```powershell
+   $files = @("D:\home\source\rust\rakukan\output\rakukan-0.13.0-setup.exe", "$env:ProgramFiles\rakukan\unins000.exe") +
+            @(Get-ChildItem "$env:ProgramFiles\rakukan" -File | Where-Object Extension -in '.dll', '.exe' | ForEach-Object FullName) +
+            @("$env:ProgramFiles\rakukan\settings-ui\rakukan-settings.exe", "$env:ProgramFiles\rakukan\settings-ui\rakukan-settings.dll")
+   Get-AuthenticodeSignature $files | Format-Table Status, @{ n = 'Signer'; e = { $_.SignerCertificate.Subject } }, Path -AutoSize
+   ```
+   見る点: 変換できる。すべての行の `Status` が `Valid` で、`Signer` が `CODESIGN_CERT` の証明書（セットアップ本体・アンインストーラー `unins000.exe`・TSF DLL・engine DLL・ホスト・トレイ・設定アプリ）。
+4. ログを退避する（S3-0 の 2 と同じ）。同じ PowerShell で `sudo cargo make uninstall`。
+   見る点: `[uninstall] C:\Program Files\rakukan\unins000.exe`、`[uninstall] exit code: 0`、`[uninstall] Done. Restart the PC to finish …` が出る。画面に何も出ない。
+5. `Show-RakukanState`。
+   見る点: `CLSID` が空、`TIP HKLM`・`TIP HKCU` が `False`、`Run HKLM` が空、`TipListed` が空、`Keyboard` に rakukan が無い。
+6. PC を再起動し、サインインする。PowerShell を開き、「PowerShell の準備」を行ってから `Show-RakukanState`、`Show-UninstallEntry`。
+   見る点: `%ProgramFiles%\rakukan` が無い（またはファイルが残っていない）。`pending (rakukan)` が空。`64-bit: False`・`32-bit: False`。`%APPDATA%\rakukan` の設定が残っている。
+
+戻す操作: 同じ PowerShell で `sudo cargo make install` → PC を再起動し、サインインする。メモ帳で `kanjiwohenkan` → Space → Enter。PowerShell を開き、「PowerShell の準備」を行ってから `Show-RakukanState`。
+
+戻した後に見る点: 変換できる。`CLSID` が `C:\Program Files\rakukan\rakukan_tsf.dll`。`Keyboard` に `0411:{C0DDF8B0-…}{C0DDF8B1-…}` があり、`TipListed` が `0.13.0`（インストーラーが足せなかった場合は、サインインのときにトレイが足す）。ホストの `Path` が `C:\Program Files\rakukan\rakukan-engine-host.exe`。
+
 ## 5. 後始末
 
 1. ログのレベルを 0 の 2 で控えた値に戻す。
@@ -539,3 +645,24 @@ S2-0 の 4 で `sudo cargo make install` した開発の配置（`%LOCALAPPDATA%
 - S2-5: 合格。`sudo cargo make install` と `register-tip.ps1` で、登録が `%LOCALAPPDATA%\rakukan\rakukan_tsf.dll`、HKCU の Run がトレイ、キーボードの一覧に rakukan、ホストが `%LOCALAPPDATA%\rakukan` から動き、変換できた。
 - S2-6: 行っていない。
 - 後始末: ログは S2-0 と S2-4 の前に `%APPDATA%\rakukan\log-backup-*` へ写した。ログのレベルは `trace` のまま。
+
+## 2026-10-24 の結果（S3: フェーズ 3 の Step 4。開発ビルド `71f8bd1` + 未コミットの Step 4、そこから `cargo make package` で作ったインストーラー）
+
+S3-0 の時点の旧配置は、S2-5 で `install.ps1` により入れた `%LOCALAPPDATA%\rakukan`。
+
+- S3-0: 合格。設定を `backup-test-20261024-082342`、ログを `log-backup-20261024-082342` に写した（3385 ファイル）。`%ProgramFiles%\rakukan` は無く、`C:\rb\dict\rakukan.dict` はスクリプトの確認で作ったものがあった。0.13.0 の 32 ビット側のアンインストール情報が残っていた（`32-bit: True`）。
+- S3-1: 合格。
+  - `sudo cargo make install` は辞書を作り直さず（`already built`）、ISCC からサイレント実行まで完走した（`exit code: 0`、画面なし、再起動なし）。`#define MyAppVersion` は書き換えられなかった。
+  - 再起動の前もメモ帳で変換できた。登録は `C:\Program Files\rakukan\rakukan_tsf.dll`、トレイは HKLM の Run、HKCU の Run は消えた。`%ProgramFiles%\rakukan` に `models` は無い。セットアップのログに移行の行と `migration: removed old uninstall entry … (App Path=C:\Users\n_fuk\AppData\Local\rakukan)` があり、アンインストール情報は `64-bit: True`・`32-bit: False`。「アプリ」の一覧の Rakukan IME は 1 つ。使用中の 4 つ（TSF DLL・CUDA 版の engine DLL・ホスト・トレイ）は削除の予約に入った。
+  - 再起動の後: ホスト・トレイ・engine DLL・辞書（`mozc_path`）が `C:\Program Files\rakukan` から動き、変換できた。ホストと engine DLL のビルドは同じ（`71f8bd1aae78-dirty`）。予約は空、`%LOCALAPPDATA%\rakukan` の旧版のファイルは消えた。`TipListed` が `0.13.0`、トレイのログに `keyboard list checked for 0.13.0`。イベントログのアプリの異常終了に explorer・notepad・rakukan のものは無かった。
+- S3-2: 合格。2 回目の `sudo cargo make install` は辞書を作り直さず（`C:\rb\dict\rakukan.dict` の更新日時が変わらない）、セットアップのログは別のファイルになった。
+- S3-3: 合格。
+  - `install-tsf-fault-test` の 1 回目はファイルのロックで止まった（`explorer.exe` とターミナル `ghostty.exe` が TSF DLL を読み込んでいた）。サインアウト → サインインの後の 2 回目で、SHA256 の一致（`3D3A35C8…`）と登録を確かめた。トレイは止まらなかった。
+  - 起動スクリプトの 1 回目は、入力方式が MS-IME のままで charmap が TSF DLL を読み込まず、`ARMED=no`。入力方式を Rakukan にした後は `BUILD_KIND=fault-test`・`ARMED=yes`。手順に入力方式の確認を足した。
+  - `install-tsf-normal-restore` も 1 回目はロックで止まり、サインアウト → サインインの後に通った（SHA256 `31DCD747…`）。`BUILD_KIND=normal`・`ARMED=no`、メモ帳で変換できた。
+- S3-4: 合格。
+  - 最初の `cargo make package` は、`check-bundled-licenses.ps1` で `Get-FileHash` が見つからずに止まった（cargo make から起動した Windows PowerShell 5.1 が PowerShell 7 のモジュールの場所を引き継ぐため）。`Get-FileHash` を .NET の SHA256 に置き換えて、やり直しで通った。
+  - セットアップ本体（タイムスタンプ付き）、`dist\` の成果物 8 つ、サイレント実行で入れた後のアンインストーラー `unins000.exe` とインストール先の成果物が、すべて `CN=Noriaki Fukuyori` で `Valid`。配布物のサイレント実行は `exit code: 0`、再起動の後に変換できた。
+  - `sudo cargo make uninstall` は `exit code: 0` で、画面は出なかった。再起動の前に登録・TIP（HKLM・HKCU）・HKLM の Run・`TipListed`・キーボードの一覧の項目・アンインストール情報（64・32 ビットとも）が消え、使用中の 4 つと `C:\Program Files\rakukan` が削除の予約に入った。再起動の後の `sudo cargo make install` では、既存のファイルが無い状態で入った。
+  - 戻した後: 再起動の後に変換でき、登録・キーボードの一覧・`TipListed`（`0.13.0`）・ホストとトレイの場所が戻った。
+- 後始末: 設定は `config.toml`・`keymap.toml`・`user_dict.toml` が S3-0 のバックアップと一致。`learn_history.bin` は試験の確定で学習が増えて異なる。ログは S3-0 と S3-4 の前に退避した。ログのレベルは `trace` のまま。`output\rakukan-0.13.0-setup.exe` は開発用のインストーラーに置き換わった（S3-4 の署名付きのものも、その後の install で置き換わった）。

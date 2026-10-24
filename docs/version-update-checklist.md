@@ -22,7 +22,7 @@
 
 | ファイル | 箇所 | 備考 |
 |---|---|---|
-| `CHANGELOG.md` | `## [Unreleased]` → `## [X.Y.Z] - YYYY-MM-DD` | Keep a Changelog 形式。次の開発開始時に `[Unreleased]` を再作成する |
+| `CHANGELOG.md` | `## [Next Release]` → `## [X.Y.Z] - YYYY-MM-DD` | Keep a Changelog 形式。版が決まるまでは `[Next Release]` の見出しで書き、版を上げるときに置き換える |
 | `README.md` | 1 行目 `# rakukan vX.Y.Z` と「## 最新の変更」 | 最新版の要約を段落に、前版を箇条書きへ繰り下げる |
 
 ## 4. Windows 固有の version 面
@@ -37,8 +37,8 @@
 | 箇所 | 内容 |
 |---|---|
 | `cost_band::DICT_SCHEMA` | 1 上げる |
-| `scripts/install.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
-| ビルドマシンの辞書 | パッケージ作成前に `RAKUKAN_FORCE_DICT=1` を付けて `cargo make install` を実行し、`%LOCALAPPDATA%\rakukan\dict\rakukan.dict` と `rakukan.dict.build.json` を作り直す（`build-installer.ps1` はこの 2 つを同梱する） |
+| `scripts/build-installer.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
+| ビルドマシンの辞書 | `build-installer.ps1`（`cargo make install` / `cargo make package`）が、`C:\rb\dict\rakukan.dict.build.json` の `dict_schema`・`mozc_rev` が期待値と違えば作り直して同梱する。作り直せなかった場合、`package`（`-Sign`）は止まり、`install` は警告を出して古い辞書を使う。手で作り直すときは `RAKUKAN_FORCE_DICT=1` を付ける |
 
 ## 4.2 第三者のライセンス（依存を変えたとき）
 

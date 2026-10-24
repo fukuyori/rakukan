@@ -19,7 +19,7 @@ pub mod user_dict;
 ///
 /// 旧辞書（記号 3000 / 絵文字 6000 の固定 cost）はすべて「通常語」に分類されるので、
 /// 再生成するまでは旧来の並びのまま動く。再生成の判断は builder が書く
-/// `rakukan.dict.build.json` の `dict_schema` を `install.ps1` が比較して行う。
+/// `rakukan.dict.build.json` の `dict_schema` を `build-installer.ps1` が比較して行う。
 pub mod cost_band {
     /// 通常語の cost はこれ未満。builder はこれ以上の通常語を `NORMAL_MAX - 1` に丸める
     pub const NORMAL_MAX: u16 = 20_000;
@@ -27,8 +27,8 @@ pub mod cost_band {
     pub const SYMBOL_BASE: u16 = 30_000;
     /// 絵文字帯の先頭。絵文字の cost = `EMOJI_BASE + emoji_data.tsv の行番号`
     pub const EMOJI_BASE: u16 = 40_000;
-    /// cost 帯の版。`rakukan.dict.build.json` に書き、`install.ps1` の期待値と比較する。
-    /// 帯の意味を変えたら上げる（`scripts/install.ps1` の `$dictSchemaExpected` も同時に）
+    /// cost 帯の版。`rakukan.dict.build.json` に書き、`build-installer.ps1` の期待値と比較する。
+    /// 帯の意味を変えたら上げる（`scripts/build-installer.ps1` の `$dictSchemaExpected` も同時に）
     pub const DICT_SCHEMA: u32 = 2;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

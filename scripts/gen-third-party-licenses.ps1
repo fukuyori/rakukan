@@ -40,7 +40,7 @@ $roots = @('rakukan-tsf', 'rakukan-engine-host', 'rakukan-engine', 'rakukan-tray
 # 上流の LICENSE を置く場所と、著作権の表示が条件のライセンス
 $overrideDir = Join-Path $repoRoot 'docs\licenses'
 $attribution = @('MIT', 'BSD-2-Clause', 'BSD-3-Clause', 'ISC')
-$missing = [System.Collections.Generic.SortedSet[string]]::new()
+$missing = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal)
 
 if (-not (Get-Command cargo-about -ErrorAction SilentlyContinue)) {
     throw 'cargo-about が見つかりません: cargo install cargo-about --locked --version 0.9.2 --features cli'
@@ -82,7 +82,7 @@ try {
                 }
                 $key = "$($l.id)`n$text"
                 if (-not $texts.ContainsKey($key)) {
-                    $texts[$key] = @{ Id = $l.id; Name = $l.name; Text = $text; Users = [System.Collections.Generic.SortedSet[string]]::new() }
+                    $texts[$key] = @{ Id = $l.id; Name = $l.name; Text = $text; Users = [System.Collections.Generic.SortedSet[string]]::new([System.StringComparer]::Ordinal) }
                 }
                 [void]$texts[$key].Users.Add("$($u.name) $($u.version)")
             }
@@ -90,6 +90,23 @@ try {
     }
 } finally {
     Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
+}
+
+# 並びは序数で比べる。Sort-Object の既定（文化に依存する比較）は Windows PowerShell 5.1 と
+# PowerShell 7 で結果が違い（5.1 はハイフンを無視して httparse を http-body より前にする）、
+# cargo make（5.1）から呼ぶ build-installer.ps1 の -Check が通らなくなる
+function Sort-Ordinal([object[]]$Items, [scriptblock[]]$Keys) {
+    $list = [System.Collections.Generic.List[object]]::new()
+    foreach ($i in $Items) { $list.Add($i) }
+    $list.Sort([System.Comparison[object]] {
+        param($x, $y)
+        foreach ($k in $Keys) {
+            $r = [string]::CompareOrdinal([string](& $k $x), [string](& $k $y))
+            if ($r -ne 0) { return $r }
+        }
+        return 0
+    })
+    return $list
 }
 
 $sb = [System.Text.StringBuilder]::new()
@@ -102,13 +119,13 @@ $sb = [System.Text.StringBuilder]::new()
 [void]$sb.AppendLine()
 [void]$sb.AppendLine('| Crate | Version | License | Source |')
 [void]$sb.AppendLine('|---|---|---|---|')
-foreach ($c in ($crates.Values | Sort-Object { $_.Name }, { $_.Version })) {
+foreach ($c in (Sort-Ordinal @($crates.Values) @({ param($v) $v.Name }, { param($v) $v.Version }))) {
     $repo = if ($c.Repository) { $c.Repository } else { '' }
     [void]$sb.AppendLine("| $($c.Name) | $($c.Version) | $($c.License) | $repo |")
 }
 [void]$sb.AppendLine()
 [void]$sb.AppendLine('### License Texts')
-foreach ($t in ($texts.Values | Sort-Object { $_.Id }, { ($_.Users | Select-Object -First 1) }, { $_.Text })) {
+foreach ($t in (Sort-Ordinal @($texts.Values) @({ param($v) $v.Id }, { param($v) $v.Users | Select-Object -First 1 }, { param($v) $v.Text }))) {
     [void]$sb.AppendLine()
     [void]$sb.AppendLine("#### $($t.Name) ($($t.Id))")
     [void]$sb.AppendLine()

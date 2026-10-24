@@ -47,7 +47,7 @@ const ID_MENU_RELOAD: usize = 1002;
 const ID_MENU_EXIT: usize = 1001;
 
 /// Stable GUID for the tray icon so Windows can persist settings (e.g. promoted / always visible).
-/// (Must match the GUID referenced from install.ps1 when setting IsPromoted.)
+/// (The removed install.ps1 set IsPromoted for this GUID; changing it drops the settings Windows saved.)
 const TRAY_GUID: GUID = GUID::from_u128(0x9c8b5a79_9f7f_4d6a_bf87_2e50b5d7a2c1);
 
 static RUNNING: AtomicBool = AtomicBool::new(true);

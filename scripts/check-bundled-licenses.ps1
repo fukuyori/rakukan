@@ -96,6 +96,13 @@ if ($Files) {
         (Join-Path $repoRoot '.nuget-packages'), $env:NUGET_PACKAGES
     ) | Where-Object { $_ -and (Test-Path -LiteralPath $_) } | Select-Object -Unique
     $byName = @{}
+    # Get-FileHash は使わない。cargo make 経由で Windows PowerShell 5.1 を起動すると、PowerShell 7 の
+    # モジュールの場所を先に引き継ぎ、5.1 の Get-FileHash（モジュールのスクリプトで定義）が見つからない
+    function Get-Sha256([string]$path) {
+        $stream = [System.IO.File]::OpenRead($path)
+        try { return [System.BitConverter]::ToString($sha.ComputeHash($stream)) -replace '-', '' }
+        finally { $stream.Dispose() }
+    }
     function Add-Candidate([string]$name, $pkg, [string]$path, [string]$hash) {
         $key = $name.ToLowerInvariant()
         if (-not $byName.ContainsKey($key)) { $byName[$key] = [System.Collections.Generic.List[object]]::new() }
@@ -133,9 +140,9 @@ if ($Files) {
         $candidates = $byName[$f.Name.ToLowerInvariant()]
         $origin = $null
         if ($candidates) {
-            $hash = (Get-FileHash -LiteralPath $f.FullName -Algorithm SHA256).Hash
+            $hash = Get-Sha256 $f.FullName
             foreach ($c in $candidates) {
-                if (-not $c.Hash) { $c.Hash = (Get-FileHash -LiteralPath $c.Path -Algorithm SHA256).Hash }
+                if (-not $c.Hash) { $c.Hash = Get-Sha256 $c.Path }
                 if ($c.Hash -eq $hash) { $origin = $c; break }
             }
         }

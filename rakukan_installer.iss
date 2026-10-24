@@ -3,7 +3,9 @@
 ; =============================================================================
 ; 使用方法:
 ;   1. Inno Setup 6 をインストール: https://jrsoftware.org/isinfo.php
-;   2. scripts\build-installer.ps1 で dist\ を組み立て、このスクリプトを ISCC.exe でコンパイルする
+;   2. scripts\build-installer.ps1 でビルドの出力から dist\ を組み立て、このスクリプトを ISCC.exe でコンパイルする
+;      （cargo make install は署名なしで作ってサイレント実行、cargo make package は署名付きで作る）
+;   モデルは同梱しない（engine-host が初回の変換で %ProgramData%\rakukan\models に取得する）。
 ;
 ; 方式（docs/Installer_Redesign_Plan.md の 2 章・4.1）:
 ;   - 配置は %ProgramFiles%\rakukan（マシン単位、管理者）。64 ビットのモードで動かす。
@@ -153,9 +155,6 @@ Source: "dist\rakukan.dict.build.json"; DestDir: "{app}\dict"; Flags: ignorevers
 ; ----- デフォルト設定ファイル (既存は上書きしない) -----
 ; config.toml は %APPDATA%\rakukan\ に配置する（rakukan が読む場所）
 Source: "dist\config.toml"; DestDir: "{code:GetRoamingConfigDir}"; Flags: onlyifdoesntexist uninsneveruninstall
-
-; ----- LLM モデル (省略可) -----
-Source: "dist\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist
 
 ; ----- TIP 登録スクリプト -----
 Source: "dist\register-tip.ps1";   DestDir: "{app}"; Flags: ignoreversion restartreplace uninsrestartdelete
@@ -386,6 +385,28 @@ begin
   end;
 end;
 
+// 0.13.0 までのインストーラーは 32 ビットのモードで動き、アンインストール情報を 32 ビット側
+// （WOW6432Node）に書いた。64 ビットのモードのこのインストーラーはそれを引き継がず、旧版の
+// アンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。
+// 旧配置を指しているものだけを消す（旧配置のフォルダーが無くても行う）。
+procedure RemoveOldUninstallEntry();
+var
+  Key, AppPath: String;
+begin
+  // [Setup] の AppId と同じ GUID
+  Key := 'Software\Microsoft\Windows\CurrentVersion\Uninstall\{B7C4E2A1-3F8D-4C91-B5A0-D2E6F9183047}_is1';
+  if not RegQueryStringValue(HKLM32, Key, 'Inno Setup: App Path', AppPath) then
+    Exit;
+  if CompareText(RemoveBackslashUnlessRoot(AppPath), OldInstallDir()) <> 0 then begin
+    Log('migration: kept 32-bit uninstall entry (App Path=' + AppPath + ')');
+    Exit;
+  end;
+  if RegDeleteKeyIncludingSubkeys(HKLM32, Key) then
+    Log('migration: removed old uninstall entry HKLM32\' + Key + ' (App Path=' + AppPath + ')')
+  else
+    Log('migration: could not remove old uninstall entry HKLM32\' + Key);
+end;
+
 procedure MigrateOldInstall();
 var
   OldDir, OldDll, RunValue: String;
@@ -439,6 +460,7 @@ var
 begin
   if CurStep = ssInstall then begin
     MigrateOldInstall();
+    RemoveOldUninstallEntry();
 
     // 前の版の登録を解除しておく。旧版の DLL では解除が失敗・異常終了することがある
     // （0.12.0 より前の DllMain の作り）ので、結果にかかわらず続ける。
