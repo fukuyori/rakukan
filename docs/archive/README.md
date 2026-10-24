@@ -25,3 +25,5 @@
 | [September_Late_Plan.md](September_Late_Plan.md) | 9 月後半の作業計画（#56 / #65 / #72、v6 の条件） | 2026-09-17〜10-10 / 0.11.9〜0.12.0 | October_Plan.md に引き継ぎ |
 | [Issue65_Fault_Test_Design.md](Issue65_Fault_Test_Design.md) | #65（再接続で config.toml の設定を使う）の故障試験の設計 | 2026-09-24 / 0.12.0 | #65 は 0.12.0 でクローズ |
 | [handoff_to_2026-10-22.md](handoff_to_2026-10-22.md) | 2026-10-22 までの引き継ぎ資料（日付ごとの更新の積み重ね） | 2026-04-17〜10-22 / 〜0.13.0 | 2026-10-23 に handoff.md を作り直した |
+| [Test_Results_to_2026-10-24.md](Test_Results_to_2026-10-24.md) | 試験の結果の記録（Test_Procedure.md の末尾から移した。0.12.0・フェーズ 1〜3・0.13.0） | 2026-10-10〜10-24 / 0.12.0〜0.13.1 | 0.13.1 の結果からは Test_Procedure.md に書く |
+| [Log_Redesign_Plan.md](Log_Redesign_Plan.md) | ログの見直し（#72〜#76。段 1〜5） | 2026-10-10〜10-24 / 0.12.0〜0.13.1 | 段 1 は 0.12.0、段 2〜5 は 0.13.1（フェーズ 3）で実装 |

@@ -1,7 +1,7 @@
 # 開いている Issue の状況
 
 2026-10-24 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。
-10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
+10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82。時期は決めない）は [October_Plan.md](October_Plan.md)。#83 と IPC の名前の整理は [2026-11_Plan.md](2026-11_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
 Issue の状態を更新したら、この表も同じコミットで更新する。クローズしたら行を削除し、末尾の「クローズの記録」に移す。
