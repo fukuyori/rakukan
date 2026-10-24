@@ -113,7 +113,6 @@ const RPC_SLOW_WARN_MS: u64 = 500;
 /// 呼び出し側が意図して待つ要求。閾値を超えても WARN を出さない。
 const RPC_EXPECTED_SLOW: &[&str] = &[
     "Create",
-    "Reload",
     "ConvertSync",
     "BgWaitMs",
     "Shutdown",
@@ -779,25 +778,6 @@ impl RpcEngine {
         })
     }
 
-    /// ホスト側の DynEngine を新しい config_json で再生成する。
-    /// TSF の `engine_reload()` から呼ばれる。
-    ///
-    /// 接続 (PipeStream) は使い回したまま、`Request::Reload` を送るだけ。
-    /// 成功後は以降の再接続でも新しい config_json が使われるよう内部に保存する
-    /// （`connect_or_spawn_with_source` で作った場合、再接続の `Create` は設定の関数から取る）。
-    pub fn reload(&self, config_json: Option<String>) -> Result<()> {
-        let mut guard = self
-            .inner
-            .lock()
-            .map_err(|_| anyhow!("RpcEngine mutex poisoned"))?;
-        guard.config_json = config_json.clone();
-        match guard.call_with_retry(Request::Reload { config_json })? {
-            Response::Unit => Ok(()),
-            Response::Error(e) => bail!("reload error: {e}"),
-            other => bail!("unexpected reload response: {:?}", other),
-        }
-    }
-
     /// ホストプロセスに self-exit を依頼する（M1.6 T-HOST1）。
     ///
     /// `Reload` の代替: DLL drop → 再ロードの race を避けるため、プロセス全体を
@@ -1085,11 +1065,6 @@ impl RpcEngine {
             _ => -1,
         }
     }
-    pub fn available_models_json(&self) -> String {
-        self.call_string(Request::AvailableModelsJson)
-            .unwrap_or_else(|_| "[]".into())
-    }
-
     pub fn last_error(&self) -> String {
         self.call_string(Request::LastError).unwrap_or_default()
     }
@@ -1205,6 +1180,7 @@ impl<T: HostTransport> Connection<T> {
                 config_json,
                 expected_host_id,
                 config_version: None,
+                broken_version: None,
             })
         });
         match result {
@@ -1693,6 +1669,7 @@ impl<T: HostTransport> Connection<T> {
             &Request::Create {
                 config_json,
                 config_version: None,
+                broken_version: None,
             },
         )?;
         match read_frame::<_, Response>(stream)? {

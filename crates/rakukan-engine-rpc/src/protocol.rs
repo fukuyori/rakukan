@@ -24,7 +24,11 @@ pub const PIPE_BASE_NAME: &str = "rakukan-engine";
 ///   `Reason::ConfigStale` / `ConfigUnusable`（#66 用に予約。v7 のホストは返さない）を追加。
 ///   v6（0.12.0）とは繋がらない。0.13.0 で出す（古いホストを止めるインストーラーはフェーズ 3。
 ///   それまでは、サインアウト → サインインの後に rakukan を使わずにインストールする手順で避ける）
-pub const PROTOCOL_VERSION: u32 = 7;
+/// - v8: 設定の反映とホストの起動し直し（#64 / #66 / #49、docs/Engine_Config_Apply_Plan.md）。
+///   `Response::CreateRestart` / `CreateKept`、`Create` / `ShutdownIfConfigDiffers` の
+///   `broken_version` を追加。`Reload` と `AvailableModelsJson` を廃止して `_Reserved…` に
+///   （ホストは `Error` を返す）。v7 とは繋がらない
+pub const PROTOCOL_VERSION: u32 = 8;
 
 /// ホストプロセスの起動インスタンス識別子。
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
@@ -376,17 +380,20 @@ pub enum Request {
     },
     /// エンジン側セッションの初期化要求。config_json は EngineConfig の JSON。
     /// 既に同じ config の DynEngine が存在する場合は何もしない。
-    /// 既存 DynEngine と config が異なる場合は作り直す。
+    /// 既存 DynEngine と config が異なる場合の扱いは docs/Engine_Config_Apply_Plan.md 4.2。
     Create {
         config_json: Option<String>,
-        /// #66 まで常に `None`。
+        /// `config_json` を作った読み取りの `config.toml` 本文の SHA-256。既定値由来は `None`。
         config_version: Option<ConfigVersion>,
+        /// 直近の読み込みで本文を読めたが設定として解析できなかったとき、その本文の
+        /// SHA-256（docs/Engine_Config_Apply_Plan.md 4.3a）。それ以外は `None`。
+        broken_version: Option<ConfigVersion>,
     },
 
-    /// 現在の DynEngine を drop し、新しい config_json で load_auto し直す。
-    /// config.toml を編集したあとの IME モード切替で呼ばれる。
-    /// model / 辞書の bg ロードもホスト側で再起動する。
-    Reload {
+    /// 旧 `Reload`（DynEngine を drop して作り直す）。1 つのホストの中では engine を
+    /// 作り直さない（#64）ので v8 で廃止した。enum の並びを保つためスロットは残す。
+    /// ホストは `Error` を返す。
+    _ReservedReload {
         config_json: Option<String>,
     },
 
@@ -471,7 +478,9 @@ pub enum Request {
     BackendLabel,
     NGpuLayers,
     MainGpu,
-    AvailableModelsJson,
+    /// 旧 `AvailableModelsJson`。使う所が無いので v8 で廃止した（モデルの一覧は
+    /// models.toml）。enum の並びを保つためスロットは残す。ホストは `Error` を返す。
+    _ReservedAvailableModelsJson,
 
     // ─── 学習 ─────────────────────────────────────────────
     _ReservedLearn {
@@ -579,8 +588,10 @@ pub enum Request {
     ShutdownIfConfigDiffers {
         config_json: Option<String>,
         expected_host_id: HostId,
-        /// #66 まで常に `None`。
+        /// `config_json` を作った読み取りの本文の SHA-256（`Create` と同じ）。
         config_version: Option<ConfigVersion>,
+        /// `Create` と同じ。
+        broken_version: Option<ConfigVersion>,
     },
 
     // ─── Issue #56: 採番された変更要求（v6）───────────────
@@ -678,4 +689,10 @@ pub enum Response {
         bg: BgView,
         effects: Vec<EffectResult>,
     },
+    /// `Create` の設定が今のエンジンと違うので、ホストは作り直さずに終わる（v8）。
+    /// クライアントはこのホストが終わるのを待ってから、新しいホストへ繋ぎ直す。
+    CreateRestart,
+    /// `Create` の設定を採用しなかったが、ホストは今の設定のまま使える（v8）。
+    /// 接続の成功として扱う（docs/Engine_Config_Apply_Plan.md 4.3）。
+    CreateKept,
 }

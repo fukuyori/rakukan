@@ -365,8 +365,8 @@ pub fn engine_try_get_or_create() -> anyhow::Result<MutexGuard<'static, EngineWr
 }
 
 /// エンジンを強制的に破棄し、次回アクセス時に再生成されるようにする。
-/// 現状は `engine_reload()` が RPC Reload を使うため呼ばれない。
-/// 診断 / 緊急回避用に残す。
+/// 現状は `engine_reload()` がホストの終了（`ShutdownIfConfigDiffers` / `Shutdown`）で
+/// 反映するため呼ばれない。診断 / 緊急回避用に残す。
 #[allow(dead_code)]
 pub fn engine_force_recreate() {
     match RAKUKAN_ENGINE.lock() {

@@ -77,6 +77,7 @@ mod tests {
             config_json: Some(r#"{"num_candidates":9}"#.into()),
             expected_host_id: HostId(7),
             config_version: Some([3; 32]),
+            broken_version: Some([4; 32]),
         };
         write_frame(&mut buf, &req).unwrap();
         let mut cur = Cursor::new(&buf);
@@ -87,7 +88,8 @@ mod tests {
                 config_json: Some(s),
                 expected_host_id: HostId(7),
                 config_version: Some(v),
-            } if s == r#"{"num_candidates":9}"# && v == [3; 32]
+                broken_version: Some(b),
+            } if s == r#"{"num_candidates":9}"# && v == [3; 32] && b == [4; 32]
         ));
     }
 
@@ -263,5 +265,53 @@ mod tests {
         });
         // ConvertSync, _ReservedConvertSyncSegmented, _ReservedMergeCandidates の並び
         assert_eq!(reserved, discriminant(&Request::_ReservedConvertSync) + 2);
+    }
+
+    /// v8 で廃止した `Reload` / `AvailableModelsJson` はスロットを残す。
+    #[test]
+    fn removed_reload_and_available_models_keep_their_slots() {
+        let create = discriminant(&Request::Create {
+            config_json: None,
+            config_version: None,
+            broken_version: None,
+        });
+        let reload = discriminant(&Request::_ReservedReload { config_json: None });
+        // Hello, Create, Reload の並び
+        assert_eq!(create, 1);
+        assert_eq!(reload, 2);
+        // MainGpu, AvailableModelsJson の並び
+        assert_eq!(
+            discriminant(&Request::_ReservedAvailableModelsJson),
+            discriminant(&Request::MainGpu) + 1
+        );
+        assert_eq!(
+            discriminant(&Request::_ReservedLearn {
+                reading: String::new(),
+                surface: String::new(),
+            }),
+            discriminant(&Request::_ReservedAvailableModelsJson) + 1
+        );
+    }
+
+    /// v8 で末尾に足した応答の番号を固定する。
+    #[test]
+    fn v8_responses_are_appended_at_the_end() {
+        let journal = response_discriminant(&Response::RestoredJournal {
+            engine_gen: EngineGen {
+                host_id: HostId(1),
+                generation: 1,
+            },
+            replay: crate::protocol::Replay::Exact,
+            final_edit: Default::default(),
+            bg: crate::protocol::BgView::Idle,
+            effects: vec![],
+        });
+        assert_eq!(response_discriminant(&Response::CreateRestart), journal + 1);
+        assert_eq!(response_discriminant(&Response::CreateKept), journal + 2);
+        for resp in [Response::CreateRestart, Response::CreateKept] {
+            let mut buf = Vec::new();
+            write_frame(&mut buf, &resp).unwrap();
+            let _: Response = read_frame(&mut Cursor::new(&buf)).unwrap();
+        }
     }
 }

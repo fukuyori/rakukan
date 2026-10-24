@@ -139,6 +139,11 @@ impl RecordTable {
         }
     }
 
+    /// 全部の記録の、処理中の要求の数。ホストの終了の前に待つのに使う。
+    fn total_in_flight(&self) -> u32 {
+        self.records.values().map(|r| r.in_flight).sum()
+    }
+
     /// 要求番号を記録と照らし合わせる。記録が無ければ（`Hello` を経ていない）
     /// 答えられないものとして扱う。
     fn check(&self, tsf: TsfId, seq: RequestSeq) -> SeqCheck {
@@ -245,11 +250,18 @@ fn gate_change(
 /// 他の要求でも返るので、`ShutdownIfConfigDiffers` の応答のときだけ終了とみなす。
 fn exits_after_response(is_conditional_shutdown: bool, resp: &Response) -> bool {
     match resp {
-        Response::ShutdownAccepted => true,
+        Response::ShutdownAccepted | Response::CreateRestart => true,
         Response::Bool(true) => is_conditional_shutdown,
         _ => false,
     }
 }
+
+/// 終了を決めた後の要求に返すエラーの文言。クライアントはこれを見て、起動し直しの
+/// 途中だと判断する（docs/Engine_Config_Apply_Plan.md 4.5）。
+pub const HOST_EXITING: &str = "host exiting";
+
+/// ホストの終了の前に、処理中の要求の完了を待つ上限。
+const EXIT_IN_FLIGHT_WAIT: Duration = Duration::from_secs(2);
 
 /// ホスト全体で共有される 1 つの DynEngine と、その生成に使った config。
 pub type SharedEngine = Arc<HostShared>;
@@ -279,6 +291,9 @@ pub struct HostShared {
     health: Mutex<HealthTracker>,
     /// 復帰のためにホストを終了する要求。応答を書いた後に見る。
     exit_after_response: AtomicBool,
+    /// 終了を決めた（docs/Engine_Config_Apply_Plan.md 4.2）。以後に届いた要求は処理せず
+    /// `HOST_EXITING` のエラーを返す。
+    exiting: AtomicBool,
     /// 変換の詰まりを監視する口（Issue #57）。エンジンを作るたびに持ち替える。
     ///
     /// `state` とは別ロックにする: 監視スレッドは変換中（engine ロック保持中）でも
@@ -327,7 +342,32 @@ impl HostShared {
             config_json: Mutex::new(None),
             health: Mutex::new(HealthTracker::new(prior)),
             exit_after_response: AtomicBool::new(false),
+            exiting: AtomicBool::new(false),
             stall_probe: Mutex::new(StallProbeSlot::default()),
+        }
+    }
+
+    /// 終了を決めたことを記録する。以後の要求は処理しない。
+    fn begin_exit(&self) {
+        self.exiting.store(true, Ordering::Release);
+    }
+
+    fn is_exiting(&self) -> bool {
+        self.exiting.load(Ordering::Acquire)
+    }
+
+    /// 処理中の要求（`in_flight`）が 0 になるか、`limit` が過ぎるまで待つ。
+    /// 0 になれば `true`。呼び出し元の要求は数え終えてから呼ぶこと。
+    fn wait_for_in_flight(&self, limit: Duration) -> bool {
+        let started = std::time::Instant::now();
+        loop {
+            if self.lock_records().total_in_flight() == 0 {
+                return true;
+            }
+            if started.elapsed() >= limit {
+                return false;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
     }
 
@@ -365,6 +405,10 @@ impl HostShared {
     /// 口を残すと、古い DLL のワーカーが `Running` のまま残っていた場合に、
     /// その観測を根拠に現在のホストを終了させてしまう。世代も進めるので、
     /// 既に複製された口で進行中の確認も無効になる。
+    ///
+    /// v8 で `Reload` を廃止し、1 つのホストの中ではエンジンを外さなくなったので、
+    /// 本番の経路からは呼ばない。世代の照合の試験のために残す。
+    #[cfg(test)]
     fn clear_stall_probe(&self) {
         let mut g = self.lock_stall_probe();
         if g.probe.is_some() {
@@ -579,6 +623,16 @@ fn session_loop(
         // （Issue #56: 別のホスト宛ての Shutdown は ShutdownSkipped になり、終了しない）。
         let is_conditional_shutdown = matches!(req, Request::ShutdownIfConfigDiffers { .. });
         let label = request_label(&req);
+        // 終了を決めた後の要求は処理しない（docs/Engine_Config_Apply_Plan.md 4.2）。
+        // TSF は通信失敗として扱い、新しいホストへ繋ぎ直す
+        if engine.is_exiting() {
+            tracing::debug!("rpc: {label} while exiting; rejected");
+            if let Err(e) = write_frame(&mut stream, &Response::Error(HOST_EXITING.into())) {
+                tracing::debug!("rpc session: write_frame failed, closing: {e}");
+                return Ok(());
+            }
+            continue;
+        }
         let started = std::time::Instant::now();
         let resp = {
             let _in_flight = InFlight::begin(engine, session.tsf);
@@ -609,11 +663,21 @@ fn session_loop(
             std::process::exit(0);
         }
         if is_shutdown {
+            // 新しい要求を断り、ほかのセッションの処理中の要求が終わるのを待つ
+            // （docs/Engine_Config_Apply_Plan.md 4.2。この要求の数えは dispatch を
+            // 抜けたときに終わっている）
+            engine.begin_exit();
+            if !engine.wait_for_in_flight(EXIT_IN_FLIGHT_WAIT) {
+                tracing::warn!(
+                    "rpc: requests still in flight after {}ms; exiting anyway",
+                    EXIT_IN_FLIGHT_WAIT.as_millis()
+                );
+            }
             // OS にパイプ経由の response を配送させるため短時間待ってから exit。
             // flush は write_frame 内で完了しているが、pipe buffer から相手の read
             // までの伝播はカーネルスケジューリング依存。50ms で十分安全側に倒れる。
             std::thread::sleep(Duration::from_millis(50));
-            tracing::info!("rpc: Shutdown requested, exiting host process");
+            tracing::info!("rpc: {label} ended the host, exiting host process");
             std::process::exit(0);
         }
     }
@@ -625,7 +689,7 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
     match req {
         Hello { .. } => "Hello",
         Create { .. } => "Create",
-        Reload { .. } => "Reload",
+        _ReservedReload { .. } => "Reload(removed)",
         Bye => "Bye",
         Shutdown { .. } => "Shutdown",
         _ReservedPushChar(_) => "PushChar",
@@ -674,7 +738,7 @@ pub(crate) fn request_label(req: &Request) -> &'static str {
         BackendLabel => "BackendLabel",
         NGpuLayers => "NGpuLayers",
         MainGpu => "MainGpu",
-        AvailableModelsJson => "AvailableModelsJson",
+        _ReservedAvailableModelsJson => "AvailableModelsJson(removed)",
         _ReservedLearn { .. } => "Learn",
         _ReservedLearnForce { .. } => "LearnForce",
         MergeCandidatesForReading { .. } => "MergeCandidatesForReading",
@@ -736,19 +800,8 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
             }
             load_engine_into(engine, &mut g, config_json)
         }
-        Request::Reload { config_json } => {
-            // 既存 engine を drop してから作り直す。
-            // config.toml 編集後のモード切替から呼ばれる。
-            let mut g = lock_engine(engine);
-            tracing::info!("rpc: Reload requested, dropping current engine");
-            g.engine = None;
-            engine.replace_engine_gen(&mut g, false);
-            // エンジンを外す時点で監視も止める。ロードに失敗した場合に、
-            // 古い DLL の `Running` を根拠に現在のホストを終了させないため
-            // （成功すれば load_engine_into が新しい口を入れ直す）。
-            engine.clear_stall_probe();
-            load_engine_into(engine, &mut g, config_json)
-        }
+        // v8 で廃止（1 つのホストの中では engine を作り直さない。#64）
+        Request::_ReservedReload { .. } => Response::Error("Reload has been removed".into()),
         Request::Bye => Response::Unit,
         Request::Change {
             seq,
@@ -799,7 +852,7 @@ fn dispatch(engine: &SharedEngine, session: &mut Session, req: Request) -> Respo
         Request::ShutdownIfConfigDiffers {
             config_json,
             expected_host_id,
-            config_version: _,
+            ..
         } => {
             // 宛先のホストは既に入れ替わっている。新しいホストの設定と比べると、
             // 「同じ設定」と「別のホストだった」を区別できなくなるので比較しない。
@@ -1834,7 +1887,7 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
     match req {
         Hello { .. }
         | Create { .. }
-        | Reload { .. }
+        | _ReservedReload { .. }
         | Bye
         | Shutdown { .. }
         | EngineHealth
@@ -1910,7 +1963,10 @@ fn dispatch_engine(eng: &mut DynEngine, req: Request) -> Response {
         BackendLabel => Response::String(eng.backend_label()),
         NGpuLayers => Response::U32(eng.n_gpu_layers()),
         MainGpu => Response::I32(eng.main_gpu()),
-        AvailableModelsJson => Response::String(eng.available_models_json()),
+        // v8 で廃止（モデルの一覧は models.toml。設定アプリが直接読む）
+        _ReservedAvailableModelsJson => {
+            Response::Error("AvailableModelsJson has been removed".into())
+        }
 
         MergeCandidatesForReading {
             reading,
@@ -2251,6 +2307,52 @@ mod record_tests {
         assert!(!exits_after_response(true, &Response::Bool(false)));
         // 他の要求の Bool(true)（Backspace など）では終了しない
         assert!(!exits_after_response(false, &Response::Bool(true)));
+        // v8: 設定が違う Create では終了する。CreateKept では続ける
+        assert!(exits_after_response(false, &Response::CreateRestart));
+        assert!(!exits_after_response(false, &Response::CreateKept));
+    }
+
+    /// 終了の前に、ほかのセッションの処理中の要求を待つ（設計書 4.2）。
+    #[test]
+    fn exit_waits_for_requests_in_flight_up_to_the_limit() {
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        assert!(!shared.is_exiting());
+        // 処理中の要求が無ければすぐ終われる
+        assert!(shared.wait_for_in_flight(Duration::from_millis(50)));
+
+        let tsf = TsfId(0x51);
+        shared.lock_records().hello(tsf, 0);
+        let in_flight = InFlight::begin(&shared, Some(tsf));
+        assert_eq!(shared.lock_records().total_in_flight(), 1);
+        // 処理中のまま上限に達すると false
+        let started = std::time::Instant::now();
+        assert!(!shared.wait_for_in_flight(Duration::from_millis(30)));
+        assert!(started.elapsed() >= Duration::from_millis(30));
+
+        // 別のスレッドで要求が終われば、待ちが解ける
+        let waiter = {
+            let shared = shared.clone();
+            std::thread::spawn(move || shared.wait_for_in_flight(Duration::from_secs(2)))
+        };
+        std::thread::sleep(Duration::from_millis(20));
+        drop(in_flight);
+        assert!(waiter.join().unwrap());
+
+        shared.begin_exit();
+        assert!(shared.is_exiting());
+    }
+
+    /// v8 で廃止した要求は Error を返す。
+    #[test]
+    fn removed_requests_return_errors() {
+        let shared: SharedEngine = Arc::new(HostShared::new());
+        let mut session = Session::default();
+        let resp = dispatch(
+            &shared,
+            &mut session,
+            Request::_ReservedReload { config_json: None },
+        );
+        assert!(matches!(resp, Response::Error(_)));
     }
 
     #[test]
@@ -2282,6 +2384,7 @@ mod record_tests {
                 config_json: Some("{}".into()),
                 expected_host_id: HostId(shared.host_id.0 ^ 1),
                 config_version: None,
+                broken_version: None,
             },
         );
         assert!(
@@ -2295,6 +2398,7 @@ mod record_tests {
                 config_json: Some("{}".into()),
                 expected_host_id: shared.host_id,
                 config_version: None,
+                broken_version: None,
             },
         );
         assert!(matches!(resp, Response::Bool(true)));
