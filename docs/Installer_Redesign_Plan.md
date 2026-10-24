@@ -4,7 +4,7 @@
 
 更新: 2026-10-10（更新の方式を「使用中のファイルは再起動時に置き換え、再起動で完了」に改めた。旧ホスト停止の先行実装は取りやめ。経緯は 1 章の末尾と #33 のコメント https://github.com/fukuyori/rakukan/issues/33#issuecomment-6092071876 ）
 
-状態: 5 章の Step 1〜6 は済み。0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験は [Test_Procedure.md](Test_Procedure.md) の S1〜S3 と、0.13.1 の配布物での T1〜T4（2026-10-23・24）。残りは公開後の Step 7（winget）と Step 8（PR #30 へのコメント）。
+状態: 5 章の Step 1〜6 は済み。0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験は [Test_Procedure.md](Test_Procedure.md) の S1〜S3 と、0.13.1 の配布物での T1〜T4（2026-10-23・24）。残りは公開後の Step 7（PR #30 へのコメント）。winget への登録は #91 で扱う。
 
 着手時期: **[October_Plan.md](October_Plan.md) の段 C として実施した**（段 A #71 → 段 B #69 / #70 の後。2026-10-10 決定）。6 章の更新時の検証（文字・キーを失わない）は、段 B で #69 / #70 を直した後に行った。0.13.0 までのインストール方法は 9 章。
 
@@ -44,7 +44,6 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - 初回インストール・更新・削除を、一般的な Windows アプリと同じ手順にする。
 - 更新前の準備を不要にし、インストーラー実行後の**再起動**でインストールを完了する。
 - ロック対処をインストーラー 1 か所に集め、ソースからの install も同じ経路にする。
-- winget から導入・更新・削除できるようにする。
 
 ## 2. 決定事項
 
@@ -64,7 +63,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | 削除 | 「アプリと機能」または `winget uninstall`。ユーザーデータは残す。完了時に再起動を求める | 一般アプリの慣習どおり。ロード中の DLL は再起動時に削除 |
 | 旧 TSF と新 host、新 TSF と旧 host の混在 | Hello を完了できない場合は「エンジン未準備」と同じ扱い（無変換、ログ出力）。再起動までの制限として受け入れる | 異なる通信形式を適用しない |
 | 開発専用の差し替え経路 | 持たない（故障試験用の TSF DLL 差し替えは 4.3 のとおり残す） | インストーラーが本線 |
-| 配布 | GitHub Releases の exe を継続し、winget に登録 | winget は Releases の exe を参照する |
+| 配布 | GitHub Releases の exe を継続する（winget への登録は #91） | — |
 | Microsoft Store | 対象外（調査のみ） | MSIX は配置・登録の前提が異なる。TSF IME を MSIX で配布できるか未確認 |
 | PR #30 | 結論をコメントする（改名退避は採らず、再起動時の置き換えにした経緯） | close 理由だった「初期に試して駄目だった」は根拠にならない |
 
@@ -172,7 +171,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 
 5 章の作業ステップへの割り当て（2026-10-10 決定）: #73・#75・#76 は Step 1（コードの変更。#75 は engine ABI を変えない）、#74 は Step 2（トレイを配布・起動するのと合わせる）。
 
-### 4.4 winget
+### 4.4 winget（#91 で扱う。この計画の作業ステップには含めない）
 
 - `winget-pkgs` に manifest を登録する。InstallerType は `inno`、サイレント引数は winget の既定（`/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART`）、InstallerUrl は GitHub Releases の exe。
 - `Scope: machine`。アンインストールは ARP 登録（`AppId`）経由。引数に `/RESTARTEXITCODE=N` を足し、`ExpectedReturnCodes` で N を `rebootRequiredToFinish` に結び付ける（7 章）。
@@ -185,7 +184,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - Step 1 の後: Step 1 だけ（今の配置と `%ProgramFiles%` への手での配置）。ログと調べ方そのものを変えるので、インストーラーの確認の前に単独で確かめる。
 - Step 3 の後: Step 2 と 3 をまとめて（6 章の更新・削除と、旧版からの移行）。どちらもインストーラーの動作で、旧版を入れた状態からの更新・削除という手順が重なる。
 - Step 4 の後: Step 4 だけ（開発の経路）。配布物の作り方を変えるので分ける。
-削除（アンインストール）を含む検証（Step 2 の削除、Step 6 の試験、Step 7 の `winget uninstall`、6 章）の前には、[October_Plan.md](October_Plan.md) の 4 節「アンインストールを含む確認の前に、ログを退避する」の手順でログを写す（アンインストールで `rakukan-engine-host.log` が消されるため）。
+削除（アンインストール）を含む検証（Step 2 の削除、Step 6 の試験、6 章）の前には、[October_Plan.md](October_Plan.md) の 4 節「アンインストールを含む確認の前に、ログを退避する」の手順でログを写す（アンインストールで `rakukan-engine-host.log` が消されるため）。
 
 | Step | 内容 | 完了条件 |
 |---|---|---|
@@ -195,8 +194,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 | 4 | 経路一本化（4.3）。`build-installer.ps1` の入力をビルド出力へ、`install.ps1` / `uninstall.ps1` の削除、`-TsfOnly` の `dev-swap-tsf.ps1` への切り出し、Makefile（`install` / `package` / `full-install` / `quick-install` / 故障試験 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook | `cargo make build-engine` → `build-tsf` → `install` → 再起動が**インストール先が空の状態から**完走し、README の手順どおりに反映できる。`install-tsf-fault-test` / `install-tsf-normal-restore` が新経路で動き、SHA256 の一致確認と再登録が従来どおり働く。`cargo make package` を実行し、成果物・セットアップ本体・アンインストーラーの 3 つに署名が付くこと（`signtool verify`）を確認する |
 | 5 | 配布前の文書。`handoff.md` と `DESIGN.md` の配置記述を更新、CHANGELOG | 文書が実装と一致 |
 | 6 | リリース作業（[October_Plan.md](October_Plan.md) の 4 節「リリース作業」） | 配布物で試験に合格し、リリースする |
-| 7 | 公開後: winget 登録（4.4）。manifest を提出 | `winget install` / `upgrade` / `uninstall` が通る |
-| 8 | 公開後: PR #30 に結論コメント | 投稿が済む |
+| 7 | 公開後: PR #30 に結論コメント | 投稿が済む |
 
 ## 6. 検証項目
 
@@ -251,7 +249,7 @@ rakukan の更新は、TSF DLL が IME を使った各アプリに読み込ま�
 - **終了コード**
   - 確かめた結果: `AlwaysRestart=yes` では、成功のたびに再起動が要るとされる（`Setup.MainFunc.pas`、`Setup.MainForm.pas`）。既定では 0 を返し、`/RESTARTEXITCODE=N` を付けると N を返す（ヘルプ「Setup Command Line Parameters」）。`/VERYSILENT` で `/NORESTART` が無いと、確認なしに再起動する。winget は Inno に `/SP- /VERYSILENT /SUPPRESSMSGBOXES /NORESTART` を付け（`ManifestCommon.cpp`）、0 なら再起動の案内を出さない。`ExpectedReturnCodes` で N を `rebootRequiredToFinish` に結び付けると、成功として扱い、再起動が要ると警告する。`rebootRequiredForInstall` は失敗の扱いになる（`InstallFlow.cpp`、スキーマ 1.10.0）。
   - 決めたこと: winget の経路では `/RESTARTEXITCODE=N` を付け、N を `rebootRequiredToFinish` に結び付ける（4.4）。`cargo make install` には付けず、0 なら再起動を案内する。
-  - 残る点: 引数を足すマニフェストの項目、N の値、winget の配布版でも同じ扱いかは Step 7 で確かめる。winget の要件（公開 URL、ARP 登録、署名の要否）も同じ。
+  - 残る点: 引数を足すマニフェストの項目、N の値、winget の配布版でも同じ扱いかは #91 で確かめる。winget の要件（公開 URL、ARP 登録、署名の要否）も同じ。
 - **`%ProgramData%\rakukan\models` の ACL**
   - 確かめた結果: `[Dirs]` の `Permissions: users-modify` で付けられる。ヘルプは、プログラムのファイルを置くフォルダーには使わないよう、データのフォルダーなら差し支えないとしている。
   - 決めたこと: `{commonappdata}\rakukan\models` に `users-modify` を付ける（4.1）。

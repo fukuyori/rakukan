@@ -33,6 +33,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#84](https://github.com/fukuyori/rakukan/issues/84) | 単漢字（mozc `single_kanji.tsv`）を候補に加え、表示順（または種類の切り替え）を決める | 2026-10-21 起票 | 10 月の計画には入っていない。扱いを決める |
 | [#85](https://github.com/fukuyori/rakukan/issues/85) | 試験の自動化の基盤（試験用のアプリ・台本の実行器・ホストの故障の口） | 2026-10-22 起票。今後の改修・開発の基盤として計画する。フェーズ 2 には入れない（利用者の判断） | 10 月の計画には入っていない。着手の時期を決める |
 | [#86](https://github.com/fukuyori/rakukan/issues/86) | 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される | 2026-10-22 起票。重要度は低（利用者の判断）。メモ帳・Explorer は窓ごとに別のスレッドで Activate する。メモ帳は窓を移ると composition を終わらせるので起きない。起きるアプリは見つかっていない | ログのアプリ名（`app=`）で、当てはまるアプリを調べる。直し方は起きるアプリが見つかってから |
+| [#91](https://github.com/fukuyori/rakukan/issues/91) | winget への登録（`winget install` / `upgrade` / `uninstall`） | 2026-10-24 起票。決めてあることは Installer_Redesign_Plan.md の 4.4、確かめることは同 7 章の「終了コード」の残る点 | 登録の時期、パッケージの識別子・提出の方法を決める |
 | [#45](https://github.com/fukuyori/rakukan/issues/45) | 速く打つとライブ変換のプレビューが連続入力中に一度も更新されない | 未着手。直し方の方向は #40 の 2026-09-12 のコメントにある（タイマーが張られていなければ張る、最後の通過から 400 ms で debounce を強制通過） | 直すか、直すならいつ行うかを決める |
 | [#40](https://github.com/fukuyori/rakukan/issues/40) | 候補・予測の品質に関する統合ブランチ側の報告 7 件の再現確認 | 1・3 は main で再現せず、7 は #45 に切り出し、4 は見送り。2（候補の末尾に ひらがな → カタカナ を添える）は未着手 | 2 を直すかを決める。決まったらクローズ |
 | [#29](https://github.com/fukuyori/rakukan/issues/29) | ユーザー辞書エントリに `priority = "low"` を追加する | 保留 | 要望があれば再検討 |
@@ -41,7 +42,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。10 月の計画のフェーズ 3。Step 1〜5（`2a628b5`・`500d161`・`b93532a`・`7c6f570`・`f74a9c7`・`cc189b3`）を PR #87（マージコミット `7a04bef`）で main に入れ、0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験 S1〜S3 と、配布物での T1〜T4・試験 30 に合格（[Test_Procedure.md](Test_Procedure.md)、2026-10-23・24） | 公開後の完了: Step 7（winget の manifest の提出と、install / upgrade / uninstall の確認）、Step 8（PR #30 への結論のコメント）。確かめてから手でクローズする（[October_Plan.md](October_Plan.md) の 4 節） |
+| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。10 月の計画のフェーズ 3。Step 1〜5（`2a628b5`・`500d161`・`b93532a`・`7c6f570`・`f74a9c7`・`cc189b3`）を PR #87（マージコミット `7a04bef`）で main に入れ、0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験 S1〜S3 と、配布物での T1〜T4・試験 30 に合格（[Test_Procedure.md](Test_Procedure.md)、2026-10-23・24） | 公開後の完了: Step 7（PR #30 への結論のコメント）。確かめてから手でクローズする（[October_Plan.md](October_Plan.md) の 4 節） |
 | #73〜#76 | ログ見直し 段 2〜5（書き手を 1 つに・発生元、掃除をトレイへ、ホストと engine DLL のログを揃える、書き込みを別スレッドへ・ETW） | 設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。#73・#75・#76 は Step 1（`2a628b5`・`500d161`）、#74 は Step 2（`7c6f570`）で実装し、S1・S2 で確かめた。0.13.1 に含まれ、配布物の試験（T1〜T4）でもホスト・トレイのログ（ヘッダー・engine DLL の行・掃除）を確かめた | 確かめてから手でクローズする（October_Plan.md の 4 節のリリース作業の 7） |
 | [#46](https://github.com/fukuyori/rakukan/issues/46) | 学習履歴を個別に削除する手段が無い | #33 と合わせる予定 | #33 と同時 |
 | [#32](https://github.com/fukuyori/rakukan/issues/32) | 文節変換: 区読点を含まない文で変換対象を文節単位に分けて選び直せない | [Segment_Edit_Plan.md](Segment_Edit_Plan.md)。9〜10 月は対応しない | 計画とインストーラー改修の後 |

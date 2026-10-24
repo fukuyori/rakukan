@@ -28,7 +28,7 @@
 | 1 | A | （Issue なし） | `config.toml` の `log_level` をホストへ `RAKUKAN_LOG` として渡すとき、値をそのまま渡しているため、engine DLL では外部ライブラリ（`tokenizers::tokenizer::normalizer`）まで TRACE で出る | `log_level = "trace"` で engine DLL のログが 1 日 200〜460 MB になり、行の 98.5% をこの TRACE が占める（2026-10-15〜21 のログ）。調査に使わない内容で、rakukan 自身の TRACE が埋もれる。段 A の作業 7（DEBUG の記録）の前に片づける | 段 A に含める |
 | 1 | A | #71 | フォーカス移動で `ResetAll` が送られず、LLM の文脈が残る | 配布中の 0.12.0 にある。PR #68 で入った意図しない変化で、DESIGN.md の設計から外れている。直し方は Issue に記録済み（Codex CLI のレビュー済み） | 検証が終わった時点で、段 A だけの修正版を出せる形にしておく。出すか、フェーズ 2 と合わせるかは完了時に決める |
 | 2 | B | #69 / #70 | ホストとの通信失敗・エンジンの未準備・ロック競合のときに、打鍵や確定する文字列が失われる・アプリへ素通りする | 入力が失われる・誤った文字が確定される。0.12.0 の実機試験で見えた: T2-3（候補選択中のホスト交換で、表示は変換後のまま状態は変換前に戻り、Enter でひらがなが確定）、T2-4（言語バーのエンジン再起動の直後、2026-10-10 02:57:26〜27 UTC の TSF ログに `handle_action: engine not ready: bg init triggered` 1 回と `engine busy` 2 回。T2-4 自体は合格）。個別に直すと穴が残るので、定義から設計する | RPC protocol を v7 に上げ、engine ABI も上げる（フェーズ 3 の #75 と合わせて 1 回）。フェーズ 3 と同じ版で出す（2026-10-21 に決定。v7 は古いホストを止めるインストーラーと一緒に出す）。2026-10-22 に改め、0.13.0 に単独で含めた（engine ABI 12 のまま。Input_Pipeline_Plan.md 9 節の決定 1） |
-| 3 | C | #33（#73〜#76） | インストーラーの見直し（再起動で完了、`%ProgramFiles%`、経路の一本化、winget）とログの見直しの段 2〜5 | 計画は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) と [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。**C の更新中の検証（文字・キーを失わない）は B の修正に依存する**ので B の後に行う。規模も大きい | #75 は engine ABI を変えない（12 のまま。Log_Redesign_Plan.md 段 4 の (b)）。フェーズ 3 の終了後に 1 つの版として出す（2026-10-23 決定）。作業は専用のブランチで行い、終了後に main へマージする（4 節） |
+| 3 | C | #33（#73〜#76） | インストーラーの見直し（再起動で完了、`%ProgramFiles%`、経路の一本化）とログの見直しの段 2〜5 | 計画は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) と [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。**C の更新中の検証（文字・キーを失わない）は B の修正に依存する**ので B の後に行う。規模も大きい | #75 は engine ABI を変えない（12 のまま。Log_Redesign_Plan.md 段 4 の (b)）。フェーズ 3 の終了後に 1 つの版として出す（2026-10-23 決定）。作業は専用のブランチで行い、終了後に main へマージする（4 節） |
 | 4 | — | #64・#66・#49・#82 | 設定が合わない `Create` での旧 engine DLL の寿命、古い設定の再送による巻き戻り、モデル変更の反映、モデル定義の config.toml への移動を合わせて設計・実装する | 設定・DLL の寿命・モデルの反映といった不具合にかかわる。engine ABI を変える。**ただし #64 の DLL の寿命の方針はフェーズ 3 の前に決める**（4 節の開始の条件） | 未定 |
 | 5 | — | #83（KV キャッシュの再利用）、IPC の名前とパイプの設定 | Space の変換のビームサーチの高速化、パイプ・ミューテックスの名前の範囲の整理 | #83 は計測しだいの速度改善。IPC はまだ Issue にしていない | 未定 |
 
@@ -181,7 +181,7 @@ RPC protocol に要求を足す場合（#69 の A の案）は、protocol の版
 - Step 1 で #73〜#76 の試験（[Log_Redesign_Plan.md](Log_Redesign_Plan.md) の 7 章。callback の別スレッドからの呼び出し・再入・解除時の寿命、キューが満杯のときに待たず欠落を数える、書き込みの失敗、Activate 前に副作用が無い）が通る。
 - **配布前の完了**: Step 1〜5（Step 5 は CHANGELOG・配置の説明・文書の更新）。
 - Step 6 は下の「リリース作業」。
-- **公開後の完了**: Step 7（winget）の導入・更新・削除の確認と、Step 8（PR #30 への結論のコメント）。
+- **公開後の完了**: Step 7（PR #30 への結論のコメント）。
 
 **アンインストールを含む確認の前に、ログを退避する**
 
@@ -190,7 +190,7 @@ RPC protocol に要求を足す場合（#69 の A の案）は、protocol の版
 - フェーズ 3 の Step 2 からのトレイ: サインインのたびに、90 日を超えたログと、30000 ファイルを超えた分を古い順に消す（#74）。
 - Step 2 からのインストーラー・アンインストーラーは、ログを消さない。ログの置き場所は、インストール先を `%ProgramFiles%` へ移しても `%LOCALAPPDATA%\rakukan` のまま（Test_Procedure.md の S1-5 で確かめた）。
 
-Step の試験、リリース作業の T4、公開後の winget での削除の確認など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-*.log*`・`rakukan-tray-*.log*`）を別の場所へ写す。
+Step の試験、リリース作業の T4 など、アンインストールを含む確認の前には、毎回 `%LOCALAPPDATA%\rakukan\` のログ（`rakukan-tsf-*.log*`・`rakukan-engine-*.log*`・`rakukan-tray-*.log*`）を別の場所へ写す。
 
 ```powershell
 $bk = "$env:APPDATA\rakukan\log-backup-$(Get-Date -Format yyyyMMdd-HHmmss)"
@@ -223,7 +223,7 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 - 版は 0.13.1（利用者が決定）。版の変更と、ビルドの識別子から `-dirty` を外す変更を `84ff900` でコミットし、タグ `0.13.1` を `84ff900` に付けた。
 - 配布物 `rakukan-0.13.1-setup.exe` は `cargo make package` で作った（ビルドの識別子は `7a04bef972ff`。版の変更をコミットする前の作業ツリーから作ったため、タグのコミットとは一致しない。中身は同じ）。配布物で T1〜T4・試験 30 に合格した（0.13.0 の配布物からの更新を含む。Test_Procedure.md の 0.13.1 の結果）。
 - リリースの作業の中で直したこと: 0.13.0 の 32 ビット側のアンインストール情報を移行で消す、cargo make から起動する Windows PowerShell 5.1 で通らなかった 2 つのスクリプト（ライセンスの一覧の並び、`Get-FileHash`）。
-- 残り: 公開後の完了（Step 7 の winget、Step 8 の PR #30 へのコメント）。#33・#73〜#76 は、確かめてから手でクローズする。
+- 残り: 公開後の完了（Step 7 の PR #30 へのコメント）。#33・#73〜#76 は、確かめてから手でクローズする。
 
 ## 5. フェーズ 4: #64・#66・#49・#82
 
