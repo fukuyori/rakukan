@@ -229,7 +229,7 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 
 ## 5. フェーズ 4: #64・#66・#49・#82
 
-合わせて設計する（[Issue_Status.md](Issue_Status.md) の「判断待ち」）。
+合わせて設計する（[Issue_Status.md](Issue_Status.md) の「判断待ち」）。設計書は [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md)（2026-10-24。Codex CLI のレビューを 2 回受けた）。#82 は、モデルの定義を config.toml へ移さず、models.toml を一覧の元にする形に改めた（同 2 章）ので、engine ABI は変えない。
 
 | Issue | 扱い | この計画との依存 |
 |---|---|---|
