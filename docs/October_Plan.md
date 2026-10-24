@@ -208,13 +208,22 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 フェーズ 3 の終了後に 1 つの版として出す（1 節）。
 
 1. ブランチの pull request を、CI が通っていることを確かめてからマージコミットでマージする。以下は main で行う。
-2. 版を上げる: [version-update-checklist.md](version-update-checklist.md) の 1〜3 章を直し、6 章の確認を流す。CHANGELOG.md は `[Unreleased]` を版の番号と日付に改める。
+2. 版を上げる: [version-update-checklist.md](version-update-checklist.md) の 1〜3 章を直し、6 章の確認を流す。CHANGELOG.md は `[Next Release]` を版の番号と日付に改める。
 3. コミットの前に `cargo fmt --all -- --check`・clippy・`cargo test --workspace --lib`・`cargo test -p rakukan-dict-builder` を通す。コミット・タグ・プッシュは、その都度の指示があってから行う。
 4. 配布物を `-Sign` 付きで作る。
 5. 配布物で試験する（[Test_Procedure.md](Test_Procedure.md) の「試験を行う時期」）: T4（前の版からの更新を含む。アンインストールの前に、上の手順でログを退避する）。インストーラーとファイルの配置を変えるので、T1〜T3 も配布物でやり直す。フェーズ 2 から回した試験 30（最終的に配布する組み合わせでの統合試験、3.1 節）もここで行う。結果は Test_Procedure.md の末尾に足す。
 6. リリースする。
 7. 記録: この節に結果（コミット・タグ・試験・判断）を書き、[handoff.md](handoff.md) の 0 章と [Issue_Status.md](Issue_Status.md) を更新する。#33・#73〜#76 は、確かめてから手でクローズする（コミットに完了キーワードを書かない）。
 8. 公開の後に、上の「公開後の完了」を行う。
+
+**結果**（2026-10-24）
+
+- 配布前の完了: Step 1〜3（`2a628b5`・`500d161`・`b93532a`・`7c6f570`・`f74a9c7`。実機の試験 S1・S2）、Step 4・5（`cc189b3`。S3）。いずれも [Test_Procedure.md](Test_Procedure.md) の結果に合格。
+- PR #87 を CI（Build & Test・Format Check・License Check・Third-Party Licenses）の合格を確かめてから、マージコミット `7a04bef` で main にマージした。
+- 版は 0.13.1（利用者が決定）。版の変更と、ビルドの識別子から `-dirty` を外す変更を `84ff900` でコミットし、タグ `0.13.1` を `84ff900` に付けた。
+- 配布物 `rakukan-0.13.1-setup.exe` は `cargo make package` で作った（ビルドの識別子は `7a04bef972ff`。版の変更をコミットする前の作業ツリーから作ったため、タグのコミットとは一致しない。中身は同じ）。配布物で T1〜T4・試験 30 に合格した（0.13.0 の配布物からの更新を含む。Test_Procedure.md の 0.13.1 の結果）。
+- リリースの作業の中で直したこと: 0.13.0 の 32 ビット側のアンインストール情報を移行で消す、cargo make から起動する Windows PowerShell 5.1 で通らなかった 2 つのスクリプト（ライセンスの一覧の並び、`Get-FileHash`）。
+- 残り: 公開後の完了（Step 7 の winget、Step 8 の PR #30 へのコメント）。#33・#73〜#76 は、確かめてから手でクローズする。
 
 ## 5. フェーズ 4: #64・#66・#49・#82
 
@@ -266,3 +275,4 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan" -File |
 - 2026-10-22: フェーズ 1・2 を完了とした（2.2 節・3.1 節。F-1・F-2・T2-4 は実機で合格、257 キー目・`VersionMismatch`・ロック競合は #85 に回した）
 - 2026-10-22: フェーズ 1 の実機の確認を終えた（2.2 節）。フェーズ 2 の実機試験の結果と、そこで見つけて直した 4 件（設計書 7 節の注記）を 3.1 節に反映した
 - 2026-10-23: フェーズ 3 の終わりに行うリリース作業を 4 節に書いた。7 節の再計測の期間に 0.13.0 のビルドを足した。アンインストールを含む確認の前にログを退避する手順を 4 節に書いた。#64 の DLL の寿命の方針を決め、4 節の開始の条件と 5 節に書いた。Installer_Redesign_Plan.md 7 章の確認事項を決め、同 7 章に書いた。#75 で engine ABI を変えない（2026-10-22 決定）ことを 1 節・5 節に反映した。フェーズ 3 は終了後に 1 つの版として出し、専用のブランチで作業して最後に main へマージすると決め、1 節と 4 節（ブランチ、リリース作業）に書いた。Installer_Redesign_Plan.md 5 章の Step を行う順に振り直し（5 配布前の文書、6 リリース作業、7 winget、8 PR #30 のコメント）、4 節の完了条件を合わせた。実機での確認を 3 回（Step 1 の後、Step 2・3 をまとめて Step 3 の後、Step 4 の後）にまとめると決め、Installer_Redesign_Plan.md 5 章に書いた
+- 2026-10-24: フェーズ 3 の配布前の完了（Step 1〜5）とリリース作業を終えた。PR #87 をマージコミット `7a04bef` でマージし、版を 0.13.1 に上げてタグ `0.13.1`（`84ff900`）を作成した。配布物で T1〜T4・試験 30 に合格した（4 節の結果）

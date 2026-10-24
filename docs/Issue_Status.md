@@ -1,7 +1,7 @@
 # 開いている Issue の状況
 
-2026-10-23 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を更新した。
-10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
+2026-10-24 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行を更新した。
+10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82 → 5 #83・IPC。時期は決めない）は [October_Plan.md](October_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
 Issue の状態を更新したら、この表も同じコミットで更新する。クローズしたら行を削除し、末尾の「クローズの記録」に移す。
@@ -41,8 +41,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。10 月の計画のフェーズ 3。ブランチ `phase3-installer`（PR #87）で作業中。Step 1（配置に依存しないパス・ログ・ピン止め・第三者のライセンス。`2a628b5`・`500d161`・`b93532a`）、Step 2（新しいインストーラー・トレイ。`7c6f570`）、Step 3（旧配置からの移行。`f74a9c7`）を実装し、実機の試験 S1・S2 に合格（[Test_Procedure.md](Test_Procedure.md)、2026-10-23） | Step 4（経路の一本化）→ Step 5（配布前の文書）→ Step 6（リリース作業。[October_Plan.md](October_Plan.md) の 4 節） |
-| #73〜#76 | ログ見直し 段 2〜5（書き手を 1 つに・発生元、掃除をトレイへ、ホストと engine DLL のログを揃える、書き込みを別スレッドへ・ETW） | 設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。#73・#75・#76 は Step 1（`2a628b5`・`500d161`）、#74 は Step 2（`7c6f570`）で実装し、S1・S2 で確かめた | #33 と同じく、October_Plan.md の 4 節のリリース作業で確かめてから扱う |
+| [#33](https://github.com/fukuyori/rakukan/issues/33) | インストーラー再設計（`%ProgramFiles%` 移行、実行後に再起動で完了） | [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。10 月の計画のフェーズ 3。Step 1〜5（`2a628b5`・`500d161`・`b93532a`・`7c6f570`・`f74a9c7`・`cc189b3`）を PR #87（マージコミット `7a04bef`）で main に入れ、0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。実機の試験 S1〜S3 と、配布物での T1〜T4・試験 30 に合格（[Test_Procedure.md](Test_Procedure.md)、2026-10-23・24） | 公開後の完了: Step 7（winget の manifest の提出と、install / upgrade / uninstall の確認）、Step 8（PR #30 への結論のコメント）。確かめてから手でクローズする（[October_Plan.md](October_Plan.md) の 4 節） |
+| #73〜#76 | ログ見直し 段 2〜5（書き手を 1 つに・発生元、掃除をトレイへ、ホストと engine DLL のログを揃える、書き込みを別スレッドへ・ETW） | 設計は [Log_Redesign_Plan.md](Log_Redesign_Plan.md)。#73・#75・#76 は Step 1（`2a628b5`・`500d161`）、#74 は Step 2（`7c6f570`）で実装し、S1・S2 で確かめた。0.13.1 に含まれ、配布物の試験（T1〜T4）でもホスト・トレイのログ（ヘッダー・engine DLL の行・掃除）を確かめた | 確かめてから手でクローズする（October_Plan.md の 4 節のリリース作業の 7） |
 | [#46](https://github.com/fukuyori/rakukan/issues/46) | 学習履歴を個別に削除する手段が無い | #33 と合わせる予定 | #33 と同時 |
 | [#32](https://github.com/fukuyori/rakukan/issues/32) | 文節変換: 区読点を含まない文で変換対象を文節単位に分けて選び直せない | [Segment_Edit_Plan.md](Segment_Edit_Plan.md)。9〜10 月は対応しない | 計画とインストーラー改修の後 |
 | [#63](https://github.com/fukuyori/rakukan/issues/63) | 文節変換: 読みと変換結果を文節単位で対応付ける方式の検討 | 方式 1（かなアンカー）は不採用、2（辞書ラティス）/ 3（形態素解析）/ 4（jinen スコアリング）を比較して記録。実装予定なし | 進める前に文節の定義・発火タイミング・実験の順番を決める |
@@ -56,7 +56,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 内容 | クローズ日 |
 |---|---|---|
-| #88 / #89 / #90 | 配布物の第三者の部品の条件: 設定アプリの著作権の表示と使用許諾の画面（Microsoft の部品）/ MPL-2.0 の `option-ext` は Windows のビルドに入らないことの表示 / CUDA の読み込み用のライブラリを `cudart_static.lib` から取る（`500d161`・`b93532a`。ブランチ `phase3-installer`、PR #87 のマージの後のリリースに含まれる） | 2026-10-23 |
+| #88 / #89 / #90 | 配布物の第三者の部品の条件: 設定アプリの著作権の表示と使用許諾の画面（Microsoft の部品）/ MPL-2.0 の `option-ext` は Windows のビルドに入らないことの表示 / CUDA の読み込み用のライブラリを `cudart_static.lib` から取る（`500d161`・`b93532a`。0.13.1 に含まれる） | 2026-10-23 |
 | #69 / #70 / #71 | ホストとの通信失敗・エンジンの準備中に打鍵や確定する文字列が失われる・アプリへ素通りする / フォーカス移動で ResetAll が送られない（10 月の計画のフェーズ 1・2） | 2026-10-22（0.13.0） |
 | #56 / #65 / #72 | ホスト交換中の未確定文字の復元（PR #67 / #68、nick）/ 再接続時に config.toml の設定で Create / DllMain を空にし Activate で初期化（regsvr32 の失敗） | 2026-10-10（0.12.0） |
 | #53 | 読みが正当化する参・拾を数字保存の検証で数えない（PR #58、nick） | 2026-09-21 |

@@ -1020,7 +1020,7 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan\rakukan-engine-host-*.log" | Sort-Objec
 
 ## 15. 今後のロードマップ
 
-2026-10-11 に改定。作業のフェーズ・順序と各フェーズの作業・完了条件は [October_Plan.md](October_Plan.md)、引き継ぎは [handoff.md](handoff.md) の 0 章、インストーラーは [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md) が正。
+2026-10-11 に改定（2026-10-24 にフェーズ 1〜3 の結果を反映）。作業のフェーズ・順序と各フェーズの作業・完了条件は [October_Plan.md](October_Plan.md)、引き継ぎは [handoff.md](handoff.md) の 0 章、インストーラーは [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)、開いている Issue の状況は [Issue_Status.md](Issue_Status.md) が正。
 
 ### 完了済み
 
@@ -1034,14 +1034,14 @@ Get-ChildItem "$env:LOCALAPPDATA\rakukan\rakukan-engine-host-*.log" | Sort-Objec
 - 設定変更の全 TSF プロセスへの反映（#65）と、ホストへの再接続時に `config.toml` を読み直した設定で `Create`（#65 の再接続組込み）
 - ホストの再起動をまたいだ composition の復元（#56。RPC protocol v6、要求の所有者・番号・保持応答、`Change` / `Restore`）
 - **0.12.0 のリリース（2026-10-10、タグ `0.12.0` = `c15fefe`）** — RPC protocol v6、engine ABI 11。上の #56・#65 を含む。インストールは従来の手順（別の IME に切り替え → サインアウト → サインイン → インストール）
+- **10 月の計画のフェーズ 1・2（0.13.0、タグ `0.13.0` = `7c76649`）** — フォーカス移動での文脈のリセット（#71）、ホストとの通信失敗・エンジンの準備中に打鍵と確定する文字列を失わない入力処理（#69 / #70）。RPC protocol v7、engine ABI 12
+- **10 月の計画のフェーズ 3（0.13.1、タグ `0.13.1` = `84ff900`）** — インストーラーの見直し（#33）: `%ProgramFiles%` への配置、使用中のファイルは再起動時に置き換え（`restartreplace`）、再起動で完了、旧配置からの移行、`cargo make install` の一本化。ログの見直し（#73〜#76）。公開後の完了（winget への登録、PR #30 へのコメント）が残る
 
 ### 次の作業（フェーズと順序は [October_Plan.md](October_Plan.md) の 1 節。時期は決めない）
 
-1. **フェーズ 1（段 A）: フォーカス移動での文脈のリセット（#71）** — フォーカス移動で `ResetAll` が送られず、LLM の文脈が残る（0.12.0 にある）
-2. **フェーズ 2（段 B）: 入力処理の見直し（#69 / #70）** — ホストとの通信失敗時に打鍵・確定する文字列を失わない、エンジンの準備前・ロック競合中のキー
-3. **フェーズ 3（段 C）: インストーラーの見直し（#33。ログの見直し #73〜#76 を含む）** — `%ProgramFiles%` への配置、使用中のファイルは再起動時に置き換え（`restartreplace`）、再起動で完了、`cargo make install` の一本化、winget
-4. **フェーズ 4: 設定とモデルの扱い（#64 / #66 / #49 / #82）** — 設定が合わない `Create` での旧 engine DLL の寿命（#64。方針は 2026-10-23 に決定: ホストの中で engine DLL を替えない。October_Plan.md の 4 節）、古い設定の採用防止（#66）、モデル変更の反映（#49）、モデル定義の config.toml の `[models]` への移動（#82。engine ABI の変更）を合わせて設計する
-5. **フェーズ 5: ビームサーチの KV キャッシュ再利用（#83）と IPC の名前とパイプの設定** — #83 は並行作業の計測の結果を見て判断し、入れる場合は今の方式へ戻せる設定・新旧が同じ候補を選ぶ試験・CPU / Vulkan / CUDA の各版での確認を条件にする。IPC（利用者 SID ＋ ログオンセッションでパイプ・ミューテックスの範囲をそろえる、`FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS`）は Issue 化が未定
+1. **フェーズ 3 の公開後の完了** — winget の manifest の提出と、`winget install` / `upgrade` / `uninstall` の確認（[Installer_Redesign_Plan.md](Installer_Redesign_Plan.md) の 4.4）、PR #30 への結論のコメント
+2. **フェーズ 4: 設定とモデルの扱い（#64 / #66 / #49 / #82）** — 設定が合わない `Create` での旧 engine DLL の寿命（#64。方針は 2026-10-23 に決定: ホストの中で engine DLL を替えない。October_Plan.md の 4 節）、古い設定の採用防止（#66）、モデル変更の反映（#49）、モデル定義の config.toml の `[models]` への移動（#82。engine ABI の変更）を合わせて設計する
+3. **フェーズ 5: ビームサーチの KV キャッシュ再利用（#83）と IPC の名前とパイプの設定** — #83 は並行作業の計測の結果を見て判断し、入れる場合は今の方式へ戻せる設定・新旧が同じ候補を選ぶ試験・CPU / Vulkan / CUDA の各版での確認を条件にする。IPC（利用者 SID ＋ ログオンセッションでパイプ・ミューテックスの範囲をそろえる、`FILE_FLAG_FIRST_PIPE_INSTANCE` / `PIPE_REJECT_REMOTE_CLIENTS`）は Issue 化が未定
 
 並行して行う（フェーズに属さない）: **ビームサーチの所要時間の計測と上位 k 件の部分選択（#83 の前段）** — engine の中だけで閉じ、RPC・ABI を変えない
 

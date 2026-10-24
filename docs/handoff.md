@@ -14,6 +14,7 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
 - 0.13.0 の変更点は CHANGELOG.md の `[0.13.0]`。RPC protocol v7、engine ABI 12。
 - フェーズ 2 は、計画ではフェーズ 3 と同じ版で出す予定だった。2026-10-22 に改め、単独で 0.13.0 に含めた（理由と条件は [Input_Pipeline_Plan.md](Input_Pipeline_Plan.md) 9 節の決定 1）。古いホストとの組み合わせは、0.13.0 のインストールの手順（別の IME に切り替え → サインアウト → サインイン → rakukan を使わずにインストール）で避けた。
 - フェーズ 2 の試験のうち、故障を起こす口が要るもの（保留中の操作、257 キー目、`VersionMismatch`、ロック競合など）は #85（試験の自動化の基盤）に回した。
+- フェーズ 3（#33・#73〜#76）の Step 1〜5 は 0.13.1（タグ `0.13.1` = `84ff900`）に含まれる。変更点は CHANGELOG.md の `[0.13.1]`。RPC protocol v7・engine ABI 12 のまま。配布物 `rakukan-0.13.1-setup.exe` のビルドの識別子は `7a04bef972ff`（版の変更をコミットする前の作業ツリーから作った。中身はタグと同じ）。
 
 ### 今の作業: フェーズ 3（段 C、#33。#73〜#76 を含む）
 
@@ -29,19 +30,20 @@ Step の進み（2026-10-24。進捗は tque の #6 の下に登録している�
 | 2 | 新しいインストーラー（64 ビット、`{autopf}`、`restartreplace`、`AlwaysRestart`、登録の成否をレジストリで判定・終了コード 20、HKLM の Run のトレイ）、トレイ（多重起動の抑止・ログ・掃除・キーボードの一覧の補いを版ごとに 1 回）、ログの掃除を 90 日・30000 ファイルに（#74） | `7c6f570` | S2 合格（Step 3 とまとめて） |
 | 3 | 旧配置（`%LOCALAPPDATA%\rakukan`）からの移行（`UsePreviousAppDir=no`、旧 DLL の登録の解除、HKCU の Run の削除、旧版のファイルの削除） | `f74a9c7` | 同上 |
 | 4 | 経路の一本化（`build-installer.ps1` の入力をビルドの出力に・辞書のビルドを移す、`install.ps1` / `uninstall.ps1` の削除、`dev-swap-tsf.ps1`、Makefile（`install` / `package` / `uninstall` / 故障試験の 2 タスク）、check-env / setup-env、README、CLAUDE.md、Stop hook）。移行で 0.13.0 の 32 ビット側のアンインストール情報を消す処理、`gen-third-party-licenses.ps1` のソートを序数比較に（Windows PowerShell 5.1 で `-Check` が通らなかった）。S3 の中で `check-bundled-licenses.ps1`・`dev-swap-tsf.ps1` の `Get-FileHash` を .NET の SHA256 に（cargo make から起動した Windows PowerShell 5.1 で見つからない） | — | S3 合格（Test_Procedure.md の 2026-10-24 の結果） |
-| 5 | 配布前の文書（CHANGELOG の `[Next Release]` の節、DESIGN.md・handoff.md の配置と導入の手順、version-update-checklist.md の CHANGELOG の見出し） | — | 文書だけ |
+| 5 | 配布前の文書（CHANGELOG の `[Next Release]` の節、DESIGN.md・handoff.md の配置と導入の手順、version-update-checklist.md の CHANGELOG の見出し） | `cc189b3`（Step 4 と同じ） | 文書だけ |
+| 6 | リリース作業: PR #87 をマージコミット `7a04bef` でマージ、版を 0.13.1 に上げ・ビルドの識別子から `-dirty` を外す（`84ff900`）、タグ `0.13.1`、配布物で T1〜T4・試験 30 | `7a04bef`・`84ff900` | 合格（Test_Procedure.md の 0.13.1 の結果） |
 
-**次の開始点: Step 6**（tque #46。リリース作業。October_Plan.md の 4 節）。次の版は 0.13.1（2026-10-24 に利用者が決定）。PR #87 は 2026-10-24 にマージコミット `7a04bef` で main にマージした（tque #47）。版を 0.13.1 に上げ、CHANGELOG の見出しを `[0.13.1] - 2026-10-24` にした（tque #48。リリースの日が変わったら見出しの日付を直す）。`-dirty` を廃止した（コミットの有無でビルドの識別子を変えない。`build-support/git_info.rs`）。配布物 `rakukan-0.13.1-setup.exe`（ビルド `7a04bef972ff`）で T1〜T4・試験 30 に合格した（Test_Procedure.md の 0.13.1 の結果。tque #49・#50）。次は、版の変更のコミットとリリース（tque #51、リリースは利用者が行う）。
+**次の開始点: 公開後の完了**（October_Plan.md の 4 節）。Step 7（tque #53。winget の manifest の提出と、`winget install` / `upgrade` / `uninstall` の確認。Installer_Redesign_Plan.md の 4.4・7 章の「終了コード」の残る点）と Step 8（tque #54。PR #30 への結論のコメント。投稿は本文の確認と「投稿して」の指示の後）。#33・#73〜#76 は、確かめてから手でクローズする。
 
 決まったこと・分かったこと（フェーズ 3 の中で）:
 - #75 は engine ABI を変えない（12 のまま）。callback を受ける関数は、無くても動く関数（`load_sym_opt!`）として足した。
 - #64: 1 つのホストの中では engine DLL を替えない（実装はフェーズ 4）。それまでは engine DLL をピン止めする。同じホストの中で CUDA 版から Vulkan 版に替わると、落ちないが変換が数秒かかる（#64 のコメント）。
 - モデルや `gpu_backend` を替えて保存しても、ホストを起動し直すまで反映されない（#49 のコメント。フェーズ 4）。
 - 著作権の表示は `rakukan Contributors` のまま（`LICENSE`・`NOTICE`・設定アプリの csproj。2026-10-23 に利用者が確認）。
-- 新しいインストーラーは版が同じなので `output\rakukan-0.13.0-setup.exe` の名前で作られる。0.13.0 の配布物は `output\oldversion\rakukan-0.13.0-release-setup.exe` に写してある。
-- 今の PC は、S3 の後に新しい形の開発の配置（`%ProgramFiles%\rakukan`、ビルド → `sudo cargo make install` → 再起動）にしてある。`%LOCALAPPDATA%\rakukan` に残っているのはログ・`etw`・`config.toml` など。
+- 0.13.0 の配布物は `output\oldversion\rakukan-0.13.0-release-setup.exe` に写してある。
+- 今の PC には 0.13.1 の配布物が入っている（`%ProgramFiles%\rakukan`）。開発の導入（ビルド → `sudo cargo make install` → 再起動）で同じ場所に上書きする。`%LOCALAPPDATA%\rakukan` に残っているのはログ・`etw`・`config.toml` など。
 - `install-tsf-*`（故障試験の TSF の差し替え）は、入力方式が Rakukan だと explorer とターミナルが TSF DLL を読み込んでいてロックで止まる。サインアウト → サインインの後、入力方式を Rakukan にせずに実行する。charmap で確かめる前には入力方式を Rakukan にする（Test_Procedure.md の S3-3）。
-- 0.13.0 までのインストーラー（32 ビットのモード）が書いたアンインストール情報（`HKLM\SOFTWARE\WOW6432Node\…\Uninstall\{B7C4E2A1-…}_is1`）が、移行の後も残っていた（2026-10-24、S2 の後のこの PC で発見）。旧版のアンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。旧配置を指すものを移行で消す処理（`RemoveOldUninstallEntry`）を足した。**Step 4 の試験（Test_Procedure.md の S3-0 の 3・S3-1 の 6）で、消えることを確かめる**（tque #85）。
+- 0.13.0 までのインストーラー（32 ビットのモード）が書いたアンインストール情報（`HKLM\SOFTWARE\WOW6432Node\…\Uninstall\{B7C4E2A1-…}_is1`）が、移行の後も残っていた（2026-10-24、S2 の後のこの PC で発見）。旧版のアンインストーラーは移行で消えるので、「アプリ」の一覧に削除できない旧版が残る。旧配置を指すものを移行で消す処理（`RemoveOldUninstallEntry`）を足し、S3-1 と、0.13.0 の配布物からの更新（T4-1）で消えることを確かめた。
 
 ### 並行して行うこと
 
