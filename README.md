@@ -94,7 +94,7 @@ v0.13.1 は、インストール・更新・アンインストールを一般的
 |---|---|
 | CUDA Toolkit（nvcc） | `rakukan_engine_cuda.dll` を作る場合。無ければ cuda variant はスキップ |
 | Vulkan SDK（環境変数 `VULKAN_SDK`） | `rakukan_engine_vulkan.dll` を作る場合。無ければ vulkan variant はスキップ |
-| Windows SDK の signtool | 配布物の署名（`cargo make package`） |
+| Windows SDK の signtool | 電子署名を行う場合（`cargo make package`） |
 
 ## インストール（ソースから）
 
@@ -125,7 +125,7 @@ cargo make full-install
 cargo make quick-install
 ```
 
-配布物（署名付きのインストーラー `output\rakukan-<version>-setup.exe`）は `cargo make package` で作ります。成果物に署名してから、セットアップ本体とアンインストーラーに署名したインストーラーを作ります（環境変数 `CODESIGN_CERT` に証明書の Subject CN を設定しておく）。
+電子署名を行える環境では、`cargo make package` で、成果物・セットアップ本体・アンインストーラーに署名したインストーラー（`output\rakukan-<version>-setup.exe`）を作れます（環境変数 `CODESIGN_CERT` に証明書の Subject CN を設定しておく）。
 
 アンインストール: `sudo cargo make uninstall`（アンインストーラーをサイレント実行。完了には再起動）。
 
@@ -142,8 +142,9 @@ cargo make quick-install
 
 ## 設定の目安
 
-`%APPDATA%\rakukan\config.toml` では `model_variant` と `n_gpu_layers` を調整できます。
+`%APPDATA%\rakukan\config.toml`（設定アプリの各ページでも変えられます）では `model_variant` と `n_gpu_layers` を調整できます。
 
+- 使えるモデルは設定アプリの「モデル ID」で選べます（一覧は `crates/rakukan-engine/models.toml`）。既定は `jinen-v1-xsmall-q5`
 - `jinen-v1-xsmall-q5` は比較的軽く、`n_gpu_layers = 16` 前後から試しやすい
 - `jinen-v1-small-q5` は `n_gpu_layers = 8` か `16` くらいから始めるのが安全
 - `jinen-v2-xsmall-q5` / `jinen-v2-small-q5` は v2 世代（Qwen3 ベース）。プロンプト形式は v1 と共通で、`model_variant` を書き換えるだけで切り替えられる
@@ -151,7 +152,7 @@ cargo make quick-install
 - 未指定は全レイヤー GPU オフロード
 - `gpu_backend = "auto"`（既定）は cuda → vulkan → cpu の順に実際にロードを試みる。`cuda` / `vulkan` / `cpu` を明示した場合はその DLL だけを使い、失敗しても他へ切り替えない（結果はエンジンホストのログに出る）
 
-`n_gpu_layers` と `model_variant` は config.toml を編集して保存すると自動で反映されます。変更は保存通知・フォルダの変更通知・30 秒ごとの定期確認で検出され、`rakukan-engine-host.exe` 内部の DynEngine が新設定で作り直されます。すぐに反映したい場合は言語バーの「エンジン再起動」を使います。
+エンジンにかかわる設定（`model_variant`・`gpu_backend`・`n_gpu_layers`・候補数・`log_level` など）を変えると、`rakukan-engine-host.exe` が起動し直して新しい設定で動きます。設定アプリで保存したときは、次の変換から反映されます。config.toml を直接編集したときは、変更はフォルダの変更通知と 30 秒ごとの定期確認で読み込まれ、次の IME の切り替え（`reload_on_mode_switch = true` のとき）で反映されます。すぐに反映したい場合は言語バーの「エンジン再起動」を使います。config.toml を読めない（書き間違いなど）間は、直前の正しい設定のまま動きます。
 
 `[input]` セクションでは起動時の IME 状態を指定できます。
 
