@@ -1,6 +1,6 @@
 # Rakukan 引き継ぎ資料
 
-作成: 2026-10-23（2026-10-22 までの引き継ぎ資料は [archive/handoff_to_2026-10-22.md](archive/handoff_to_2026-10-22.md) に移した）
+作成: 2026-10-23、更新: 2026-10-24（0.14.0 と 10 月の計画の完了まで。2026-10-22 までの引き継ぎ資料は [archive/handoff_to_2026-10-22.md](archive/handoff_to_2026-10-22.md) に移した）
 
 この文書には、次のセッションが作業を続けるために知っておくことだけを書く。
 後から変わらない事実（コミット、タグ、含まれる版、日付）で書く。リリースされたかどうかは書かない（GitHub の Releases で確かめる）。
@@ -54,7 +54,7 @@ sudo cargo make install   # インストーラーを署名なしで作り、サ�
 
 ### 実機の試験
 
-- 手順と、どの試験をいつ行うかは [Test_Procedure.md](Test_Procedure.md)（T1 通常の入力、T2 ホストの入れ替え、T3 設定、T4 インストール・更新・アンインストール、S1・S2 フェーズ 3 の Step 1〜3）。
+- 手順と、どの試験をいつ行うかは [Test_Procedure.md](Test_Procedure.md)（T1 通常の入力、T2 ホストの入れ替え、T3 設定、T4 インストール・更新・アンインストール、S1〜S3 フェーズ 3 の Step 1〜4。T4 の準備の関数 `Show-RakukanState` などは S3 にある）。
 - 手順は「1. 操作（コマンド）」と「見る点:」の番号付きの一覧で示す。管理者の PowerShell では作業フォルダがリポジトリにならないので、パスはフルパスで書く。
 - 修正はまとめてから 1 回で試験する。試験は 1 つずつ示し、操作と見る点を同じ行に書き、戻す操作まで含める。
 - 結果は Test_Procedure.md の末尾に、日付・版・ビルドを書いた節として足す。
@@ -87,6 +87,7 @@ sudo cargo make install   # インストーラーを署名なしで作り、サ�
 | 登録の記録 | `%LOCALAPPDATA%\rakukan\register_debug.log`（regsvr32 の登録・解除のたびに時刻・`dll_path`・各段階の結果） |
 | 調査用の ETW | `scripts/etw-trace.ps1 start / stop / export`（管理者）。provider は `Rakukan.Tsf`・`Rakukan.Host` |
 | 復帰マーカー | `%LOCALAPPDATA%\rakukan\engine-recovery.txt`（#43 / #57） |
+| ホストが最後に採用した設定 | `%LOCALAPPDATA%\rakukan\host-config-last.json`（#66。config.toml を解析できない間に起動したホストが使う） |
 
 ## 3. 文書の地図
 
@@ -112,16 +113,18 @@ sudo cargo make install   # インストーラーを署名なしで作り、サ�
 - **#86**: 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される。重要度は低。起きるアプリは見つかっていない。ログのアプリ名（`app=`）で探す。
 - **観察（調べていない）**: ホストを起動できない状態で、最初のキーの待ちが 3.6 s になったことがある（`Transport` → `HostMissing` → `Suppressed`。2026-10-22）。
 - **フェーズ 3 で行っていない確認**: 別のユーザーでの確認（Test_Procedure.md の S2-6）。
+- **フェーズ 4・0.14.0 で行っていない確認**: 入力中（未確定の文字がある）に設定を保存する試験（設定アプリに切り替えると確定するため、今の形では試せない）。0.14.0 の配布物での T1〜T3（利用者の判断。T2 のホストの入れ替えの間の復元は、0.13.1 の T2 で確かめたもの）。
 - **観察（調べていない）**: 2026-10-23 のサインインの後、ChatGPT.exe の TSF のログが作られなかった。ChatGPT で「100%」が「10%」になることがあるという報告があったが、ログが無く確かめられていない。
 - **運用で確かめる**: #57（詰まりの検出）は運用ログで確認してクローズを判断する。#50（DM の識別）は段 1 のログ（`e0cbbd3`）がたまってから照合する（どちらも 2026-11_Plan.md の 2 節）。
 
 ## 5. 調査の知見
 
-- **ホストを起動できない状態を作る**: `%LOCALAPPDATA%\rakukan\rakukan-engine-host.exe` の名前を変え、動いているホストを止める（`Stop-Process -Name rakukan-engine-host -Force`）。ホストは常駐なので、アプリを閉じるだけでは止まらない。元に戻すのを PowerShell の `finally` に任せない（ターミナルの強制終了で実行されなかった。2026-09-22）。
+- **ホストを起動できない状態を作る**: インストール先の `%ProgramFiles%\rakukan\rakukan-engine-host.exe` の名前を変え（管理者が要る。0.13.0 までの配置は `%LOCALAPPDATA%\rakukan`）、動いているホストを止める（`Stop-Process -Name rakukan-engine-host -Force`）。ホストは常駐なので、アプリを閉じるだけでは止まらない。元に戻すのを PowerShell の `finally` に任せない（ターミナルの強制終了で実行されなかった。2026-09-22）。
 - **未確定の文字を持ったままホストを入れ替える**: アプリからフォーカスが外れると未確定の文字は確定されるので、PowerShell で `Start-Sleep` で遅らせてからホストを止め、その間にアプリへ戻って操作する。待ちは 10〜15 s 程度にする（長いとフォーカスが移る）。
-- **モデル未準備の状態を作る**: `model_variant` を存在しない値にしてからホストを終了する（#49 のため、設定を変えただけではモデルが切り替わらない）。
-- **推論失敗を作る**: `[diagnostics] force_inference_failure = true`。有効にするにはホストの作り直しが要る。
-- **ホストのログの DEBUG を出す**: ユーザーの環境変数 `RUST_LOG=info,rakukan_engine_rpc=debug` を設定し、サインインし直す（ホストは起動したアプリの環境を受け継ぐ）。試験の後に消す。engine DLL のログは `config.toml` の `log_level` に従う（`RAKUKAN_LOG` を明示すればそちらが優先）。
+- **モデル未準備の状態を作る**: `model_variant` を存在しない値にして保存する（0.14.0 からは、保存でホストが起動し直して新しい値で読み込む）。
+- **推論失敗を作る**: `[diagnostics] force_inference_failure = true`。設定の JSON に入るので、保存すればホストが起動し直して有効になる（0.14.0）。
+- **config.toml を壊した状態を作る**: config.toml の最後に `[general` の 1 行を足す。TSF は直前の設定を保ち、その後に起動したホストは `host-config-last.json` で動く（ホストのログに `starting with the last adopted config`）。戻すときは行を消すだけでなく、写しで上書きする（改行が残ってハッシュが変わる。2026-10-24）。
+- **ホストのログの DEBUG を出す**: ユーザーの環境変数 `RUST_LOG=info,rakukan_engine_rpc=debug` を設定し、サインインし直す（ホストは起動したアプリの環境を受け継ぐ）。試験の後に消す。engine DLL のログは `config.toml` の `log_level` に従う（`RAKUKAN_LOG` を明示すればそちらが優先）。0.14.0 からは `log_level` を変えるとホストが起動し直す。
 - **RPC のログが出ることを確かめる**: 言語バーの「エンジン再起動」で `rpc: Shutdown acknowledged by host` が出る。接続のたびに `host connected: Hello/Create ok …` が出る。
 - **キーの扱いを追う**: TSF のログの `key_diag:`（キーごとの判断）、`rescue:`（救済の各段階）、`key_queue:`（保留・直接入力）、`rpc SLOW … thread=`（UI のスレッドの停止）。
 - **ツールの注意**
