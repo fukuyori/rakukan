@@ -1,4 +1,4 @@
-# rakukan v0.14.0
+# rakukan v0.15.0
 
 > ⚠️ **注意：現在テスト動作中です**
 >
@@ -31,7 +31,9 @@ rakukan は、ローカルで動く小型 LLM と Mozc 系辞書を組み合わ�
 
 ## 最新の変更
 
-v0.14.0 は、設定アプリで変えた設定（モデル・GPU の backend・ログの水準を含む）が、エンジンのホストが動いている間も次の変換から反映されるようにしたリリースです（[Issue #49](https://github.com/fukuyori/rakukan/issues/49) / [#64](https://github.com/fukuyori/rakukan/issues/64) / [#66](https://github.com/fukuyori/rakukan/issues/66)）。設定が変わると、ホストは自分の中でエンジンを作り直さずに起動し直します（ほかのアプリの接続もいったん切れ、入力中の文字は戻されます）。ホストは、送られた設定が config.toml の今の内容から作られているかを確かめてから採用するので、古い設定を持ったアプリの接続で設定が戻りません。config.toml を読めない間は、最後に採用した設定で動きます。既定のモデルを `jinen-v1-xsmall-q5` にそろえ、設定アプリのモデルの選択肢を models.toml から作るようにしました（Issue #82）。IME をオンにした直後の表示が「ー」になる問題も直しました。ホストとの通信の版（プロトコル）が 8 に上がったので、更新した後は PC を再起動するまで日本語入力が使えないことがあります。
+v0.15.0 は、変換を速くしたリリースです。同梱の llama.cpp を新しくし（llama-cpp-2 0.1.161）、開発者の環境（CUDA 版・`jinen-v2-small-q5`）では、ライブ変換の時間の中央値が読みの長さに応じて 16〜38% 短くなりました。速く打ち続けている間も、打つのを止める前にライブ変換のプレビューが更新されるようにしました（[Issue #45](https://github.com/fukuyori/rakukan/issues/45)）。候補の一覧の末尾に、ひらがなとカタカナを添えたので、F6・F7 を押さずに選べます（[Issue #40](https://github.com/fukuyori/rakukan/issues/40) の 2）。llama.cpp の計算が変わったため、2 番目より後の候補の順が入れ替わることがあります。辞書の版を、ビルドの表示・ホストのログ・設定アプリの「バージョン情報」で確かめられるようにしました。ホストとの通信の版（プロトコル 8）は変わりません。
+
+- v0.14.0: **設定アプリで変えた設定（モデル・GPU の backend・ログの水準を含む）が、ホストが動いている間も次の変換から反映される**（Issue #49 / #64 / #66）。設定が変わるとホストが起動し直す。古い設定を持ったアプリの接続で設定が戻らない。config.toml を読めない間は、最後に採用した設定で動く。既定のモデルを `jinen-v1-xsmall-q5` にそろえ、設定アプリのモデルの選択肢を models.toml から作る（Issue #82）。IME をオンにした直後の表示が「ー」になる問題を修正。通信のプロトコル v8。
 
 - v0.13.1: **インストール・更新・アンインストールを、一般的な Windows のアプリと同じ手順にした**（Issue #33）。インストール先を `%ProgramFiles%\rakukan` にし、インストーラーの実行の後の PC の再起動で完了する（事前の IME の切り替えやサインアウトは要らない）。0.13.0 までの配置からの更新では旧配置を片付ける。モデルは `%ProgramData%\rakukan\models` に置く。ログの見直し（Issue #73〜#76）、トレイの配布、使用許諾の画面と第三者のライセンスの文書の同梱。
 
@@ -167,6 +169,54 @@ cargo make quick-install
   ime_off_apps = ["conhost.exe", "WindowsTerminal.exe", "mintty.exe", "wezterm-gui.exe", "ghostty.exe"]
   ime_on_apps = ["msedge.exe", "chrome.exe", "firefox.exe"]
   ```
+
+### 変換を速くする設定
+
+変換の時間は、主に「GPU で動かすか」「モデルの大きさ」「ビーム幅（同時に探す候補の数）」で決まります。速くしたいときは、次の順に見直してください。
+
+ここに出てくる項目は、設定アプリ（言語バーのメニュー「設定...」）の次の場所で変えられます。
+
+| `config.toml` の項目 | 設定アプリのタブ | 画面のまとまり | 画面の項目名 | 既定値 |
+|---|---|---|---|---|
+| `[general] gpu_backend` | 基本 | 動作とモデル | GPU バックエンド | `"auto"` |
+| `[general] n_gpu_layers` | 基本 | 動作とモデル | GPU レイヤー数 | 書かなければ全レイヤー（雛形の `config.toml` は `16`） |
+| `[general] model_variant` | 基本 | 動作とモデル | モデル ID | `jinen-v1-xsmall-q5` |
+| `[conversion] num_candidates` | 基本 | 候補表示 | 候補数 (1-30) | `6` |
+| `[conversion] beam_size` | 基本 | 候補表示 | Space変換 beam (1-30) | `6` |
+| `[live_conversion] beam_size` | ライブ変換 | ― | beam_size (1-9) | `1` |
+| `[live_conversion] debounce_ms` | ライブ変換 | ― | デバウンス (ms) | `80` |
+
+既定値は、`config.toml` にその項目を書かなかったときの値です。
+
+1. **GPU で動かす**（`[general]`）
+   - `gpu_backend = "auto"`（既定）なら、使える GPU を自動で選びます。NVIDIA の GPU では `cuda`、ほかの GPU では `vulkan` が選ばれます。`cpu` に決め打ちしていないか確かめてください。
+   - `n_gpu_layers` は、書かなければ全レイヤーを GPU に載せます。雛形の `config.toml` では `16` になっているので、GPU のメモリに余裕があれば、行を消すか値を大きくします。
+   - どの backend で動いているかは、エンジンのホストのログ（`%LOCALAPPDATA%\rakukan\rakukan-engine-host-*.log`）の `Selected backend` で確かめられます。
+2. **小さいモデルを選ぶ**（`[general] model_variant`）
+   - `xsmall` は `small` より小さく（v1 で 26M と 90M）、計算が軽くなります。`q5` は `f16` より小さくした版です。
+   - 変換の品質とのつり合いで選んでください。
+3. **Space の変換のビーム幅を狭くする**（`[conversion]`）
+   - Space の変換のビーム幅は、`num_candidates` と `beam_size` の小さいほうです（どちらも既定は 6）。広くするほど候補は増えますが、時間がかかります。
+   - 開発者の環境（CUDA 版・`jinen-v2-small-q5`）では、6〜10 文字の読みの変換の中央値が、ビーム幅 6 で 51 ms、ビーム幅 14・28 で 155 ms でした。
+   - 読みが長いほど時間がかかります。長い文は、句読点で区切って入力すると、ブロックごとに変換されます。
+4. **ライブ変換を greedy にする**（`[live_conversion] beam_size`）
+   - `1`（既定）は greedy で、いちばん軽い方法です。2 以上にすると、Space の変換と同じビームサーチを打鍵ごとに行うので、重くなります。
+
+```toml
+[general]
+gpu_backend = "auto"
+# n_gpu_layers は書かない（全レイヤーを GPU に載せる）
+model_variant = "jinen-v1-xsmall-q5"
+
+[conversion]
+num_candidates = 6
+beam_size = 6
+
+[live_conversion]
+beam_size = 1
+```
+
+`[live_conversion] debounce_ms`（既定 80）は、打つのを止めてからライブ変換を始めるまでの待ち時間です。小さくするとプレビューが早く出ますが、変換の回数が増えます。計算の速さそのものは変わりません。
 
 > v0.4.4 より、Zoom / Dropbox 等の他アプリが異常終了する問題は別プロセス化で解消済みです。`n_gpu_layers` を下げる回避策は不要になりました。
 
