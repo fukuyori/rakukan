@@ -30,15 +30,20 @@
 - DLL / EXE の VERSIONINFO リソース（`winres` / `.rc`）は 2026-09-01 時点で**使っていない**。追加した場合はここに加える。
 - `engine_abi_version()` / `EXPECTED_ENGINE_ABI_VERSION`（ABI 番号）はバージョン番号とは独立。FFI シグネチャを変えたときだけ **2 か所同時に**上げる（`crates/rakukan-engine/src/ffi.rs` と `crates/rakukan-engine-abi/src/lib.rs`）。
 
-## 4.1 辞書の cost 帯（dict_schema）を変えたとき
+## 4.1 辞書のビルダーの出力を変えたとき（dict_schema・format_version）
 
-`rakukan.dict` の cost 帯（`crates/rakukan-dict/src/lib.rs` の `cost_band`）の意味を変えたら、次を同時に行う。バージョン番号とは独立。
+辞書（`rakukan.dict`）を決める項目は、`rakukan.dict.build.json` の `mozc_rev`・`mozc_source`（元データ）、`dict_schema`（中身の作り方）、`format_version`（ファイルの構造。辞書のヘッダーにもある）。`builder_version` は辞書を作ったときの rakukan の版で、参考の記録。いずれもバージョン番号とは独立。
+
+ビルダー（`rakukan-dict-builder`）の出力が変わる変更をしたら、`dict_schema` を上げる。入れる語・除く語、cost（`cost_band` の帯の意味を含む）、候補の順、記号・絵文字の扱い、`build-installer.ps1` がビルダーに渡す引数、ファイルの構造が当たる。上げないと、中身の古い辞書が作り直されずに配布物へ入る。
 
 | 箇所 | 内容 |
 |---|---|
-| `cost_band::DICT_SCHEMA` | 1 上げる |
-| `scripts/build-installer.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を再生成させる） |
-| ビルドマシンの辞書 | `build-installer.ps1`（`cargo make install` / `cargo make package`）が、`C:\rb\dict\rakukan.dict.build.json` の `dict_schema`・`mozc_rev` が期待値と違えば作り直して同梱する。作り直せなかった場合、`package`（`-Sign`）は止まり、`install` は警告を出して古い辞書を使う。手で作り直すときは `RAKUKAN_FORCE_DICT=1` を付ける |
+| `cost_band::DICT_SCHEMA`（`crates/rakukan-dict/src/lib.rs`） | 1 上げる |
+| `scripts/build-installer.ps1` の `$dictSchemaExpected` | 同じ値にする（古い辞書を作り直させる） |
+| ファイルの構造を変えたとき | 上の 2 つに加えて、`VERSION`（`crates/rakukan-dict/src/mozc_dict.rs` と `crates/rakukan-dict-builder/src/main.rs` の 2 か所）と `build-installer.ps1` の `$dictFormatExpected` を同じ値にする。engine は `VERSION` の違う辞書を拒む |
+| ビルドマシンの辞書 | `build-installer.ps1`（`cargo make install` / `cargo make package`）が、`C:\rb\dict\rakukan.dict.build.json` の `dict_schema`・`format_version`・`mozc_rev` が期待値と違えば作り直して同梱する。同梱する辞書の 4 項目（`mozc_rev`・`dict_schema`・`format_version`・`builder_version`）をビルドのときに表示する。作り直せなかった場合、`package`（`-Sign`）は止まり、`install` は警告を出して古い辞書を使う。手で作り直すときは `RAKUKAN_FORCE_DICT=1` を付ける |
+
+期待値と定数が食い違っていないことは、`rakukan-dict-builder` の試験（`build_installer_expectations_match_the_constants`）で確かめる。
 
 ## 4.2 第三者のライセンス（依存を変えたとき）
 

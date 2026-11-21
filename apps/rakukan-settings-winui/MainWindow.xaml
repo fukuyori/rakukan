@@ -483,6 +483,7 @@
                             <StackPanel Spacing="12">
                                 <TextBlock Style="{ThemeResource SubtitleTextBlockStyle}" Text="バージョン情報" />
                                 <TextBlock x:Name="AboutVersionText" />
+                                <TextBlock x:Name="AboutDictText" Opacity="0.7" TextWrapping="Wrap" IsTextSelectionEnabled="True" />
                                 <TextBlock x:Name="AboutCopyrightText" Opacity="0.7" TextWrapping="Wrap" />
                                 <TextBlock Opacity="0.7" TextWrapping="Wrap" Text="rakukan は MIT License で提供しています。同梱する第三者の部品は、それぞれのライセンスに従います。" />
                                 <StackPanel Orientation="Horizontal" Spacing="12">

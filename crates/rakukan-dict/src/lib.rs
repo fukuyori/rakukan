@@ -27,8 +27,14 @@ pub mod cost_band {
     pub const SYMBOL_BASE: u16 = 30_000;
     /// 絵文字帯の先頭。絵文字の cost = `EMOJI_BASE + emoji_data.tsv の行番号`
     pub const EMOJI_BASE: u16 = 40_000;
-    /// cost 帯の版。`rakukan.dict.build.json` に書き、`build-installer.ps1` の期待値と比較する。
-    /// 帯の意味を変えたら上げる（`scripts/build-installer.ps1` の `$dictSchemaExpected` も同時に）
+    /// 辞書の中身の作り方の版。`rakukan.dict.build.json` に書き、`build-installer.ps1` の
+    /// 期待値と比較して、合わない辞書を作り直す。
+    ///
+    /// ビルダーの出力が変わる変更をしたら 1 上げる（`scripts/build-installer.ps1` の
+    /// `$dictSchemaExpected` も同時に。docs/version-update-checklist.md の 4.1）。
+    /// 入れる語・除く語、cost（この帯の意味を含む）、候補の順、記号・絵文字の扱い、
+    /// ビルダーに渡す引数、ファイルの構造が当たる。上げないと、中身の古い辞書が
+    /// 作り直されずに配布物へ入る。
     pub const DICT_SCHEMA: u32 = 2;
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

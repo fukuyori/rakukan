@@ -183,9 +183,12 @@ $emojiUrl    = "$mozcRepoUrl/src/data/emoji/emoji_data.tsv"
 # 新しい SHA のものとして再利用しないため。
 $mozcTsvDir  = Join-Path $dictDir ("mozc_tsv_" + $mozcRev.Substring(0, 12))
 
-# cost 帯の版（rakukan-dict の cost_band::DICT_SCHEMA と同じ値にする）。
+# 辞書の中身の作り方の版（rakukan-dict の cost_band::DICT_SCHEMA と同じ値にする）と、
+# ファイルの構造の版（rakukan-dict の mozc_dict::VERSION と同じ値にする）。
 # 辞書の隣の rakukan.dict.build.json にビルダーが書く。無い・古い辞書は作り直す。
+# 値を変えるときは docs/version-update-checklist.md の 4.1 に従う。
 $dictSchemaExpected = 2
+$dictFormatExpected = 1
 $dictBuildInfo = "$mozcDictOut.build.json"
 
 # 復旧不能ならここで停止し、再生成判定や別の差し替えへ進まない（Issue #62）。
@@ -207,6 +210,11 @@ function Test-DictUpToDate {
     }
     if ([int]$info.dict_schema -lt $dictSchemaExpected) {
         return "dict_schema " + $info.dict_schema + " < " + $dictSchemaExpected
+    }
+    # 構造の版は一致だけを認める（engine は VERSION の違う辞書を拒む）
+    if ([string]$info.format_version -ne [string]$dictFormatExpected) {
+        $haveFormat = if ($null -ne $info.format_version) { [string]$info.format_version } else { "unknown" }
+        return "format_version " + $haveFormat + " != " + $dictFormatExpected
     }
     if ([string]$info.mozc_rev -ne $mozcRev) {
         $haveRev = if ($info.mozc_rev) { $info.mozc_rev } else { "unknown" }
@@ -324,9 +332,25 @@ if (-not (Test-Path -LiteralPath $mozcDictOut)) {
     throw "辞書を作れませんでした（上の WARNING を参照）: $mozcDictOut"
 }
 if ($dictRebuildReason) {
-    # 配布物には、取得元の版と cost 帯の版が合わない辞書を入れない
+    # 配布物には、取得元の版・作り方の版・構造の版が合わない辞書を入れない
     if ($Sign) { throw "辞書が古いままです（$dictRebuildReason）。取得・ビルドの失敗を直してから作り直してください。" }
     Write-Warning "辞書が古いまま使います（$dictRebuildReason）"
+}
+
+# 同梱する辞書の版を表示する（build.json の 4 項目）
+if (Test-Path -LiteralPath $dictBuildInfo) {
+    try {
+        $shownInfo = Get-Content -LiteralPath $dictBuildInfo -Raw | ConvertFrom-Json
+        $showValue = { param($v) if ($null -ne $v -and [string]$v -ne "") { [string]$v } else { "-" } }
+        Write-Host ("  dictionary: mozc_rev=" + (& $showValue $shownInfo.mozc_rev) +
+            " dict_schema=" + (& $showValue $shownInfo.dict_schema) +
+            " format_version=" + (& $showValue $shownInfo.format_version) +
+            " builder_version=" + (& $showValue $shownInfo.builder_version))
+    } catch {
+        Write-Warning ("rakukan.dict.build.json を読めません: " + $_)
+    }
+} else {
+    Write-Warning "rakukan.dict.build.json がありません（辞書の版を表示できません）"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────

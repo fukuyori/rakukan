@@ -75,6 +75,7 @@ pub fn load_dict() -> LoadResult {
                     ),
                 }
             } else {
+                tracing::info!("dict build info: {}", describe_build_info(mozc_path_ref));
                 LoadResult::Ok(store)
             }
         }
@@ -126,4 +127,96 @@ fn step_probe_mozc(path: &std::path::Path) -> Result<(), String> {
 /// Step 3: MozcDict::open を呼ぶ（mmap + ヘッダー全検証）
 fn step_open_mozc(path: &std::path::Path) -> Result<(), String> {
     MozcDict::open(path).map(|_| ()).map_err(|e| format!("{e}"))
+}
+
+// ─── 辞書のビルド情報（rakukan.dict.build.json）─────────────────────────────
+
+/// `rakukan-dict-builder` が辞書の隣に書く `<辞書>.build.json` の、ログに出す項目。
+/// どの項目も無いことがある（古いビルダーの辞書、取得元を固定しない呼び出し）。
+#[derive(serde::Deserialize, Debug, Default, PartialEq)]
+struct DictBuildInfo {
+    mozc_rev: Option<String>,
+    dict_schema: Option<u32>,
+    format_version: Option<u32>,
+    builder_version: Option<String>,
+}
+
+/// 辞書のパスから `build.json` のパスを作る（`rakukan.dict` → `rakukan.dict.build.json`）。
+fn build_info_path(dict: &std::path::Path) -> PathBuf {
+    let mut p = dict.as_os_str().to_owned();
+    p.push(".build.json");
+    PathBuf::from(p)
+}
+
+/// `build.json` の中身を 1 行にする。無い・読めないときも、その旨を返す（辞書の読み込みは止めない）。
+fn describe_build_info(dict: &std::path::Path) -> String {
+    let path = build_info_path(dict);
+    match std::fs::read_to_string(&path) {
+        Err(e) => format!("not available ({e}) path={}", path.display()),
+        Ok(text) => describe_build_info_text(&text),
+    }
+}
+
+fn describe_build_info_text(text: &str) -> String {
+    match serde_json::from_str::<DictBuildInfo>(text) {
+        Err(e) => format!("unreadable ({e})"),
+        Ok(info) => {
+            let num = |v: Option<u32>| v.map_or_else(|| "-".to_string(), |n| n.to_string());
+            format!(
+                "mozc_rev={} dict_schema={} format_version={} builder_version={}",
+                info.mozc_rev.as_deref().unwrap_or("-"),
+                num(info.dict_schema),
+                num(info.format_version),
+                info.builder_version.as_deref().unwrap_or("-"),
+            )
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_info_path_appends_the_suffix() {
+        let p = build_info_path(std::path::Path::new(r"C:\x\dict\rakukan.dict"));
+        assert_eq!(p, PathBuf::from(r"C:\x\dict\rakukan.dict.build.json"));
+    }
+
+    #[test]
+    fn describe_lists_the_four_items() {
+        // rakukan-dict-builder が書く形（mozc_source は出さない）
+        let text = r#"{
+  "dict_schema": 2,
+  "format_version": 1,
+  "builder_version": "0.13.0",
+  "mozc_rev": "cbbb6e1bd181cb9f3b409622d916a53a35400ec7",
+  "mozc_source": "https://raw.githubusercontent.com/google/mozc/cbbb6e1"
+}"#;
+        assert_eq!(
+            describe_build_info_text(text),
+            "mozc_rev=cbbb6e1bd181cb9f3b409622d916a53a35400ec7 dict_schema=2 format_version=1 builder_version=0.13.0"
+        );
+    }
+
+    #[test]
+    fn describe_marks_missing_items() {
+        assert_eq!(
+            describe_build_info_text(r#"{"dict_schema": 2}"#),
+            "mozc_rev=- dict_schema=2 format_version=- builder_version=-"
+        );
+    }
+
+    #[test]
+    fn describe_reports_unreadable_json() {
+        assert!(describe_build_info_text("{").starts_with("unreadable ("));
+    }
+
+    #[test]
+    fn describe_reports_a_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = describe_build_info(&dir.path().join("rakukan.dict"));
+        assert!(s.starts_with("not available ("), "{s}");
+        assert!(s.contains("rakukan.dict.build.json"), "{s}");
+    }
 }

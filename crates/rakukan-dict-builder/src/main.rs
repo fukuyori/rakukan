@@ -456,6 +456,7 @@ fn build_groups(entries: Vec<Entry>, max_per_reading: usize) -> Vec<ReadingGroup
 // ─── バイナリ書き出し ─────────────────────────────────────────────────────────
 
 const MAGIC: &[u8; 4] = b"RKND";
+/// ファイルの構造の版。`rakukan_dict::mozc_dict::VERSION` と同じ値にする（試験で確かめる）。
 const VERSION: u32 = 1;
 
 fn write_dict(groups: &[ReadingGroup], output: &PathBuf) -> Result<()> {
@@ -951,6 +952,63 @@ mod tests {
         // n_readings
         let n_readings = u32::from_le_bytes(data[12..16].try_into().unwrap());
         assert_eq!(n_readings, 2); // "にほん" と "にほんご"
+    }
+}
+
+#[cfg(test)]
+mod version_consistency_tests {
+    //! 辞書の版の定数と、`build-installer.ps1` の期待値が食い違っていないこと
+    //! （docs/version-update-checklist.md の 4.1）。食い違うと、作り直すべき辞書が
+    //! 作り直されない、または毎回作り直される。
+    use super::{VERSION, cost_band};
+
+    /// `build-installer.ps1` の `$<name> = <数>` の数を取る。
+    fn expected_in_build_installer(name: &str) -> u32 {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../scripts/build-installer.ps1");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{} を読めない: {e}", path.display()));
+        let prefix = format!("${name} =");
+        let mut found = text
+            .lines()
+            .map(str::trim)
+            .filter_map(|l| l.strip_prefix(&prefix))
+            .map(|v| {
+                v.trim()
+                    .parse::<u32>()
+                    .unwrap_or_else(|e| panic!("${name} の値を読めない: {v:?} ({e})"))
+            });
+        let value = found
+            .next()
+            .unwrap_or_else(|| panic!("build-installer.ps1 に ${name} が無い"));
+        assert!(
+            found.next().is_none(),
+            "build-installer.ps1 に ${name} が 2 つある"
+        );
+        value
+    }
+
+    #[test]
+    fn build_installer_expectations_match_the_constants() {
+        assert_eq!(
+            expected_in_build_installer("dictSchemaExpected"),
+            cost_band::DICT_SCHEMA,
+            "build-installer.ps1 の $dictSchemaExpected と cost_band::DICT_SCHEMA が違う"
+        );
+        assert_eq!(
+            expected_in_build_installer("dictFormatExpected"),
+            VERSION,
+            "build-installer.ps1 の $dictFormatExpected とビルダーの VERSION が違う"
+        );
+    }
+
+    #[test]
+    fn builder_and_reader_agree_on_the_format_version() {
+        assert_eq!(
+            VERSION,
+            rakukan_dict::mozc_dict::VERSION,
+            "ビルダーの VERSION と rakukan-dict の mozc_dict::VERSION が違う"
+        );
     }
 }
 

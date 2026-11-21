@@ -23,7 +23,10 @@ use memmap2::Mmap;
 // ─── フォーマット定数 ─────────────────────────────────────────────────────────
 
 const MAGIC: &[u8; 4] = b"RKND";
-const VERSION: u32 = 1;
+/// ファイルの構造の版（ヘッダーに入る）。`rakukan-dict-builder` の `VERSION` と
+/// `scripts/build-installer.ps1` の `$dictFormatExpected` も同じ値にする
+/// （docs/version-update-checklist.md の 4.1。食い違いはビルダーの試験で見つける）。
+pub const VERSION: u32 = 1;
 
 const HEADER_SIZE: usize = 16;
 const INDEX_ENTRY_SIZE: usize = 12;

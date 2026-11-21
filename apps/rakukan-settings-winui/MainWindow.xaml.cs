@@ -40,6 +40,7 @@ public sealed partial class MainWindow : Window
         var copyright = entry?.GetCustomAttribute<AssemblyCopyrightAttribute>()?.Copyright ?? "";
         CopyrightText.Text = copyright;
         AboutVersionText.Text = VersionText.Text;
+        AboutDictText.Text = DescribeInstalledDictionary();
         AboutCopyrightText.Text = copyright;
 
         _keyFields = new Dictionary<ManagedKeyAction, TextBox>
@@ -448,6 +449,44 @@ public sealed partial class MainWindow : Window
 
     private async void OpenThirdPartyLicensesButton_Click(object sender, RoutedEventArgs e) =>
         await OpenInstalledDocumentAsync("THIRD_PARTY_LICENSES.md");
+
+    /// <summary>
+    /// インストール先（settings-ui の親）の dict\rakukan.dict.build.json から、辞書の版を 1 行にする。
+    /// 項目は rakukan-dict-builder が書く mozc_rev（mozc の版）・dict_schema（作り方の版）・
+    /// format_version（構造の版）。無い・読めないときは、その旨を返す（画面の表示は止めない）。
+    /// </summary>
+    private static string DescribeInstalledDictionary()
+    {
+        var path = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "dict", "rakukan.dict.build.json"));
+        try
+        {
+            using var doc = System.Text.Json.JsonDocument.Parse(File.ReadAllText(path));
+            var root = doc.RootElement;
+            string Field(string name) =>
+                root.TryGetProperty(name, out var v) && v.ValueKind != System.Text.Json.JsonValueKind.Null
+                    ? v.ToString()
+                    : "-";
+            var rev = Field("mozc_rev");
+            // 40 桁の SHA は先頭 12 桁で示す（build-installer.ps1 の「mozc xxxxxxxxxxxx」の表示と同じ長さ）
+            if (rev.Length > 12)
+            {
+                rev = rev[..12];
+            }
+            return $"辞書: mozc {rev}・作り方の版 {Field("dict_schema")}・構造の版 {Field("format_version")}";
+        }
+        catch (FileNotFoundException)
+        {
+            return "辞書: 版の情報がありません（rakukan.dict.build.json が見つかりません）";
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return "辞書: 版の情報がありません（dict フォルダが見つかりません）";
+        }
+        catch (Exception ex)
+        {
+            return $"辞書: 版の情報を読めません（{ex.Message}）";
+        }
+    }
 
     /// <summary>インストール先（settings-ui の親）にある文書をメモ帳で開く。</summary>
     private async Task OpenInstalledDocumentAsync(string name)
