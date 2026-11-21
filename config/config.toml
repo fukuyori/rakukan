@@ -53,8 +53,8 @@ enabled = false
 debounce_ms = 80
 use_llm = false
 prefer_dictionary_first = true
-# ライブ変換の候補数（beam 幅）: 1 = greedy（高速）, 3 = beam search（高品質、デフォルト）
-beam_size = 3
+# ライブ変換の候補数（beam 幅）: 1 = greedy（高速、デフォルト）, 2〜9 = beam search（Space の変換と同じ方法。重くなる）
+beam_size = 1
 
 [appearance]
 # 候補ウィンドウのフォントサイズ（ピクセル）。既定 17
