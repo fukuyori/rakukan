@@ -1,6 +1,6 @@
 # 開いている Issue の状況
 
-2026-10-24 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。
+2026-11-21 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。2026-11-21 に一覧（28 件）と照合し、0.14.0 の運用ログ（10/24〜11/21）の確認の結果で #57・#50・#86・#83 の行を更新し、#92 を足した。
 10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）、フェーズ 4 は 0.14.0（タグ `0.14.0` = `66b1554`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82。時期は決めない）は [October_Plan.md](October_Plan.md)。#83 と IPC の名前の整理は [2026-11_Plan.md](2026-11_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
@@ -10,8 +10,8 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 意図的に詰まりを起こす手段が無く実機未確認。運用ログで誤再起動が無いことを確認してクローズ（[2026-11_Plan.md](2026-11_Plan.md) の 2 節） |
-| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント）。段 1（原因を確かめるログ）は `e0cbbd3` で入れた（[October_Plan.md](October_Plan.md) の 7 節） | ログがたまってから照合し、段 2 を決める（[2026-11_Plan.md](2026-11_Plan.md) の 2 節） |
+| [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 2026-11-21 に 10/24〜11/21 のログ（0.14.0）を確かめ、詰まりによる自己終了（`conversion stalled`）は 0 件。発動が無いので閾値（30 秒）を見直す材料は無い。クローズを判断する |
+| [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント）。段 1（原因を確かめるログ）は `e0cbbd3` で入れた（[October_Plan.md](October_Plan.md) の 7 節）。2026-11-21 に 10/24〜11/21 のログで照合: `skipped save` 1,464 件はすべて直前の行に理由がある（`dead` 1,142・`superseded` 322）。`unknown dm` 251 組は、どれもそのファイルの中で登録にも Activate の列挙にも現れない DM（Tfx.exe・SnapNoteStudio.exe・ClipRack.exe・CredentialUIBroker.exe・EXCEL.EXE・Zoom.exe） | Tfx・SnapNoteStudio でモードの復元を実機で確かめてから、段 2（同じスレッドなら、遅れて処理する側で列挙をやり直す）を行う |
 | [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | フェーズ 4 で実装（1 つのホストの中では engine DLL・エンジンを作り直さず、設定が違えばホストが起動し直す。`Reload` を廃止。RPC protocol v8）。2026-10-24 に実機で確認（[October_Plan.md](October_Plan.md) の 5 節） | クローズの条件を確かめる |
 | [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | フェーズ 4 で実装（`config_version` をホストが config.toml の本文のハッシュと照合、`CreateKept` / `ConfigStale` / `ConfigUnusable`、壊れている間は `host-config-last.json`）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
 | [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | フェーズ 4 で実装（設定の変更でホストが起動し直す。`gpu_backend` / `log_level` も設定の JSON に。engine の converter の照合）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
@@ -29,10 +29,11 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 | [#79](https://github.com/fukuyori/rakukan/issues/79) | ヒエログリフや珍しい仮名（濁点付き仮名・鼻濁音・アイヌ語カナ）が一般的な読みの変換で上位に出る | 2026-10-11 起票。実測で 4 番目前後に出ることを確認。mozc は `d901f2c2f` / `028c3b36c` で降格（削除ではない）。重要度は中〜低（先頭 3 件は変わらず、誤確定にもつながらない）として、10 月の計画には入れない | 降格の方式を決める。推奨はエンジン側で文字のコードで判定する方式（辞書の作り直し不要。固定版の `symbol.tsv` で対象 120 件に一致、誤検出 0）。辞書側で印を付ける方式にするかは #78 のときに改めて決める |
 | [#80](https://github.com/fukuyori/rakukan/issues/80) | 数字の後の助数詞の学習が、数字が変わると効かない（読み全体で学習しているため） | 2026-10-11 起票。mozc `662147864`（数字の直後という条件付きの学習）を参考に記録 | #16 の設計に含めて検討する |
 | [#81](https://github.com/fukuyori/rakukan/issues/81) | 候補ウィンドウがダークテーマに対応していない | 2026-10-11 起票。色はライト用のみで固定。入力モード表示は `SystemUsesLightTheme` で判定している | 判定に使う値・判定の時期・配色・config での選択・高コントラストの扱いを決める |
-| [#83](https://github.com/fukuyori/rakukan/issues/83) | Space 変換のビームサーチで、ステップごとに全系列を計算し直している（KV キャッシュの再利用） | 2026-10-11 起票。karukan `8d132a9`（#95）を参考に記録。効果は未計測 | まず所要時間を計測。次に上位 k 件の部分選択、その後に KV 再利用（旧方式へ戻せる設定、新旧比較の試験、3 variant での確認） |
+| [#83](https://github.com/fukuyori/rakukan/issues/83) | Space 変換のビームサーチで、ステップごとに全系列を計算し直している（KV キャッシュの再利用） | 2026-10-11 起票。karukan `8d132a9`（#95）を参考に記録。2026-11-21 に 10/24〜11/21 のログで計測（CUDA・`jinen-v2-small-q5`）: Space の変換の中央値は 111 ms（1〜5 文字）・252 ms（11〜20 文字）・510 ms（21〜40 文字）で、ライブ変換（39〜107 ms）より遅い。上位 k 件の部分選択は `70b3b43`（新旧の一致を試験で確認。速さは未計測）。karukan #153（2026-11-11）は、ビームサーチを統合 KV（`kv_unified`）で行い Space の変換が 3 割前後減ったとしている | llama-cpp-2 を 0.1.143 から 0.1.161 に上げて 3 variant で確かめ、KV の扱いを #95 の方式と #153 の統合 KV で比べて決める（旧方式へ戻せる設定、新旧比較の試験、3 variant での確認） |
 | [#84](https://github.com/fukuyori/rakukan/issues/84) | 単漢字（mozc `single_kanji.tsv`）を候補に加え、表示順（または種類の切り替え）を決める | 2026-10-21 起票 | 10 月の計画には入っていない。扱いを決める |
 | [#85](https://github.com/fukuyori/rakukan/issues/85) | 試験の自動化の基盤（試験用のアプリ・台本の実行器・ホストの故障の口） | 2026-10-22 起票。今後の改修・開発の基盤として計画する。フェーズ 2 には入れない（利用者の判断） | 10 月の計画には入っていない。着手の時期を決める |
-| [#86](https://github.com/fukuyori/rakukan/issues/86) | 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される | 2026-10-22 起票。重要度は低（利用者の判断）。メモ帳・Explorer は窓ごとに別のスレッドで Activate する。メモ帳は窓を移ると composition を終わらせるので起きない。起きるアプリは見つかっていない | ログのアプリ名（`app=`）で、当てはまるアプリを調べる。直し方は起きるアプリが見つかってから |
+| [#86](https://github.com/fukuyori/rakukan/issues/86) | 同じプロセスで複数のスレッドが TSF を使うと、composition とセッションがスレッドの間で共有される | 2026-10-22 起票。重要度は低（利用者の判断）。メモ帳・Explorer は窓ごとに別のスレッドで Activate する。メモ帳は窓を移ると composition を終わらせるので起きない。2026-11-21 に 10/24〜11/21 のログで、警告 `multiple threads have activated the TSF text service` が explorer.exe（190 件）・msrdc.exe（103 件）・obs64.exe・firefox.exe・voicevox.exe・notepad.exe・tfx.exe・excel.exe などで出ていた。composition の共有で不具合が起きたかは確かめていない | 警告の出たアプリ（特に msrdc.exe）で、スレッドをまたいだ composition の共有が起きるかを確かめ、重要度と直し方を見直す |
+| [#92](https://github.com/fukuyori/rakukan/issues/92) | 確定済みの文字列を再変換できるようにしてほしい（直近の確定を対象に） | 2026-11-02 に外部の利用者が起票。返信は無い。案は、直近の数十件の「読み・表記」を持つ方法と、TSF の `ITfFnReconversion` を使う方法。起票者は動作確認に協力できるとしている | 受けるか、受けるならどの方式・時期かを決めて返信する |
 | [#91](https://github.com/fukuyori/rakukan/issues/91) | winget への登録（`winget install` / `upgrade` / `uninstall`） | 2026-10-24 起票。決めてあることは Installer_Redesign_Plan.md の 4.4、確かめることは同 7 章の「終了コード」の残る点 | 登録の時期、パッケージの識別子・提出の方法を決める |
 | [#45](https://github.com/fukuyori/rakukan/issues/45) | 速く打つとライブ変換のプレビューが連続入力中に一度も更新されない | 未着手。直し方の方向は #40 の 2026-09-12 のコメントにある（タイマーが張られていなければ張る、最後の通過から 400 ms で debounce を強制通過） | 直すか、直すならいつ行うかを決める |
 | [#40](https://github.com/fukuyori/rakukan/issues/40) | 候補・予測の品質に関する統合ブランチ側の報告 7 件の再現確認 | 1・3 は main で再現せず、7 は #45 に切り出し、4 は見送り。2（候補の末尾に ひらがな → カタカナ を添える）は未着手 | 2 を直すかを決める。決まったらクローズ |
@@ -49,7 +50,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 ## 4. クローズ候補
 
-- #57 と #50 は修正が 0.11.9 で出ている。運用ログの確認が済めばクローズできる。
+- #57 は、運用ログの確認（2026-11-21、10/24〜11/21 で詰まりによる自己終了 0 件）が済んだ。クローズは利用者の判断。
 
 ## 5. クローズの記録（2026-09 以降）
 
