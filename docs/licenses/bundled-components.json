@@ -8,7 +8,7 @@
   ],
   "frameworkPackages": [
     { "id": "Microsoft.Windows.SDK.NET.Ref", "version": "10.0.19041.57", "license": "Microsoft Software License Terms (Windows SDK)", "section": "### Windows SDK Projection for .NET" },
-    { "id": "Microsoft.NETCore.App.Host.win-x64", "version": "8.0.32", "license": "MIT (.NET)", "section": "### .NET App Host" },
+    { "id": "Microsoft.NETCore.App.Host.win-x64", "version": "8.0.34", "license": "MIT (.NET)", "section": "### .NET App Host" },
     { "id": "Microsoft.NETCore.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null },
     { "id": "Microsoft.WindowsDesktop.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null },
     { "id": "Microsoft.AspNetCore.App.Ref", "version": "*", "license": "MIT (.NET reference assemblies; not bundled)", "section": null }

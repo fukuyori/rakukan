@@ -207,7 +207,7 @@ Public Domain Dataです。使用・変更・配布に関しては一切の制�
 
 ### llama.cpp / ggml
 
-- **Source:** https://github.com/ggml-org/llama.cpp at commit `5d3a4a7da5e3dd42f5922aba2fe21b520e96e830` (the version vendored by the `llama-cpp-sys-2` 0.1.143 crate)
+- **Source:** https://github.com/ggml-org/llama.cpp at commit `d81235049384534c167caea52b85a694f6103d14` (the version vendored by the `llama-cpp-sys-2` 0.1.161 crate)
 - **License:** MIT
 - **Used in:** `rakukan_engine_cpu.dll`, `rakukan_engine_vulkan.dll`, `rakukan_engine_cuda.dll` (the ggml and llama libraries, and the llama.cpp `common` library)
 
@@ -2581,7 +2581,7 @@ EULAID:WIN10SDK.RTM.AUG_2018_en-US
 
 ### .NET App Host
 
-- **Source:** .NET pack `Microsoft.NETCore.App.Host.win-x64` 8.0.32 (https://github.com/dotnet/runtime)
+- **Source:** .NET pack `Microsoft.NETCore.App.Host.win-x64` 8.0.34 (https://github.com/dotnet/runtime)
 - **License:** MIT; the package's `LICENSE.TXT` and `THIRD-PARTY-NOTICES.TXT`, reproduced below
 - **Used in:** `settings-ui\rakukan-settings.exe` (the .NET app host, with the settings app's name and path written into it at build time)
 
@@ -4007,8 +4007,8 @@ The following Rust crates are linked into `rakukan_tsf.dll`, `rakukan-engine-hos
 | libc | 0.2.185 | MIT OR Apache-2.0 | https://github.com/rust-lang/libc |
 | libloading | 0.8.9 | ISC | https://github.com/nagisa/rust_libloading/ |
 | litemap | 0.8.2 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| llama-cpp-2 | 0.1.143 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
-| llama-cpp-sys-2 | 0.1.143 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
+| llama-cpp-2 | 0.1.161 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
+| llama-cpp-sys-2 | 0.1.161 | MIT OR Apache-2.0 | https://github.com/utilityai/llama-cpp-rs |
 | lock_api | 0.4.14 | MIT OR Apache-2.0 | https://github.com/Amanieu/parking_lot |
 | log | 0.4.29 | MIT OR Apache-2.0 | https://github.com/rust-lang/log |
 | macro_rules_attribute | 0.2.2 | Apache-2.0 OR MIT OR Zlib | https://github.com/danielhenrymantilla/macro_rules_attribute-rs |
@@ -4577,7 +4577,7 @@ limitations under the License.
 
 #### Apache License 2.0 (Apache-2.0)
 
-Used by: anyhow 1.0.102, dary_heap 0.3.8, dirs 6.0.0, dirs-sys 0.5.0, esaxx-rs 0.1.10, ident_case 1.0.1, itoa 1.0.18, libc 0.2.185, llama-cpp-2 0.1.143, llama-cpp-sys-2 0.1.143, miniz_oxide 0.8.9, monostate 0.1.18, monostate-impl 0.1.18, paste 1.0.15, pin-project-lite 0.2.17, portable-atomic 1.13.1, proc-macro2 1.0.106, quote 1.0.45, rand 0.9.4, rand_chacha 0.9.0, rustversion 1.0.22, ryu 1.0.23, serde 1.0.228, serde_core 1.0.228, serde_derive 1.0.228, serde_json 1.0.149, serde_urlencoded 0.7.1, syn 2.0.117, sync_wrapper 1.0.2, thiserror 1.0.69, thiserror 2.0.18, thiserror-impl 1.0.69, thiserror-impl 2.0.18, unicode-ident 1.0.24, yada 0.5.1
+Used by: anyhow 1.0.102, dary_heap 0.3.8, dirs 6.0.0, dirs-sys 0.5.0, esaxx-rs 0.1.10, ident_case 1.0.1, itoa 1.0.18, libc 0.2.185, llama-cpp-2 0.1.161, llama-cpp-sys-2 0.1.161, miniz_oxide 0.8.9, monostate 0.1.18, monostate-impl 0.1.18, paste 1.0.15, pin-project-lite 0.2.17, portable-atomic 1.13.1, proc-macro2 1.0.106, quote 1.0.45, rand 0.9.4, rand_chacha 0.9.0, rustversion 1.0.22, ryu 1.0.23, serde 1.0.228, serde_core 1.0.228, serde_derive 1.0.228, serde_json 1.0.149, serde_urlencoded 0.7.1, syn 2.0.117, sync_wrapper 1.0.2, thiserror 1.0.69, thiserror 2.0.18, thiserror-impl 1.0.69, thiserror-impl 2.0.18, unicode-ident 1.0.24, yada 0.5.1
 
 ```
 Apache License
