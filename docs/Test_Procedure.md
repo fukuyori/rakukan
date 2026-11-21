@@ -577,3 +577,14 @@ Step 4（経路の一本化）までは、開発の導入は今までの `sudo c
 - T4-2: 合格。「アプリ」からアンインストールして再起動の後、入れ直して再起動し、変換できた。
 - 試験の後の状態: アンインストール情報は 64 ビット側の `Rakukan IME 0.14.0`（`C:\Program Files\rakukan\`）だけ。再起動の置き換えの予約は空。TSF の登録は `C:\Program Files\rakukan\rakukan_tsf.dll`、キーボードの一覧に Rakukan がある。インストール先の DLL・EXE（`unins000.exe` を含む）の署名はすべて有効。
 - T1〜T3: 行わなかった（利用者の判断）。T1・T3 にあたる動きは、同日のフェーズ 4 の試験（開発ビルド `23749e6`）で確かめている。T2（ホストの入れ替えの間の復元）は、0.13.1 の T2 で確かめたもの。
+
+## 2026-11-21 の結果（llama-cpp-2 0.1.161・辞書の版の整理。開発ビルド `e252b94`、`sudo cargo make install`）
+
+対象のコミットは `70b3b43`（上位 k 件の部分選択・conv-worker のエラーの元のエラー）、`c60f586`（llama-cpp-2 を 0.1.143 から 0.1.161 へ）、`3a6c102`（辞書の版の整理）。導入の前に、`cargo make install` が設定アプリの部品の確認（.NET の apphost が 8.0.32 → 8.0.34）と THIRD_PARTY_LICENSES.md の確認（llama-cpp-2 の版）で止まったので、`docs/licenses/bundled-components.json` と `docs/THIRD_PARTY_LICENSES.md` を直してから入れ直した。
+
+- ビルド: `cargo make build-engine` で cpu・vulkan・cuda の 3 つとも `[OK]`。`cargo clippy --workspace --all-targets`（esaxx-rs の既知の警告だけ）、`cargo test --workspace --lib` 788 件合格、`cargo test -p rakukan-dict-builder` 18 件合格。
+- 新旧の候補の比較（導入の前。`rakukan-cli --once`、CPU、`jinen-v2-small-q5`、候補 14 件、14 の読み）: 先頭の候補は 14 の読みすべてで同じ。11 の読みで 2 番目より後の順か末尾の候補が変わった。それぞれの版で同じ読みを 2 回変換すると同じ結果になる（差は llama.cpp の更新による）。ビームサーチの時間は 3 つの読みで 1349 → 743 ms、1966 → 1049 ms、1424 → 740 ms。
+- 導入の後: ホストのログの 1 行目が `build=0.14.0@e252b949b8d5`、`engine DLL loaded` が `abi=12 dll_git=e252b949b8d5`（ビルドの一致の WARN なし）、`Selected backend (explicit): cuda`、`model ready name=jinen-v2-small-q5`。インストールのログ（`output\logs\setup-20261121-150154-31168.log`）に error・fail・warn の行は無い。
+- 辞書の版: ホストのログに `dict build info: mozc_rev=cbbb6e1bd181cb9f3b409622d916a53a35400ec7 dict_schema=2 format_version=1 builder_version=0.13.0`（インストール先の `rakukan.dict.build.json` と同じ）。設定アプリの「バージョン情報」に辞書の版が出た。`build-installer.ps1` の表示（`dictionary: mozc_rev=… dict_schema=2 format_version=1 builder_version=0.13.0`）は、インストールの画面が残っていなかったので、表示の部分だけを Windows PowerShell 5.1 で `C:\rb\dict\rakukan.dict.build.json` に対して実行して確かめた。照合（`format_version` が違う・無い、`dict_schema` が古い）も同じく 5.1 で確かめた。
+- 変換（メモ帳）: 変換と確定ができた。新しいホストのログ（変換 551 回）の中央値は、ライブ変換が 24 ms（1〜5 文字）・33 ms（6〜10 文字）・52 ms（11〜20 文字）・90 ms（21〜40 文字）。10/24〜11/21 の 0.14.0（`66b155452016`）の 39・51・71・107 ms より短い。Space の変換は 5 回で、21〜40 文字が 141・207・219 ms（前の中央値は 510 ms）。回数が少ないので、運用のログで数え直す。`conv-worker error`・`inference failed`・WARN・ERROR の行は無かった。
+- 行わなかったもの: Vulkan 版の実機での確認（利用者の判断。ビルドは通った）。
