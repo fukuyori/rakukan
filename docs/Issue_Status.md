@@ -1,6 +1,6 @@
 # 開いている Issue の状況
 
-2026-11-21 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。2026-11-21 に一覧（28 件）と照合し、0.14.0 の運用ログ（10/24〜11/21）の確認の結果で #57・#50・#86・#83 の行を更新し、#92 を足した。
+2026-11-21 時点。2026-10-22 に GitHub の一覧（`gh issue list --state open`、30 件）と [handoff.md](handoff.md) の記録を照合し、2026-10-23 にフェーズ 3 の行と #88〜#90 を、2026-10-24 にフェーズ 3 の行と、フェーズ 4 の #64・#66・#49・#82・#50 の行を更新した。2026-11-21 に一覧（28 件）と照合し、0.14.0 の運用ログ（10/24〜11/21）の確認の結果で #50・#86・#83 の行を更新し、#92 を足した。同日に #57・#64・#66・#49・#82 をクローズした。
 10 月の計画のフェーズ 1・2 は 0.13.0（タグ `0.13.0` = `7c76649`）、フェーズ 3 は 0.13.1（タグ `0.13.1` = `84ff900`）、フェーズ 4 は 0.14.0（タグ `0.14.0` = `66b1554`）に含まれる。10 月の作業計画（フェーズ 1 #71 → 2 #69 / #70 → 3 #33 → 4 #64・#66・#49・#82。時期は決めない）は [October_Plan.md](October_Plan.md)。#83 と IPC の名前の整理は [2026-11_Plan.md](2026-11_Plan.md)。9 月の計画と記録は [archive/September_Late_Plan.md](archive/September_Late_Plan.md)、
 インストーラー再設計は [Installer_Redesign_Plan.md](Installer_Redesign_Plan.md)。
 
@@ -10,12 +10,7 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 | Issue | 概要 | 対応状況 | 次の動き |
 |---|---|---|---|
-| [#57](https://github.com/fukuyori/rakukan/issues/57) | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される | [PR #59](https://github.com/fukuyori/rakukan/pull/59)（nick）をマージ済み。詰まりの監視をホストへ移し、実行番号で数える。engine ABI 9 → 10。0.11.9 に含まれる | 2026-11-21 に 10/24〜11/21 のログ（0.14.0）を確かめ、詰まりによる自己終了（`conversion stalled`）は 0 件。発動が無いので閾値（30 秒）を見直す材料は無い。クローズを判断する |
 | [#50](https://github.com/fukuyori/rakukan/issues/50) | 破棄済み DocumentManager のポインタが `dm_modes` に入り直し、アドレス再利用で前のモードが復元される | `c078e51` で修正（DM をポインタ + 世代で識別、Activate で既存 DM を列挙、Deactivate で全失効）。実機確認は範囲付きで済み、0.11.9 に含まれる。2026-10-24 の運用ログの確認（09-24〜10-24）で `skipped save for dead dm` と `unknown dm` がほぼ毎日出ており、一部の理由が分からないため開いたまま（#50 のコメント）。段 1（原因を確かめるログ）は `e0cbbd3` で入れた（[October_Plan.md](October_Plan.md) の 7 節）。2026-11-21 に 10/24〜11/21 のログで照合: `skipped save` 1,464 件はすべて直前の行に理由がある（`dead` 1,142・`superseded` 322）。`unknown dm` 251 組は、どれもそのファイルの中で登録にも Activate の列挙にも現れない DM（Tfx.exe・SnapNoteStudio.exe・ClipRack.exe・CredentialUIBroker.exe・EXCEL.EXE・Zoom.exe） | Tfx・SnapNoteStudio でモードの復元を実機で確かめてから、段 2（同じスレッドなら、遅れて処理する側で列挙をやり直す）を行う |
-| [#64](https://github.com/fukuyori/rakukan/issues/64) | config 不一致の `Create` で、ワーカーが残る旧エンジン DLL をアンロードしうる | フェーズ 4 で実装（1 つのホストの中では engine DLL・エンジンを作り直さず、設定が違えばホストが起動し直す。`Reload` を廃止。RPC protocol v8）。2026-10-24 に実機で確認（[October_Plan.md](October_Plan.md) の 5 節） | クローズの条件を確かめる |
-| [#66](https://github.com/fukuyori/rakukan/issues/66) | ホスト再接続時の古い設定の再送による巻き戻りを防止する | フェーズ 4 で実装（`config_version` をホストが config.toml の本文のハッシュと照合、`CreateKept` / `ConfigStale` / `ConfigUnusable`、壊れている間は `host-config-last.json`）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
-| [#49](https://github.com/fukuyori/rakukan/issues/49) | `model_variant` を変更してもホストのプロセスが続く限り古いモデルのまま動く | フェーズ 4 で実装（設定の変更でホストが起動し直す。`gpu_backend` / `log_level` も設定の JSON に。engine の converter の照合）。2026-10-24 に実機で確認 | クローズの条件を確かめる |
-| [#82](https://github.com/fukuyori/rakukan/issues/82) | モデルの一覧を models.toml にまとめ、既定のモデルと設定アプリの選択肢をそろえる | 2026-10-24 に方針を改めた: config.toml へは移さず、models.toml を一覧の元にする（既定は xsmall、設定アプリが models.toml から選択肢を作る、`pre_tokenizer_override` の削除）。フェーズ 4 の `23749e6` で実装し、実機で確認。同日に題を改め、決定をコメントに書いた（本文は起票のときの案のまま） | クローズの条件を確かめる |
 | [#51](https://github.com/fukuyori/rakukan/issues/51) | アプリごとの IME 初期状態を config で設定し、GUI からも操作できるようにする | 段 1（`[input] ime_on_apps` / `ime_off_apps`、[PR #52](https://github.com/fukuyori/rakukan/pull/52)）は 0.11.9 に含まれる | 段 2 = 設定アプリ（WinUI）での編集画面。実行中のアプリから選ばせたい。#33 と時期を調整 |
 
 ## 2. 判断待ち（利用者の決定が要る）
@@ -50,12 +45,14 @@ Issue の状態を更新したら、この表も同じコミットで更新す�
 
 ## 4. クローズ候補
 
-- #57 は、運用ログの確認（2026-11-21、10/24〜11/21 で詰まりによる自己終了 0 件）が済んだ。クローズは利用者の判断。
+- なし
 
 ## 5. クローズの記録（2026-09 以降）
 
 | Issue | 内容 | クローズ日 |
 |---|---|---|
+| #64 / #66 / #49 / #82 | config 不一致の `Create` で旧 engine DLL を外しうる / 再接続時の古い設定の再送による巻き戻り / `model_variant` の変更がホストの続く間は反映されない / モデルの一覧を models.toml にまとめる（10 月の計画のフェーズ 4。`c0dcaf6`・`542d9c1`・`36cd6a9`・`23749e6`。0.14.0 に含まれる）。2026-10-24 の実機の確認と、10/24〜11/21 の運用ログを各 Issue のコメントに記録した | 2026-11-21 |
+| #57 | 変換が 250 ms を超えて返ると詰まりの開始時刻が残り、後の変換でエンジンが誤って再起動される（[PR #59](https://github.com/fukuyori/rakukan/pull/59)、nick。詰まりの監視をホストへ移し、実行番号で数える。0.11.9 に含まれる）。0.14.0 の 10/24〜11/21 の運用ログで、詰まりによる自己終了 0 件を確かめた | 2026-11-21 |
 | #33 / #73〜#76 | インストーラー再設計（`%ProgramFiles%` への配置、実行の後の再起動で完了、旧配置からの移行、`cargo make install` の一本化）/ ログ見直し 段 2〜5（10 月の計画のフェーズ 3。0.13.1 に含まれる。winget への登録は #91 に移した） | 2026-10-24（0.13.1） |
 | #88 / #89 / #90 | 配布物の第三者の部品の条件: 設定アプリの著作権の表示と使用許諾の画面（Microsoft の部品）/ MPL-2.0 の `option-ext` は Windows のビルドに入らないことの表示 / CUDA の読み込み用のライブラリを `cudart_static.lib` から取る（`500d161`・`b93532a`。0.13.1 に含まれる） | 2026-10-23 |
 | #69 / #70 / #71 | ホストとの通信失敗・エンジンの準備中に打鍵や確定する文字列が失われる・アプリへ素通りする / フォーカス移動で ResetAll が送られない（10 月の計画のフェーズ 1・2） | 2026-10-22（0.13.0） |
