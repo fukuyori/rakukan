@@ -2,6 +2,7 @@
 name = "rakukan-engine"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -22,7 +23,6 @@ which          = { workspace = true }
 
 # 旧 karukan-engine の依存をそのまま引き継ぐ
 llama-cpp-2           = "0.1"
-yada                  = "0.5"
 hf-hub                = "0.4"
 unicode-normalization  = "0.1"
 memmap2               = "0.9"

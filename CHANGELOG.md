@@ -3,6 +3,13 @@
 <!-- markdownlint-disable MD024 -->
 <!-- MD024: Keep-a-Changelog 形式では各バージョンで ### Added/Changed/Fixed が繰り返されるため無効化 -->
 
+## [Next Release]
+
+### Changed
+
+- **ソースからビルドするのに要る Rust の版を 1.100.0 以上にした**（`Cargo.toml` の `rust-version`）: これまでの `1.85` は、どの crate にも効いていなかった（各 crate が受け継いでいなかった）うえ、実際には 1.93 以前ではビルドできなかった（`if let` guards を使っているため。1.97.1 と 1.100.0 で通ることを確かめた）。各 crate が受け継ぐので、古い Rust では cargo が最初に版を知らせる。
+- 使っていない依存（`rakukan-engine` の `yada`、`rakukan-dict` の `thiserror`、workspace の `tokio`）と、使っていない `workspace.package` の `repository` を消した。cargo 1.100.0 の警告（`unused_dependencies` など）が出なくなる。
+
 ## [0.15.0] - 2026-11-21
 
 変換が速くなった。同梱の llama.cpp を新しくし（llama-cpp-2 0.1.161）、開発者の環境（CUDA 版・`jinen-v2-small-q5`）では、ライブ変換の時間の中央値が読みの長さに応じて 16〜38% 短くなった。速く打ち続けている間もライブ変換のプレビューが更新されるようにし、候補の末尾に ひらがな・カタカナ を添えた。llama.cpp の計算が変わったため、2 番目より後の候補の順が入れ替わることがある。ホストとの通信の版（RPC プロトコル 8）と engine ABI（12）は変わらない。

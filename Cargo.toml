@@ -16,19 +16,15 @@ resolver = "2"
 [workspace.package]
 version = "0.15.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.100.0"
 authors = ["rakukan Contributors"]
 license = "MIT"
 # rakukan の crate は crates.io に公開しない（cargo-about は公開しない crate のライセンスを集めない）
 publish = false
-repository = "https://github.com/fukuyori/rakukan"
 
 # ワークスペース全体で共有する依存バージョン
 # 各クレートは workspace = true で参照する
 [workspace.dependencies]
-# 非同期ランタイム
-tokio = { version = "1", features = ["full"] }
-
 # エラーハンドリング
 anyhow = "1"
 thiserror = "1"

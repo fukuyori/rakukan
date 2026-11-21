@@ -87,7 +87,7 @@ v0.15.0 は、変換を速くしたリリースです。同梱の llama.cpp を�
 
 | 必須 | 用途 |
 |---|---|
-| Rust 1.85 以上（`x86_64-pc-windows-msvc`）と cargo-make | 全クレートのビルド、`Makefile.toml` の実行 |
+| Rust 1.100.0 以上（`x86_64-pc-windows-msvc`）と cargo-make | 全クレートのビルド、`Makefile.toml` の実行 |
 | Visual Studio 2022 Build Tools（C++ ツール、CMake / Ninja、MSBuild） | llama.cpp のビルド、設定アプリのビルド |
 | LLVM（libclang） | `llama-cpp-sys-2` の bindgen |
 | .NET SDK 8 以上 | 設定アプリ `apps/rakukan-settings-winui`（Windows App SDK は NuGet で自動取得） |

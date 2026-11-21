@@ -4145,7 +4145,6 @@ The following Rust crates are linked into `rakukan_tsf.dll`, `rakukan-engine-hos
 | winnow | 0.7.15 | MIT | https://github.com/winnow-rs/winnow |
 | winsafe | 0.0.19 | MIT | https://github.com/rodrigocfd/winsafe |
 | writeable | 0.6.3 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
-| yada | 0.5.1 | MIT OR Apache-2.0 | https://github.com/takuyaa/yada |
 | yoke | 0.8.2 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | yoke-derive | 0.8.2 | Unicode-3.0 | https://github.com/unicode-org/icu4x |
 | zerocopy | 0.8.48 | BSD-2-Clause OR Apache-2.0 OR MIT | https://github.com/google/zerocopy |
@@ -4577,7 +4576,7 @@ limitations under the License.
 
 #### Apache License 2.0 (Apache-2.0)
 
-Used by: anyhow 1.0.102, dary_heap 0.3.8, dirs 6.0.0, dirs-sys 0.5.0, esaxx-rs 0.1.10, ident_case 1.0.1, itoa 1.0.18, libc 0.2.185, llama-cpp-2 0.1.161, llama-cpp-sys-2 0.1.161, miniz_oxide 0.8.9, monostate 0.1.18, monostate-impl 0.1.18, paste 1.0.15, pin-project-lite 0.2.17, portable-atomic 1.13.1, proc-macro2 1.0.106, quote 1.0.45, rand 0.9.4, rand_chacha 0.9.0, rustversion 1.0.22, ryu 1.0.23, serde 1.0.228, serde_core 1.0.228, serde_derive 1.0.228, serde_json 1.0.149, serde_urlencoded 0.7.1, syn 2.0.117, sync_wrapper 1.0.2, thiserror 1.0.69, thiserror 2.0.18, thiserror-impl 1.0.69, thiserror-impl 2.0.18, unicode-ident 1.0.24, yada 0.5.1
+Used by: anyhow 1.0.102, dary_heap 0.3.8, dirs 6.0.0, dirs-sys 0.5.0, esaxx-rs 0.1.10, ident_case 1.0.1, itoa 1.0.18, libc 0.2.185, llama-cpp-2 0.1.161, llama-cpp-sys-2 0.1.161, miniz_oxide 0.8.9, monostate 0.1.18, monostate-impl 0.1.18, paste 1.0.15, pin-project-lite 0.2.17, portable-atomic 1.13.1, proc-macro2 1.0.106, quote 1.0.45, rand 0.9.4, rand_chacha 0.9.0, rustversion 1.0.22, ryu 1.0.23, serde 1.0.228, serde_core 1.0.228, serde_derive 1.0.228, serde_json 1.0.149, serde_urlencoded 0.7.1, syn 2.0.117, sync_wrapper 1.0.2, thiserror 1.0.69, thiserror 2.0.18, thiserror-impl 1.0.69, thiserror-impl 2.0.18, unicode-ident 1.0.24
 
 ```
 Apache License

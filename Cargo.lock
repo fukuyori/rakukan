@@ -1678,7 +1678,6 @@ dependencies = [
  "memmap2",
  "serde",
  "tempfile",
- "thiserror 1.0.69",
  "toml",
  "tracing",
  "windows",
@@ -1715,7 +1714,6 @@ dependencies = [
  "tracing-subscriber",
  "unicode-normalization",
  "which",
- "yada",
 ]
 
 [[package]]
@@ -3502,12 +3500,6 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
-
-[[package]]
-name = "yada"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aed111bd9e48a802518765906cbdadf0b45afb72b9c81ab049a3b86252adffdd"
 
 [[package]]
 name = "yoke"

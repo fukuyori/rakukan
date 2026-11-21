@@ -2,6 +2,7 @@
 name    = "rakukan-dict"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -10,7 +11,6 @@ description = "辞書パーサー・ユーザー辞書管理（mozc binary + use
 
 [dependencies]
 anyhow       = { workspace = true }
-thiserror    = { workspace = true }
 tracing      = { workspace = true }
 serde        = { workspace = true }
 toml         = "0.8"
