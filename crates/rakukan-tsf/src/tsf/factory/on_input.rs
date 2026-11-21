@@ -105,7 +105,9 @@ impl super::TextServiceFactory_Impl {
                     .unwrap_or_default();
                 let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
                 candidate_window::hide();
-                candidate_window::stop_live_timer();
+                // ライブタイマーはここでは止めない。打鍵のたびに止めて張り直すと周期が
+                // 最初からになり、速く打つ間は一度も届かない（Issue #45）。変換を始められ
+                // なかったときだけ、下で止める。
                 crate::tsf::live_session::queue_preview_clear();
 
                 let kind = if c.is_ascii_uppercase() {
@@ -144,6 +146,8 @@ impl super::TextServiceFactory_Impl {
                 drop(guard);
                 if live_ready {
                     candidate_window::live_input_notify(&ctx, tid);
+                } else {
+                    candidate_window::stop_live_timer();
                 }
                 update_composition(ctx, tid, sink, display_shown)?;
                 return Ok(true);
@@ -347,7 +351,7 @@ impl super::TextServiceFactory_Impl {
                     .unwrap_or_default();
                 let preview_for = sess.live_conv_preview_for().unwrap_or("").to_string();
                 candidate_window::hide();
-                candidate_window::stop_live_timer();
+                // ライブタイマーはここでは止めない（Issue #45。上の文字の入力と同じ）
                 crate::tsf::live_session::queue_preview_clear();
 
                 engine.push_raw(c)?;
@@ -365,6 +369,8 @@ impl super::TextServiceFactory_Impl {
                 drop(guard);
                 if live_ready {
                     candidate_window::live_input_notify(&ctx, tid);
+                } else {
+                    candidate_window::stop_live_timer();
                 }
                 update_composition(ctx, tid, sink, display_shown)?;
                 return Ok(true);

@@ -891,6 +891,8 @@ pub fn destroy() {
             let _ = DestroyWindow(hwnd);
         }
         set_hwnd(HWND::default());
+        // 窓と一緒にタイマーも消える。同じ値の HWND が次に作られても張り直させる（Issue #45）
+        crate::tsf::live_session::clear_timer_hwnd();
         tracing::debug!("candwin::destroy");
     }
 }
@@ -2117,7 +2119,8 @@ fn waiting_tick() -> anyhow::Result<()> {
 /// on_input から呼ぶ。最終入力時刻を記録し、ライブタイマーを起動する。
 ///
 /// `config.live_conversion.enabled = false` の場合は何もしない。
-/// ライブタイマーが既に動いている場合でも SetTimer は内部でリセットされる（同一 ID なら上書き）。
+/// ライブタイマーがこの窓で既に動いている場合は張り直さない（Issue #45。張り直すと周期が
+/// 先頭からやり直しになり、速く打つ間は WM_TIMER が届かない）。
 pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid: u32) {
     use windows::core::Interface;
 
@@ -2187,14 +2190,18 @@ pub fn live_input_notify(ctx: &windows::Win32::UI::TextServices::ITfContext, tid
         }
     };
 
-    // ライブタイマーを起動（既存なら上書き）
-    unsafe {
-        SetTimer(hwnd, LIVE_TIMER_ID, LIVE_POLL_MS, None);
+    // ライブタイマーを起動する。すでにこの窓に張ってあれば張り直さない。同じ (hwnd, id) への
+    // SetTimer は周期を先頭からやり直すので、打鍵の間隔が周期より短い間は WM_TIMER が
+    // 一度も届かなくなる（Issue #45）。
+    if crate::tsf::live_session::arm_timer_if_needed(hwnd.0 as usize, now) {
+        unsafe {
+            SetTimer(hwnd, LIVE_TIMER_ID, LIVE_POLL_MS, None);
+        }
+        tracing::info!(
+            "[Live] live_input_notify: timer armed debounce={}ms",
+            debounce_ms
+        );
     }
-    tracing::info!(
-        "[Live] live_input_notify: timer armed debounce={}ms",
-        debounce_ms
-    );
 }
 
 /// ライブタイマーを明示的に停止する（IMEオフ・確定・キャンセル時）。
@@ -2205,6 +2212,7 @@ pub fn stop_live_timer() {
             let _ = KillTimer(hwnd, LIVE_TIMER_ID);
         }
     }
+    crate::tsf::live_session::clear_timer_hwnd();
     crate::tsf::live_session::clear_context_snapshot();
     tracing::debug!("[Live] stop_live_timer");
 }
@@ -2276,16 +2284,37 @@ fn is_symbol_only_preview(s: &str) -> bool {
             .all(|c| !c.is_alphanumeric() && !c.is_whitespace())
 }
 
+/// 最後にプレビューを出してからこの時間がたてば、debounce の間でも通す（Issue #45）。
+/// 打鍵の間隔が debounce より短く続く間も、この間隔でプレビューが更新される。
+const LIVE_DEBOUNCE_MAX_WAIT_MS: u64 = 400;
+
 /// debounce 経過時刻を返す。debounce 中なら `None` (caller は早期リターン)。
 fn pass_debounce() -> Option<u64> {
-    let debounce_ms = LIVE_DEBOUNCE_CFG_MS.load(AO::Relaxed);
-    let now = current_millis();
-    let last = crate::tsf::live_session::load_last_input_ms();
-    let elapsed = now.saturating_sub(last);
-    if elapsed < debounce_ms {
-        None
+    debounce_decision(
+        current_millis(),
+        crate::tsf::live_session::load_last_input_ms(),
+        LIVE_DEBOUNCE_CFG_MS.load(AO::Relaxed),
+        crate::tsf::live_session::load_last_shown_ms(),
+        LIVE_DEBOUNCE_MAX_WAIT_MS,
+    )
+}
+
+/// `pass_debounce` の判定（時計を引数で受け取る）。通すときは、最後の打鍵からの経過 ms を返す。
+///
+/// - 最後の打鍵から `debounce_ms` たっていれば通す（今までと同じ）。
+/// - そうでなくても、最後にプレビューを出してから `max_wait_ms` たっていれば通す。
+fn debounce_decision(
+    now_ms: u64,
+    last_input_ms: u64,
+    debounce_ms: u64,
+    last_shown_ms: u64,
+    max_wait_ms: u64,
+) -> Option<u64> {
+    let since_input = now_ms.saturating_sub(last_input_ms);
+    if since_input >= debounce_ms || now_ms.saturating_sub(last_shown_ms) >= max_wait_ms {
+        Some(since_input)
     } else {
-        Some(elapsed)
+        None
     }
 }
 
@@ -2822,6 +2851,8 @@ pub fn on_live_timer() {
     if !try_apply_phase1a(&snapshot) {
         queue_phase1b(&snapshot);
     }
+    // debounce の上限は、ここから数える（Issue #45）
+    crate::tsf::live_session::store_last_shown_ms(current_millis());
 }
 
 #[cfg(test)]
@@ -2844,9 +2875,59 @@ mod tests {
 
     use super::{
         BG_ERROR_STATUS, BG_RECOVERING_STATUS, BG_UNRECOVERABLE_STATUS, FONT_HEIGHT_BASE,
-        FONT_HEIGHT_MIN, Layout, fit_font_height, guard_preview_shrink, scaled_to,
-        status_for_health,
+        FONT_HEIGHT_MIN, Layout, debounce_decision, fit_font_height, guard_preview_shrink,
+        scaled_to, status_for_health,
     };
+
+    /// 打鍵が止まって debounce がたてば通す（今までと同じ）。
+    #[test]
+    fn debounce_passes_after_the_quiet_period() {
+        // 最後の打鍵 1000、debounce 80、最後に出したのも 1000
+        assert_eq!(debounce_decision(1079, 1000, 80, 1000, 400), None);
+        assert_eq!(debounce_decision(1080, 1000, 80, 1000, 400), Some(80));
+    }
+
+    /// 速く打ち続けて debounce がたたなくても、最後に出してから 400 ms で通す（Issue #45）。
+    #[test]
+    fn debounce_is_capped_while_typing_fast() {
+        // 最後に出したのが 1000、打鍵は 1350（50 ms 前）
+        assert_eq!(debounce_decision(1399, 1350, 80, 1000, 400), None);
+        assert_eq!(debounce_decision(1400, 1350, 80, 1000, 400), Some(50));
+    }
+
+    /// 間を置いた後の最初の打鍵では、上限で debounce を飛ばさない。
+    /// 入力の始まり（タイマーを新しく張ったとき）に、最後に出した時刻を今にそろえるため。
+    #[test]
+    fn debounce_is_kept_for_the_first_key_after_a_pause() {
+        // 入力の始まりで last_shown = last_input = 5000
+        assert_eq!(debounce_decision(5062, 5000, 80, 5000, 400), None);
+        assert_eq!(debounce_decision(5125, 5000, 80, 5000, 400), Some(125));
+    }
+
+    /// 時計が戻っても（打鍵の時刻が今より後）、通さない側に倒れて panic しない。
+    #[test]
+    fn debounce_tolerates_a_clock_going_back() {
+        assert_eq!(debounce_decision(900, 1000, 80, 950, 400), None);
+    }
+
+    /// タイマーは窓ごとに 1 回だけ張る。止めた後と、窓が変わったときは張り直す（Issue #45）。
+    #[test]
+    fn live_timer_is_armed_once_per_window() {
+        use crate::tsf::live_session::{arm_timer_if_needed, clear_timer_hwnd, load_last_shown_ms};
+        clear_timer_hwnd();
+        assert!(arm_timer_if_needed(0xA0, 100));
+        assert_eq!(load_last_shown_ms(), 100);
+        // 同じ窓では張り直さず、最後に出した時刻も動かさない
+        assert!(!arm_timer_if_needed(0xA0, 150));
+        assert_eq!(load_last_shown_ms(), 100);
+        // 窓が変われば張り直す
+        assert!(arm_timer_if_needed(0xB0, 200));
+        assert_eq!(load_last_shown_ms(), 200);
+        // 止めた後は同じ窓でも張り直す
+        clear_timer_hwnd();
+        assert!(arm_timer_if_needed(0xB0, 300));
+        clear_timer_hwnd();
+    }
 
     #[test]
     fn status_text_follows_engine_health() {

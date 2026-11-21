@@ -43,6 +43,13 @@ pub(super) struct LiveConvSession {
     pub fired_once: bool,
     /// 最後の `live_input_notify` 呼出時刻 (ms)。debounce 判定に使う。
     pub last_input_ms: u64,
+    /// ライブタイマーを張っている窓（`HWND` の値）。0 は張っていない。
+    /// 打鍵のたびに `SetTimer` で張り直すと周期が先頭からやり直しになり、速く打つ間は
+    /// `WM_TIMER` が届かない（Issue #45）。張ってある窓には張り直さない。
+    pub timer_hwnd: usize,
+    /// 最後にプレビューを出した時刻 (ms)。入力の始まり（タイマーを新しく張ったとき）にも
+    /// 今の時刻にそろえる。ここから上限の時間がたてば、debounce の間でも通す（Issue #45）。
+    pub last_shown_ms: u64,
 }
 
 thread_local! {
@@ -118,6 +125,37 @@ pub(super) fn store_last_input_ms(now_ms: u64) {
 /// `last_input_ms` を取得 (`pass_debounce` 用)。
 pub(super) fn load_last_input_ms() -> u64 {
     TL_LIVE_SESSION.with(|s| s.borrow().last_input_ms)
+}
+
+// ─── タイマーを張った窓・最後にプレビューを出した時刻（Issue #45）────────────────
+
+/// ライブタイマーを `hwnd` に張る必要があるか。張ってある窓と違えば記録し直して `true`。
+/// `true` のときは入力の始まりとして、最後にプレビューを出した時刻を `now_ms` にそろえる。
+pub(super) fn arm_timer_if_needed(hwnd: usize, now_ms: u64) -> bool {
+    TL_LIVE_SESSION.with(|s| {
+        let mut s = s.borrow_mut();
+        if s.timer_hwnd == hwnd {
+            return false;
+        }
+        s.timer_hwnd = hwnd;
+        s.last_shown_ms = now_ms;
+        true
+    })
+}
+
+/// タイマーを止めたときに呼ぶ（次の入力で張り直させる）。
+pub(super) fn clear_timer_hwnd() {
+    TL_LIVE_SESSION.with(|s| s.borrow_mut().timer_hwnd = 0);
+}
+
+/// プレビューを出した（Phase1A で書いた、または Phase1B のキューに積んだ）時刻を記録する。
+pub(super) fn store_last_shown_ms(now_ms: u64) {
+    TL_LIVE_SESSION.with(|s| s.borrow_mut().last_shown_ms = now_ms);
+}
+
+/// 最後にプレビューを出した時刻 (`pass_debounce` 用)。
+pub(super) fn load_last_shown_ms() -> u64 {
+    TL_LIVE_SESSION.with(|s| s.borrow().last_shown_ms)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
