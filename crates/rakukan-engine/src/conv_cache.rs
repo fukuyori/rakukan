@@ -297,7 +297,10 @@ fn worker_loop(cache: Arc<Cache>) {
                     (converter, cands, false)
                 }
                 Ok(Err(e)) => {
-                    tracing::warn!("conv-worker error: {e}");
+                    tracing::warn!(
+                        "conv-worker error: {}",
+                        crate::kanji::error::error_chain(&e)
+                    );
                     (converter, vec![], true)
                 }
                 Err(_) => {

@@ -693,22 +693,7 @@ impl LlamaCppModel {
 
     /// Get top-k tokens from logits with log probabilities
     fn get_top_k_tokens(&self, logits: &[f32], k: usize) -> (Vec<LlamaToken>, Vec<f32>) {
-        // Convert logits to log probabilities using log-softmax
-        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-        let log_sum_exp: f32 = logits
-            .iter()
-            .map(|&x| (x - max_logit).exp())
-            .sum::<f32>()
-            .ln()
-            + max_logit;
-
-        let mut token_scores: Vec<(usize, f32)> = logits
-            .iter()
-            .enumerate()
-            .map(|(i, &x)| (i, x - log_sum_exp))
-            .collect();
-        token_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
-        token_scores.truncate(k);
+        let token_scores = top_k_log_probs(logits, k);
 
         let tokens: Vec<LlamaToken> = token_scores
             .iter()
@@ -918,9 +903,129 @@ impl<'a> NllScorer<'a> {
     }
 }
 
+/// logits を log-softmax にして、上位 `k` 件を `(トークンの番号, log 確率)` で返す。
+///
+/// 並びはスコアの降順で、同じスコアはトークンの番号の昇順（全体を安定ソートして
+/// 先頭 k 件を取るのと同じ結果）。語彙全体（数万件）をソートせず、
+/// `select_nth_unstable_by` で上位 k 件を分けてから、その k 件だけをソートする
+/// （#83 の小さな改善）。比較に番号を含めて全順序にしてあるので、不安定な選択でも
+/// 結果は一意に決まる。
+fn top_k_log_probs(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
+    let k = k.min(logits.len());
+    if k == 0 {
+        return Vec::new();
+    }
+    let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let log_sum_exp: f32 = logits
+        .iter()
+        .map(|&x| (x - max_logit).exp())
+        .sum::<f32>()
+        .ln()
+        + max_logit;
+
+    let mut token_scores: Vec<(usize, f32)> = logits
+        .iter()
+        .enumerate()
+        .map(|(i, &x)| (i, x - log_sum_exp))
+        .collect();
+    let by_score_then_index =
+        |a: &(usize, f32), b: &(usize, f32)| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0));
+    if k < token_scores.len() {
+        token_scores.select_nth_unstable_by(k - 1, by_score_then_index);
+        token_scores.truncate(k);
+    }
+    token_scores.sort_unstable_by(by_score_then_index);
+    token_scores
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 変更前の実装（全体を安定ソートして先頭 k 件）。新旧の一致を確かめるための基準。
+    fn top_k_log_probs_full_sort(logits: &[f32], k: usize) -> Vec<(usize, f32)> {
+        let max_logit = logits.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        let log_sum_exp: f32 = logits
+            .iter()
+            .map(|&x| (x - max_logit).exp())
+            .sum::<f32>()
+            .ln()
+            + max_logit;
+        let mut token_scores: Vec<(usize, f32)> = logits
+            .iter()
+            .enumerate()
+            .map(|(i, &x)| (i, x - log_sum_exp))
+            .collect();
+        token_scores.sort_by(|a, b| b.1.total_cmp(&a.1));
+        token_scores.truncate(k);
+        token_scores
+    }
+
+    /// 再現できる疑似乱数（xorshift64）。外部の crate を足さない。
+    fn xorshift(state: &mut u64) -> u64 {
+        let mut x = *state;
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *state = x;
+        x
+    }
+
+    fn assert_same(logits: &[f32], k: usize) {
+        let new = top_k_log_probs(logits, k);
+        let old = top_k_log_probs_full_sort(logits, k);
+        assert_eq!(new.len(), old.len(), "len differs: k={k}");
+        for (n, o) in new.iter().zip(old.iter()) {
+            assert_eq!(n.0, o.0, "token differs: k={k}");
+            assert_eq!(n.1.to_bits(), o.1.to_bits(), "log prob differs: k={k}");
+        }
+    }
+
+    #[test]
+    fn top_k_matches_full_sort_on_random_logits() {
+        let mut s = 0x9E37_79B9_7F4A_7C15u64;
+        for _ in 0..50 {
+            let n = 1 + (xorshift(&mut s) % 40_000) as usize;
+            let logits: Vec<f32> = (0..n)
+                .map(|_| ((xorshift(&mut s) % 2_000_000) as f32 / 100_000.0) - 10.0)
+                .collect();
+            for k in [1usize, 2, 6, 14, 28, 30, 60, n, n + 5] {
+                assert_same(&logits, k);
+            }
+        }
+    }
+
+    #[test]
+    fn top_k_matches_full_sort_with_many_ties() {
+        // 値を数種類に絞って同点を大量に作る（同点の並びが番号順になることを確かめる）
+        let mut s = 0x1234_5678_9ABC_DEF0u64;
+        for _ in 0..30 {
+            let n = 1 + (xorshift(&mut s) % 5_000) as usize;
+            let logits: Vec<f32> = (0..n).map(|_| (xorshift(&mut s) % 4) as f32).collect();
+            for k in [1usize, 3, 6, 28, n / 2 + 1, n] {
+                assert_same(&logits, k);
+            }
+        }
+    }
+
+    #[test]
+    fn top_k_handles_special_values_and_edges() {
+        let logits = [
+            0.0f32,
+            f32::NEG_INFINITY,
+            3.5,
+            -0.0,
+            3.5,
+            f32::MIN,
+            1e-30,
+            -7.25,
+        ];
+        for k in 0..=logits.len() + 2 {
+            assert_same(&logits, k);
+        }
+        assert!(top_k_log_probs(&[], 5).is_empty());
+        assert!(top_k_log_probs(&[1.0, 2.0], 0).is_empty());
+    }
 
     #[test]
     fn test_is_byte_fallback_token() {
