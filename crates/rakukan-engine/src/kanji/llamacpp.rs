@@ -235,22 +235,20 @@ impl LlamaCppModel {
     /// For byte-level BPE tokens that represent partial UTF-8 sequences,
     /// this returns a hex representation like `<0xE3>` instead of replacement characters.
     pub fn decode_token_for_display(&self, token: LlamaToken) -> String {
-        match self.model.token_to_piece_bytes(token, 32, true, None) {
-            Ok(bytes) => {
-                if let Ok(s) = std::str::from_utf8(&bytes) {
-                    // Valid UTF-8, return as-is (escape control chars)
-                    if s.chars().all(|c| !c.is_control() || c == ' ' || c == '\n') {
-                        s.to_string()
-                    } else {
-                        // Has control characters, show hex
-                        bytes_to_hex_display(&bytes)
-                    }
-                } else {
-                    // Invalid UTF-8 (partial sequence), show hex
-                    bytes_to_hex_display(&bytes)
-                }
+        // llama-cpp-2 0.1.161 からは語彙の API（`LlamaVocab`）で取る。バッファは
+        // 足りなければ広げられるので、失敗は返らない。
+        let bytes = self.model.vocab().token_to_piece(token, true, None);
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            // Valid UTF-8, return as-is (escape control chars)
+            if s.chars().all(|c| !c.is_control() || c == ' ' || c == '\n') {
+                s.to_string()
+            } else {
+                // Has control characters, show hex
+                bytes_to_hex_display(&bytes)
             }
-            Err(_) => format!("<{}>", token.0),
+        } else {
+            // Invalid UTF-8 (partial sequence), show hex
+            bytes_to_hex_display(&bytes)
         }
     }
 
@@ -360,7 +358,7 @@ impl LlamaCppModel {
             .new_context(backend, ctx_params)
             .map_err(|e| KanjiError::Inference(e.into()))?;
 
-        let model_eos = self.model.token_eos();
+        let model_eos = self.model.vocab().eos();
         let input_len = input_tokens.len();
 
         // Step 1: Process input tokens for ALL sequences in one batch
@@ -511,7 +509,7 @@ impl LlamaCppModel {
         beam_size: usize,
     ) -> Result<Vec<(Vec<LlamaToken>, f32)>> {
         let backend = get_backend()?;
-        let model_eos = self.model.token_eos();
+        let model_eos = self.model.vocab().eos();
         let input_len = input_tokens.len();
 
         // n_ctx / n_batch は「全 beam のフル系列を 1 decode に載せる」ぶんが必要。
@@ -715,7 +713,7 @@ impl LlamaCppModel {
     ) -> bool {
         eos_token_id.is_some_and(|eos| token.0 == eos)
             || token == model_eos
-            || self.model.is_eog_token(token)
+            || self.model.vocab().is_eog(token)
     }
 
     /// Generate tokens with a custom sampler
@@ -749,7 +747,7 @@ impl LlamaCppModel {
         let n_start = input_tokens.len();
 
         // Get model's EOS token for comparison
-        let model_eos = self.model.token_eos();
+        let model_eos = self.model.vocab().eos();
 
         // ウォールクロック制限（GEN_TIMEOUT_SECS はモジュールレベルで定義）
         let gen_start = std::time::Instant::now();
@@ -779,7 +777,7 @@ impl LlamaCppModel {
             }
 
             // Check if model thinks it's end of generation
-            if self.model.is_eog_token(new_token) {
+            if self.model.vocab().is_eog(new_token) {
                 break;
             }
 
@@ -800,7 +798,7 @@ impl LlamaCppModel {
 
     /// Get the EOS token ID from the model
     pub fn eos_token_id(&self) -> LlamaToken {
-        self.model.token_eos()
+        self.model.vocab().eos()
     }
 }
 
