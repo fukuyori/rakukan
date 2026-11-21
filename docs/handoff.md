@@ -25,7 +25,8 @@ main・タグ・Issue の今の状態は、作業を始めるときに `git stat
   - #57 は、運用ログで詰まりによる自己終了 0 件を確かめて、2026-11-21 にクローズした（#1211）。#64・#66・#49・#82 は、フェーズ 4 の実装と実機での確認をもって、同日にクローズした（#1216。各 Issue のコメントに確認の内容を記録）。
   - #92（確定済みの文字列の再変換）は、確定の後の再変換を対応の範囲に入れないと返信し、2026-11-21 に not planned でクローズした（#1220）。
   - #45（`b5278e3`）と #40 の 2（`4c95242`）は rakukan で直し、開発ビルドの実機（EmEditor）で確かめて、2026-11-21 にクローズした。
-  - 利用者の判断を待つもの: #79 の直し方（#1221。文字のコードで判定して降格する案。珍しい記号の置き場所・例外の読みが未決）、karukan #153 の過負荷ガード・Q8_0（#1226）、karukan #143・#149・#154（#1227）。
+  - 候補の並びの見直し（mozc に合わせる。#79 の珍しい記号と #29 のユーザー辞書の優先度を含む）を [Candidate_Order_Plan.md](Candidate_Order_Plan.md) にまとめた（2026-11-21、未実装。決めたことは同 9 章）。
+  - karukan の更新の取り込みで決めたこと（2026-11-21、#1226・#1227）: #153 の過負荷ガードは取り込まない（rakukan はライブ変換がホストで非同期に動き、Space は辞書の候補を先に出すので、遅いモデルで入力が止まらない。重いときに止まる報告が出たら改めて検討）。既定のモデルは `jinen-v1-xsmall-q5` のままにし、Q8_0 は選択肢にも足さない。#149（Ctrl+M で確定）・#154（Ctrl+H を Backspace に）は既定に入れない（`keymap.toml` に `key = "Ctrl+M"` / `action = "commit_raw"`、`key = "Ctrl+H"` / `action = "backspace"` と書けば割り当てられる。入力中でないときは IME が取らない。コードで確かめた範囲で、実機では試していない）。#143（`romaji.tsv`）は取り込まない。
   - llama-cpp-2 の更新（0.1.143 → 0.1.161、#1223）と辞書の版の整理（2026-11_Plan.md 1.1、#1222）を実装した（CHANGELOG.md の `[Next Release]`）。llama-cpp-2 の更新で、CPU 版の Space の変換が約 45% 短くなり、2 番目より後の候補の順が入れ替わることがある（14 の読みで、先頭の候補はすべて同じ）。2026-11-21 に開発ビルド `e252b94` を導入して確かめた（CUDA 版。Test_Procedure.md の同日の結果）。ライブ変換の中央値は 16〜38% 短くなった。Vulkan 版の実機での確認は行わなかった（利用者の判断。ビルドは通った）。#1222・#1223 は完了。
   - #83 の方式の見直し（#1224）は #83 のコメントに記録した（KV の再利用を統合 KV の形で入れる案。入れる前に jinen-v1 で新旧の一致を確かめる）。ライブ変換（greedy）の高速化は #93 に起票した（#1225）。どちらも実装するかは未定。
   - #50 は、段 1 のログでの照合と Tfx・SnapNoteStudio の実機（#1213）で問題が無かったので、段 2 を行わずに 2026-11-21 にクローズした。
@@ -111,6 +112,7 @@ sudo cargo make install   # インストーラーを署名なしで作り、サ�
 | [Engine_Config_Apply_Plan.md](Engine_Config_Apply_Plan.md) | フェーズ 4（#64・#66・#49・#82）の設定の反映とホストの起動し直しの設計。コードのコメントが参照している |
 | [Test_Procedure.md](Test_Procedure.md) | 実機の試験の手順・行う時期・0.13.1 からの結果（それより前は archive/Test_Results_to_2026-10-24.md） |
 | [version-update-checklist.md](version-update-checklist.md) | 版を上げるときに直すファイルと確認 |
+| [Candidate_Order_Plan.md](Candidate_Order_Plan.md) | 候補の並びの見直し（mozc に合わせる、ユーザー辞書の優先度 #29、珍しい記号 #79）。2026-11-21 に作成、未実装 |
 | [Segment_Edit_Plan.md](Segment_Edit_Plan.md) / [Symbol_Leader_Input_Plan.md](Symbol_Leader_Input_Plan.md) | 検討中: 文節変換（#32）/ リーダー記号（#35） |
 | [GPU_MEMORY_LIFECYCLE.md](GPU_MEMORY_LIFECYCLE.md) | ホストが複数あっても GPU を圧迫しない根拠 |
 | [EXPLORER_CRASH_HISTORY.md](EXPLORER_CRASH_HISTORY.md) / [INVESTIGATION_GUIDE.md](INVESTIGATION_GUIDE.md) | Explorer の異常終了の対策の年表と、dump の解析の手順 |
