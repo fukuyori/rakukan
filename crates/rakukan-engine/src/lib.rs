@@ -507,6 +507,29 @@ fn place_symbol_candidates(
     out
 }
 
+/// 候補の末尾に、ひらがな（読みそのまま）→ カタカナを添える（Issue #40 の 2）。
+///
+/// F6・F7 を押さずに、候補の一覧から ひらがな・カタカナ を選べるようにする。
+/// - 読みと違う候補（実候補）が 1 件も無いときは足さず、読みだけを返す。TSF のライブ変換は
+///   「読みと違う候補があるか」でプレビューを出すかを決め、読みと違う最初の候補を出すので、
+///   ここでカタカナを足すと、打鍵のたびにプレビューがカタカナに化ける。
+/// - ほかの候補を積み、上限で切った後ろに足す（前に入れると、Space の直後の同期の経路で
+///   候補 0 番がプリエディットに使われ、composition が化ける）。戻りの件数は上限を
+///   2 件まで超えてよい（候補ウィンドウはページ送りを持つ）。
+/// - すでに候補にあるものは足さない。
+fn append_kana_candidates(mut merged: Vec<String>, hiragana: &str) -> Vec<String> {
+    if !merged.iter().any(|c| !c.is_empty() && c != hiragana) {
+        return vec![hiragana.to_string()];
+    }
+    let katakana = crate::kana::hiragana_to_katakana(hiragana);
+    for kana in [hiragana.to_string(), katakana] {
+        if !kana.is_empty() && !merged.contains(&kana) {
+            merged.push(kana);
+        }
+    }
+    merged
+}
+
 /// `push_char` で trie（ローマ字ルール）に委ねる文字か。
 /// 英字と `,./[]\-`（、。・「」￥ー等のルールがある記号）。
 fn is_trie_input_char(c: char) -> bool {
@@ -1445,19 +1468,8 @@ impl RakunEngine {
             llm_candidates,
             limit,
         );
-        let mut merged = place_symbol_candidates(merged, symbol_cands, emoji_cands);
-
-        // 候補不足時は元の読みを末尾に追加（変換せず確定する退避路）
-        let desired_visible = self.config.num_candidates.min(limit);
-        if merged.len() < desired_visible && !merged.iter().any(|c| c == hiragana) {
-            merged.push(hiragana.to_string());
-        }
-
-        if merged.is_empty() {
-            vec![hiragana.to_string()]
-        } else {
-            merged
-        }
+        let merged = place_symbol_candidates(merged, symbol_cands, emoji_cands);
+        append_kana_candidates(merged, hiragana)
     }
 
     /// エンジン内部の `hiragana_buf` を reading として辞書をマージする。
@@ -2007,8 +2019,10 @@ mod candidate_merge_tests {
     use rakukan_dict::DictStore;
     use std::fs;
 
+    /// 候補の末尾に、読み（ひらがな）→ カタカナ を添える（Issue #40 の 2）。
+    /// 以前は、候補が `num_candidates` に足りないときだけ読みを足していた。
     #[test]
-    fn merge_candidates_pads_short_list_with_original_reading() {
+    fn merge_candidates_appends_reading_and_katakana() {
         let mut engine = RakunEngine::new(EngineConfig {
             num_candidates: 9,
             ..Default::default()
@@ -2018,8 +2032,9 @@ mod candidate_merge_tests {
         let llm_candidates = (1..=8).map(|n| format!("候補{n}")).collect();
         let merged = engine.merge_candidates(llm_candidates, 40);
 
-        assert_eq!(merged.len(), 9);
-        assert_eq!(merged.last().map(String::as_str), Some("てすと"));
+        assert_eq!(merged.len(), 10);
+        assert_eq!(merged[0], "候補1");
+        assert_eq!(merged[8..], ["てすと".to_string(), "テスト".to_string()]);
     }
 
     #[test]
@@ -2170,6 +2185,60 @@ surfaces = ["杜野"]
             super::place_symbol_candidates(base.clone(), vec![], vec![]),
             base
         );
+    }
+
+    fn strs(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// 実候補があれば、末尾に ひらがな → カタカナ を添える（Issue #40 の 2）。
+    #[test]
+    fn kana_candidates_are_appended_after_real_ones() {
+        assert_eq!(
+            super::append_kana_candidates(strs(&["右", "見木"]), "みぎ"),
+            strs(&["右", "見木", "みぎ", "ミギ"])
+        );
+    }
+
+    /// 実候補が 0 件なら足さず、読みだけを返す（TSF のプレビューがカタカナに化けないように）。
+    #[test]
+    fn kana_candidates_are_not_appended_without_real_ones() {
+        assert_eq!(
+            super::append_kana_candidates(vec![], "あいう"),
+            strs(&["あいう"])
+        );
+        // 候補が読みと同じ表記だけのときも「実候補なし」（足すと読みと違う候補ができてしまう）
+        assert_eq!(
+            super::append_kana_candidates(strs(&["ありがとう"]), "ありがとう"),
+            strs(&["ありがとう"])
+        );
+        assert_eq!(
+            super::append_kana_candidates(strs(&[""]), "あ"),
+            strs(&["あ"])
+        );
+    }
+
+    /// すでにある ひらがな・カタカナ は足さない（重ならない）。位置も動かさない。
+    #[test]
+    fn kana_candidates_are_not_duplicated() {
+        assert_eq!(
+            super::append_kana_candidates(strs(&["みぎ", "右", "ミギ"]), "みぎ"),
+            strs(&["みぎ", "右", "ミギ"])
+        );
+        assert_eq!(
+            super::append_kana_candidates(strs(&["ニホン", "日本"]), "にほん"),
+            strs(&["ニホン", "日本", "にほん"])
+        );
+    }
+
+    /// 上限で切った後ろに足すので、件数は上限を最大 2 件超える。先頭の候補は変わらない。
+    #[test]
+    fn kana_candidates_go_behind_the_limit() {
+        let base: Vec<String> = (0..9).map(|i| format!("候補{i}")).collect();
+        let out = super::append_kana_candidates(base.clone(), "こうほ");
+        assert_eq!(out.len(), base.len() + 2);
+        assert_eq!(out[..base.len()], base[..]);
+        assert_eq!(out[base.len()..], strs(&["こうほ", "コウホ"])[..]);
     }
 
     #[test]
